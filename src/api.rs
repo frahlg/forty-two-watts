@@ -90,7 +90,7 @@ fn handle_status(
     control: &Arc<Mutex<ControlState>>,
     capacities: &HashMap<String, f64>,
 ) -> tiny_http::Response<std::io::Cursor<Vec<u8>>> {
-    let store = store.lock().unwrap();
+    let mut store = store.lock().unwrap();
     let control = control.lock().unwrap();
 
     // Aggregate readings
@@ -100,23 +100,24 @@ fn handle_status(
         .unwrap_or(0.0);
 
     // PV and battery: sum across all drivers (each system has its own)
-    let pvs = store.readings_by_type(&DerType::Pv);
-    let bats = store.readings_by_type(&DerType::Battery);
+    let pv_w: f64 = store.readings_by_type(&DerType::Pv).iter().map(|p| p.smoothed_w).sum();
+    let bat_w: f64 = store.readings_by_type(&DerType::Battery).iter().map(|b| b.smoothed_w).sum();
 
-    let pv_w: f64 = pvs.iter().map(|p| p.smoothed_w).sum();
-    let bat_w: f64 = bats.iter().map(|b| b.smoothed_w).sum();
-
-    // Load = house consumption (energy balance: what the house actually uses)
-    // load = grid_import + pv_generation + battery_discharge
-    // In our signs: grid(+import) - pv(negative=gen) - bat(negative=discharge)
-    let load_w: f64 = grid_w - pv_w - bat_w;
+    // Load = house consumption (energy balance: grid - pv - bat)
+    // Filtered with slow Kalman because battery dispatch changes faster
+    // than the grid meter responds — raw load has transient spikes.
+    // The slow filter (process_noise=20W, measurement_noise=500W) tracks
+    // real house load which only changes when appliances switch on/off.
+    let raw_load = grid_w - pv_w - bat_w;
+    let load_w = store.update_load(raw_load);
 
     // Weighted average SoC by capacity
-    let total_cap: f64 = bats.iter()
+    let bat_readings = store.readings_by_type(&DerType::Battery);
+    let total_cap: f64 = bat_readings.iter()
         .filter_map(|b| capacities.get(&b.driver).copied())
         .sum();
     let avg_soc = if total_cap > 0.0 {
-        bats.iter()
+        bat_readings.iter()
             .filter_map(|b| {
                 let cap = capacities.get(&b.driver)?;
                 Some(b.soc.unwrap_or(0.0) * cap)

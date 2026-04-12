@@ -161,19 +161,24 @@ pub struct TelemetryStore {
     health: HashMap<String, DriverHealth>,
     process_noise: f64,
     measurement_noise: f64,
+    /// Separate slow Kalman filter for load — house load changes slowly
+    /// (appliances), but the computed value is noisy due to timing mismatch
+    /// between grid meter and battery dispatch
+    load_filter: KalmanFilter1D,
 }
 
 impl TelemetryStore {
     pub fn new(_alpha: f64) -> Self {
-        // Alpha is ignored now — Kalman filter auto-adapts
-        // Process noise: how much power changes between samples (~100W typical)
-        // Measurement noise: sensor jitter (~50W for power meters)
         Self {
             readings: HashMap::new(),
             filters: HashMap::new(),
             health: HashMap::new(),
-            process_noise: 100.0,
-            measurement_noise: 50.0,
+            process_noise: 100.0,   // DER signals change ~100W between samples
+            measurement_noise: 50.0, // meter jitter ~50W
+            // Load filter: very slow — house load only changes when appliances
+            // switch on/off (process_noise=20W), but the computed value is very
+            // noisy due to timing mismatch between grid and battery (noise=500W)
+            load_filter: KalmanFilter1D::new(20.0, 500.0),
         }
     }
 
@@ -227,6 +232,13 @@ impl TelemetryStore {
 
     pub fn all_health(&self) -> &HashMap<String, DriverHealth> {
         &self.health
+    }
+
+    /// Update load estimate with slow Kalman filter
+    /// Raw load = grid - pv - bat (correct but noisy during battery transients)
+    /// Filtered load tracks real house consumption smoothly
+    pub fn update_load(&mut self, raw_load: f64) -> f64 {
+        self.load_filter.update(raw_load)
     }
 
     pub fn is_stale(&self, driver: &str, der_type: &DerType, timeout_s: u64) -> bool {
