@@ -208,38 +208,57 @@ end
 -- Control
 ----------------------------------------------------------------------------
 
+-- Control: Ferroamp External API
+-- Reference: https://github.com/henricm/ha-ferroamp
+-- Topic: extapi/control/request
+-- Commands:
+--   {"transId":"...","cmd":{"name":"charge","arg":<watts>}}    — force charge (arg always positive)
+--   {"transId":"...","cmd":{"name":"discharge","arg":<watts>}} — force discharge (arg always positive)
+--   {"transId":"...","cmd":{"name":"auto"}}                    — return to auto mode
+-- EMS convention: positive power_w = charge, negative = discharge
 function driver_command(action, power_w, cmd)
     if action == "init" then
         return true
     elseif action == "battery" then
-        -- positive power_w = charge, negative = discharge
-        local payload = string.format(
-            '{"transId":"%s","cmd":{"name":"charge","arg":%d}}',
-            cmd.id or "lua", math.floor(power_w)
-        )
-        return host.mqtt_publish("extapi/control/request", payload)
+        local tid = "ems-" .. tostring(host.millis())
+        if power_w > 0 then
+            -- Charge: use "charge" command with positive watts
+            local payload = string.format(
+                '{"transId":"%s","cmd":{"name":"charge","arg":%d}}',
+                tid, math.floor(power_w)
+            )
+            return host.mqtt_publish("extapi/control/request", payload)
+        elseif power_w < 0 then
+            -- Discharge: use "discharge" command with positive watts
+            local payload = string.format(
+                '{"transId":"%s","cmd":{"name":"discharge","arg":%d}}',
+                tid, math.floor(math.abs(power_w))
+            )
+            return host.mqtt_publish("extapi/control/request", payload)
+        else
+            -- Zero: return to auto mode
+            return host.mqtt_publish("extapi/control/request",
+                string.format('{"transId":"%s","cmd":{"name":"auto"}}', tid))
+        end
     elseif action == "curtail" then
         local payload = string.format(
-            '{"transId":"%s","cmd":{"name":"pplim","arg":%d}}',
-            cmd.id or "lua", math.floor(math.abs(power_w))
+            '{"transId":"ems","cmd":{"name":"pplim","arg":%d}}',
+            math.floor(math.abs(power_w))
         )
         return host.mqtt_publish("extapi/control/request", payload)
     elseif action == "curtail_disable" then
-        local payload = string.format(
-            '{"transId":"%s","cmd":{"name":"pplim","arg":0}}',
-            cmd.id or "lua"
-        )
-        return host.mqtt_publish("extapi/control/request", payload)
+        return host.mqtt_publish("extapi/control/request",
+            '{"transId":"ems","cmd":{"name":"pplim","arg":0}}')
     elseif action == "deinit" then
         return host.mqtt_publish("extapi/control/request",
-            '{"transId":"deinit","cmd":{"name":"auto","arg":1}}')
+            '{"transId":"ems","cmd":{"name":"auto"}}')
     end
     return false
 end
 
 function driver_default_mode()
     host.mqtt_publish("extapi/control/request",
-        '{"transId":"watchdog","cmd":{"name":"auto","arg":1}}')
+        '{"transId":"watchdog","cmd":{"name":"auto"}}')
 end
 
 function driver_cleanup()

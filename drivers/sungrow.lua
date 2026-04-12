@@ -203,39 +203,48 @@ function driver_poll()
     return 5000
 end
 
--- Control command handler for Sungrow battery/curtailment
--- Registers: 13049=operating_mode (0=auto,1=charge,2=discharge),
---            13050=charge_power_limit, 13051=discharge_power_limit
+-- Control command handler for Sungrow battery
+-- Reference: https://github.com/mkaiser/Sungrow-SHx-Inverter-Modbus-Home-Assistant
+-- Holding registers (address = register - 1):
+--   13049 (reg 13050): EMS mode: 0=self-consumption, 2=forced/compulsory, 3=external EMS
+--   13050 (reg 13051): Force charge/discharge cmd: 0xAA=charge, 0xBB=discharge, 0xCC=stop
+--   13051 (reg 13052): Force charge/discharge power: 0-5000 W
+-- EMS convention: positive power_w = charge, negative = discharge
 function driver_command(action, power_w, cmd)
     if action == "init" then
         return true
     elseif action == "battery" then
         if power_w > 0 then
-            -- Charge: set limit then mode=1
-            host.modbus_write(13050, power_w)
-            host.modbus_write(13049, 1)
+            -- Force charge
+            host.modbus_write(13051, math.floor(math.min(power_w, 5000)))  -- power limit
+            host.modbus_write(13050, 0xAA)                                 -- force charge cmd
+            host.modbus_write(13049, 2)                                    -- forced mode
         elseif power_w < 0 then
-            -- Discharge: set limit then mode=2
-            host.modbus_write(13051, math.abs(power_w))
-            host.modbus_write(13049, 2)
+            -- Force discharge
+            host.modbus_write(13051, math.floor(math.min(math.abs(power_w), 5000)))  -- power limit
+            host.modbus_write(13050, 0xBB)                                             -- force discharge cmd
+            host.modbus_write(13049, 2)                                                -- forced mode
         else
-            -- Auto mode
-            host.modbus_write(13049, 0)
+            -- Stop forced mode, return to self-consumption
+            host.modbus_write(13050, 0xCC)  -- stop
+            host.modbus_write(13049, 0)     -- self-consumption mode
         end
         return true
     elseif action == "curtail" then
-        host.modbus_write(13050, math.abs(power_w))
-        host.modbus_write(13049, 1)
+        -- Limit export power
+        host.modbus_write(13073, math.floor(math.abs(power_w)))
         return true
     elseif action == "curtail_disable" or action == "deinit" then
-        host.modbus_write(13049, 0)
+        host.modbus_write(13050, 0xCC)  -- stop forced
+        host.modbus_write(13049, 0)     -- self-consumption
         return true
     end
     return false
 end
 
 function driver_default_mode()
-    host.modbus_write(13049, 0)  -- auto mode
+    host.modbus_write(13050, 0xCC)  -- stop forced charge/discharge
+    host.modbus_write(13049, 0)     -- self-consumption mode
 end
 
 function driver_cleanup()
