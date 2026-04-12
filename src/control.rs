@@ -160,11 +160,12 @@ pub fn compute_dispatch(
         return Vec::new();
     }
 
-    // PI controller: feed the grid measurement, get total correction needed
-    // PID setpoint = grid_target_w, measurement = grid_w
-    // Output is the total battery power adjustment needed (negative = discharge)
+    // PI controller: measurement=grid_w, setpoint=grid_target_w
+    // When importing (grid > target): PID output is NEGATIVE → add to battery = discharge
+    // When exporting (grid < target): PID output is POSITIVE → add to battery = charge
+    // No negation needed — PID output IS the battery correction directly
     let pid_output = state.pid_controller.next_control_output(grid_w);
-    let total_correction = -pid_output.output; // negate: positive PID output (importing) → negative battery (discharge)
+    let total_correction = pid_output.output;
 
     debug!("PI: grid={:.0}W target={:.0}W error={:.0}W P={:.0} I={:.0} correction={:.0}W",
         grid_w, state.grid_target_w, error,
