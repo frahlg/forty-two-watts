@@ -62,7 +62,7 @@
   // ---- Render ----
   function render(data) {
     // Grid
-    gridW.textContent = formatW(Math.abs(data.grid_w));
+    gridW.textContent = formatW(data.grid_w);
     if (data.grid_w > 10) {
       gridDir.textContent = "importing";
       gridW.className = "card-value val-import";
@@ -74,23 +74,21 @@
       gridW.className = "card-value val-neutral";
     }
 
-    // PV — convention: negative = generating
-    var pvAbs = Math.abs(data.pv_w);
-    pvW.textContent = formatW(pvAbs);
+    // PV — negative = generating
+    pvW.textContent = formatW(data.pv_w);
     pvW.className = "card-value val-generation";
 
     // Load
     loadW.textContent = formatW(data.load_w || 0);
 
-    // Battery
-    var batAbs = Math.abs(data.bat_w);
-    batW.textContent = formatW(batAbs);
+    // Battery — positive=charge, negative=discharge
+    batW.textContent = formatW(data.bat_w);
     if (data.bat_w > 10) {
-      batDir.textContent = "discharging";
-      batW.className = "card-value val-discharging";
-    } else if (data.bat_w < -10) {
       batDir.textContent = "charging";
       batW.className = "card-value val-charging";
+    } else if (data.bat_w < -10) {
+      batDir.textContent = "discharging";
+      batW.className = "card-value val-discharging";
     } else {
       batDir.textContent = "idle";
       batW.className = "card-value val-neutral";
@@ -132,7 +130,7 @@
       if (d.driver === "ferroamp") ft = d.target_w;
       if (d.driver === "sungrow") st = d.target_w;
     });
-    pushChartData(data.grid_w, Math.abs(data.pv_w), data.load_w||0, fd.bat_w||0, sd.bat_w||0, ft, st);
+    pushChartData(data.grid_w, data.pv_w, data.load_w||0, fd.bat_w||0, sd.bat_w||0, ft, st);
     renderChart();
 
     // Timestamp
@@ -271,8 +269,8 @@
         "</div>" +
         '<div class="driver-stats">' +
         '  <span class="stat-label">Meter</span><span class="stat-value">' + formatW(meterW) + "</span>" +
-        '  <span class="stat-label">PV</span><span class="stat-value">' + formatW(Math.abs(pvWVal)) + "</span>" +
-        '  <span class="stat-label">Battery</span><span class="stat-value">' + formatW(Math.abs(batWVal)) + "</span>" +
+        '  <span class="stat-label">PV</span><span class="stat-value">' + formatW(pvWVal) + "</span>" +
+        '  <span class="stat-label">Battery</span><span class="stat-value">' + formatW(batWVal) + "</span>" +
         '  <span class="stat-label">SoC</span><span class="stat-value">' + formatSoc(batSocVal) + "</span>" +
         '  <span class="stat-label">Ticks</span><span class="stat-value">' + ticks + "</span>" +
         '  <span class="stat-label">Errors</span><span class="stat-value">' + errors + "</span>" +
