@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 /// - host.mqtt_messages() -> table of {topic, payload}
 /// - host.mqtt_publish(topic, payload) -> bool
 pub fn register(lua: &Lua, host: &Table, ctx: &HostContext) -> LuaResult<()> {
-    if let (Some(ref client), Some(ref queue)) = (&ctx.mqtt_client, &ctx.mqtt_queue) {
+    if let (Some(client), Some(queue)) = (&ctx.mqtt_client, &ctx.mqtt_queue) {
         register_subscribe(lua, host, client.clone())?;
         register_messages(lua, host, client.clone(), queue.clone())?;
         register_publish(lua, host, client.clone())?;

@@ -43,7 +43,7 @@ impl FuseConfig {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct DriverConfig {
     pub name: String,
     pub lua: String,
@@ -57,7 +57,7 @@ pub struct DriverConfig {
     pub modbus: Option<ModbusConnectionConfig>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct MqttConnectionConfig {
     pub host: String,
     #[serde(default = "default_mqtt_port")]
@@ -68,7 +68,7 @@ pub struct MqttConnectionConfig {
     pub password: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct ModbusConnectionConfig {
     pub host: String,
     #[serde(default = "default_modbus_port")]

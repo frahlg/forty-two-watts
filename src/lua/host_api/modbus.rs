@@ -104,7 +104,7 @@ fn register_write_multiple(
     let f = lua.create_function(move |_, (register, values): (u16, Table)| {
         // Convert Lua table (1-indexed) to Vec<u16>
         let mut vals = Vec::new();
-        let len: i64 = values.raw_len();
+        let len: i64 = values.raw_len() as i64;
         for i in 1..=len {
             let v: u16 = values.get(i)?;
             vals.push(v);

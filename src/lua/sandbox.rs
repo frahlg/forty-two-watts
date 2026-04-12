@@ -80,7 +80,7 @@ pub fn create_driver_env(lua: &Lua, driver_name: &str) -> LuaResult<Table> {
     // Set __index to fall through to base globals
     let meta = lua.create_table()?;
     meta.raw_set("__index", base)?;
-    env.set_metatable(Some(meta));
+    let _ = env.set_metatable(Some(meta));
 
     Ok(env)
 }
