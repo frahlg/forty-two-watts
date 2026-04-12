@@ -5,9 +5,8 @@ COPY Cargo.toml Cargo.lock ./
 COPY src/ src/
 RUN cargo build --release
 
-# Runtime — minimal
+# Runtime — static binary, minimal image
 FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=builder /build/target/release/home-ems /app/home-ems
 COPY drivers/ /app/drivers/
