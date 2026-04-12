@@ -26,6 +26,13 @@ pub struct SiteConfig {
     pub watchdog_timeout_s: u64,
     #[serde(default = "default_alpha")]
     pub smoothing_alpha: f64,
+    // Anti-oscillation parameters
+    #[serde(default = "default_gain")]
+    pub gain: f64,                    // proportional gain 0-1 (0.4 = correct 40% of error)
+    #[serde(default = "default_slew_rate")]
+    pub slew_rate_w: f64,             // max watts change per dispatch
+    #[serde(default = "default_dispatch_interval")]
+    pub min_dispatch_interval_s: u64, // seconds between dispatches
 }
 
 #[derive(Debug, Deserialize)]
@@ -109,6 +116,9 @@ fn default_control_interval() -> u64 { 5 }
 fn default_tolerance() -> f64 { 50.0 }
 fn default_watchdog() -> u64 { 60 }
 fn default_alpha() -> f64 { 0.3 }
+fn default_gain() -> f64 { 0.4 }
+fn default_slew_rate() -> f64 { 300.0 }
+fn default_dispatch_interval() -> u64 { 10 }
 fn default_phases() -> u8 { 3 }
 fn default_voltage() -> f64 { 230.0 }
 fn default_mqtt_port() -> u16 { 1883 }

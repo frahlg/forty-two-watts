@@ -82,6 +82,11 @@ fn main() {
         config.site.grid_tolerance_w,
         site_meter_driver,
     );
+    control_state.gain = config.site.gain;
+    control_state.slew_rate_w = config.site.slew_rate_w;
+    control_state.min_dispatch_interval_s = config.site.min_dispatch_interval_s;
+    info!("anti-oscillation: gain={}, slew={}W/cycle, holdoff={}s",
+        control_state.gain, control_state.slew_rate_w, control_state.min_dispatch_interval_s);
     if let Some(mode_str) = state_store.load_config("mode") {
         if let Ok(mode) = serde_json::from_str::<control::Mode>(&format!("\"{}\"", mode_str)) {
             info!("restored mode: {:?}", mode);

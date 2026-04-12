@@ -33,7 +33,7 @@ pub struct DispatchTarget {
     pub clamped: bool, // was the target clamped by limits?
 }
 
-/// Control loop state
+/// Control loop state with anti-oscillation parameters
 pub struct ControlState {
     pub mode: Mode,
     pub grid_target_w: f64,
@@ -42,6 +42,17 @@ pub struct ControlState {
     pub priority_order: Vec<String>,
     pub weights: HashMap<String, f64>,
     pub last_targets: Vec<DispatchTarget>,
+
+    // Anti-oscillation: proportional gain (0-1, lower = less aggressive)
+    pub gain: f64,
+    // Anti-oscillation: max watts change per dispatch cycle
+    pub slew_rate_w: f64,
+    // Anti-oscillation: minimum seconds between dispatches
+    pub min_dispatch_interval_s: u64,
+    // Track when we last dispatched
+    pub last_dispatch: Option<std::time::Instant>,
+    // Previous per-driver targets (for slew rate limiting)
+    prev_targets: HashMap<String, f64>,
 }
 
 impl ControlState {
@@ -54,6 +65,15 @@ impl ControlState {
             priority_order: Vec::new(),
             weights: HashMap::new(),
             last_targets: Vec::new(),
+            // Anti-oscillation defaults:
+            // Only correct 40% of error each cycle — converges in ~3 cycles without overshoot
+            gain: 0.4,
+            // Max 300W change per cycle — prevents step changes that cause ringing
+            slew_rate_w: 300.0,
+            // Wait 10s between dispatches — batteries need time to settle
+            min_dispatch_interval_s: 10,
+            last_dispatch: None,
+            prev_targets: HashMap::new(),
         }
     }
 }
@@ -113,29 +133,63 @@ pub fn compute_dispatch(
         return Vec::new();
     }
 
+    // Command holdoff — don't re-dispatch until previous command has settled
+    if let Some(last) = state.last_dispatch {
+        if last.elapsed().as_secs() < state.min_dispatch_interval_s {
+            debug!("grid={:.0}W, holdoff ({:.0}s since last dispatch)",
+                grid_w, last.elapsed().as_secs_f32());
+            return Vec::new(); // return empty = no dispatch this cycle
+        }
+    }
+
     // Compute error
     let error = grid_w - state.grid_target_w;
 
     // Deadband — don't adjust if within tolerance
     if error.abs() < state.grid_tolerance_w {
-        debug!("grid={:.0}W, target={:.0}W, within tolerance ({:.0}W), skipping",
+        debug!("grid={:.0}W, target={:.0}W, within tolerance ({:.0}W), holding",
             grid_w, state.grid_target_w, state.grid_tolerance_w);
-        return state.last_targets.clone();
+        return Vec::new();
     }
 
-    debug!("grid={:.0}W, target={:.0}W, error={:.0}W", grid_w, state.grid_target_w, error);
+    // Apply proportional gain — only correct a fraction of the error
+    // This prevents overshoot: gain=0.4 means we correct 40% per cycle,
+    // converging smoothly in ~3 cycles instead of oscillating
+    let corrected_error = error * state.gain;
 
-    // Compute per-battery targets based on mode
-    let targets = match &state.mode {
-        Mode::SelfConsumption => compute_proportional(&batteries, error, driver_capacities),
-        Mode::Priority => compute_priority(&batteries, error, &state.priority_order),
-        Mode::Weighted => compute_weighted(&batteries, error, &state.weights),
+    debug!("grid={:.0}W, target={:.0}W, error={:.0}W, corrected={:.0}W (gain={:.1})",
+        grid_w, state.grid_target_w, error, corrected_error, state.gain);
+
+    // Compute raw per-battery targets based on mode
+    let mut targets = match &state.mode {
+        Mode::SelfConsumption => compute_proportional(&batteries, corrected_error, driver_capacities),
+        Mode::Priority => compute_priority(&batteries, corrected_error, &state.priority_order),
+        Mode::Weighted => compute_weighted(&batteries, corrected_error, &state.weights),
         _ => Vec::new(),
     };
+
+    // Apply slew rate limit — don't change any target by more than slew_rate_w per cycle
+    for target in &mut targets {
+        if let Some(&prev) = state.prev_targets.get(&target.driver) {
+            let delta = target.target_w - prev;
+            if delta.abs() > state.slew_rate_w {
+                let limited = prev + delta.signum() * state.slew_rate_w;
+                debug!("slew limit {}: {:.0}W → {:.0}W (wanted {:.0}W)",
+                    target.driver, prev, limited, target.target_w);
+                target.target_w = limited;
+                target.clamped = true;
+            }
+        }
+    }
 
     // Apply fuse guard
     let targets = apply_fuse_guard(targets, store, fuse_max_w);
 
+    // Update state
+    state.last_dispatch = Some(std::time::Instant::now());
+    for t in &targets {
+        state.prev_targets.insert(t.driver.clone(), t.target_w);
+    }
     state.last_targets = targets.clone();
     targets
 }
