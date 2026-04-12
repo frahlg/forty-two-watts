@@ -128,8 +128,8 @@ fn run_ha_bridge(
 
 fn publish_autodiscovery(client: &mut MqttClient, driver_names: &[String], discovery: &str, prefix: &str) {
     let device = serde_json::json!({
-        "identifiers": ["home_ems"],
-        "name": "Home EMS",
+        "identifiers": ["forty_two_watts"],
+        "name": "Forty-Two Watts",
         "manufacturer": "Sourceful",
         "model": "forty-two-watts",
         "sw_version": env!("CARGO_PKG_VERSION"),
@@ -147,7 +147,7 @@ fn publish_autodiscovery(client: &mut MqttClient, driver_names: &[String], disco
     for (id, field, unit, class, icon) in &sensors {
         let topic = format!("{}/sensor/fortytwo_{}/config", discovery, id);
         let payload = serde_json::json!({
-            "name": format!("Home EMS {}", id.replace('_', " ")),
+            "name": format!("Forty-Two Watts {}", id.replace('_', " ")),
             "unique_id": format!("fortytwo_{}", id),
             "state_topic": format!("{}/status/{}", prefix, field),
             "unit_of_measurement": unit,
@@ -162,7 +162,7 @@ fn publish_autodiscovery(client: &mut MqttClient, driver_names: &[String], disco
     // Mode select
     let mode_topic = format!("{}/select/fortytwo_mode/config", discovery);
     let mode_payload = serde_json::json!({
-        "name": "Home EMS Mode",
+        "name": "Forty-Two Watts Mode",
         "unique_id": "fortytwo_mode",
         "state_topic": format!("{}/status/mode", prefix),
         "command_topic": format!("{}/command/mode", prefix),
@@ -175,7 +175,7 @@ fn publish_autodiscovery(client: &mut MqttClient, driver_names: &[String], disco
     // Grid target number
     let target_topic = format!("{}/number/fortytwo_grid_target/config", discovery);
     let target_payload = serde_json::json!({
-        "name": "Home EMS Grid Target",
+        "name": "Forty-Two Watts Grid Target",
         "unique_id": "fortytwo_grid_target",
         "state_topic": format!("{}/status/grid_target_w", prefix),
         "command_topic": format!("{}/command/grid_target_w", prefix),
@@ -194,7 +194,7 @@ fn publish_autodiscovery(client: &mut MqttClient, driver_names: &[String], disco
             let id = format!("{}_{}", name, field);
             let topic = format!("{}/sensor/fortytwo_{}/config", discovery, id);
             let payload = serde_json::json!({
-                "name": format!("EMS {} {}", name, field.replace('_', " ")),
+                "name": format!("42W {} {}", name, field.replace('_', " ")),
                 "unique_id": format!("fortytwo_{}", id),
                 "state_topic": format!("{}/drivers/{}/{}", prefix, name, field),
                 "unit_of_measurement": unit,
