@@ -131,11 +131,17 @@ impl MqttClient {
 
     /// Publish a message (QoS 0, no packet ID).
     pub fn publish(&mut self, topic: &str, payload: &[u8]) -> io::Result<()> {
+        self.publish_retained(topic, false, payload)
+    }
+
+    /// Publish with optional retained flag.
+    pub fn publish_retained(&mut self, topic: &str, retained: bool, payload: &[u8]) -> io::Result<()> {
         let topic_bytes = topic.as_bytes();
         let remaining = 2 + topic_bytes.len() + payload.len();
 
         let mut packet = Vec::with_capacity(2 + remaining);
-        packet.push(PUBLISH);
+        let flags = PUBLISH | if retained { 0x01 } else { 0x00 };
+        packet.push(flags);
         encode_remaining_length(&mut packet, remaining);
         packet.extend_from_slice(&(topic_bytes.len() as u16).to_be_bytes());
         packet.extend_from_slice(topic_bytes);

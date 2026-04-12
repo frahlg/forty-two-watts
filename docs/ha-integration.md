@@ -1,11 +1,11 @@
 # Home Assistant Integration
 
-home-ems integrates with Home Assistant via MQTT. It publishes sensor data, supports MQTT auto-discovery, and subscribes to command topics for mode and target changes.
+forty-two-watts integrates with Home Assistant via MQTT. It publishes sensor data, supports MQTT auto-discovery, and subscribes to command topics for mode and target changes.
 
 ## Prerequisites
 
 1. **Mosquitto MQTT broker** running on your Home Assistant instance (install via Settings > Add-ons > Mosquitto broker)
-2. An MQTT user configured for home-ems (Settings > People > Users, or in the Mosquitto add-on config)
+2. An MQTT user configured for forty-two-watts (Settings > People > Users, or in the Mosquitto add-on config)
 3. **MQTT integration** enabled in Home Assistant (Settings > Devices & Services > MQTT)
 
 ## Configuration
@@ -17,8 +17,8 @@ homeassistant:
   enabled: true
   broker: 192.168.1.1          # IP of your HA instance / Mosquitto broker
   port: 1883                   # MQTT port (default: 1883)
-  username: homeems            # MQTT user
-  password: homeems            # MQTT password
+  username: fortytwo            # MQTT user
+  password: fortytwo            # MQTT password
   publish_interval_s: 5        # How often to publish sensor updates (default: 5)
 ```
 
@@ -32,7 +32,7 @@ homeassistant:
 
 ## Auto-Discovered Entities
 
-home-ems publishes MQTT auto-discovery configs under the `homeassistant/` prefix. Once connected, these entities appear automatically in Home Assistant.
+forty-two-watts publishes MQTT auto-discovery configs under the `homeassistant/` prefix. Once connected, these entities appear automatically in Home Assistant.
 
 ### Site-Level Sensors
 
@@ -64,29 +64,29 @@ For each configured driver (e.g., `ferroamp`, `sungrow`), the following sensors 
 
 ### Published Topics (State)
 
-home-ems publishes to these topics at the configured interval:
+forty-two-watts publishes to these topics at the configured interval:
 
 | Topic                              | Payload   | Description                          |
 |------------------------------------|-----------|--------------------------------------|
-| `homeems/status/grid_w`            | number    | Total grid power in watts            |
-| `homeems/status/pv_w`             | number    | Total PV power in watts              |
-| `homeems/status/bat_w`            | number    | Total battery power in watts         |
-| `homeems/status/bat_soc`          | number    | Weighted avg battery SoC (0-100%)    |
-| `homeems/status/mode`             | string    | Current operating mode               |
-| `homeems/drivers/{name}/meter_w`  | number    | Per-driver grid power                |
-| `homeems/drivers/{name}/pv_w`     | number    | Per-driver PV power                  |
-| `homeems/drivers/{name}/bat_w`    | number    | Per-driver battery power             |
-| `homeems/drivers/{name}/bat_soc`  | number    | Per-driver battery SoC (0-100%)      |
-| `homeems/drivers/{name}/status`   | string    | Driver status: `Ok`, `Degraded`, `Offline` |
+| `fortytwo/status/grid_w`            | number    | Total grid power in watts            |
+| `fortytwo/status/pv_w`             | number    | Total PV power in watts              |
+| `fortytwo/status/bat_w`            | number    | Total battery power in watts         |
+| `fortytwo/status/bat_soc`          | number    | Weighted avg battery SoC (0-100%)    |
+| `fortytwo/status/mode`             | string    | Current operating mode               |
+| `fortytwo/drivers/{name}/meter_w`  | number    | Per-driver grid power                |
+| `fortytwo/drivers/{name}/pv_w`     | number    | Per-driver PV power                  |
+| `fortytwo/drivers/{name}/bat_w`    | number    | Per-driver battery power             |
+| `fortytwo/drivers/{name}/bat_soc`  | number    | Per-driver battery SoC (0-100%)      |
+| `fortytwo/drivers/{name}/status`   | string    | Driver status: `Ok`, `Degraded`, `Offline` |
 
 ### Command Topics (Control)
 
-Home Assistant (or any MQTT client) can publish to these topics to control home-ems:
+Home Assistant (or any MQTT client) can publish to these topics to control forty-two-watts:
 
 | Topic                          | Payload        | Description                            |
 |--------------------------------|----------------|----------------------------------------|
-| `homeems/command/mode`         | string         | Set mode: `idle`, `self_consumption`, `charge`, `priority`, `weighted` |
-| `homeems/command/grid_target_w`| number (string)| Set grid target in watts (e.g., `"0"` for self-consumption, `"200"` for 200W import target) |
+| `fortytwo/command/mode`         | string         | Set mode: `idle`, `self_consumption`, `charge`, `priority`, `weighted` |
+| `fortytwo/command/grid_target_w`| number (string)| Set grid target in watts (e.g., `"0"` for self-consumption, `"200"` for 200W import target) |
 
 ## Example Home Assistant Automations
 
@@ -103,7 +103,7 @@ automation:
     action:
       - service: mqtt.publish
         data:
-          topic: "homeems/command/mode"
+          topic: "fortytwo/command/mode"
           payload: "charge"
 
   - alias: "Self-consumption during day"
@@ -113,7 +113,7 @@ automation:
     action:
       - service: mqtt.publish
         data:
-          topic: "homeems/command/mode"
+          topic: "fortytwo/command/mode"
           payload: "self_consumption"
 ```
 
@@ -131,7 +131,7 @@ automation:
     action:
       - service: mqtt.publish
         data:
-          topic: "homeems/command/mode"
+          topic: "fortytwo/command/mode"
           payload: "charge"
 
   - alias: "Self-consumption when electricity is expensive"
@@ -142,7 +142,7 @@ automation:
     action:
       - service: mqtt.publish
         data:
-          topic: "homeems/command/mode"
+          topic: "fortytwo/command/mode"
           payload: "self_consumption"
 ```
 
@@ -155,13 +155,13 @@ automation:
   - alias: "Idle mode on sunny days"
     trigger:
       - platform: numeric_state
-        entity_id: sensor.home_ems_pv_power
+        entity_id: sensor.forty_two_watts_pv_power
         below: -3000   # More than 3kW PV generation (negative = generating)
         for: "00:15:00"
     action:
       - service: mqtt.publish
         data:
-          topic: "homeems/command/mode"
+          topic: "fortytwo/command/mode"
           payload: "self_consumption"
 ```
 
@@ -174,23 +174,23 @@ automation:
   - alias: "Idle when battery critically low"
     trigger:
       - platform: numeric_state
-        entity_id: sensor.home_ems_battery_soc
+        entity_id: sensor.forty_two_watts_battery_soc
         below: 10
     action:
       - service: mqtt.publish
         data:
-          topic: "homeems/command/mode"
+          topic: "fortytwo/command/mode"
           payload: "idle"
 
   - alias: "Resume self-consumption when battery recovers"
     trigger:
       - platform: numeric_state
-        entity_id: sensor.home_ems_battery_soc
+        entity_id: sensor.forty_two_watts_battery_soc
         above: 20
     action:
       - service: mqtt.publish
         data:
-          topic: "homeems/command/mode"
+          topic: "fortytwo/command/mode"
           payload: "self_consumption"
 ```
 
@@ -207,7 +207,7 @@ automation:
     action:
       - service: mqtt.publish
         data:
-          topic: "homeems/command/grid_target_w"
+          topic: "fortytwo/command/grid_target_w"
           payload: "-5000"
 ```
 
@@ -221,19 +221,19 @@ A simple Lovelace card showing the energy flow:
 type: entities
 title: Home EMS
 entities:
-  - entity: sensor.home_ems_grid_power
+  - entity: sensor.forty_two_watts_grid_power
     name: Grid
     icon: mdi:transmission-tower
-  - entity: sensor.home_ems_pv_power
+  - entity: sensor.forty_two_watts_pv_power
     name: Solar
     icon: mdi:solar-power
-  - entity: sensor.home_ems_battery_power
+  - entity: sensor.forty_two_watts_battery_power
     name: Battery
     icon: mdi:battery-charging
-  - entity: sensor.home_ems_battery_soc
+  - entity: sensor.forty_two_watts_battery_soc
     name: Battery SoC
     icon: mdi:battery
-  - entity: select.home_ems_mode
+  - entity: select.forty_two_watts_mode
     name: Mode
 ```
 
@@ -243,7 +243,7 @@ entities:
 type: horizontal-stack
 cards:
   - type: gauge
-    entity: sensor.home_ems_grid_power
+    entity: sensor.forty_two_watts_grid_power
     name: Grid
     min: -10000
     max: 10000
@@ -252,7 +252,7 @@ cards:
       yellow: 0
       red: 5000
   - type: gauge
-    entity: sensor.home_ems_battery_soc
+    entity: sensor.forty_two_watts_battery_soc
     name: Battery
     min: 0
     max: 100
@@ -268,17 +268,17 @@ cards:
 type: entities
 title: Driver Status
 entities:
-  - entity: sensor.home_ems_ferroamp_meter_w
+  - entity: sensor.forty_two_watts_ferroamp_meter_w
     name: Ferroamp Grid
-  - entity: sensor.home_ems_ferroamp_bat_w
+  - entity: sensor.forty_two_watts_ferroamp_bat_w
     name: Ferroamp Battery
-  - entity: sensor.home_ems_ferroamp_bat_soc
+  - entity: sensor.forty_two_watts_ferroamp_bat_soc
     name: Ferroamp SoC
-  - entity: sensor.home_ems_sungrow_meter_w
+  - entity: sensor.forty_two_watts_sungrow_meter_w
     name: Sungrow Grid
-  - entity: sensor.home_ems_sungrow_bat_w
+  - entity: sensor.forty_two_watts_sungrow_bat_w
     name: Sungrow Battery
-  - entity: sensor.home_ems_sungrow_bat_soc
+  - entity: sensor.forty_two_watts_sungrow_bat_soc
     name: Sungrow SoC
 ```
 
@@ -289,11 +289,11 @@ type: history-graph
 title: Energy (Last 24h)
 hours_to_show: 24
 entities:
-  - entity: sensor.home_ems_grid_power
+  - entity: sensor.forty_two_watts_grid_power
     name: Grid
-  - entity: sensor.home_ems_pv_power
+  - entity: sensor.forty_two_watts_pv_power
     name: Solar
-  - entity: sensor.home_ems_battery_power
+  - entity: sensor.forty_two_watts_battery_power
     name: Battery
 ```
 
@@ -301,8 +301,8 @@ entities:
 
 **Entities not appearing in HA:**
 - Verify the Mosquitto add-on is running and MQTT integration is configured
-- Check that home-ems can reach the broker: `mosquitto_pub -h <broker-ip> -u homeems -P homeems -t test -m hello`
-- Check home-ems logs for MQTT connection errors
+- Check that forty-two-watts can reach the broker: `mosquitto_pub -h <broker-ip> -u fortytwo -P fortytwo -t test -m hello`
+- Check forty-two-watts logs for MQTT connection errors
 
 **Stale sensor values:**
 - Verify `publish_interval_s` is set appropriately (default 5 seconds)

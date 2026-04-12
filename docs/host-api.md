@@ -1,12 +1,12 @@
 # Host API Reference
 
-The `host` table is available to all Lua drivers. It provides functions for logging, device communication, data decoding, JSON handling, and telemetry emission. These are the same APIs available on the Sourceful Zap gateway, so drivers are portable between home-ems and the Zap.
+The `host` table is available to all Lua drivers. It provides functions for logging, device communication, data decoding, JSON handling, and telemetry emission. These are the same APIs available on the Sourceful Zap gateway, so drivers are portable between forty-two-watts and the Zap.
 
 ## Core
 
 ### `host.log(message)` / `host.log(level, message)`
 
-Log a message to the home-ems structured logging system.
+Log a message to the forty-two-watts structured logging system.
 
 **Parameters:**
 - `message` (string) -- the log message (single-argument form logs at `info` level)
@@ -21,13 +21,13 @@ host.log("debug", "register 100 = " .. tostring(val))
 host.log("warn", "communication timeout, retrying")
 ```
 
-**Tip:** Set `RUST_LOG=lua=debug` when running home-ems to see debug-level driver logs.
+**Tip:** Set `RUST_LOG=lua=debug` when running forty-two-watts to see debug-level driver logs.
 
 ---
 
 ### `host.millis()`
 
-Returns the number of milliseconds since the home-ems process started. Useful for timing intervals within a driver.
+Returns the number of milliseconds since the forty-two-watts process started. Useful for timing intervals within a driver.
 
 **Parameters:** none
 

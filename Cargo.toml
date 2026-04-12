@@ -1,5 +1,5 @@
 [package]
-name = "home-ems"
+name = "forty-two-watts"
 version = "0.1.0"
 edition = "2024"
 description = "Unified Home Energy Management System - coordinates multiple battery systems on a shared grid connection"

@@ -5,29 +5,29 @@
 set -euo pipefail
 
 VERSION=${1:?Usage: $0 <version>}
-REPO="frahlg/home-ems"
+REPO="frahlg/forty-two-watts"
 
-echo "Building home-ems ${VERSION}..."
+echo "Building forty-two-watts ${VERSION}..."
 mkdir -p release
 
 # Build static binaries for both architectures
 for PLATFORM in linux/arm64 linux/amd64; do
     ARCH=$(echo $PLATFORM | cut -d/ -f2)
     echo "  Building ${ARCH}..."
-    docker build --platform ${PLATFORM} -t home-ems:${ARCH} .
-    docker create --name ems-extract home-ems:${ARCH}
-    docker cp ems-extract:/app/home-ems release/home-ems-linux-${ARCH}
+    docker build --platform ${PLATFORM} -t forty-two-watts:${ARCH} .
+    docker create --name ems-extract forty-two-watts:${ARCH}
+    docker cp ems-extract:/app/forty-two-watts release/forty-two-watts-linux-${ARCH}
     docker rm ems-extract
-    chmod +x release/home-ems-linux-${ARCH}
-    tar czf release/home-ems-linux-${ARCH}.tar.gz \
-        -C release home-ems-linux-${ARCH} \
+    chmod +x release/forty-two-watts-linux-${ARCH}
+    tar czf release/forty-two-watts-linux-${ARCH}.tar.gz \
+        -C release forty-two-watts-linux-${ARCH} \
         -C .. drivers/ web/ config.example.yaml
 done
 
 echo "Creating GitHub release ${VERSION}..."
 gh release create ${VERSION} \
-    release/home-ems-linux-arm64.tar.gz \
-    release/home-ems-linux-amd64.tar.gz \
+    release/forty-two-watts-linux-arm64.tar.gz \
+    release/forty-two-watts-linux-amd64.tar.gz \
     --repo ${REPO} \
     --title "${VERSION}" \
     --generate-notes

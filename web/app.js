@@ -1,4 +1,4 @@
-// home-ems dashboard — plain JS, no framework
+// forty-two-watts dashboard — plain JS, no framework
 
 (function () {
   "use strict";

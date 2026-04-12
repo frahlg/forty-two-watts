@@ -1,4 +1,4 @@
-# home-ems
+# forty-two-watts
 
 Unified Home Energy Management System. Coordinates multiple battery/inverter systems on a shared grid connection to prevent oscillation and optimize self-consumption. Runs as a single Rust binary, loads Lua drivers compatible with the Sourceful Zap gateway, and exposes a REST API plus MQTT integration for Home Assistant.
 
@@ -9,7 +9,7 @@ Unified Home Energy Management System. Coordinates multiple battery/inverter sys
                               |
                         +-----v------+
                         |            |
-                        |  home-ems  |       REST API :8080
+                        |  forty-two-watts  |       REST API :8080
                         |  (Rust)    |-----> GET /api/status
                         |            |       GET /api/health
                         +--+-+-+-+---+       POST /api/mode
@@ -21,8 +21,8 @@ Unified Home Energy Management System. Coordinates multiple battery/inverter sys
     | Driver Thread   | | Control  |   | HA MQTT Bridge   |
     | (Lua sandbox)   | |  Loop    |   | (autodiscovery)  |
     |                 | | (5s)     |   |                  |
-    | driver_poll()   | |          |   | homeems/status/* |
-    | host.emit()     | | compute  |   | homeems/command/*|
+    | driver_poll()   | |          |   | fortytwo/status/* |
+    | host.emit()     | | compute  |   | fortytwo/command/*|
     |   |             | | dispatch |   +------------------+
     |   v             | |   |      |
     | TelemetryStore <--+   |      |
@@ -46,11 +46,11 @@ Unified Home Energy Management System. Coordinates multiple battery/inverter sys
 ### Install
 
 ```bash
-git clone <repo-url> && cd home-ems
+git clone <repo-url> && cd forty-two-watts
 cargo build --release
 ```
 
-The binary is at `target/release/home-ems`. No system dependencies required -- Lua 5.4 is vendored via `mlua`.
+The binary is at `target/release/forty-two-watts`. No system dependencies required -- Lua 5.4 is vendored via `mlua`.
 
 ### Configure
 
@@ -66,10 +66,10 @@ At minimum, configure your driver(s) with the correct IP addresses and credentia
 
 ```bash
 # From the project directory (so driver paths resolve correctly)
-./target/release/home-ems -c config.yaml
+./target/release/forty-two-watts -c config.yaml
 
 # Or with debug logging
-RUST_LOG=debug ./target/release/home-ems -c config.yaml
+RUST_LOG=debug ./target/release/forty-two-watts -c config.yaml
 
 # Or during development
 cargo run -- -c config.yaml
@@ -119,8 +119,8 @@ homeassistant:                    # Optional: Home Assistant MQTT integration
   enabled: true                   # Default: true
   broker: 192.168.1.1             # HA Mosquitto broker IP
   port: 1883                     # Default: 1883
-  username: homeems               # Optional
-  password: homeems               # Optional
+  username: fortytwo               # Optional
+  password: fortytwo               # Optional
   publish_interval_s: 5           # Sensor update interval (default: 5)
 
 state:
@@ -331,7 +331,7 @@ No tokio, no async runtime. The architecture uses synchronous OS threads with `A
 ### Project Layout
 
 ```
-home-ems/
+forty-two-watts/
   src/
     main.rs          # Entry point, driver threads, control loop
     config.rs        # YAML config parsing and validation

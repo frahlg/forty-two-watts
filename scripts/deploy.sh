@@ -6,14 +6,14 @@ set -euo pipefail
 
 HOST=${1:?Usage: $0 <ssh-host> [version]}
 VERSION=${2:-latest}
-REPO="frahlg/home-ems"
-REMOTE_DIR="home-ems-app"
+REPO="frahlg/forty-two-watts"
+REMOTE_DIR="forty-two-watts-app"
 
 # Detect architecture
 ARCH=$(ssh ${HOST} "uname -m")
 case ${ARCH} in
-    aarch64) BINARY="home-ems-linux-arm64" ;;
-    x86_64)  BINARY="home-ems-linux-amd64" ;;
+    aarch64) BINARY="forty-two-watts-linux-arm64" ;;
+    x86_64)  BINARY="forty-two-watts-linux-amd64" ;;
     *) echo "Unsupported arch: ${ARCH}"; exit 1 ;;
 esac
 
@@ -31,7 +31,7 @@ ssh ${HOST} "
     cd ~/${REMOTE_DIR}
 
     # Stop running instance
-    pkill -f home-ems 2>/dev/null || true
+    pkill -f forty-two-watts 2>/dev/null || true
     sleep 1
 
     # Download and extract
@@ -42,7 +42,7 @@ ssh ${HOST} "
     echo 'Binary updated to ${VERSION}'
 
     # Start
-    nohup ./${BINARY} config.yaml > home-ems.log 2>&1 &
+    nohup ./${BINARY} config.yaml > forty-two-watts.log 2>&1 &
     sleep 2
 
     # Verify
@@ -50,6 +50,6 @@ ssh ${HOST} "
         echo 'Deployed and running!'
     else
         echo 'WARNING: health check failed'
-        tail -5 home-ems.log
+        tail -5 forty-two-watts.log
     fi
 "

@@ -2,13 +2,13 @@
 
 ## Overview
 
-A Lua driver is a self-contained script that communicates with a single physical device (inverter, battery, meter) and translates its proprietary protocol into the standardized telemetry format that home-ems understands. Drivers are the same scripts that run on the Sourceful Zap gateway -- they use the same `host.*` API and follow the same contract, so a driver written for home-ems works on the Zap and vice versa.
+A Lua driver is a self-contained script that communicates with a single physical device (inverter, battery, meter) and translates its proprietary protocol into the standardized telemetry format that forty-two-watts understands. Drivers are the same scripts that run on the Sourceful Zap gateway -- they use the same `host.*` API and follow the same contract, so a driver written for forty-two-watts works on the Zap and vice versa.
 
 Each driver runs in its own OS thread inside an isolated Lua 5.4 sandbox. The runtime automatically creates protocol connections (Modbus TCP, MQTT) based on the YAML config, so the driver code never deals with sockets or connection management directly.
 
 ```
 +-----------+     +-----------+     +------------------+
-|  Physical |     |   Lua     |     |   home-ems       |
+|  Physical |     |   Lua     |     |   forty-two-watts       |
 |  Device   |<--->|  Driver   |---->|  TelemetryStore  |
 | (inverter)|     | (sandbox) |     |  (shared state)  |
 +-----------+     +-----------+     +------------------+
@@ -284,7 +284,7 @@ If this device provides the site grid meter, add `is_site_meter: true`.
 
 ### Step 9: Test
 
-Run home-ems and check the logs:
+Run forty-two-watts and check the logs:
 
 ```bash
 RUST_LOG=debug cargo run -- -c config.yaml
@@ -429,7 +429,7 @@ end
 
 2. **Log liberally during development.** Use `host.log("debug", "register 100 = " .. tostring(val))` to trace values. Set `RUST_LOG=lua=debug` to see driver log output.
 
-3. **Check the REST API.** After starting home-ems, `curl http://localhost:8080/api/status` shows live telemetry for all drivers. This is the fastest way to verify your driver emits correct values.
+3. **Check the REST API.** After starting forty-two-watts, `curl http://localhost:8080/api/status` shows live telemetry for all drivers. This is the fastest way to verify your driver emits correct values.
 
 4. **Watch sign conventions.** The most common bug is wrong signs. Check that:
    - Meter `w` is positive when importing, negative when exporting

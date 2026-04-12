@@ -1,4 +1,4 @@
-# home-ems
+# forty-two-watts
 
 Unified Home Energy Management System. Coordinates multiple battery/inverter systems on a shared grid connection to prevent oscillation and optimize self-consumption.
 
