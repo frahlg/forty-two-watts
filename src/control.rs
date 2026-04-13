@@ -206,7 +206,10 @@ pub fn compute_dispatch(
     targets
 }
 
-/// Distribute total correction proportionally by battery capacity
+/// Distribute total correction proportionally by battery capacity.
+/// Computes the total desired battery power for the site, then splits it
+/// across batteries by capacity. Both batteries converge to the same
+/// proportional state instead of drifting independently.
 fn distribute_proportional(
     batteries: &[BatteryInfo],
     total_correction: f64,
@@ -215,9 +218,13 @@ fn distribute_proportional(
     let total_cap: f64 = batteries.iter().map(|b| b.capacity_wh).sum();
     if total_cap == 0.0 { return Vec::new(); }
 
+    // Total battery power desired for the site
+    let current_total: f64 = batteries.iter().map(|b| b.current_w).sum();
+    let desired_total = current_total + total_correction;
+
     batteries.iter().map(|bat| {
-        let share = total_correction * (bat.capacity_wh / total_cap);
-        let target = bat.current_w + share;
+        // Each battery gets its proportional share of the TOTAL desired power
+        let target = desired_total * (bat.capacity_wh / total_cap);
         let (clamped_target, was_clamped) = clamp_with_soc(target, bat.soc);
         DispatchTarget {
             driver: bat.driver.clone(),
@@ -273,10 +280,13 @@ fn distribute_weighted(
         .sum();
     if total_weight == 0.0 { return Vec::new(); }
 
+    // Total desired battery power = current total + correction
+    let current_total: f64 = batteries.iter().map(|b| b.current_w).sum();
+    let desired_total = current_total + total_correction;
+
     batteries.iter().map(|bat| {
         let w = weights.get(&bat.driver).copied().unwrap_or(1.0);
-        let share = total_correction * (w / total_weight);
-        let target = bat.current_w + share;
+        let target = desired_total * (w / total_weight);
         let (clamped_target, was_clamped) = clamp_with_soc(target, bat.soc);
         DispatchTarget {
             driver: bat.driver.clone(),
