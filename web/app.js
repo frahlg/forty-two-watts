@@ -62,6 +62,7 @@
   const eDischarged = $("e-discharged");
   const eLoad = $("e-load");
   const lastUpdate = $("last-update");
+  const versionEl = $("version");
   const FUSE_MAX_W = 11040; // 16A * 230V * 3ph
 
   // ---- Formatting ----
@@ -94,6 +95,10 @@
 
   // ---- Render ----
   function render(data) {
+    // Version (live from API — survives stale browser cache of index.html)
+    if (versionEl && data.version) {
+      versionEl.textContent = "v" + data.version;
+    }
     // Grid
     gridW.textContent = formatW(data.grid_w);
     if (data.grid_w > 10) {

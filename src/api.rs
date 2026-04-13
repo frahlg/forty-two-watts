@@ -181,6 +181,7 @@ fn handle_status(
     }).collect();
 
     json_response(200, &serde_json::json!({
+        "version": env!("CARGO_PKG_VERSION"),
         "mode": control.mode,
         "grid_w": grid_w,
         "pv_w": pv_w,
@@ -422,10 +423,16 @@ fn serve_static(url_path: &str) -> tiny_http::Response<std::io::Cursor<Vec<u8>>>
         Ok(contents) => {
             let content_type = guess_content_type(&file_path);
             let data = std::io::Cursor::new(contents);
-            let header = tiny_http::Header::from_bytes("Content-Type", content_type).unwrap();
+            let mut headers = vec![
+                tiny_http::Header::from_bytes("Content-Type", content_type).unwrap(),
+            ];
+            // Always revalidate static assets — version bumps shouldn't require Cmd+Shift+R
+            headers.push(
+                tiny_http::Header::from_bytes("Cache-Control", "no-cache, must-revalidate").unwrap()
+            );
             tiny_http::Response::new(
                 tiny_http::StatusCode(200),
-                vec![header],
+                headers,
                 data,
                 None,
                 None,
