@@ -16,7 +16,11 @@
     sungrow_bat: [],
     ferroamp_target: [],
     sungrow_target: [],
+    timestamps: [],
   };
+  // Last render layout, needed for hover tooltip
+  var chartLayout = null;
+  var hoverIndex = -1;
 
   // ---- DOM refs ----
   const $ = (id) => document.getElementById(id);
@@ -176,6 +180,7 @@
     chartHistory.sungrow_bat.push(sunBat);
     chartHistory.ferroamp_target.push(ferroTarget);
     chartHistory.sungrow_target.push(sunTarget);
+    chartHistory.timestamps.push(Date.now());
     if (chartHistory.grid.length > CHART_POINTS) {
       chartHistory.grid.shift();
       chartHistory.pv.shift();
@@ -184,6 +189,7 @@
       chartHistory.sungrow_bat.shift();
       chartHistory.ferroamp_target.shift();
       chartHistory.sungrow_target.shift();
+      chartHistory.timestamps.shift();
     }
   }
 
@@ -275,6 +281,91 @@
     ctx.fillStyle = "#666";
     ctx.fillText("5m ago", pad.left, h - 5);
     ctx.fillText("now", w - pad.right - 20, h - 5);
+
+    // Store layout for hover tooltip
+    chartLayout = {
+      pad: pad, plotW: plotW, plotH: plotH, w: w, h: h,
+      yMin: yMin, yMax: yMax, yRange: yRange,
+      series: series,
+      pointCount: Math.max.apply(null, series.map(function(s){ return s.data.length; }))
+    };
+
+    // Draw hover overlay if active
+    if (hoverIndex >= 0 && hoverIndex < chartLayout.pointCount) {
+      drawHoverOverlay(ctx);
+    }
+  }
+
+  function drawHoverOverlay(ctx) {
+    if (!chartLayout) return;
+    var l = chartLayout;
+    var i = hoverIndex;
+    var x = l.pad.left + (l.plotW * i / Math.max(1, l.pointCount - 1));
+
+    // Vertical line
+    ctx.strokeStyle = "rgba(255,255,255,0.3)";
+    ctx.lineWidth = 1;
+    ctx.setLineDash([2, 2]);
+    ctx.beginPath();
+    ctx.moveTo(x, l.pad.top);
+    ctx.lineTo(x, l.pad.top + l.plotH);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Dots on each series at this x
+    l.series.forEach(function (s) {
+      if (i >= s.data.length) return;
+      var y = l.pad.top + l.plotH * (1 - (s.data[i] - l.yMin) / l.yRange);
+      ctx.fillStyle = s.color;
+      ctx.beginPath();
+      ctx.arc(x, y, 3, 0, Math.PI * 2);
+      ctx.fill();
+    });
+
+    // Tooltip box
+    var labels = [
+      { name: "Grid",     data: chartHistory.grid,     color: "#ef4444" },
+      { name: "PV",       data: chartHistory.pv,       color: "#22c55e" },
+      { name: "Load",     data: chartHistory.load,     color: "#e2e8f0" },
+      { name: "Ferroamp", data: chartHistory.ferroamp_bat, color: "#f59e0b" },
+      { name: "  target", data: chartHistory.ferroamp_target, color: "#f59e0b", dim: true },
+      { name: "Sungrow",  data: chartHistory.sungrow_bat, color: "#8b5cf6" },
+      { name: "  target", data: chartHistory.sungrow_target, color: "#8b5cf6", dim: true },
+    ];
+
+    var ts = chartHistory.timestamps[i] || 0;
+    var timeStr = ts > 0 ? new Date(ts).toLocaleTimeString() : "";
+    var lineHeight = 16;
+    var boxW = 170;
+    var boxH = (labels.length + 1) * lineHeight + 10;
+
+    // Position tooltip (avoid going off-screen)
+    var boxX = x + 10;
+    if (boxX + boxW > l.w - 5) boxX = x - boxW - 10;
+    var boxY = l.pad.top + 5;
+
+    ctx.fillStyle = "rgba(20,20,35,0.95)";
+    ctx.strokeStyle = "#444";
+    ctx.lineWidth = 1;
+    ctx.fillRect(boxX, boxY, boxW, boxH);
+    ctx.strokeRect(boxX, boxY, boxW, boxH);
+
+    ctx.font = "10px monospace";
+    ctx.fillStyle = "#888";
+    ctx.fillText(timeStr, boxX + 6, boxY + lineHeight - 2);
+
+    labels.forEach(function (lab, idx) {
+      if (i >= lab.data.length) return;
+      var y = boxY + (idx + 2) * lineHeight - 4;
+      ctx.fillStyle = lab.color;
+      ctx.fillRect(boxX + 6, y - 8, 8, 8);
+      ctx.fillStyle = lab.dim ? "#888" : "#ddd";
+      ctx.fillText(lab.name, boxX + 18, y);
+      ctx.fillStyle = "#fff";
+      ctx.textAlign = "right";
+      ctx.fillText(formatW(lab.data[i]), boxX + boxW - 6, y);
+      ctx.textAlign = "left";
+    });
   }
 
   function renderDrivers(drivers) {
@@ -403,10 +494,7 @@
     if (ok) {
       connStatus.className = "conn-status connected";
       connStatus.title = "Connected";
-      // Clear any stale "Connection lost" text from previous failure
-      if (lastUpdate.textContent === "Connection lost") {
-        lastUpdate.textContent = "";
-      }
+      // render() will update lastUpdate with timestamp
     } else {
       connStatus.className = "conn-status disconnected";
       connStatus.title = "Disconnected";
@@ -456,6 +544,32 @@
     });
   }
 
+  // ---- Chart hover ----
+  var canvas = document.getElementById("power-chart");
+  if (canvas) {
+    canvas.addEventListener("mousemove", function (e) {
+      if (!chartLayout) return;
+      var rect = canvas.getBoundingClientRect();
+      var scaleX = canvas.width / rect.width;
+      var x = (e.clientX - rect.left) * scaleX;
+      var l = chartLayout;
+      if (x < l.pad.left || x > l.pad.left + l.plotW) {
+        if (hoverIndex !== -1) { hoverIndex = -1; renderChart(); }
+        return;
+      }
+      var relX = x - l.pad.left;
+      var idx = Math.round(relX / l.plotW * (l.pointCount - 1));
+      idx = Math.max(0, Math.min(l.pointCount - 1, idx));
+      if (idx !== hoverIndex) {
+        hoverIndex = idx;
+        renderChart();
+      }
+    });
+    canvas.addEventListener("mouseleave", function () {
+      if (hoverIndex !== -1) { hoverIndex = -1; renderChart(); }
+    });
+  }
+
   // ---- History loader ----
   function loadHistory(range) {
     var points = CHART_POINTS;
@@ -471,6 +585,7 @@
         chartHistory.sungrow_bat = [];
         chartHistory.ferroamp_target = [];
         chartHistory.sungrow_target = [];
+        chartHistory.timestamps = [];
         data.items.forEach(function (it) {
           var fd = (it.drivers || {}).ferroamp || {};
           var sd = (it.drivers || {}).sungrow || {};
@@ -483,6 +598,7 @@
           chartHistory.sungrow_bat.push(sd.bat_w || 0);
           chartHistory.ferroamp_target.push(ft);
           chartHistory.sungrow_target.push(st);
+          chartHistory.timestamps.push(it.ts || 0);
         });
         renderChart();
       })
