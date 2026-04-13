@@ -2,37 +2,48 @@
 
 ## Short term
 
-- [ ] **Telemetry history in redb** — save readings every 5s, retain 3 days, serve via `GET /api/history`, chart loads data on page open instead of starting empty
-- [ ] **Peak shaving mode** — configurable grid import ceiling (e.g. max 2000W import) instead of targeting 0W. New mode `peak_shaving` with `peak_limit_w` config
-- [ ] **EV charging signal** — `POST /api/ev_charging {"power_w": 7000, "active": true}` tells the EMS a car is charging. Batteries should NOT discharge to cover EV load — only self-consume for house load. Also expose via HA MQTT command topic
-- [ ] **Fix HA mode selector** — mode state format doesn't match HA options, shows "unknown". Ensure `self_consumption` string matches exactly
-- [ ] **Compact UI** — fuse gauge visualization, per-battery weight/limit sliders, responsive layout that fits without scrolling
-- [ ] **Per-battery config in UI** — SoC min/max limits, max charge/discharge power, priority weight — editable from the dashboard
+- [ ] **Per-battery config in UI** — SoC min/max limits, max charge/discharge power, priority weight — editable from dashboard. Currently these are hardcoded constants in control.rs
+- [ ] **Energy accumulation** — cumulative kWh counters (import/export/PV/charge/discharge) integrated from power over time, displayed as "today" and "all-time". Use the history data we already store
+- [ ] **Chart range fix** — when selecting 1h/6h/24h/3d, `CHART_POINTS` constant (60) limits the chart. Make chart accept any N points from the history endpoint
+- [ ] **Persist peak_limit and ev_charging across restarts** — currently only mode is restored from redb
 
 ## Medium term
 
-- [ ] **More Lua drivers** — document how to add new devices (template in docs/lua-drivers.md), test with additional inverters/batteries
+- [ ] **More Lua drivers** — documented template in docs/lua-drivers.md. Test with additional inverters/batteries (SMA, Huawei, Pixii, etc.)
 - [ ] **Systemd service** — auto-start on RPi boot, restart on crash, log to journald
 - [ ] **MPC controller** — replace PI with Model Predictive Control (`clarabel` or `osqp` crate) for constraint-aware optimization that plans N steps ahead
 - [ ] **Decouple measurement from control** — drivers push async telemetry with timestamps, control loop runs on fixed timer, Kalman provides best estimate at each tick
-- [ ] **CI/CD** — GitHub Actions workflow: build static musl binaries for arm64+amd64 on tag push, auto-create release with artifacts
-- [ ] **Load display stability** — improve Kalman filter tuning for load calculation, or compute load from dedicated measurement point
+- [ ] **CI/CD** — GitHub Actions workflow: build static musl binaries for arm64+amd64 on tag push, auto-create release
+- [ ] **Load display stability** — improve Kalman filter tuning for load calculation during battery transients
+
+## Ideas / future
+
+- [ ] **Price-aware charging** — integrate Nordpool tariff, charge during cheap hours, discharge during expensive hours
+- [ ] **Weather-aware forecasting** — pull solar forecast, pre-charge battery before cloudy days
+- [ ] **Multi-site** — one home-ems managing several physical sites via remote agents
+- [ ] **Alerting** — push notifications on driver failure, critical SoC, etc.
+- [ ] **WebSocket live updates** — replace 5s polling with push for instant updates
+- [ ] **Docker Hub image** — publish multi-arch Docker image so people can just `docker run ghcr.io/frahlg/forty-two-watts`
+- [ ] **Grafana exporter** — Prometheus endpoint for long-term metrics
 
 ## Done
 
-- [x] PI controller (Kp=0.4, Ki=0.05) with anti-windup
-- [x] 1D Kalman filter per DER signal (auto-adaptive noise rejection)
-- [x] Lua driver system (ferroamp.lua + sungrow.lua from srcful-device-support)
-- [x] Ferroamp EnergyHub MQTT driver — charge/discharge/auto verified at 200W
-- [x] Sungrow SH hybrid Modbus driver — charge/discharge verified, auto-configures discharge limit
-- [x] Anti-oscillation: slew rate 300W/cycle, 10s command holdoff, 42W deadband
+- [x] PI controller (Kp=0.5, Ki=0.1) with anti-windup
+- [x] 1D Kalman filter per DER signal (auto-adaptive)
+- [x] Lua driver system (ferroamp.lua + sungrow.lua verified on hardware)
+- [x] Anti-oscillation: slew rate 500W/cycle, 5s holdoff, 42W deadband
 - [x] Fuse guard (16A shared breaker)
-- [x] 5 dispatch modes: idle, self_consumption, charge, priority, weighted
-- [x] REST API: status, mode, target, drivers, health
-- [x] Web dashboard with real-time chart (grid, PV, load, per-battery actual+target)
-- [x] Home Assistant MQTT autodiscovery (15 entities, mode selector, grid target slider)
-- [x] redb state persistence for crash recovery
+- [x] 6 dispatch modes: idle, self_consumption, peak_shaving, charge, priority, weighted
+- [x] EV charging signal — batteries ignore EV load
+- [x] Per-battery dispatch fix — synchronized proportional split (was drifting)
+- [x] REST API: status, mode, target, peak_limit, ev_charging, drivers, history, health
+- [x] Web dashboard: summary cards with fuse gauge, compact controls, chart with hover tooltip
+- [x] Chart range selector (5m / 15m / 1h / 6h / 24h / 3d)
+- [x] Telemetry history in redb (3-day retention, auto-prune, bucket downsampling)
+- [x] Home Assistant MQTT autodiscovery (mode selector, grid target, peak limit, EV charging, all sensors)
+- [x] HA mode selector fix (snake_case)
+- [x] redb state persistence for crash recovery (mode restored on startup)
 - [x] Static musl binaries (linux/arm64 + linux/amd64) via Docker
 - [x] GitHub release v0.1.0 with downloadable binaries
-- [x] Deployed to RPi (192.168.192.40)
+- [x] Deployed to RPi (192.168.192.40) running autonomously
 - [x] Douglas Adams theme throughout 🐬
