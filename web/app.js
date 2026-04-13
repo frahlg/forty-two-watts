@@ -166,10 +166,7 @@
     });
     pushChartData(data.grid_w, data.pv_w, data.load_w||0, fd.bat_w||0, sd.bat_w||0, ft, st);
     renderChart();
-
-    // Timestamp
-    lastUpdate.textContent =
-      "Last update: " + new Date().toLocaleTimeString();
+    // Timestamp is updated in fetchStatus (before render, so it's robust to render errors)
   }
 
   function pushChartData(grid, pv, load, ferroBat, sunBat, ferroTarget, sunTarget) {
@@ -435,7 +432,9 @@
       })
       .then(function (data) {
         setConnected(true);
-        // Isolate render errors from connection state
+        // Always refresh timestamp on successful fetch
+        lastUpdate.textContent = "Last update: " + new Date().toLocaleTimeString();
+        // Isolate render errors from connection state / timestamp
         try { render(data); }
         catch (e) { console.error("render error:", e); }
       })
