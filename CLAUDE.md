@@ -12,6 +12,9 @@ Rust binary that loads Lua drivers (from Sourceful's srcful-device-support regis
 - **Host API**: The `host.*` namespace exposed to Lua drivers (MQTT, Modbus, decode helpers, telemetry emit)
 - **Telemetry Store**: Central shared state. Kalman-filtered per-signal smoothing (auto-adaptive noise), separate slow filter for load.
 - **Control Loop**: configurable interval (default 5s) reads telemetry, runs PI controller (Kp=0.5, Ki=0.1, anti-windup at ±3000W), applies slew limit, dispatches.
+- **Battery Models** (`battery_model.rs`): Per-battery ARX(1) model learned online via RLS. Provides τ (time constant), steady-state gain, saturation curves per SoC, deadband, hardware health score. See [docs/battery-models.md](docs/battery-models.md).
+- **Cascade controller** (in `control.rs`): When models present, each battery gets its own inner PI loop (auto-tuned from learned τ) + saturation clamp + inverse-model command transformation. Falls back to direct command when models missing.
+- **Self-tune** (`self_tune.rs`): Manual calibration sequence (3 min/battery) — drives each battery through known steps, fits ARX(1) from response, writes as baseline for health drift detection.
 - **Fuse Guard**: Ensures total generation (PV + battery discharge) never exceeds the shared breaker limit.
 - **Energy Accumulator**: Wh integrated from W on every cycle. Today / total split, day rollover at UTC midnight, persisted to redb.
 - **DriverRegistry**: Manages driver thread lifecycle. `add()`, `remove()`, `reload()` (diffs configs and applies). All hot — no restart.
@@ -53,7 +56,9 @@ Tests live inline as `#[cfg(test)] mod tests` in each module. No `tests/` direct
 - `src/config.rs` — YAML schema + validation. All types `Clone + Serialize + Deserialize` for round-trip via UI.
 - `src/driver_registry.rs` — Dynamic driver lifecycle. `add()`/`remove()`/`reload()` + `diff_drivers()` pure helper.
 - `src/config_reload.rs` — File watcher (`notify`) + `reload()` + `save_atomic()` (tmp + rename).
-- `src/control.rs` — PI controller + dispatch modes + fuse guard + slew rate.
+- `src/control.rs` — Site PI controller + dispatch modes + fuse guard + slew rate + cascade (per-battery inner PI + inverse model + saturation clamp).
+- `src/battery_model.rs` — Per-battery RLS estimator (ARX(1)), saturation curve tracking, hardware-health drift detection.
+- `src/self_tune.rs` — Self-tune state machine: step-response sequence + first-order fit + writes baseline.
 - `src/telemetry.rs` — `TelemetryStore` + `KalmanFilter1D` + `DriverHealth`.
 - `src/energy.rs` — `EnergyAccumulator` (Wh integration) + day rollover.
 - `src/state.rs` — `StateStore` (redb): config, telemetry snapshots, events (ms-keyed), tiered history with auto-aggregation.
@@ -63,7 +68,8 @@ Tests live inline as `#[cfg(test)] mod tests` in each module. No `tests/` direct
 - `drivers/` — Lua drivers (ferroamp.lua, sungrow.lua)
 - `web/index.html`, `style.css`, `app.js` — Dashboard
 - `web/settings.js` — 6-tab settings modal (Control / Devices / Price / Weather / Batteries / Home Assistant). GETs `/api/config`, edits in place, POSTs back.
-- `docs/` — `lua-drivers.md`, `host-api.md`, `ha-integration.md`, `configuration.md`
+- `web/models.js` — Battery Models panel + self-tune modal. Polls `/api/battery_models` every 3s, drives `/api/self_tune/*`.
+- `docs/` — `lua-drivers.md`, `host-api.md`, `ha-integration.md`, `configuration.md`, `battery-models.md`
 - `config.example.yaml` — Example configuration
 
 ## Dependencies

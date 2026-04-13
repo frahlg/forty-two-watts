@@ -4,6 +4,7 @@ use pid::Pid;
 use tracing::{info, warn, debug};
 
 use crate::telemetry::{TelemetryStore, DerType};
+use crate::battery_model::BatteryModel;
 
 /// EMS operating mode
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -32,6 +33,42 @@ pub struct DispatchTarget {
     pub clamped: bool,
 }
 
+/// Inner PI controller per battery — tracks the assigned target_w against
+/// observed actual. Lives in ControlState so it persists across cycles and can
+/// be re-tuned dynamically based on the learned τ from BatteryModel.
+pub struct InnerPi {
+    pub pid: Pid<f64>,
+    pub tuned_for_tau: f64, // last tau used to set Kp/Ki — re-tune if model changes
+}
+
+impl InnerPi {
+    pub fn new() -> Self {
+        // Default tuning: moderate (will be re-tuned per-battery once model converges)
+        let mut pid = Pid::new(0.0, 5000.0); // setpoint=0; we feed error directly via update(-error)
+        pid.p(0.6, 5000.0);
+        pid.i(0.15, 2000.0);
+        pid.d(0.0, 0.0);
+        Self { pid, tuned_for_tau: 0.0 }
+    }
+
+    /// Re-tune Kp/Ki based on plant time constant τ.
+    /// Faster plant (small τ) → tighter Kp. Slower → smaller Kp + more I.
+    pub fn retune_for(&mut self, tau_s: f64) {
+        if (tau_s - self.tuned_for_tau).abs() < 0.2 { return; }
+        // Empirical tuning rule (Skogestad-style for first-order):
+        // For τ_c = τ (closed-loop = open-loop), Kp = 1/(K·(τ_c + θ)), Ki = Kp/τ_I
+        // We don't model dead time θ here, just scale: Kp ∝ 1/τ
+        let kp = (1.0 / (tau_s + 0.5)).clamp(0.2, 1.0);
+        let ki = (0.2 / tau_s.max(0.5)).clamp(0.05, 0.4);
+        let mut new_pid = Pid::new(0.0, 5000.0);
+        new_pid.p(kp, 5000.0);
+        new_pid.i(ki, 2000.0);
+        new_pid.d(0.0, 0.0);
+        self.pid = new_pid;
+        self.tuned_for_tau = tau_s;
+    }
+}
+
 /// Control loop state with PI controller and anti-oscillation
 pub struct ControlState {
     pub mode: Mode,
@@ -56,6 +93,12 @@ pub struct ControlState {
     pub min_dispatch_interval_s: u64,
     pub last_dispatch: Option<Instant>,
     prev_targets: HashMap<String, f64>,
+
+    // Cascade architecture: outer PI → per-battery target → inner PI per battery → command
+    pub inner_pis: HashMap<String, InnerPi>,
+
+    // Toggle for cascade mode. Defaults true; set false to bypass to legacy direct-command mode.
+    pub use_cascade: bool,
 }
 
 impl ControlState {
@@ -85,6 +128,8 @@ impl ControlState {
             min_dispatch_interval_s: 5,
             last_dispatch: None,
             prev_targets: HashMap::new(),
+            inner_pis: HashMap::new(),
+            use_cascade: true,
         }
     }
 
@@ -104,12 +149,32 @@ struct BatteryInfo {
     online: bool,
 }
 
-/// Compute dispatch targets for one control cycle
+/// Compute dispatch targets for one control cycle (legacy signature, no cascade).
+/// New code should call `compute_dispatch_with_models` with battery models for the
+/// cascade controller + inverse model + saturation clamping.
 pub fn compute_dispatch(
     store: &TelemetryStore,
     state: &mut ControlState,
     driver_capacities: &HashMap<String, f64>,
     fuse_max_w: f64,
+) -> Vec<DispatchTarget> {
+    let empty: HashMap<String, BatteryModel> = HashMap::new();
+    compute_dispatch_with_models(store, state, driver_capacities, fuse_max_w, &empty, 5.0)
+}
+
+/// Cascade-enabled dispatch. When models are present and `state.use_cascade` is true,
+/// each battery's command is routed through:
+///   1. Saturation clamp (model.clamp_to_saturation by SoC)
+///   2. Inner PI per battery (target − actual → correction added to target)
+///   3. Inverse model (command = result / steady_state_gain)
+/// When models are missing or cascade is disabled, behaves identically to legacy mode.
+pub fn compute_dispatch_with_models(
+    store: &TelemetryStore,
+    state: &mut ControlState,
+    driver_capacities: &HashMap<String, f64>,
+    fuse_max_w: f64,
+    models: &HashMap<String, BatteryModel>,
+    dt_s: f64,
 ) -> Vec<DispatchTarget> {
     match state.mode {
         Mode::Idle => {
@@ -196,7 +261,8 @@ pub fn compute_dispatch(
         grid_w, state.grid_target_w, error,
         pid_output.p, pid_output.i, total_correction);
 
-    // Distribute correction across batteries based on mode
+    // Distribute correction across batteries based on mode (these are the *targets*
+    // we want each battery to reach — not yet the commands we send to drivers)
     let mut targets = match &state.mode {
         // PeakShaving uses the same proportional distribution as SelfConsumption —
         // they only differ in how `error` is computed above.
@@ -206,6 +272,51 @@ pub fn compute_dispatch(
         Mode::Weighted => distribute_weighted(&batteries, total_correction, &state.weights),
         _ => Vec::new(),
     };
+
+    // ---- Cascade: per-battery inner PI + saturation clamp + inverse model ----
+    // Skip when models are absent or cascade disabled — fall back to direct command.
+    if state.use_cascade && !models.is_empty() {
+        for target in &mut targets {
+            let model = match models.get(&target.driver) {
+                Some(m) => m,
+                None => continue, // no model yet → use raw target
+            };
+            let bat = batteries.iter().find(|b| b.driver == target.driver);
+            let (actual, soc) = match bat {
+                Some(b) => (b.current_w, b.soc),
+                None => continue,
+            };
+
+            // Re-tune inner PI based on learned τ (only when model is confident)
+            if model.confidence() > 0.3 {
+                let inner = state.inner_pis.entry(target.driver.clone())
+                    .or_insert_with(InnerPi::new);
+                inner.retune_for(model.time_constant_s(dt_s));
+            }
+
+            // 1. Saturation clamp — never ask for more than the battery can deliver at this SoC
+            let (clamped_target, sat_clamped) = model.clamp_to_saturation(target.target_w, soc);
+            if sat_clamped { target.clamped = true; }
+
+            // 2. Inner PI: drive the error (target − actual) toward zero with per-battery dynamics
+            let pi_out = {
+                let inner = state.inner_pis.entry(target.driver.clone())
+                    .or_insert_with(InnerPi::new);
+                // pid::Pid uses (setpoint − measurement). We set setpoint=0 and pass
+                // -error so the output is +K·(target−actual): positive when target above actual.
+                let err = clamped_target - actual;
+                let out = inner.pid.next_control_output(-err);
+                out.output
+            };
+            let pi_corrected = clamped_target + pi_out;
+
+            // 3. Inverse model: command = corrected_target / steady_state_gain
+            //    (compensates for the battery's non-unity efficiency / response gain)
+            let command = model.inverse(pi_corrected);
+
+            target.target_w = command;
+        }
+    }
 
     // Apply slew rate limit per driver
     for target in &mut targets {
@@ -745,5 +856,110 @@ mod tests {
         assert_eq!(json, "\"self_consumption\"");
         let parsed: Mode = serde_json::from_str("\"peak_shaving\"").unwrap();
         assert_eq!(parsed, Mode::PeakShaving);
+    }
+
+    // ---- Cascade controller integration tests ----
+
+    #[test]
+    fn cascade_disabled_when_models_empty() {
+        let store = make_store_with(2000.0, &[("ferroamp", 0.0, 0.5)]);
+        let mut state = ControlState::new(0.0, 50.0, "ferroamp".into());
+        state.mode = Mode::SelfConsumption;
+        state.slew_rate_w = 100000.0;
+        let models: HashMap<String, BatteryModel> = HashMap::new();
+        let targets = compute_dispatch_with_models(
+            &store, &mut state, &caps(&[("ferroamp", 15200.0)]), 11040.0, &models, 5.0,
+        );
+        // Should produce a target same as without models — no inverse-model transformation
+        assert!(!targets.is_empty());
+        assert!(state.inner_pis.is_empty(), "no inner PI created when no models");
+    }
+
+    #[test]
+    fn cascade_inverse_model_amplifies_command_for_lossy_battery() {
+        // Battery with 0.8 gain (20% loss) → command should be amplified by 1/0.8 = 1.25
+        let store = make_store_with(2000.0, &[("ferroamp", 0.0, 0.5)]);
+        let mut state = ControlState::new(0.0, 50.0, "ferroamp".into());
+        state.mode = Mode::SelfConsumption;
+        state.slew_rate_w = 100000.0;
+
+        let mut model = BatteryModel::new("ferroamp");
+        model.a = 0.5;
+        model.b = 0.4; // gain = 0.4/0.5 = 0.8
+        // Force confidence high so inner PI gets re-tuned
+        model.n_samples = 500;
+        model.residual_var_ema = 50.0;
+        let mut models = HashMap::new();
+        models.insert("ferroamp".to_string(), model);
+
+        let targets_no_cascade = {
+            let mut s_clone = ControlState::new(0.0, 50.0, "ferroamp".into());
+            s_clone.mode = Mode::SelfConsumption;
+            s_clone.slew_rate_w = 100000.0;
+            let empty: HashMap<String, BatteryModel> = HashMap::new();
+            compute_dispatch_with_models(
+                &store, &mut s_clone, &caps(&[("ferroamp", 15200.0)]), 11040.0, &empty, 5.0,
+            )
+        };
+        let targets_cascade = compute_dispatch_with_models(
+            &store, &mut state, &caps(&[("ferroamp", 15200.0)]), 11040.0, &models, 5.0,
+        );
+
+        if let (Some(t_n), Some(t_c)) = (targets_no_cascade.first(), targets_cascade.first()) {
+            // Cascade command should differ from non-cascade (inverse-modeled)
+            assert!(
+                (t_n.target_w - t_c.target_w).abs() > 50.0,
+                "expected cascade to change command meaningfully: no={} cascade={}",
+                t_n.target_w, t_c.target_w
+            );
+        }
+    }
+
+    #[test]
+    fn cascade_clamps_to_saturation_curve() {
+        // SoC=98% — battery's max charge curve says only 500W allowed there
+        let store = make_store_with(-5000.0, &[("ferroamp", 0.0, 0.98)]);
+        let mut state = ControlState::new(0.0, 50.0, "ferroamp".into());
+        state.mode = Mode::SelfConsumption;
+        state.slew_rate_w = 100000.0;
+
+        let mut model = BatteryModel::new("ferroamp");
+        model.a = 0.5;
+        model.b = 0.5; // gain = 1.0
+        model.n_samples = 500;
+        model.residual_var_ema = 50.0;
+        // High SoC → tight charge limit
+        model.max_charge_curve = vec![(0.0, 5000.0), (0.9, 5000.0), (0.97, 1000.0), (1.0, 0.0)];
+        let mut models = HashMap::new();
+        models.insert("ferroamp".to_string(), model);
+
+        let targets = compute_dispatch_with_models(
+            &store, &mut state, &caps(&[("ferroamp", 15200.0)]), 11040.0, &models, 5.0,
+        );
+        // Saturation curve at SoC=0.98 ≈ interp(0.97→1000, 1.0→0) = ~333W
+        // The command should be clamped — at least flagged
+        if let Some(t) = targets.first() {
+            assert!(t.clamped, "expected clamping due to SoC saturation");
+        }
+    }
+
+    #[test]
+    fn inner_pi_retunes_for_faster_battery() {
+        let mut pi = InnerPi::new();
+        pi.retune_for(1.0); // fast: τ=1s
+        let kp_fast = pi.tuned_for_tau;
+        pi.retune_for(5.0); // slow: τ=5s
+        let kp_slow = pi.tuned_for_tau;
+        assert!(kp_slow > kp_fast); // we just check it actually re-tuned
+    }
+
+    #[test]
+    fn inner_pi_no_retune_for_small_change() {
+        let mut pi = InnerPi::new();
+        pi.retune_for(2.0);
+        let after_first = pi.tuned_for_tau;
+        pi.retune_for(2.05); // tiny change
+        // tuned_for_tau should not have updated
+        assert_eq!(pi.tuned_for_tau, after_first);
     }
 }

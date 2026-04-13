@@ -178,7 +178,34 @@
     <section id="drivers-section">
       <div class="drivers-grid" id="drivers-grid"></div>
     </section>
+
+    <!-- Battery Models — learned per-battery dynamics (RLS) + health + self-tune -->
+    <section id="models-section">
+      <div class="section-header">
+        <h2>Battery Models</h2>
+        <button id="self-tune-btn" class="btn-send">Self-tune</button>
+      </div>
+      <div class="models-grid" id="models-grid"></div>
+    </section>
   </main>
+
+  <!-- Self-tune Modal -->
+  <div id="self-tune-modal" class="modal hidden">
+    <div class="modal-content" style="max-width:520px">
+      <div class="modal-header">
+        <h2>Battery self-tune</h2>
+        <button id="self-tune-close" class="modal-close">×</button>
+      </div>
+      <div class="modal-body" id="self-tune-body">
+        <!-- Rendered by JS: battery checklist OR live progress OR before/after diff -->
+      </div>
+      <div class="modal-footer">
+        <span id="self-tune-status" class="settings-status"></span>
+        <button id="self-tune-cancel" class="btn-send" style="display:none">Cancel</button>
+        <button id="self-tune-start" class="btn-send">Start calibration</button>
+      </div>
+    </div>
+  </div>
 
   <footer>
     <span id="refresh-indicator" class="refresh-dot" title="Auto-refresh active">&#9679;</span>
@@ -188,5 +215,6 @@
 
   <script src="/app.js"></script>
   <script src="/settings.js"></script>
+  <script src="/models.js"></script>
 </body>
 </html>

@@ -42,6 +42,9 @@ When your grid power is within 42W of the target, the system logs `Don't Panic` 
 ## Features
 
 - **PI Controller** with anti-windup — because proportional-only control is for mostly harmless systems
+- **Per-Battery Online Learning** — RLS estimates each battery's response model (τ, gain, saturation curve) continuously. Cascade controller uses the model to compensate for individual quirks. See [docs/battery-models.md](docs/battery-models.md)
+- **Self-tune** — manual calibration: 3-min step response per battery → fits ARX(1) model → sets baseline for hardware health
+- **Hardware health detection** — gain drift over time signals battery aging before it becomes catastrophic
 - **1D Kalman Filter** per signal — auto-adapts to noise. Like the Babel Fish, but for watts
 - **Lua Driver System** — same drivers that run on the Sourceful Zap gateway. Drop in a `.lua` file, get a new device
 - **6 Dispatch Modes**: idle, self_consumption, peak_shaving, charge, priority, weighted

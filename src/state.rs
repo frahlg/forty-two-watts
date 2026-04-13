@@ -88,6 +88,7 @@ fn replace_with_averages(prefix: &str, obj: &mut serde_json::Map<String, serde_j
 const CONFIG_TABLE: TableDefinition<&str, &str> = TableDefinition::new("config");
 const TELEMETRY_TABLE: TableDefinition<&str, &str> = TableDefinition::new("telemetry");
 const EVENTS_TABLE: TableDefinition<u64, &str> = TableDefinition::new("events");
+const MODELS_TABLE: TableDefinition<&str, &str> = TableDefinition::new("battery_models");
 
 // Tiered history tables
 const HISTORY_HOT: TableDefinition<u64, &str> = TableDefinition::new("history");        // 5s native, 30 days
@@ -129,6 +130,7 @@ impl StateStore {
             let _ = txn.open_table(CONFIG_TABLE)?;
             let _ = txn.open_table(TELEMETRY_TABLE)?;
             let _ = txn.open_table(EVENTS_TABLE)?;
+            let _ = txn.open_table(MODELS_TABLE)?;
             let _ = txn.open_table(HISTORY_HOT)?;
             let _ = txn.open_table(HISTORY_WARM)?;
             let _ = txn.open_table(HISTORY_COLD)?;
@@ -374,6 +376,34 @@ impl StateStore {
     pub fn history_count(&self) -> usize {
         let (h, w, c) = self.history_counts();
         h + w + c
+    }
+
+    /// Save a battery model JSON blob keyed by name.
+    pub fn save_battery_model(&self, name: &str, json: &str) {
+        match self.db.begin_write() {
+            Ok(txn) => {
+                if let Ok(mut table) = txn.open_table(MODELS_TABLE) {
+                    let _ = table.insert(name, json);
+                }
+                let _ = txn.commit();
+            }
+            Err(e) => warn!("save_battery_model: {}", e),
+        }
+    }
+
+    /// Load all stored battery models. Returns Vec<(name, json)>.
+    pub fn load_all_battery_models(&self) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        if let Ok(txn) = self.db.begin_read() {
+            if let Ok(table) = txn.open_table(MODELS_TABLE) {
+                if let Ok(iter) = table.iter() {
+                    for r in iter.flatten() {
+                        out.push((r.0.value().to_string(), r.1.value().to_string()));
+                    }
+                }
+            }
+        }
+        out
     }
 
     /// Test-only: write directly into a tier with a chosen timestamp

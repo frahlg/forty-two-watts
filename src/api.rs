@@ -8,8 +8,11 @@ use crate::telemetry::{TelemetryStore, DerType};
 use crate::control::{ControlState, Mode};
 use crate::config::Config;
 use crate::driver_registry::DriverRegistry;
+use crate::battery_model::BatteryModel;
+use crate::self_tune::SelfTuneCoordinator;
 
 /// Start the REST API server on a separate thread
+#[allow(clippy::too_many_arguments)]
 pub fn start(
     port: u16,
     store: Arc<Mutex<TelemetryStore>>,
@@ -20,6 +23,8 @@ pub fn start(
     current_config: Arc<RwLock<Config>>,
     registry: DriverRegistry,
     config_path: PathBuf,
+    battery_models: Arc<RwLock<HashMap<String, BatteryModel>>>,
+    self_tune: Arc<Mutex<SelfTuneCoordinator>>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::Builder::new()
         .name("api".to_string())
@@ -50,6 +55,10 @@ pub fn start(
                     ("GET", "/api/drivers") => handle_drivers(&store),
                     ("GET", "/api/config") => handle_get_config(&current_config),
                     ("POST", "/api/config") => handle_post_config(&current_config, &registry, &control, &config_path, &mut request),
+                    ("GET", "/api/battery_models") => handle_get_models(&battery_models, &control),
+                    ("POST", "/api/self_tune/start") => handle_self_tune_start(&self_tune, &battery_models, &control, &mut request),
+                    ("GET", "/api/self_tune/status") => handle_self_tune_status(&self_tune),
+                    ("POST", "/api/self_tune/cancel") => handle_self_tune_cancel(&self_tune),
                     ("GET", p) if p.starts_with("/api/history") => handle_history(&state_store, p),
                     ("GET", path) => serve_static(path),
                     _ => json_response(404, &serde_json::json!({"error": "not found"})),
@@ -511,6 +520,81 @@ fn handle_post_config(
         Ok(()) => json_response(200, &serde_json::json!({"status": "ok"})),
         Err((code, msg)) => json_response(code, &serde_json::json!({"error": msg})),
     }
+}
+
+/// GET /api/battery_models — current per-battery learned model state.
+fn handle_get_models(
+    models: &Arc<RwLock<HashMap<String, BatteryModel>>>,
+    control: &Arc<Mutex<ControlState>>,
+) -> tiny_http::Response<std::io::Cursor<Vec<u8>>> {
+    let dt_s = 5.0; // TODO: pass from config; control_interval_s default
+    let _ = control; // reserved for future per-controller diagnostics
+    let models = models.read().unwrap();
+    let mut out = serde_json::Map::new();
+    for (name, m) in models.iter() {
+        out.insert(name.clone(), serde_json::json!({
+            "tau_s": m.time_constant_s(dt_s),
+            "gain": m.steady_state_gain(),
+            "deadband_w": m.deadband_w,
+            "n_samples": m.n_samples,
+            "confidence": m.confidence(),
+            "health_score": m.health_score(),
+            "health_drift_per_day": m.health_drift_per_day(),
+            "baseline_gain": m.baseline_gain,
+            "baseline_tau_s": m.baseline_tau_s,
+            "last_calibrated_ts_ms": m.last_calibrated_ts_ms,
+            "last_updated_ts_ms": m.last_updated_ts_ms,
+            "max_charge_curve": m.max_charge_curve,
+            "max_discharge_curve": m.max_discharge_curve,
+            // Raw ARX params for diagnostics
+            "a": m.a,
+            "b": m.b,
+        }));
+    }
+    json_response(200, &serde_json::Value::Object(out))
+}
+
+/// POST /api/self_tune/start  body: {"batteries": ["ferroamp", "sungrow"]}
+fn handle_self_tune_start(
+    self_tune: &Arc<Mutex<SelfTuneCoordinator>>,
+    models: &Arc<RwLock<HashMap<String, BatteryModel>>>,
+    control: &Arc<Mutex<ControlState>>,
+    request: &mut tiny_http::Request,
+) -> tiny_http::Response<std::io::Cursor<Vec<u8>>> {
+    let body = read_body(request);
+    #[derive(serde::Deserialize)]
+    struct Req { batteries: Vec<String> }
+    let req: Req = match serde_json::from_str(&body) {
+        Ok(r) => r,
+        Err(e) => return json_response(400, &serde_json::json!({"error": format!("invalid body: {}", e)})),
+    };
+    let dt_s = 5.0;
+    let current_mode = control.lock().unwrap().mode.clone();
+    let result = {
+        let models = models.read().unwrap();
+        self_tune.lock().unwrap().start(req.batteries.clone(), &models, current_mode, dt_s)
+    };
+    match result {
+        Ok(()) => {
+            info!("self-tune started for batteries: {:?}", req.batteries);
+            json_response(200, &serde_json::json!({"status": "started", "batteries": req.batteries}))
+        }
+        Err(e) => json_response(409, &serde_json::json!({"error": e})),
+    }
+}
+
+fn handle_self_tune_status(
+    self_tune: &Arc<Mutex<SelfTuneCoordinator>>,
+) -> tiny_http::Response<std::io::Cursor<Vec<u8>>> {
+    json_response(200, &self_tune.lock().unwrap().status_json())
+}
+
+fn handle_self_tune_cancel(
+    self_tune: &Arc<Mutex<SelfTuneCoordinator>>,
+) -> tiny_http::Response<std::io::Cursor<Vec<u8>>> {
+    self_tune.lock().unwrap().cancel();
+    info!("self-tune cancelled by API");
+    json_response(200, &serde_json::json!({"status": "cancelled"}))
 }
 
 #[cfg(test)]

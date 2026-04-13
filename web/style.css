@@ -872,3 +872,167 @@ footer {
   border-color: #3b82f6;
   color: #3b82f6;
 }
+
+/* ---- Battery Models section ---- */
+#models-section { margin-top: 20px; }
+.section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+.section-header h2 {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: var(--text);
+}
+.models-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 12px;
+}
+.model-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px 14px;
+}
+.model-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+}
+.model-name {
+  font-weight: 600;
+  font-size: 0.95rem;
+}
+.model-confidence {
+  font-size: 0.7rem;
+  color: var(--text-dim);
+  font-family: monospace;
+}
+.model-stats {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px 10px;
+  font-size: 0.8rem;
+  margin-bottom: 10px;
+}
+.model-stat-label { color: var(--text-dim); }
+.model-stat-value {
+  font-family: monospace;
+  text-align: right;
+  font-weight: 500;
+}
+.model-bar {
+  height: 6px;
+  background: var(--surface2);
+  border-radius: 3px;
+  overflow: hidden;
+  margin-top: 4px;
+}
+.model-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #ef4444 0%, #f59e0b 50%, #22c55e 100%);
+  transition: width 0.4s ease;
+}
+.model-health-text {
+  font-size: 0.7rem;
+  color: var(--text-dim);
+  margin-top: 4px;
+  font-family: monospace;
+  display: flex;
+  justify-content: space-between;
+}
+.health-good { color: #22c55e; }
+.health-warn { color: #f59e0b; }
+.health-bad  { color: #ef4444; }
+
+/* ---- Self-tune modal ---- */
+.self-tune-checklist {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 16px 0;
+}
+.self-tune-checklist label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  padding: 8px;
+  border-radius: 4px;
+  background: var(--surface2);
+}
+.self-tune-warning {
+  background: rgba(245, 158, 11, 0.1);
+  border: 1px solid #f59e0b;
+  border-radius: 4px;
+  padding: 10px 12px;
+  margin: 12px 0;
+  font-size: 0.85rem;
+  color: #fbbf24;
+}
+.self-tune-progress {
+  margin: 12px 0;
+}
+.self-tune-step {
+  font-family: monospace;
+  font-size: 0.9rem;
+  color: var(--text);
+  margin-bottom: 8px;
+}
+.self-tune-bar {
+  height: 8px;
+  background: var(--surface2);
+  border-radius: 4px;
+  overflow: hidden;
+  margin-bottom: 6px;
+}
+.self-tune-bar-fill {
+  height: 100%;
+  background: #3b82f6;
+  transition: width 0.5s linear;
+}
+.self-tune-bar-overall {
+  height: 4px;
+  background: var(--surface2);
+  border-radius: 2px;
+  overflow: hidden;
+  margin-top: 6px;
+}
+.self-tune-bar-overall-fill {
+  height: 100%;
+  background: #22c55e;
+  transition: width 0.5s linear;
+}
+.self-tune-meta {
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  display: flex;
+  justify-content: space-between;
+  margin-top: 4px;
+}
+.tune-diff-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 8px;
+  font-size: 0.85rem;
+}
+.tune-diff-table th, .tune-diff-table td {
+  text-align: left;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  font-family: monospace;
+}
+.tune-diff-table th {
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.tune-delta-positive { color: #22c55e; }
+.tune-delta-negative { color: #ef4444; }
+.tune-delta-neutral { color: var(--text-dim); }

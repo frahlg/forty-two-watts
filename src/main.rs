@@ -10,6 +10,8 @@ mod state;
 mod energy;
 mod driver_registry;
 mod config_reload;
+mod battery_model;
+mod self_tune;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -104,6 +106,30 @@ fn main() {
     }
     let energy = Arc::new(Mutex::new(energy::EnergyAccumulator::new(energy_state)));
 
+    // Battery models — load from redb if present, else start with fresh defaults per driver
+    let mut models_map: HashMap<String, battery_model::BatteryModel> = HashMap::new();
+    for (name, json) in state_store.load_all_battery_models() {
+        match serde_json::from_str::<battery_model::BatteryModel>(&json) {
+            Ok(m) => {
+                info!("restored battery model '{}': τ={:.2}s gain={:.3} samples={}",
+                    name, m.time_constant_s(initial_config.site.control_interval_s as f64),
+                    m.steady_state_gain(), m.n_samples);
+                models_map.insert(name, m);
+            }
+            Err(e) => warn!("failed to parse stored model for {}: {}", name, e),
+        }
+    }
+    // Ensure every configured driver has a model entry
+    for d in &initial_config.drivers {
+        if d.battery_capacity_wh > 0.0 && !models_map.contains_key(&d.name) {
+            models_map.insert(d.name.clone(), battery_model::BatteryModel::new(&d.name));
+        }
+    }
+    let battery_models = Arc::new(RwLock::new(models_map));
+
+    // Self-tune coordinator
+    let self_tune_state = Arc::new(Mutex::new(self_tune::SelfTuneCoordinator::new()));
+
     // Graceful shutdown
     let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
     let r = running.clone();
@@ -146,6 +172,8 @@ fn main() {
         current_config.clone(),
         registry.clone(),
         config_path.clone(),
+        battery_models.clone(),
+        self_tune_state.clone(),
     );
 
     // Start HA MQTT bridge
@@ -175,6 +203,8 @@ fn main() {
     // Control loop on main thread
     let control_interval = Duration::from_secs(initial_config.site.control_interval_s);
     let fuse_max_w = initial_config.fuse.max_power_w();
+    let dt_s = initial_config.site.control_interval_s as f64;
+    let mut model_save_counter: u64 = 0;
 
     while running.load(std::sync::atomic::Ordering::SeqCst) {
         std::thread::sleep(control_interval);
@@ -186,16 +216,85 @@ fn main() {
         }
         let capacities_snap = driver_capacities.read().unwrap().clone();
 
-        // Run one control cycle
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+
+        // ---- Continuous learning: feed last (command, actual) pairs to RLS ----
+        // Use last_targets from previous cycle as the commands; current actuals from store.
+        {
+            let store_lock = store.lock().unwrap();
+            let last_targets = control.lock().unwrap().last_targets.clone();
+            let mut models = battery_models.write().unwrap();
+            for target in &last_targets {
+                if let Some(reading) = store_lock.get(&target.driver, &telemetry::DerType::Battery) {
+                    let model = models.entry(target.driver.clone())
+                        .or_insert_with(|| battery_model::BatteryModel::new(&target.driver));
+                    let soc = reading.soc.unwrap_or(0.5);
+                    model.update(target.target_w, reading.smoothed_w, soc, dt_s, now_ms);
+                }
+            }
+        }
+
+        // ---- Self-tune tick: advance state machine, fit step responses ----
+        {
+            let mut tune = self_tune_state.lock().unwrap();
+            if tune.active {
+                let store_lock = store.lock().unwrap();
+                let mut models = battery_models.write().unwrap();
+                tune.tick(
+                    |name| store_lock.get(name, &telemetry::DerType::Battery)
+                        .map(|r| (r.smoothed_w, r.soc.unwrap_or(0.5))),
+                    &mut models,
+                    dt_s,
+                    now_ms,
+                );
+            }
+        }
+
+        // Run one control cycle (with cascade if models present)
         let targets = {
             let store_lock = store.lock().unwrap();
             let mut control_lock = control.lock().unwrap();
-            control::compute_dispatch(&store_lock, &mut control_lock, &capacities_snap, fuse_max_w)
+            let models = battery_models.read().unwrap();
+            control::compute_dispatch_with_models(
+                &store_lock, &mut control_lock, &capacities_snap, fuse_max_w,
+                &models, dt_s,
+            )
+        };
+
+        // ---- Self-tune override: replace command for the battery being tuned ----
+        let tune_override = self_tune_state.lock().unwrap().current_command();
+        let final_targets: Vec<_> = if let Some((tune_battery, tune_cmd)) = tune_override {
+            // For non-tuning batteries: use computed target. For tuning battery: use tune cmd.
+            // Other batteries during tune: hold at idle (0W) — we don't want them counter-balancing
+            let names: Vec<String> = registry.names();
+            names.into_iter().map(|name| {
+                if name == tune_battery {
+                    control::DispatchTarget { driver: name, target_w: tune_cmd, clamped: false }
+                } else {
+                    control::DispatchTarget { driver: name, target_w: 0.0, clamped: false }
+                }
+            }).collect()
+        } else {
+            targets
         };
 
         // Dispatch targets to drivers via registry
-        for target in &targets {
+        for target in &final_targets {
             let _ = registry.send(&target.driver, DriverCommand::Battery { power_w: target.target_w });
+        }
+
+        // Persist battery models periodically (every 12 cycles ≈ 60s at 5s)
+        model_save_counter += 1;
+        if model_save_counter % 12 == 0 {
+            let models = battery_models.read().unwrap();
+            for (name, model) in models.iter() {
+                if let Ok(json) = serde_json::to_string(model) {
+                    state_store.save_battery_model(name, &json);
+                }
+            }
         }
 
         // Watchdog per driver
