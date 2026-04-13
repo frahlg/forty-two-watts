@@ -443,3 +443,162 @@ footer {
   border-radius: 2px;
   display: inline-block;
 }
+
+/* ========== Compact layout overrides ========== */
+
+.summary-cards {
+  grid-template-columns: repeat(6, 1fr);
+  gap: 8px;
+}
+
+.summary-card {
+  padding: 10px 12px;
+}
+
+.summary-card .card-label {
+  font-size: 0.7rem;
+  margin-bottom: 4px;
+}
+
+.summary-card .card-value {
+  font-size: 1.3rem;
+  line-height: 1.1;
+}
+
+.summary-card .card-sub {
+  font-size: 0.65rem;
+  margin-top: 2px;
+}
+
+.soc-bar, .fuse-bar {
+  height: 6px;
+  background: var(--border);
+  border-radius: 3px;
+  margin-top: 6px;
+  overflow: hidden;
+}
+
+.soc-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #ef4444 0%, #f59e0b 30%, #22c55e 60%);
+  transition: width 0.3s;
+}
+
+.fuse-fill {
+  height: 100%;
+  background: #22c55e;
+  transition: width 0.3s, background 0.3s;
+}
+
+.fuse-fill.warn { background: #f59e0b; }
+.fuse-fill.crit { background: #ef4444; }
+
+.controls-row {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.control-card {
+  padding: 10px 12px;
+}
+
+.control-card .card-label {
+  font-size: 0.7rem;
+  margin-bottom: 6px;
+}
+
+.mode-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.mode-buttons button {
+  flex: 1 1 auto;
+  font-size: 0.75rem;
+  padding: 4px 8px;
+  min-width: 50px;
+}
+
+.slider-group-compact {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.slider-group-compact input[type="range"] {
+  flex: 1;
+  min-width: 0;
+}
+
+.slider-group-compact .slider-current {
+  font-size: 0.75rem;
+  min-width: 60px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.slider-group-compact .btn-send {
+  padding: 4px 10px;
+  font-size: 0.75rem;
+}
+
+.chart-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.range-buttons {
+  display: flex;
+  gap: 4px;
+}
+
+.range-buttons button {
+  font-size: 0.7rem;
+  padding: 3px 8px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.range-buttons button.active {
+  background: var(--accent, #3b82f6);
+  color: white;
+  border-color: var(--accent, #3b82f6);
+}
+
+.drivers-grid {
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 8px;
+}
+
+.driver-card {
+  padding: 10px 12px;
+}
+
+.driver-stats {
+  font-size: 0.8rem;
+  gap: 4px 12px;
+}
+
+.footer-tagline {
+  margin-left: auto;
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  font-style: italic;
+}
+
+@media (max-width: 900px) {
+  .summary-cards {
+    grid-template-columns: repeat(3, 1fr);
+  }
+  .controls-row {
+    grid-template-columns: 1fr;
+  }
+}

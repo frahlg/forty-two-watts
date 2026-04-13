@@ -36,7 +36,16 @@
   const gridTargetSlider = $("grid-target-slider");
   const gridTargetValue = $("grid-target-value");
   const gridTargetSend = $("grid-target-send");
+  const peakLimitSlider = $("peak-limit-slider");
+  const peakLimitValue = $("peak-limit-value");
+  const peakLimitSend = $("peak-limit-send");
+  const evSlider = $("ev-slider");
+  const evValue = $("ev-value");
+  const evSend = $("ev-send");
+  const fuseUse = $("fuse-use");
+  const fuseFill = $("fuse-fill");
   const lastUpdate = $("last-update");
+  const FUSE_MAX_W = 11040; // 16A * 230V * 3ph
 
   // ---- Formatting ----
   function formatW(w) {
@@ -115,6 +124,26 @@
       gridTargetSlider.value = data.grid_target_w;
       gridTargetValue.textContent = formatW(data.grid_target_w);
     }
+    if (document.activeElement !== peakLimitSlider && data.peak_limit_w != null) {
+      peakLimitSlider.value = data.peak_limit_w;
+      peakLimitValue.textContent = formatW(data.peak_limit_w);
+    }
+    if (document.activeElement !== evSlider && data.ev_charging_w != null) {
+      evSlider.value = data.ev_charging_w;
+      evValue.textContent = formatW(data.ev_charging_w);
+    }
+
+    // Fuse — current power throughput vs limit
+    // Use max of (|grid|, total PV generation, total battery discharge)
+    var totalDischarge = 0;
+    if (data.bat_w < 0) totalDischarge = Math.abs(data.bat_w);
+    var pvGen = Math.abs(data.pv_w);
+    var throughput = Math.max(Math.abs(data.grid_w), pvGen + totalDischarge);
+    var fusePct = Math.min(100, (throughput / FUSE_MAX_W) * 100);
+    var amps = throughput / 230 / 3;
+    fuseUse.textContent = amps.toFixed(1) + " A";
+    fuseFill.style.width = fusePct + "%";
+    fuseFill.className = "fuse-fill" + (fusePct > 85 ? " crit" : fusePct > 65 ? " warn" : "");
 
     // Drivers
     renderDrivers(data.drivers || {});
@@ -338,18 +367,28 @@
   }
 
   function setTarget(w) {
-    fetch("/api/target", {
+    postJson("/api/target", { grid_target_w: w });
+  }
+
+  function setPeakLimit(w) {
+    postJson("/api/peak_limit", { peak_limit_w: w });
+  }
+
+  function setEvCharging(w) {
+    postJson("/api/ev_charging", { power_w: w, active: w > 0 });
+  }
+
+  function postJson(url, body) {
+    fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ grid_target_w: w }),
+      body: JSON.stringify(body),
     })
       .then(function (res) {
         if (!res.ok) throw new Error("HTTP " + res.status);
         fetchStatus();
       })
-      .catch(function () {
-        setConnected(false);
-      });
+      .catch(function () { setConnected(false); });
   }
 
   function setConnected(ok) {
@@ -377,6 +416,33 @@
   gridTargetSend.addEventListener("click", function () {
     setTarget(Number(gridTargetSlider.value));
   });
+
+  peakLimitSlider.addEventListener("input", function () {
+    peakLimitValue.textContent = formatW(Number(peakLimitSlider.value));
+  });
+  peakLimitSend.addEventListener("click", function () {
+    setPeakLimit(Number(peakLimitSlider.value));
+  });
+
+  evSlider.addEventListener("input", function () {
+    evValue.textContent = formatW(Number(evSlider.value));
+  });
+  evSend.addEventListener("click", function () {
+    setEvCharging(Number(evSlider.value));
+  });
+
+  // Range selector
+  var rangeButtons = document.getElementById("range-buttons");
+  if (rangeButtons) {
+    rangeButtons.addEventListener("click", function (e) {
+      if (e.target.tagName === "BUTTON" && e.target.dataset.range) {
+        rangeButtons.querySelectorAll("button").forEach(function (b) {
+          b.classList.toggle("active", b === e.target);
+        });
+        loadHistory(e.target.dataset.range);
+      }
+    });
+  }
 
   // ---- History loader ----
   function loadHistory(range) {

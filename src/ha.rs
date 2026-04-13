@@ -72,7 +72,7 @@ fn run_ha_bridge(
         }
 
         // Read telemetry — collect values then drop locks before publishing
-        let (grid_w, pv_w, bat_w, avg_soc, load_w, mode, target, driver_data) = {
+        let (grid_w, pv_w, bat_w, avg_soc, load_w, mode, target, peak_limit, ev_charging, driver_data) = {
             let st = store.lock().unwrap();
             let ctrl = control.lock().unwrap();
 
@@ -85,7 +85,12 @@ fn run_ha_bridge(
                 bat_readings.iter().filter_map(|b| b.soc).sum::<f64>() / bat_readings.len() as f64
             } else { 0.0 };
             let load_w = grid_w - pv_w - bat_w;
-            let mode = format!("{:?}", ctrl.mode).to_lowercase();
+            // Serde gives snake_case matching HA select options
+            let mode = serde_json::to_string(&ctrl.mode)
+                .unwrap_or_else(|_| "\"idle\"".into())
+                .trim_matches('"').to_string();
+            let peak_limit = ctrl.peak_limit_w;
+            let ev_charging = ctrl.ev_charging_w;
             let target = ctrl.grid_target_w;
 
             // Collect per-driver data
@@ -99,7 +104,7 @@ fn run_ha_bridge(
                 dd.push((name.clone(), meter, pv, bat, soc, status));
             }
 
-            (grid_w, pv_w, bat_w, avg_soc, load_w, mode, target, dd)
+            (grid_w, pv_w, bat_w, avg_soc, load_w, mode, target, peak_limit, ev_charging, dd)
         };
 
         // Publish site sensors
@@ -110,6 +115,8 @@ fn run_ha_bridge(
         let _ = client.publish_retained(&format!("{}/status/load_w", prefix), false, format!("{:.0}", load_w).as_bytes());
         let _ = client.publish_retained(&format!("{}/status/mode", prefix), false, mode.as_bytes());
         let _ = client.publish_retained(&format!("{}/status/grid_target_w", prefix), false, format!("{:.0}", target).as_bytes());
+        let _ = client.publish_retained(&format!("{}/status/peak_limit_w", prefix), false, format!("{:.0}", peak_limit).as_bytes());
+        let _ = client.publish_retained(&format!("{}/status/ev_charging_w", prefix), false, format!("{:.0}", ev_charging).as_bytes());
 
         // Per-driver sensors
         for (name, meter, pv, bat, soc, status) in &driver_data {
@@ -166,7 +173,7 @@ fn publish_autodiscovery(client: &mut MqttClient, driver_names: &[String], disco
         "unique_id": "fortytwo_mode",
         "state_topic": format!("{}/status/mode", prefix),
         "command_topic": format!("{}/command/mode", prefix),
-        "options": ["idle", "self_consumption", "charge", "priority", "weighted"],
+        "options": ["idle", "self_consumption", "peak_shaving", "charge", "priority", "weighted"],
         "icon": "mdi:tune",
         "device": device,
     });
@@ -187,6 +194,38 @@ fn publish_autodiscovery(client: &mut MqttClient, driver_names: &[String], disco
         "device": device,
     });
     let _ = client.publish_retained(&target_topic, true, target_payload.to_string().as_bytes());
+
+    // Peak shaving limit
+    let peak_topic = format!("{}/number/fortytwo_peak_limit/config", discovery);
+    let peak_payload = serde_json::json!({
+        "name": "Forty-Two Watts Peak Limit",
+        "unique_id": "fortytwo_peak_limit",
+        "state_topic": format!("{}/status/peak_limit_w", prefix),
+        "command_topic": format!("{}/command/peak_limit_w", prefix),
+        "unit_of_measurement": "W",
+        "min": 0,
+        "max": 11000,
+        "step": 100,
+        "icon": "mdi:chart-sawtooth",
+        "device": device,
+    });
+    let _ = client.publish_retained(&peak_topic, true, peak_payload.to_string().as_bytes());
+
+    // EV charging signal (watts) — HA automation sets this
+    let ev_topic = format!("{}/number/fortytwo_ev_charging/config", discovery);
+    let ev_payload = serde_json::json!({
+        "name": "Forty-Two Watts EV Charging",
+        "unique_id": "fortytwo_ev_charging",
+        "state_topic": format!("{}/status/ev_charging_w", prefix),
+        "command_topic": format!("{}/command/ev_charging_w", prefix),
+        "unit_of_measurement": "W",
+        "min": 0,
+        "max": 22000,
+        "step": 100,
+        "icon": "mdi:car-electric",
+        "device": device,
+    });
+    let _ = client.publish_retained(&ev_topic, true, ev_payload.to_string().as_bytes());
 
     // Per-driver sensors
     for name in driver_names {
@@ -226,6 +265,18 @@ fn handle_command(topic: &str, payload: &str, control: &Arc<Mutex<ControlState>>
                 if let Ok(target) = payload.trim().parse::<f64>() {
                     info!("HA MQTT: grid target → {}W", target);
                     control.lock().unwrap().set_grid_target(target);
+                }
+            }
+            "peak_limit_w" => {
+                if let Ok(v) = payload.trim().parse::<f64>() {
+                    info!("HA MQTT: peak limit → {}W", v);
+                    control.lock().unwrap().peak_limit_w = v;
+                }
+            }
+            "ev_charging_w" => {
+                if let Ok(v) = payload.trim().parse::<f64>() {
+                    info!("HA MQTT: EV charging → {}W", v);
+                    control.lock().unwrap().ev_charging_w = v.max(0.0);
                 }
             }
             other => {

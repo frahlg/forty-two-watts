@@ -11,6 +11,8 @@ use crate::telemetry::{TelemetryStore, DerType};
 pub enum Mode {
     Idle,
     SelfConsumption,
+    /// Peak shaving: cap grid import at peak_limit_w, no action within [0, limit]
+    PeakShaving,
     Charge,
     Priority,
     Weighted,
@@ -40,16 +42,19 @@ pub struct ControlState {
     pub weights: HashMap<String, f64>,
     pub last_targets: Vec<DispatchTarget>,
 
-    // PI controller (replaces manual proportional gain)
+    // Peak shaving: max acceptable grid import (only enforced in PeakShaving mode)
+    pub peak_limit_w: f64,
+
+    // EV charging signal: batteries ignore this much of grid import
+    // (the EV is drawing it, batteries shouldn't cover it)
+    pub ev_charging_w: f64,
+
+    // PI controller
     pid_controller: Pid<f64>,
 
-    // Anti-oscillation: max watts change per dispatch cycle
     pub slew_rate_w: f64,
-    // Anti-oscillation: minimum seconds between dispatches
     pub min_dispatch_interval_s: u64,
-    // Track when we last dispatched
     pub last_dispatch: Option<Instant>,
-    // Previous per-driver targets for slew rate limiting
     prev_targets: HashMap<String, f64>,
 }
 
@@ -73,9 +78,11 @@ impl ControlState {
             priority_order: Vec::new(),
             weights: HashMap::new(),
             last_targets: Vec::new(),
+            peak_limit_w: 5000.0,   // default peak limit: 5kW
+            ev_charging_w: 0.0,     // no EV charging by default
             pid_controller: pid,
-            slew_rate_w: 500.0,     // 500W per cycle — settles in ~10 cycles
-            min_dispatch_interval_s: 5, // dispatch every 5s
+            slew_rate_w: 500.0,
+            min_dispatch_interval_s: 5,
             last_dispatch: None,
             prev_targets: HashMap::new(),
         }
@@ -126,9 +133,13 @@ pub fn compute_dispatch(
     }
 
     // Read site meter (Kalman-filtered)
-    let grid_w: f64 = store.get(&state.site_meter_driver, &DerType::Meter)
+    let raw_grid_w: f64 = store.get(&state.site_meter_driver, &DerType::Meter)
         .map(|m| m.smoothed_w)
         .unwrap_or(0.0);
+
+    // EV charging signal: subtract EV load from grid so batteries don't try to cover it.
+    // EV gets electricity directly from grid, house load gets covered by PV+batteries.
+    let grid_w = raw_grid_w - state.ev_charging_w;
 
     // Read batteries
     let batteries: Vec<BatteryInfo> = driver_capacities.iter()
@@ -152,18 +163,33 @@ pub fn compute_dispatch(
         return Vec::new();
     }
 
+    // Compute error based on mode
+    let error = match state.mode {
+        Mode::PeakShaving => {
+            // Only act when grid import exceeds peak_limit
+            // (allow any amount of export, allow import up to peak_limit)
+            if grid_w > state.peak_limit_w {
+                grid_w - state.peak_limit_w
+            } else if grid_w < 0.0 {
+                grid_w // exporting: charge batteries with surplus
+            } else {
+                0.0 // within acceptable band
+            }
+        }
+        _ => grid_w - state.grid_target_w,
+    };
+
     // Deadband — don't adjust if within 42W of The Answer
-    let error = grid_w - state.grid_target_w;
     if error.abs() < state.grid_tolerance_w {
         debug!("grid={:.0}W — Don't Panic. Within {}W of The Answer.", grid_w, state.grid_tolerance_w as i64);
         return Vec::new();
     }
 
-    // PI controller: measurement=grid_w, setpoint=grid_target_w
-    // When importing (grid > target): PID output is NEGATIVE → add to battery = discharge
-    // When exporting (grid < target): PID output is POSITIVE → add to battery = charge
-    // No negation needed — PID output IS the battery correction directly
-    let pid_output = state.pid_controller.next_control_output(grid_w);
+    // PI controller: feed the computed error directly as (setpoint=0, measurement=error)
+    // This lets PeakShaving mode use the same PI tuning
+    let pid_output = state.pid_controller.next_control_output(
+        state.grid_target_w + error
+    );
     let total_correction = pid_output.output;
 
     debug!("PI: grid={:.0}W target={:.0}W error={:.0}W P={:.0} I={:.0} correction={:.0}W",

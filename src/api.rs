@@ -38,6 +38,8 @@ pub fn start(
                     ("GET", "/api/mode") => handle_get_mode(&control),
                     ("POST", "/api/mode") => handle_set_mode(&control, &mut request),
                     ("POST", "/api/target") => handle_set_target(&control, &mut request),
+                    ("POST", "/api/peak_limit") => handle_set_peak_limit(&control, &mut request),
+                    ("POST", "/api/ev_charging") => handle_set_ev_charging(&control, &mut request),
                     ("GET", "/api/drivers") => handle_drivers(&store),
                     ("GET", p) if p.starts_with("/api/history") => handle_history(&state_store, p),
                     ("GET", path) => serve_static(path),
@@ -174,6 +176,8 @@ fn handle_status(
         "load_w": load_w,
         "bat_soc": avg_soc,
         "grid_target_w": control.grid_target_w,
+        "peak_limit_w": control.peak_limit_w,
+        "ev_charging_w": control.ev_charging_w,
         "drivers": drivers,
         "dispatch": targets,
     }))
@@ -245,6 +249,45 @@ fn handle_set_target(
             } else {
                 json_response(400, &serde_json::json!({"error": "missing grid_target_w"}))
             }
+        }
+        Err(e) => json_response(400, &serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+fn handle_set_peak_limit(
+    control: &Arc<Mutex<ControlState>>,
+    request: &mut tiny_http::Request,
+) -> tiny_http::Response<std::io::Cursor<Vec<u8>>> {
+    let body = read_body(request);
+    match serde_json::from_str::<serde_json::Value>(&body) {
+        Ok(v) => {
+            if let Some(limit) = v.get("peak_limit_w").and_then(|t| t.as_f64()) {
+                let mut control = control.lock().unwrap();
+                info!("peak limit → {}W", limit);
+                control.peak_limit_w = limit;
+                json_response(200, &serde_json::json!({"peak_limit_w": limit}))
+            } else {
+                json_response(400, &serde_json::json!({"error": "missing peak_limit_w"}))
+            }
+        }
+        Err(e) => json_response(400, &serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+fn handle_set_ev_charging(
+    control: &Arc<Mutex<ControlState>>,
+    request: &mut tiny_http::Request,
+) -> tiny_http::Response<std::io::Cursor<Vec<u8>>> {
+    let body = read_body(request);
+    match serde_json::from_str::<serde_json::Value>(&body) {
+        Ok(v) => {
+            let power = v.get("power_w").and_then(|t| t.as_f64()).unwrap_or(0.0);
+            let active = v.get("active").and_then(|a| a.as_bool()).unwrap_or(power > 0.0);
+            let effective = if active { power } else { 0.0 };
+            let mut control = control.lock().unwrap();
+            info!("EV charging → {}W (active: {})", effective, active);
+            control.ev_charging_w = effective;
+            json_response(200, &serde_json::json!({"ev_charging_w": effective, "active": active}))
         }
         Err(e) => json_response(400, &serde_json::json!({"error": e.to_string()})),
     }
