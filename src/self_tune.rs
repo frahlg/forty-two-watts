@@ -43,17 +43,18 @@ pub enum SelfTuneStep {
 }
 
 impl SelfTuneStep {
-    /// Duration of this step
+    /// Duration of this step. Tuned so that with a 5s control interval we collect
+    /// at least 4 samples per active step (so fit_step_response has enough data).
     pub fn duration_s(&self) -> u64 {
         match self {
-            Self::Stabilize => 15,
-            Self::StepUpSmall => 15,
+            Self::Stabilize => 15,       // 3 samples — settle, no fit
+            Self::StepUpSmall => 25,     // 5 samples — fit τ + gain
             Self::SettleUp => 15,
-            Self::StepDownSmall => 15,
+            Self::StepDownSmall => 25,
             Self::SettleDown => 15,
-            Self::StepUpLarge => 20,
+            Self::StepUpLarge => 25,     // 5 samples — probe upper saturation
             Self::SettleHighUp => 10,
-            Self::StepDownLarge => 20,
+            Self::StepDownLarge => 25,
             Self::SettleHighDown => 10,
             Self::Fit => 1,
             Self::Done => 0,
@@ -352,17 +353,23 @@ impl SelfTuneCoordinator {
 ///   • k: from the average of the last 30% of samples (assumed near steady state)
 ///   • τ: time at which y reaches 63.2% of (k·u − initial_y)
 fn fit_step_response(samples: &[TuneSample]) -> StepFit {
-    if samples.len() < 5 {
+    // Require at least 3 samples — at 5s control interval and 15s small-step
+    // duration we typically get 3-4 samples per active step. 5 was too strict
+    // and rejected every step.
+    if samples.len() < 3 {
+        tracing::warn!("fit_step_response: too few samples ({})", samples.len());
         return StepFit { gain: 1.0, tau_s: 5.0, valid: false };
     }
     let u = samples[0].command;
     if u.abs() < 100.0 {
+        tracing::warn!("fit_step_response: command too small ({:.0}W)", u);
         return StepFit { gain: 1.0, tau_s: 5.0, valid: false };
     }
 
     let initial = samples[0].actual;
-    // Steady-state estimate: average of last 30% of samples
-    let tail_start = (samples.len() * 7) / 10;
+    // Steady-state estimate: average of last half of samples (more robust than
+    // last 30% when sample count is small)
+    let tail_start = samples.len() / 2;
     let tail = &samples[tail_start..];
     let y_ss: f64 = tail.iter().map(|s| s.actual).sum::<f64>() / tail.len() as f64;
     let delta = y_ss - initial;
@@ -370,6 +377,10 @@ fn fit_step_response(samples: &[TuneSample]) -> StepFit {
 
     // Reject if response is tiny (battery didn't move)
     if delta.abs() < 50.0 {
+        tracing::warn!(
+            "fit_step_response: response too small (initial={:.0}W ss={:.0}W delta={:.0}W cmd={:.0}W)",
+            initial, y_ss, delta, u
+        );
         return StepFit { gain, tau_s: 5.0, valid: false };
     }
 
@@ -377,13 +388,16 @@ fn fit_step_response(samples: &[TuneSample]) -> StepFit {
     let target = initial + 0.632 * delta;
     let mut tau = 5.0;
     for s in samples {
-        // Crossing detection (sign-aware)
         if (delta > 0.0 && s.actual >= target) || (delta < 0.0 && s.actual <= target) {
             tau = s.elapsed_s.max(0.5);
             break;
         }
     }
 
+    tracing::info!(
+        "fit_step_response: cmd={:.0}W initial={:.0}W ss={:.0}W gain={:.3} τ={:.2}s ({} samples)",
+        u, initial, y_ss, gain, tau, samples.len()
+    );
     StepFit { gain, tau_s: tau.clamp(0.5, 30.0), valid: true }
 }
 

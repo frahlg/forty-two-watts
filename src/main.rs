@@ -223,16 +223,23 @@ fn main() {
 
         // ---- Continuous learning: feed last (command, actual) pairs to RLS ----
         // Use last_targets from previous cycle as the commands; current actuals from store.
+        // CRITICAL: skip during self-tune. Self-tune overrides commands AFTER compute_dispatch
+        // sets last_targets, so RLS would see the cascade target paired with the actual that
+        // resulted from the override command — completely uncorrelated. That corrupts the
+        // model. The self-tune produces its own clean baseline at the end anyway.
         {
-            let store_lock = store.lock().unwrap();
-            let last_targets = control.lock().unwrap().last_targets.clone();
-            let mut models = battery_models.write().unwrap();
-            for target in &last_targets {
-                if let Some(reading) = store_lock.get(&target.driver, &telemetry::DerType::Battery) {
-                    let model = models.entry(target.driver.clone())
-                        .or_insert_with(|| battery_model::BatteryModel::new(&target.driver));
-                    let soc = reading.soc.unwrap_or(0.5);
-                    model.update(target.target_w, reading.smoothed_w, soc, dt_s, now_ms);
+            let tune_active = self_tune_state.lock().unwrap().active;
+            if !tune_active {
+                let store_lock = store.lock().unwrap();
+                let last_targets = control.lock().unwrap().last_targets.clone();
+                let mut models = battery_models.write().unwrap();
+                for target in &last_targets {
+                    if let Some(reading) = store_lock.get(&target.driver, &telemetry::DerType::Battery) {
+                        let model = models.entry(target.driver.clone())
+                            .or_insert_with(|| battery_model::BatteryModel::new(&target.driver));
+                        let soc = reading.soc.unwrap_or(0.5);
+                        model.update(target.target_w, reading.smoothed_w, soc, dt_s, now_ms);
+                    }
                 }
             }
         }
