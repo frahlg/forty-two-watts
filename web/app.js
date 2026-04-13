@@ -16,7 +16,9 @@
   let chartRange = "5m";             // current selected range
   let currentMode = null;
   let animating = true;              // 30fps redraw loop flag
-  let lastDataTs = 0;                // timestamp of newest data point — for "live" pulse
+  let lastDataTs = 0;                // browser-clock timestamp of newest pushed point
+  let lastPushAt = 0;                // browser-clock timestamp of last push attempt — for dedupe (NEVER mix with server ts)
+  let lastFlashAt = 0;               // browser-clock timestamp of last "new data" flash
 
   // ---- Chart data ----
   var chartHistory = {
@@ -106,6 +108,21 @@
 
   // ---- Render ----
   function render(data) {
+    // PUSH CHART DATA FIRST — never let a DOM render error somewhere below
+    // silently kill the chart-update path. (Prior bug: missing #dispatch-list
+    // threw inside renderDispatch, which is between renderDrivers and
+    // pushChartData, so the chart starved while ticks kept incrementing.)
+    try {
+      var fd0 = (data.drivers || {}).ferroamp || {};
+      var sd0 = (data.drivers || {}).sungrow || {};
+      var ft0 = 0, st0 = 0;
+      (data.dispatch || []).forEach(function(d) {
+        if (d.driver === "ferroamp") ft0 = d.target_w;
+        if (d.driver === "sungrow") st0 = d.target_w;
+      });
+      pushChartData(data, fd0.bat_w||0, sd0.bat_w||0, ft0, st0);
+    } catch (e) { console.error("pushChartData error:", e); }
+
     // Version (live from API — survives stale browser cache of index.html)
     if (versionEl && data.version) {
       versionEl.textContent = "v" + data.version;
@@ -203,26 +220,19 @@
     // Dispatch
     renderDispatch(data.dispatch || []);
 
-    // Chart — per-driver battery actual + dispatch targets
-    var fd = data.drivers.ferroamp || {};
-    var sd = data.drivers.sungrow || {};
-    var ft = 0, st = 0;
-    (data.dispatch || []).forEach(function(d) {
-      if (d.driver === "ferroamp") ft = d.target_w;
-      if (d.driver === "sungrow") st = d.target_w;
-    });
-    pushChartData(data, fd.bat_w||0, sd.bat_w||0, ft, st);
-    // No explicit renderChart() — the rAF loop redraws ~30fps for a smooth flowing feel.
+    // Chart push happens at the top of render() for resilience to DOM errors.
+    // The rAF loop redraws ~30fps for the smooth flowing feel.
     // Timestamp is updated in fetchStatus (before render, so it's robust to render errors)
   }
 
   function pushChartData(data, ferroBat, sunBat, ferroTarget, sunTarget) {
     var t = (data.energy && data.energy.today) || {};
     var now = Date.now();
-    // Dedupe — server pushes new history items only every ~5s; the 2s status
-    // poll would otherwise duplicate the latest point.
-    var lastTs = chartHistory.timestamps[chartHistory.timestamps.length - 1] || 0;
-    if (now - lastTs < 1500) return;
+    // Dedupe via JS-side push timer ONLY — never compare against server timestamps
+    // from chartHistory.timestamps because clock skew between RPi and browser
+    // would silently block all pushes if server is even slightly ahead.
+    if (lastPushAt > 0 && now - lastPushAt < 800) return;
+    lastPushAt = now;
 
     chartHistory.grid.push(data.grid_w);
     chartHistory.pv.push(data.pv_w);
@@ -242,6 +252,8 @@
       Object.keys(chartHistory).forEach(function(k) { chartHistory[k].shift(); });
     }
     lastDataTs = now;
+    // Fire a discrete pulse for this new data point — heartbeat feel
+    lastFlashAt = now;
   }
 
   function renderChart() {
@@ -367,12 +379,14 @@
       return pad.top + plotH * (1 - (v - yMin) / yRange);
     }
 
+    // Collect latest-point coordinates per series so we can draw the live
+    // pulses OUTSIDE the clip rect (otherwise they get cut off at the right edge)
+    var liveTips = [];
+
     // Draw each series. Fill area under prominent ones with subtle gradient.
     series.forEach(function (sr) {
       if (sr.data.length < 2 || chartHistory.timestamps.length < 2) return;
 
-      // Build path through visible points (plus one off-screen on each side
-      // so the line continues to the edge instead of starting mid-canvas)
       var pts = [];
       for (var j = 0; j < sr.data.length; j++) {
         var ts = chartHistory.timestamps[j];
@@ -405,24 +419,67 @@
       ctx.stroke();
       ctx.setLineDash([]);
 
-      // Pulsing dot at the latest point — only for the bigger lines
-      if (sr.width >= 2 && pts.length > 0) {
-        var last = pts[pts.length - 1];
-        var pulsePhase = (now / 700) % (Math.PI * 2);
-        var pulseR = 3 + Math.sin(pulsePhase) * 1.2;
-        ctx.fillStyle = sr.color;
-        ctx.globalAlpha = 0.35;
-        ctx.beginPath();
-        ctx.arc(last.x, last.y, pulseR + 4, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.globalAlpha = 1;
-        ctx.beginPath();
-        ctx.arc(last.x, last.y, 2.5, 0, Math.PI * 2);
-        ctx.fill();
+      // Cache the right-most point for un-clipped pulse drawing
+      if (sr.width >= 2) {
+        liveTips.push({ x: pts[pts.length - 1].x, y: pts[pts.length - 1].y, color: sr.color });
       }
     });
 
     ctx.restore();
+
+    // ---- Live pulses (drawn outside clip so they're never cut off) ----
+    // ONE discrete ripple per new data point — no continuous breathing.
+    // Each new push (lastFlashAt) triggers an 800ms expanding ring + flash.
+    var FLASH_MS = 800;
+    var sinceFlash = lastFlashAt > 0 ? (now - lastFlashAt) : Infinity;
+    var flashActive = sinceFlash < FLASH_MS;
+    var flashProgress = flashActive ? (sinceFlash / FLASH_MS) : 1; // 0..1
+    var rippleR = 5 + flashProgress * 32;
+    var rippleAlpha = flashActive ? (1 - flashProgress) * 0.85 : 0;
+    // Brief brightness boost on the dot itself for the first 200ms
+    var dotBoost = sinceFlash < 200 ? (1 - sinceFlash / 200) : 0;
+
+    liveTips.forEach(function (tip) {
+      // Static halo — soft, always visible (NOT breathing)
+      ctx.fillStyle = tip.color;
+      ctx.globalAlpha = 0.18;
+      ctx.beginPath();
+      ctx.arc(tip.x, tip.y, 7, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Solid core dot
+      ctx.globalAlpha = 1;
+      ctx.beginPath();
+      ctx.arc(tip.x, tip.y, 3 + dotBoost * 1.5, 0, Math.PI * 2);
+      ctx.fill();
+
+      // White center for crispness
+      ctx.fillStyle = "#fff";
+      ctx.globalAlpha = 0.7 + dotBoost * 0.3;
+      ctx.beginPath();
+      ctx.arc(tip.x, tip.y, 1.2 + dotBoost, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Ripple — fires once per new data point, expands and fades
+      if (flashActive) {
+        ctx.strokeStyle = tip.color;
+        ctx.globalAlpha = rippleAlpha;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(tip.x, tip.y, rippleR, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+    });
+    ctx.globalAlpha = 1;
+
+    // Subtle vertical "now" line — anchor point so the eye knows where present is
+    var nowX = pad.left + plotW;
+    ctx.strokeStyle = "rgba(255,255,255,0.12)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(nowX, pad.top);
+    ctx.lineTo(nowX, pad.top + plotH);
+    ctx.stroke();
 
     // Y-axis labels (outside clip so they're fully visible)
     ctx.fillStyle = "#888";
@@ -439,6 +496,30 @@
     ctx.textAlign = "right";
     ctx.fillText("now", w - pad.right, h - 5);
     ctx.textAlign = "left";
+
+    // Live freshness indicator — top-right corner of plot area
+    if (lastDataTs > 0) {
+      var ageMs = now - lastDataTs;
+      var ageStr;
+      if (ageMs < 1500) ageStr = "live";
+      else if (ageMs < 60_000) ageStr = Math.round(ageMs / 1000) + "s ago";
+      else ageStr = Math.round(ageMs / 60_000) + "m ago";
+      var fresh = ageMs < 5000;
+      // Dot flashes briefly when fresh data lands (discrete, not breathing)
+      var dotFlash = sinceFlash < 400 ? (1 - sinceFlash / 400) : 0;
+      ctx.fillStyle = fresh ? "#22c55e" : "#f59e0b";
+      ctx.globalAlpha = 0.35 + dotFlash * 0.5;
+      ctx.beginPath();
+      ctx.arc(w - pad.right - 78, pad.top + 4, 3.5 + dotFlash * 3, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+      ctx.beginPath();
+      ctx.arc(w - pad.right - 78, pad.top + 4, 2.5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.font = "10px monospace";
+      ctx.fillStyle = fresh ? "#aaa" : "#f59e0b";
+      ctx.fillText(ageStr, w - pad.right - 70, pad.top + 8);
+    }
 
     // Store layout for hover tooltip + animation loop
     chartLayout = {
@@ -584,6 +665,8 @@
   }
 
   function renderDispatch(dispatch) {
+    // index.html no longer has #dispatch-list — graceful no-op if missing
+    if (!dispatchList) return;
     dispatchList.innerHTML = "";
     dispatch.forEach(function (d) {
       var item = document.createElement("div");
