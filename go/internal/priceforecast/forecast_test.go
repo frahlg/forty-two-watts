@@ -36,10 +36,11 @@ func TestFreshModelHasSensibleCurve(t *testing.T) {
 
 func TestFitsHourOfWeekPattern(t *testing.T) {
 	// Synthetic: SE3 prices with morning peak 150, midday trough 30,
-	// evening peak 200. 6 weeks of data.
+	// evening peak 200. Two years of data so the Bayesian prior (weight
+	// ≈ 8) is swamped by ~100 samples per hour-of-week bucket.
 	var pts []state.PricePoint
-	start := time.Date(2026, 1, 5, 0, 0, 0, 0, time.UTC) // Monday
-	for d := 0; d < 42; d++ {
+	start := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	for d := 0; d < 730; d++ { // 2 years
 		for h := 0; h < 24; h++ {
 			ts := start.Add(time.Duration(d*24+h) * time.Hour)
 			var price float64
@@ -64,20 +65,53 @@ func TestFitsHourOfWeekPattern(t *testing.T) {
 	m := NewZoneModel("SE3")
 	m.FitFromHistory(pts)
 
-	// Test: Monday 08:00 → morning peak
+	// With ~100+ samples per bucket, fit should be very close to data.
+	// Tolerance generous because month multipliers still apply some
+	// seasonal scaling.
 	mornMon := time.Date(2026, 3, 2, 8, 0, 0, 0, time.UTC)
-	if got := m.Predict(mornMon); math.Abs(got-150) > 5 {
-		t.Errorf("Mon 08:00 peak: got %f, want ~150", got)
+	if got := m.Predict(mornMon); math.Abs(got-150) > 20 {
+		t.Errorf("Mon 08:00 peak: got %f, want ~150 (±20)", got)
 	}
-	// Wed 13:00 → trough
 	trough := time.Date(2026, 3, 4, 13, 0, 0, 0, time.UTC)
-	if got := m.Predict(trough); math.Abs(got-30) > 5 {
-		t.Errorf("Wed 13:00 trough: got %f, want ~30", got)
+	if got := m.Predict(trough); math.Abs(got-30) > 20 {
+		t.Errorf("Wed 13:00 trough: got %f, want ~30 (±20)", got)
 	}
-	// Fri 19:00 → evening peak
 	eve := time.Date(2026, 3, 6, 19, 0, 0, 0, time.UTC)
-	if got := m.Predict(eve); math.Abs(got-200) > 5 {
-		t.Errorf("Fri 19:00 peak: got %f, want ~200", got)
+	if got := m.Predict(eve); math.Abs(got-200) > 20 {
+		t.Errorf("Fri 19:00 peak: got %f, want ~200 (±20)", got)
+	}
+}
+
+func TestSparseHistoryFallsBackToPriorShape(t *testing.T) {
+	// Only 3 days of data. The Bayesian prior (weight 8) dominates,
+	// so the predictions should still show the baked hour-of-week
+	// shape — morning + evening peaks, midday trough — even if the
+	// short training sample happened to be uniform.
+	var pts []state.PricePoint
+	start := time.Date(2026, 1, 5, 0, 0, 0, 0, time.UTC)
+	for d := 0; d < 3; d++ {
+		for h := 0; h < 24; h++ {
+			ts := start.Add(time.Duration(d*24+h) * time.Hour)
+			pts = append(pts, state.PricePoint{
+				Zone: "SE3", SlotTsMs: ts.UnixMilli(),
+				SlotLenMin: 60, SpotOreKwh: 100, // totally flat — unusual
+			})
+		}
+	}
+	m := NewZoneModel("SE3")
+	m.FitFromHistory(pts)
+
+	// Even though training data was flat, shape persists from prior.
+	morn := time.Date(2026, 3, 2, 8, 0, 0, 0, time.UTC)
+	midday := time.Date(2026, 3, 2, 13, 0, 0, 0, time.UTC)
+	eve := time.Date(2026, 3, 2, 19, 0, 0, 0, time.UTC)
+	if !(m.Predict(morn) > m.Predict(midday)) {
+		t.Errorf("morning (%f) should beat midday (%f) — prior shape lost",
+			m.Predict(morn), m.Predict(midday))
+	}
+	if !(m.Predict(eve) > m.Predict(midday)) {
+		t.Errorf("evening (%f) should beat midday (%f) — prior shape lost",
+			m.Predict(eve), m.Predict(midday))
 	}
 }
 

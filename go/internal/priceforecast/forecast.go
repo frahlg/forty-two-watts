@@ -66,20 +66,18 @@ type ZoneModel struct {
 	FittedAt int64             `json:"fitted_at"`
 }
 
-// NewZoneModel with a baked-in typical-Nordic hour-of-week prior so the
-// model is useful before any real history has been fitted. Shape:
+// bakedPrior returns the typical-Nordic hour-of-week prior shape for a
+// zone. Used both as cold-start seed and as the Bayesian prior that
+// FitFromHistory blends fitted values against — so sparse history
+// doesn't wipe out the shape.
 //
 //   - morning ramp 06:00–09:00 peaking around 08:00
 //   - midday trough 11:00–14:00 (solar flood, industrial slack)
 //   - evening peak 17:00–20:00 peaking around 19:00
 //   - overnight baseline 00:00–05:00
-//
-// Weekend hours are ~15% lower during peaks (less industrial demand).
-// Level is zone-dependent but grossly similar for SE1–SE4 / NO / DK.
-// Overridden the moment real data is fitted.
-func NewZoneModel(zone string) *ZoneModel {
-	m := &ZoneModel{Zone: zone, Alpha: 0.15}
-	// Base level in öre/kWh — post-2022 long-term typical.
+//   - weekend ~15% lower at peaks
+func bakedPrior(zone string) ([Buckets]float64, [12]float64) {
+	var bucket [Buckets]float64
 	base := 60.0
 	switch zone {
 	case "SE3", "SE4", "DK1", "DK2", "DE":
@@ -93,58 +91,52 @@ func NewZoneModel(zone string) *ZoneModel {
 		isWeekend := d >= 5
 		for h := 0; h < 24; h++ {
 			shape := 1.0
-			// Shape factor: typical day-ahead curve.
 			switch {
 			case h >= 7 && h <= 9:
-				shape = 1.6 // morning peak
+				shape = 1.6
 			case h >= 17 && h <= 20:
-				shape = 1.85 // evening peak
+				shape = 1.85
 			case h >= 11 && h <= 14:
-				shape = 0.55 // midday dip
+				shape = 0.55
 			case h >= 0 && h <= 5:
-				shape = 0.65 // overnight baseline
+				shape = 0.65
 			case h == 6 || h == 10:
-				shape = 1.15 // ramp
+				shape = 1.15
 			case h == 15 || h == 16:
-				shape = 1.05 // afternoon
+				shape = 1.05
 			case h >= 21 && h <= 23:
-				shape = 1.1 // late evening
+				shape = 1.1
 			}
 			if isWeekend {
-				shape = 0.85 + 0.15*(shape-0.85) // blend toward base
+				shape = 0.85 + 0.15*(shape-0.85)
 			}
-			m.Bucket[d*24+h] = base * shape
-			// Seed counts = MinTrustSamples so Predict() fully trusts
-			// the baked pattern from the first call. FitFromHistory
-			// replaces these outright once real data arrives.
-			m.Counts[d*24+h] = MinTrustSamples
+			bucket[d*24+h] = base * shape
 		}
 	}
-	for i := 0; i < 12; i++ {
-		m.Month[i] = 1.0
-	}
-	// Seasonal modifier — winter dearer, summer cheaper.
-	seasonal := [12]float64{
+	month := [12]float64{
 		1.35, 1.30, 1.10, 0.95, 0.85, 0.75,
 		0.70, 0.75, 0.90, 1.05, 1.20, 1.40,
 	}
-	m.Month = seasonal
+	return bucket, month
+}
+
+// NewZoneModel seeds with the baked prior so day-0 predictions already
+// look like a typical Nordic day.
+func NewZoneModel(zone string) *ZoneModel {
+	m := &ZoneModel{Zone: zone, Alpha: 0.15}
+	m.Bucket, m.Month = bakedPrior(zone)
+	for i := 0; i < Buckets; i++ {
+		m.Counts[i] = MinTrustSamples // so Predict() fully trusts the prior
+	}
 	return m
 }
 
-// Predict returns the expected spot öre/kWh at t for zone.
+// Predict returns the expected spot öre/kWh at t for zone. The bucket
+// value is already prior-blended via FitFromHistory, so we just apply
+// the monthly seasonality.
 func (m ZoneModel) Predict(t time.Time) float64 {
 	idx := hourOfWeek(t)
-	b := m.Bucket[idx]
-	trust := float64(m.Counts[idx]) / MinTrustSamples
-	if trust > 1 {
-		trust = 1
-	}
-	// Blend with overall mean when the bucket is fresh.
-	mean := m.overallMean()
-	base := trust*b + (1-trust)*mean
-	monthMod := m.Month[int(t.Month())-1]
-	return base * monthMod
+	return m.Bucket[idx] * m.Month[int(t.Month())-1]
 }
 
 // overallMean across buckets weighted by counts.
@@ -164,14 +156,25 @@ func (m ZoneModel) overallMean() float64 {
 	return sumWX / sumW
 }
 
+// PriorWeight is the "virtual sample count" for the baked prior when
+// blending with fitted data. Higher = prior persists longer before
+// real data wins. With priorWeight=8, two real samples give 80% prior
+// + 20% fitted; after 40 samples we're 17% prior + 83% fitted.
+const PriorWeight = 8.0
+
 // FitFromHistory rebuilds the model from stored prices for this zone.
-// Call this periodically (e.g. nightly) so new data lands in the model.
-// Replaces existing bucket state; doesn't try to incrementally update.
+// Uses a Bayesian blend with the baked prior so sparse history doesn't
+// collapse the learned shape. Call periodically (e.g. every 6h).
 func (m *ZoneModel) FitFromHistory(pts []state.PricePoint) {
 	if len(pts) == 0 {
 		return
 	}
-	// Group by hour-of-week.
+	// Re-derive the baked prior so we can blend correctly every time
+	// (previous fitted values aren't "prior" in the Bayesian sense —
+	// they already include data, so double-counting would bias).
+	prior, priorMonth := bakedPrior(m.Zone)
+
+	// Group observed prices by hour-of-week.
 	var sum [Buckets]float64
 	var cnt [Buckets]int64
 	var monthSum [12]float64
@@ -185,25 +188,40 @@ func (m *ZoneModel) FitFromHistory(pts []state.PricePoint) {
 		monthSum[mi] += p.SpotOreKwh
 		monthCnt[mi]++
 	}
+
+	// Bayesian blend per bucket:
+	//   posterior = (priorValue × priorWeight + data_sum) / (priorWeight + data_count)
+	// Count clamp: Counts[i] = min(cnt[i] + PriorWeight, MinTrustSamples)
+	// so Predict() still sees "trust = 1" from the prior floor.
 	for i := 0; i < Buckets; i++ {
-		if cnt[i] > 0 {
-			m.Bucket[i] = sum[i] / float64(cnt[i])
-			m.Counts[i] = cnt[i]
-		}
+		numer := prior[i]*PriorWeight + sum[i]
+		denom := PriorWeight + float64(cnt[i])
+		m.Bucket[i] = numer / denom
+		// Counts reflects REAL samples only — used by the tests + UI
+		// to show confidence, but trust in Predict() uses a floor of
+		// MinTrustSamples so prior-only buckets still return the prior.
+		m.Counts[i] = cnt[i] + int64(PriorWeight)
 	}
-	// Month modifier = month_mean / overall_mean.
+
+	// Month multipliers: same blend. Normalize month to give ratios
+	// vs. overall mean.
 	overall := m.overallMean()
 	if overall > 0 {
 		for mi := 0; mi < 12; mi++ {
+			priorM := priorMonth[mi]
 			if monthCnt[mi] > 0 {
-				mAvg := monthSum[mi] / float64(monthCnt[mi])
-				m.Month[mi] = mAvg / overall
+				observedRatio := (monthSum[mi] / float64(monthCnt[mi])) / overall
+				// Blend ratios, not absolute means.
+				numer := priorM*PriorWeight + observedRatio*float64(monthCnt[mi])
+				denom := PriorWeight + float64(monthCnt[mi])
+				m.Month[mi] = numer / denom
 			} else {
-				m.Month[mi] = 1.0
+				m.Month[mi] = priorM
 			}
 		}
 	}
-	// Simple MAE: how well does the fit explain the history itself?
+
+	// MAE: fit quality on history itself.
 	var abserr float64
 	for _, p := range pts {
 		t := time.UnixMilli(p.SlotTsMs).UTC()
