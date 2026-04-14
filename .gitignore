@@ -3,3 +3,22 @@
 *.redb
 config.yaml
 data/
+
+# Go build artifacts
+/go/bin/
+/go/dist/
+*.test
+*.out
+
+# WASM build artifacts
+/wasm-drivers/**/target/
+*.wasm.gz
+
+# Local config for simulators
+config.local.yaml
+
+# State DB
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
