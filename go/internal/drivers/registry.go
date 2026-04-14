@@ -1,0 +1,281 @@
+package drivers
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"sync"
+	"time"
+
+	"github.com/frahlg/forty-two-watts/go/internal/config"
+	"github.com/frahlg/forty-two-watts/go/internal/telemetry"
+)
+
+// Registry manages running WASM driver instances — spawn, poll, command, stop.
+// Thread-safe.
+type Registry struct {
+	runtime *Runtime
+	tel     *telemetry.Store
+
+	// MQTTFactory creates an MQTT capability for a driver given its config.
+	// Called on Add; the returned MQTTCap belongs to that driver alone.
+	MQTTFactory func(name string, c *config.MQTTConfig) (MQTTCap, error)
+	// ModbusFactory creates a Modbus capability.
+	ModbusFactory func(name string, c *config.ModbusConfig) (ModbusCap, error)
+
+	mu  sync.Mutex
+	rec map[string]*runningDriver
+}
+
+// NewRegistry builds a registry that shares one wazero runtime across drivers.
+func NewRegistry(rt *Runtime, tel *telemetry.Store) *Registry {
+	return &Registry{
+		runtime: rt,
+		tel:     tel,
+		rec:     map[string]*runningDriver{},
+	}
+}
+
+type runningDriver struct {
+	driver *Driver
+	env    *HostEnv
+	cfg    config.Driver
+	// Poll loop coordination
+	cmdCh chan driverCmd
+	stop  chan struct{}
+	done  chan struct{}
+}
+
+type driverCmd struct {
+	kind    string
+	payload []byte
+	result  chan error
+}
+
+// Add spawns a driver. Returns error if the driver config is invalid or
+// the WASM module can't be loaded.
+func (r *Registry) Add(ctx context.Context, cfg config.Driver) error {
+	r.mu.Lock()
+	if _, exists := r.rec[cfg.Name]; exists {
+		r.mu.Unlock()
+		return fmt.Errorf("driver %q already registered", cfg.Name)
+	}
+	r.mu.Unlock()
+
+	if cfg.WASM == "" {
+		return fmt.Errorf("driver %q: only WASM drivers supported in Go port (got lua=%q)", cfg.Name, cfg.Lua)
+	}
+
+	env := NewHostEnv(cfg.Name, r.tel)
+	if mq := cfg.EffectiveMQTT(); mq != nil && r.MQTTFactory != nil {
+		cap, err := r.MQTTFactory(cfg.Name, mq)
+		if err != nil {
+			return fmt.Errorf("mqtt capability: %w", err)
+		}
+		env.WithMQTT(cap)
+	}
+	if mb := cfg.EffectiveModbus(); mb != nil && r.ModbusFactory != nil {
+		cap, err := r.ModbusFactory(cfg.Name, mb)
+		if err != nil {
+			return fmt.Errorf("modbus capability: %w", err)
+		}
+		env.WithModbus(cap)
+	}
+
+	drv, err := r.runtime.Load(ctx, cfg.WASM, env)
+	if err != nil {
+		return fmt.Errorf("load wasm: %w", err)
+	}
+
+	// Serialize the driver config as init JSON
+	if err := drv.Init(ctx, []byte(`{}`)); err != nil {
+		_ = drv.Cleanup(ctx)
+		return fmt.Errorf("driver_init: %w", err)
+	}
+
+	rd := &runningDriver{
+		driver: drv,
+		env:    env,
+		cfg:    cfg,
+		cmdCh:  make(chan driverCmd, 8),
+		stop:   make(chan struct{}),
+		done:   make(chan struct{}),
+	}
+	r.mu.Lock()
+	r.rec[cfg.Name] = rd
+	r.mu.Unlock()
+	go r.runLoop(rd)
+	slog.Info("driver added", "name", cfg.Name, "wasm", cfg.WASM)
+	return nil
+}
+
+// runLoop polls the driver at its requested cadence and handles commands.
+func (r *Registry) runLoop(rd *runningDriver) {
+	defer close(rd.done)
+	ctx := context.Background()
+	interval := rd.env.PollInterval()
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
+	for {
+		select {
+		case <-rd.stop:
+			_ = rd.driver.DefaultMode(ctx)
+			_ = rd.driver.Cleanup(ctx)
+			return
+		case cmd := <-rd.cmdCh:
+			var err error
+			switch cmd.kind {
+			case "command":
+				err = rd.driver.Command(ctx, cmd.payload)
+			case "default":
+				err = rd.driver.DefaultMode(ctx)
+			}
+			if cmd.result != nil {
+				cmd.result <- err
+			}
+		case <-timer.C:
+			if _, err := rd.driver.Poll(ctx); err != nil {
+				slog.Warn("driver poll failed", "name", rd.cfg.Name, "err", err)
+				r.tel.DriverHealthMut(rd.cfg.Name).RecordError(err.Error())
+			}
+			// Re-arm timer at driver's requested interval
+			interval = rd.env.PollInterval()
+			timer.Reset(interval)
+		}
+	}
+}
+
+// Remove stops and cleans up a driver. Idempotent.
+func (r *Registry) Remove(name string) {
+	r.mu.Lock()
+	rd, ok := r.rec[name]
+	if !ok {
+		r.mu.Unlock()
+		return
+	}
+	delete(r.rec, name)
+	r.mu.Unlock()
+	close(rd.stop)
+	<-rd.done
+	slog.Info("driver removed", "name", name)
+}
+
+// Send dispatches a command JSON blob to a specific driver. Blocks until the
+// driver's runLoop processes it or ctx expires.
+func (r *Registry) Send(ctx context.Context, name string, payload []byte) error {
+	r.mu.Lock()
+	rd, ok := r.rec[name]
+	r.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("driver %q not found", name)
+	}
+	resCh := make(chan error, 1)
+	select {
+	case rd.cmdCh <- driverCmd{kind: "command", payload: payload, result: resCh}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	select {
+	case err := <-resCh:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// SendDefault sends the default/watchdog command to a driver.
+func (r *Registry) SendDefault(ctx context.Context, name string) error {
+	r.mu.Lock()
+	rd, ok := r.rec[name]
+	r.mu.Unlock()
+	if !ok { return fmt.Errorf("driver %q not found", name) }
+	resCh := make(chan error, 1)
+	rd.cmdCh <- driverCmd{kind: "default", result: resCh}
+	select {
+	case err := <-resCh: return err
+	case <-ctx.Done(): return ctx.Err()
+	}
+}
+
+// Names returns the currently registered driver names.
+func (r *Registry) Names() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]string, 0, len(r.rec))
+	for n := range r.rec { out = append(out, n) }
+	return out
+}
+
+// ShutdownAll stops every driver. Blocks until all poll loops exit.
+func (r *Registry) ShutdownAll() {
+	r.mu.Lock()
+	names := make([]string, 0, len(r.rec))
+	for n := range r.rec { names = append(names, n) }
+	r.mu.Unlock()
+	for _, n := range names {
+		r.Remove(n)
+	}
+}
+
+// Reload diffs a new driver list against running state and applies add/
+// remove/restart. Drivers with changed wasm path / capabilities are restarted.
+func (r *Registry) Reload(ctx context.Context, newDrivers []config.Driver) {
+	r.mu.Lock()
+	oldNames := make(map[string]bool, len(r.rec))
+	oldCfgs := make(map[string]config.Driver, len(r.rec))
+	for n, rd := range r.rec {
+		oldNames[n] = true
+		oldCfgs[n] = rd.cfg
+	}
+	r.mu.Unlock()
+
+	newNames := make(map[string]bool, len(newDrivers))
+	for _, d := range newDrivers { newNames[d.Name] = true }
+
+	// Remove or restart
+	for n, old := range oldCfgs {
+		newCfg, stillThere := findDriver(newDrivers, n)
+		if !stillThere {
+			r.Remove(n)
+		} else if !sameDriverConfig(old, newCfg) {
+			slog.Info("driver config changed, restarting", "name", n)
+			r.Remove(n)
+		}
+	}
+	// Add new
+	for _, d := range newDrivers {
+		r.mu.Lock()
+		_, exists := r.rec[d.Name]
+		r.mu.Unlock()
+		if exists { continue }
+		if err := r.Add(ctx, d); err != nil {
+			slog.Warn("add driver failed", "name", d.Name, "err", err)
+		}
+	}
+}
+
+func findDriver(list []config.Driver, name string) (config.Driver, bool) {
+	for _, d := range list {
+		if d.Name == name { return d, true }
+	}
+	return config.Driver{}, false
+}
+
+func sameDriverConfig(a, b config.Driver) bool {
+	if a.WASM != b.WASM || a.IsSiteMeter != b.IsSiteMeter ||
+		a.BatteryCapacityWh != b.BatteryCapacityWh {
+		return false
+	}
+	aMq, bMq := a.EffectiveMQTT(), b.EffectiveMQTT()
+	if (aMq == nil) != (bMq == nil) { return false }
+	if aMq != nil && (aMq.Host != bMq.Host || aMq.Port != bMq.Port ||
+		aMq.Username != bMq.Username || aMq.Password != bMq.Password) {
+		return false
+	}
+	aMb, bMb := a.EffectiveModbus(), b.EffectiveModbus()
+	if (aMb == nil) != (bMb == nil) { return false }
+	if aMb != nil && (aMb.Host != bMb.Host || aMb.Port != bMb.Port || aMb.UnitID != bMb.UnitID) {
+		return false
+	}
+	return true
+}

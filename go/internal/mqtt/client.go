@@ -1,0 +1,73 @@
+// Package mqtt provides an MQTT capability wrapper suitable for binding
+// per-driver in the WASM runtime.
+package mqtt
+
+import (
+	"fmt"
+	"sync"
+	"time"
+
+	paho "github.com/eclipse/paho.mqtt.golang"
+
+	"github.com/frahlg/forty-two-watts/go/internal/drivers"
+)
+
+// Capability wraps a paho client to match drivers.MQTTCap.
+type Capability struct {
+	client paho.Client
+
+	mu       sync.Mutex
+	incoming []drivers.MQTTMessage
+}
+
+// Dial connects to an MQTT broker and returns a Capability.
+func Dial(host string, port int, username, password, clientID string) (*Capability, error) {
+	cap := &Capability{}
+	opts := paho.NewClientOptions().
+		AddBroker(fmt.Sprintf("tcp://%s:%d", host, port)).
+		SetClientID(clientID).
+		SetAutoReconnect(true).
+		SetConnectRetry(true).
+		SetConnectRetryInterval(5 * time.Second).
+		SetDefaultPublishHandler(func(_ paho.Client, m paho.Message) {
+			cap.mu.Lock()
+			cap.incoming = append(cap.incoming, drivers.MQTTMessage{
+				Topic:   m.Topic(),
+				Payload: string(m.Payload()),
+			})
+			cap.mu.Unlock()
+		})
+	if username != "" { opts.SetUsername(username) }
+	if password != "" { opts.SetPassword(password) }
+	cap.client = paho.NewClient(opts)
+	if tok := cap.client.Connect(); tok.WaitTimeout(10*time.Second) && tok.Error() != nil {
+		return nil, tok.Error()
+	}
+	return cap, nil
+}
+
+// Close disconnects the client.
+func (c *Capability) Close() { c.client.Disconnect(250) }
+
+// Subscribe — implements drivers.MQTTCap.
+func (c *Capability) Subscribe(topic string) error {
+	tok := c.client.Subscribe(topic, 0, nil)
+	tok.WaitTimeout(5 * time.Second)
+	return tok.Error()
+}
+
+// Publish — implements drivers.MQTTCap.
+func (c *Capability) Publish(topic string, payload []byte) error {
+	tok := c.client.Publish(topic, 0, false, payload)
+	tok.WaitTimeout(5 * time.Second)
+	return tok.Error()
+}
+
+// PopMessages — implements drivers.MQTTCap.
+func (c *Capability) PopMessages() []drivers.MQTTMessage {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := c.incoming
+	c.incoming = nil
+	return out
+}
