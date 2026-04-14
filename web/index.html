@@ -104,30 +104,36 @@
       </div>
     </section>
 
-    <!-- Controls — compact single row -->
+    <!-- Controls — two-tier: primary strategy + manual advanced -->
     <section class="controls-row">
-      <div class="card control-card">
-        <div class="card-label">Mode</div>
-        <div class="mode-buttons" id="mode-buttons">
-          <button data-mode="idle" title="Do nothing">Idle</button>
-          <button data-mode="self_consumption" title="Manual self-consumption (no plan)">Self</button>
-          <button data-mode="peak_shaving" title="Manual peak shaving">Peak</button>
-          <button data-mode="charge" title="Force full charge">Charge</button>
-          <button data-mode="planner_self" title="Planner — self-consumption (no grid-charge, no export)">Plan·Self</button>
-          <button data-mode="planner_cheap" title="Planner — grid-charge when cheap (no export)">Plan·Cheap</button>
-          <button data-mode="planner_arbitrage" title="Planner — full arbitrage (charge cheap, discharge expensive)">Plan·Arb</button>
+      <div class="card control-card control-strategy">
+        <div class="card-label">Strategy</div>
+        <div class="mode-buttons mode-buttons-primary" id="mode-buttons-primary">
+          <button data-mode="planner_self" title="Self-consumption with forecast-aware planning — never grid-charge, never export via battery">Self-consumption</button>
+          <button data-mode="planner_cheap" title="Plan charges batteries when grid prices are low (still never exports via battery)">Cheap charging</button>
+          <button data-mode="planner_arbitrage" title="Full price arbitrage — charge cheap, discharge into expensive hours">Arbitrage</button>
+        </div>
+        <div class="mode-advanced-toggle">
+          <button class="btn-link" id="mode-advanced-btn" title="Show manual modes">Manual…</button>
+        </div>
+        <div class="mode-buttons mode-buttons-advanced" id="mode-buttons" style="display:none">
+          <button data-mode="idle" title="Do nothing — no dispatch">Idle</button>
+          <button data-mode="self_consumption" title="Manual self-consumption — PI chases grid_target, no plan">Self</button>
+          <button data-mode="peak_shaving" title="Limit import to peak-limit">Peak</button>
+          <button data-mode="charge" title="Force full charge regardless of price">Charge</button>
         </div>
       </div>
       <div class="card control-card">
-        <div class="card-label" id="target-label">Grid Target</div>
+        <div class="card-label" id="target-label">Grid target</div>
         <div class="slider-group-compact">
           <input type="range" id="grid-target-slider" min="-5000" max="5000" step="50" value="0">
           <span id="grid-target-value" class="slider-current">0 W</span>
           <button id="grid-target-send" class="btn-send">Set</button>
         </div>
+        <div class="card-sub card-hint" id="grid-target-hint">Planner controls this when a strategy is active.</div>
       </div>
       <div class="card control-card">
-        <div class="card-label">Peak Limit</div>
+        <div class="card-label">Peak limit</div>
         <div class="slider-group-compact">
           <input type="range" id="peak-limit-slider" min="0" max="11000" step="100" value="5000">
           <span id="peak-limit-value" class="slider-current">5000 W</span>
@@ -135,7 +141,7 @@
         </div>
       </div>
       <div class="card control-card">
-        <div class="card-label">EV Charging ⚡</div>
+        <div class="card-label">EV charging ⚡</div>
         <div class="slider-group-compact">
           <input type="range" id="ev-slider" min="0" max="22000" step="100" value="0">
           <span id="ev-value" class="slider-current">0 W</span>
@@ -166,7 +172,9 @@
         <div class="chart-legend" id="chart-legend">
           <span class="legend-item"><span class="legend-color" style="background:#ef4444"></span> Grid</span>
           <span class="legend-item"><span class="legend-color" style="background:#22c55e"></span> PV</span>
+          <span class="legend-item"><span class="legend-color legend-dash" style="border-color:#22c55e"></span> PV twin</span>
           <span class="legend-item"><span class="legend-color" style="background:#e2e8f0"></span> Load</span>
+          <span class="legend-item"><span class="legend-color legend-dash" style="border-color:#e2e8f0"></span> Load twin</span>
           <span class="legend-item"><span class="legend-color" style="background:#f59e0b"></span> Ferroamp</span>
           <span class="legend-item"><span class="legend-color" style="background:#8b5cf6"></span> Sungrow</span>
         </div>

@@ -28,6 +28,7 @@ import (
 	"github.com/frahlg/forty-two-watts/go/internal/drivers"
 	"github.com/frahlg/forty-two-watts/go/internal/forecast"
 	"github.com/frahlg/forty-two-watts/go/internal/ha"
+	"github.com/frahlg/forty-two-watts/go/internal/loadmodel"
 	mqttcli "github.com/frahlg/forty-two-watts/go/internal/mqtt"
 	modbuscli "github.com/frahlg/forty-two-watts/go/internal/modbus"
 	"github.com/frahlg/forty-two-watts/go/internal/mpc"
@@ -236,12 +237,26 @@ func main() {
 		slog.Info("pvmodel started", "rated_w", ratedPVW, "quality", pvSvc.Model().Quality())
 	}
 
+	// ---- Start load digital twin ----
+	// Peak load proxy: use fuse power budget × 0.5 as a sane default
+	// until user configures an explicit value. Users can override by
+	// setting site.load_peak_w in config once we expose it.
+	loadPeakW := cfg.Fuse.MaxPowerW() * 0.5
+	if loadPeakW <= 0 {
+		loadPeakW = 5000
+	}
+	loadSvc := loadmodel.NewService(st, tel, cfg.SiteMeterDriver(), loadPeakW)
+	loadSvc.Start(ctx)
+	defer loadSvc.Stop()
+	slog.Info("loadmodel started", "peak_w", loadPeakW, "quality", loadSvc.Model().Quality())
+
 	// ---- Start MPC planner (optional) ----
 	mpcSvc := buildMPC(cfg, st, tel, capacities)
 	if mpcSvc != nil {
 		if pvSvc != nil {
 			mpcSvc.PV = pvSvc.Predict
 		}
+		mpcSvc.Load = loadSvc.Predict
 		if cfg.Price != nil {
 			mpcSvc.ExportBonusOreKwh = cfg.Price.ExportBonusOreKwh
 			mpcSvc.ExportFeeOreKwh = cfg.Price.ExportFeeOreKwh
@@ -273,6 +288,7 @@ func main() {
 		Forecast:   forecastSvc,
 		MPC:        mpcSvc,
 		PVModel:    pvSvc,
+		LoadModel:  loadSvc,
 		Version:    Version,
 	}
 	srv := api.New(deps)

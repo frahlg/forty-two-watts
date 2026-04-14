@@ -17,6 +17,10 @@ import (
 // in the DB.
 type PVPredictor func(t time.Time, cloudPct float64) float64
 
+// LoadPredictor plugs in a learned load predictor. Implemented by
+// *loadmodel.Service.Predict. Leave nil to fall back to Service.BaseLoad.
+type LoadPredictor func(t time.Time) float64
+
 // Service wires the optimizer to the rest of the stack: pulls prices +
 // forecast from the SQLite store, reads current SoC from the telemetry
 // store, and re-plans on a ticker. The latest plan is cached.
@@ -27,7 +31,8 @@ type Service struct {
 	BaseLoad float64 // baseline household load (W). 0 disables load assumption.
 	Horizon  time.Duration
 	Interval time.Duration
-	PV       PVPredictor // optional — overrides stored pv_w_estimated
+	PV   PVPredictor   // optional — overrides stored pv_w_estimated
+	Load LoadPredictor // optional — overrides flat BaseLoad
 
 	// ExportBonusOreKwh and ExportFeeOreKwh flow in from config.Price.
 	// Used to compute default ExportOrePerKWh when Params doesn't set it.
@@ -172,7 +177,7 @@ func (s *Service) replan(_ context.Context) *Plan {
 		// continue without PV forecast
 	}
 
-	slots := buildSlots(prices, forecasts, s.BaseLoad, now.UnixMilli(), s.PV)
+	slots := buildSlots(prices, forecasts, s.BaseLoad, now.UnixMilli(), s.PV, s.Load)
 	if len(slots) == 0 {
 		return nil
 	}
@@ -229,7 +234,7 @@ func (s *Service) replan(_ context.Context) *Plan {
 // that the forecast service stored at fetch time. This lets the model
 // learn system-specific orientation/shading/soiling and drive planning
 // off the better signal without re-fetching weather.
-func buildSlots(prices []state.PricePoint, forecasts []state.ForecastPoint, baseLoad float64, nowMs int64, pv PVPredictor) []Slot {
+func buildSlots(prices []state.PricePoint, forecasts []state.ForecastPoint, baseLoad float64, nowMs int64, pv PVPredictor, load LoadPredictor) []Slot {
 	out := make([]Slot, 0, len(prices))
 	for _, pr := range prices {
 		slotLen := pr.SlotLenMin
@@ -240,19 +245,24 @@ func buildSlots(prices []state.PricePoint, forecasts []state.ForecastPoint, base
 		if slotEnd <= nowMs {
 			continue // past slot
 		}
+		slotT := time.UnixMilli(pr.SlotTsMs)
 		var pvW float64
 		if pv != nil {
 			cloud := lookupCloud(forecasts, pr.SlotTsMs)
-			pvW = pv(time.UnixMilli(pr.SlotTsMs), cloud)
+			pvW = pv(slotT, cloud)
 		} else {
 			pvW = lookupPV(forecasts, pr.SlotTsMs)
+		}
+		loadW := baseLoad
+		if load != nil {
+			loadW = load(slotT)
 		}
 		out = append(out, Slot{
 			StartMs:  pr.SlotTsMs,
 			LenMin:   slotLen,
 			PriceOre: pr.TotalOreKwh,
 			PVW:      -math.Abs(pvW), // PV pushes in → negative (site sign)
-			LoadW:    baseLoad,
+			LoadW:    loadW,
 		})
 	}
 	return out

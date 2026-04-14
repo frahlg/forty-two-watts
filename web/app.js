@@ -24,7 +24,9 @@
   var chartHistory = {
     grid: [],
     pv: [],
+    pv_forecast: [], // twin prediction per sample — dashed overlay
     load: [],
+    load_forecast: [], // twin prediction per sample — dashed overlay
     ferroamp_bat: [],
     sungrow_bat: [],
     ferroamp_target: [],
@@ -165,16 +167,29 @@
     batSoc.textContent = socPct + "%";
     socFill.style.width = socPct + "%";
 
-    // Mode buttons
+    // Mode buttons — primary (strategy) + advanced (manual)
     currentMode = data.mode;
-    var buttons = modeButtons.querySelectorAll("button");
-    buttons.forEach(function (btn) {
-      if (btn.dataset.mode === data.mode) {
-        btn.classList.add("active");
-      } else {
-        btn.classList.remove("active");
-      }
+    var allModeButtons = document.querySelectorAll("#mode-buttons-primary button, #mode-buttons button");
+    allModeButtons.forEach(function (btn) {
+      if (btn.dataset.mode === data.mode) btn.classList.add("active");
+      else btn.classList.remove("active");
     });
+    // When planner is driving, grey out the grid-target slider and show a hint.
+    var plannerActive = (data.mode || "").indexOf("planner_") === 0;
+    var gridSlider = document.getElementById("grid-target-slider");
+    var gridSend = document.getElementById("grid-target-send");
+    var gridHint = document.getElementById("grid-target-hint");
+    if (gridSlider) gridSlider.disabled = plannerActive;
+    if (gridSend) gridSend.disabled = plannerActive;
+    if (gridHint) gridHint.style.display = plannerActive ? "block" : "none";
+    // Plan-stale banner
+    if (data.plan_stale && plannerActive && gridHint) {
+      gridHint.textContent = "⚠ Plan stale — falling back to self_consumption.";
+      gridHint.classList.add("card-hint-warn");
+    } else if (gridHint) {
+      gridHint.textContent = "Planner controls this when a strategy is active.";
+      gridHint.classList.remove("card-hint-warn");
+    }
 
     // Grid target — only update slider if user is not actively dragging
     if (gridTargetSlider && document.activeElement !== gridTargetSlider) {
@@ -236,7 +251,9 @@
 
     chartHistory.grid.push(data.grid_w);
     chartHistory.pv.push(data.pv_w);
+    chartHistory.pv_forecast.push(data.pv_w_predicted != null ? data.pv_w_predicted : null);
     chartHistory.load.push(data.load_w || 0);
+    chartHistory.load_forecast.push(data.load_w_predicted != null ? data.load_w_predicted : null);
     chartHistory.ferroamp_bat.push(ferroBat);
     chartHistory.sungrow_bat.push(sunBat);
     chartHistory.ferroamp_target.push(ferroTarget);
@@ -295,7 +312,9 @@
       series = [
         { data: chartHistory.grid,            color: "#ef4444", width: 2,   dash: [],     name: "Grid",         fill: true },
         { data: chartHistory.pv,              color: "#22c55e", width: 2,   dash: [],     name: "PV",           fill: true },
+        { data: chartHistory.pv_forecast,     color: "#22c55e", width: 1.5, dash: [5, 4], name: "PV twin",      fill: false },
         { data: chartHistory.load,            color: "#e2e8f0", width: 1.5, dash: [],     name: "Load",         fill: false },
+        { data: chartHistory.load_forecast,   color: "#e2e8f0", width: 1.5, dash: [5, 4], name: "Load twin",    fill: false },
         { data: chartHistory.ferroamp_bat,    color: "#f59e0b", width: 2,   dash: [],     name: "Ferroamp",     fill: false },
         { data: chartHistory.ferroamp_target, color: "#f59e0b", width: 1.5, dash: [6, 4], name: "Ferroamp tgt", fill: false },
         { data: chartHistory.sungrow_bat,     color: "#8b5cf6", width: 2,   dash: [],     name: "Sungrow",      fill: false },
@@ -774,6 +793,24 @@
       setMode(e.target.dataset.mode);
     }
   });
+  var primaryButtons = document.getElementById("mode-buttons-primary");
+  if (primaryButtons) {
+    primaryButtons.addEventListener("click", function (e) {
+      if (e.target.tagName === "BUTTON" && e.target.dataset.mode) {
+        setMode(e.target.dataset.mode);
+      }
+    });
+  }
+  var advBtn = document.getElementById("mode-advanced-btn");
+  if (advBtn) {
+    advBtn.addEventListener("click", function () {
+      var panel = document.getElementById("mode-buttons");
+      if (!panel) return;
+      var shown = panel.style.display !== "none";
+      panel.style.display = shown ? "none" : "flex";
+      advBtn.textContent = shown ? "Manual…" : "Hide manual";
+    });
+  }
 
   gridTargetSlider.addEventListener("input", function () {
     gridTargetValue.textContent = formatW(Number(gridTargetSlider.value));

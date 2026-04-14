@@ -23,6 +23,7 @@ import (
 	"github.com/frahlg/forty-two-watts/go/internal/config"
 	"github.com/frahlg/forty-two-watts/go/internal/control"
 	"github.com/frahlg/forty-two-watts/go/internal/forecast"
+	"github.com/frahlg/forty-two-watts/go/internal/loadmodel"
 	"github.com/frahlg/forty-two-watts/go/internal/mpc"
 	"github.com/frahlg/forty-two-watts/go/internal/prices"
 	"github.com/frahlg/forty-two-watts/go/internal/pvmodel"
@@ -60,6 +61,9 @@ type Deps struct {
 
 	// Optional: PV digital-twin self-learner.
 	PVModel *pvmodel.Service
+
+	// Optional: load digital-twin self-learner.
+	LoadModel *loadmodel.Service
 
 	Version string
 }
@@ -107,6 +111,8 @@ func (s *Server) routes() {
 	s.handle("POST /api/mpc/replan",          s.handleMPCReplan)
 	s.handle("GET  /api/pvmodel",             s.handlePVModel)
 	s.handle("POST /api/pvmodel/reset",       s.handlePVModelReset)
+	s.handle("GET  /api/loadmodel",           s.handleLoadModel)
+	s.handle("POST /api/loadmodel/reset",     s.handleLoadModelReset)
 
 	// ---- Static web UI ----
 	// Everything not matched above falls through to the static server.
@@ -246,14 +252,24 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	var pvPredictW, loadPredictW float64
+	if s.deps.PVModel != nil {
+		pvPredictW = -s.deps.PVModel.PredictNow() // site-sign: negative
+	}
+	if s.deps.LoadModel != nil {
+		loadPredictW = s.deps.LoadModel.Predict(time.Now())
+	}
+
 	writeJSON(w, 200, map[string]any{
 		"version":         s.deps.Version,
 		"mode":            ctrl.Mode,
 		"plan_stale":      ctrl.PlanStale,
 		"grid_w":          gridW,
 		"pv_w":            pvW,
+		"pv_w_predicted":  pvPredictW,
 		"bat_w":           batW,
 		"load_w":          loadW,
+		"load_w_predicted": loadPredictW,
 		"bat_soc":         avgSoC,
 		"grid_target_w":   ctrl.GridTargetW,
 		"peak_limit_w":    ctrl.PeakLimitW,
@@ -680,6 +696,35 @@ func (s *Server) handlePVModelReset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.deps.PVModel.Reset()
+	writeJSON(w, 200, map[string]string{"status": "reset"})
+}
+
+// ---- Load digital twin ----
+
+func (s *Server) handleLoadModel(w http.ResponseWriter, r *http.Request) {
+	if s.deps.LoadModel == nil {
+		writeJSON(w, 200, map[string]any{"enabled": false})
+		return
+	}
+	m := s.deps.LoadModel.Model()
+	writeJSON(w, 200, map[string]any{
+		"enabled":    true,
+		"samples":    m.Samples,
+		"mae_w":      m.MAE,
+		"peak_w":     m.PeakW,
+		"quality":    m.Quality(),
+		"last_ms":    m.LastMs,
+		"forgetting": m.Forgetting,
+		"beta":       m.Beta,
+	})
+}
+
+func (s *Server) handleLoadModelReset(w http.ResponseWriter, r *http.Request) {
+	if s.deps.LoadModel == nil {
+		writeJSON(w, 400, map[string]string{"error": "loadmodel disabled"})
+		return
+	}
+	s.deps.LoadModel.Reset()
 	writeJSON(w, 200, map[string]string{"status": "reset"})
 }
 

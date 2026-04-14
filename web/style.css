@@ -917,6 +917,55 @@ footer {
 }
 .live-plan-row > section { min-width: 0; }  /* allow canvas to shrink */
 .live-plan-row .chart-container canvas { width: 100%; display: block; }
+.legend-dash {
+  background: transparent !important;
+  border-top: 2px dashed currentColor;
+  height: 0;
+  width: 18px;
+  display: inline-block;
+  vertical-align: middle;
+}
+.control-strategy { min-width: 320px; }
+.mode-buttons-primary {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.mode-buttons-primary button {
+  flex: 1;
+  min-width: 100px;
+  padding: 8px 10px;
+  font-weight: 500;
+}
+.mode-advanced-toggle {
+  margin-top: 8px;
+  text-align: right;
+}
+.btn-link {
+  background: none;
+  border: none;
+  color: var(--text-dim, #94a3b8);
+  cursor: pointer;
+  font-size: 0.8rem;
+  padding: 2px 6px;
+  text-decoration: underline dotted;
+}
+.btn-link:hover { color: var(--text, #e2e8f0); }
+.mode-buttons-advanced {
+  display: none;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed rgba(255,255,255,0.08);
+}
+.card-hint {
+  font-size: 0.72rem;
+  color: var(--text-dim, #94a3b8);
+  margin-top: 6px;
+  display: none;
+}
+.card-hint-warn { color: #fbbf24; }
 .models-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));

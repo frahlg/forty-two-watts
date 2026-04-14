@@ -91,6 +91,23 @@ func (s *Service) Predict(t time.Time, cloudPct float64) float64 {
 	return s.model.Predict(cs, cloudPct, t)
 }
 
+// PredictNow returns the twin's prediction for right now using the
+// latest cloud cover from the forecast cache. Used by the UI to
+// overlay predicted vs actual PV on the live chart.
+func (s *Service) PredictNow() float64 {
+	if s == nil {
+		return 0
+	}
+	now := time.Now()
+	cloud := 50.0
+	if s.Cloud != nil {
+		if v, ok := s.Cloud(now); ok {
+			cloud = v
+		}
+	}
+	return s.Predict(now, cloud)
+}
+
 // Start begins the online-learning loop. Safe to call multiple times.
 func (s *Service) Start(ctx context.Context) {
 	if s == nil {
