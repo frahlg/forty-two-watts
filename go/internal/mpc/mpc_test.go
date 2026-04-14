@@ -279,6 +279,43 @@ func TestExportBonusMakesArbitrageMoreProfitable(t *testing.T) {
 	}
 }
 
+// ---- Solar curtailment ----
+
+func TestCurtailmentFlagsNegativeExportSlots(t *testing.T) {
+	// Big PV surplus, no load absorption left (battery already full),
+	// zero export revenue. Expect curtailment suggestion on those slots.
+	slots := []Slot{
+		{StartMs: 0, LenMin: 60, PriceOre: 10, LoadW: 500, PVW: -8000},
+	}
+	p := baseParams(ModeArbitrage)
+	p.InitialSoCPct = 95 // already at max — battery can't absorb more
+	p.ExportOrePerKWh = 0
+	plan := Optimize(slots, p)
+	a := plan.Actions[0]
+	if a.PVLimitW == 0 {
+		t.Errorf("expected curtailment on negative-export slot, got pv_limit_w=0 (grid_w=%f)", a.GridW)
+	}
+	// Recommended limit should roughly equal what the site can consume.
+	expected := a.LoadW + math.Max(0, a.BatteryW)
+	if math.Abs(a.PVLimitW-expected) > 500 {
+		t.Errorf("pv_limit_w = %f, expected ~%f (load + charge)", a.PVLimitW, expected)
+	}
+}
+
+func TestCurtailmentSkipsWhenExportProfitable(t *testing.T) {
+	slots := []Slot{
+		{StartMs: 0, LenMin: 60, PriceOre: 100, LoadW: 500, PVW: -8000},
+	}
+	p := baseParams(ModeArbitrage)
+	p.InitialSoCPct = 95
+	p.ExportOrePerKWh = 80 // profitable export
+	plan := Optimize(slots, p)
+	if plan.Actions[0].PVLimitW != 0 {
+		t.Errorf("profitable export should not trigger curtailment, got pv_limit_w=%f",
+			plan.Actions[0].PVLimitW)
+	}
+}
+
 func TestSelfConsumptionWithZeroBaseline(t *testing.T) {
 	// load==PV → baseline=0. Battery must stay at 0.
 	slots := []Slot{

@@ -163,3 +163,46 @@ and gives ≈0.6 ms solve time over a 193-slot horizon.
 Flat-price days give the DP nothing to work with; all three strategies
 return near-identical schedules. See `go/internal/mpc/stress_test.go`
 for the scenario-comparison benchmark that illustrates this.
+
+---
+
+## Solar curtailment
+
+Post-processing flags each plan slot with a recommended PV cap
+(`pv_limit_w`) when all three conditions hold:
+
+1. the slot is exporting (`grid_w < 0`)
+2. export revenue is non-positive (spot ≤ 0 or fees ≥ revenue)
+3. local consumption (load + battery charge) cannot absorb the PV
+
+In that regime, exporting costs money and curtailing the PV is a pure
+win. The recommended limit equals `load_w + max(battery_w, 0)` — just
+enough to cover on-site absorption.
+
+The MPC cost function isn't changed by curtailment; the annotation is
+a dispatch-time suggestion. A driver that advertises
+`supports_pv_curtail` can pick up `action.pv_limit_w` on each control
+cycle and send a setpoint to the inverter. Drivers without this
+capability ignore the field; curtailment then just doesn't happen.
+
+---
+
+## Savings — what to expect
+
+The stress test (`go test -run AnnualSavings ./internal/mpc/`) projects
+annual SEK savings across six scenario types weighted by prevalence:
+
+| Scenario | Weight | Self-cons | Cheap-charge | Arbitrage |
+|---|---:|---:|---:|---:|
+| sunny_mild | 25% | 430 | 438 | 479 |
+| cloudy | 30% | 596 | 1 038 | 1 086 |
+| price_spike | 5% | 753 | 2 239 | 2 391 |
+| flat_prices | 10% | 106 | 106 | 111 |
+| cheap_night | 15% | 613 | 1 312 | 1 640 |
+| solar_surplus | 15% | 112 | 112 | 131 |
+| **TOTAL SEK/yr** | | **2 610** | **5 245** | **5 839** |
+
+Figures based on a 15 kWh / 5 kW battery and typical Nordic-ish prices
+(see scenario generators in `stress_test.go`). Arbitrage adds
+~3 200 SEK/yr over self-consumption but depends heavily on price
+volatility — a stable market year narrows the gap.

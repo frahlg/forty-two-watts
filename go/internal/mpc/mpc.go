@@ -35,6 +35,7 @@ package mpc
 
 import (
 	"math"
+	"strings"
 	"time"
 )
 
@@ -119,6 +120,12 @@ type Action struct {
 	CostOre     float64 `json:"cost_ore"`   // this slot's cost (öre). Negative = revenue.
 	Confidence  float64 `json:"confidence"` // 1.0 real, <1.0 forecasted (UI uses this to style)
 	Reason      string  `json:"reason"`     // short human-readable explanation
+
+	// PVLimitW is the recommended cap on PV inverter output (W, positive).
+	// 0 = no curtailment. Set by post-processing when exporting would
+	// cost money (negative export revenue after fees). Consumed by the
+	// control loop only when the driver advertises `supports_pv_curtail`.
+	PVLimitW float64 `json:"pv_limit_w,omitempty"`
 }
 
 // Plan is the output.
@@ -358,7 +365,54 @@ func Optimize(slots []Slot, p Params) Plan {
 		}
 	}
 	plan.TotalCostOre = totalCost
+	annotateCurtailment(&plan, p.ExportOrePerKWh)
 	return plan
+}
+
+// annotateCurtailment walks the plan and flags slots where curtailing
+// PV would avoid a net-negative export event. Triggered when:
+//
+//   - the slot is exporting (grid_w < 0)
+//   - AND export revenue is non-positive (fee ≥ revenue, or negative spot)
+//   - AND the battery can't absorb more (already charging at max)
+//
+// In that case exporting PV costs money with no offsetting benefit.
+// Recommended PV limit = load + battery_charge (just cover what the
+// site + battery can consume). Driver dispatches this only if it
+// advertises PV-curtailment support. The CostOre doesn't change — the
+// DP already priced this slot as-is; curtailment is a mitigation
+// applied at dispatch time.
+func annotateCurtailment(plan *Plan, exportOrePerKWh float64) {
+	if exportOrePerKWh > 0 {
+		// Positive export price → exporting is always better than
+		// curtailing. Nothing to do.
+		return
+	}
+	for i := range plan.Actions {
+		a := &plan.Actions[i]
+		if a.GridW >= 0 {
+			continue // importing, not exporting
+		}
+		// Slot is exporting. If we can't earn on export, cap PV to
+		// what's being consumed locally + stored.
+		consumedW := a.LoadW
+		if a.BatteryW > 0 {
+			consumedW += a.BatteryW // site-sign: + = charging (absorbs PV)
+		}
+		if consumedW < 0 {
+			consumedW = 0
+		}
+		// Only suggest curtailment if PV actually exceeds local consumption.
+		pvAbs := -a.PVW // PV stored site-signed as negative
+		if pvAbs > consumedW {
+			a.PVLimitW = consumedW
+			if a.Reason != "" && !strings.HasSuffix(a.Reason, ")") {
+				a.Reason += " · curtail PV"
+			} else {
+				a.Reason = "curtail PV (negative export) · " + a.Reason
+			}
+		}
+	}
 }
 
 // modeAllows enforces the mode's grid-use policy.

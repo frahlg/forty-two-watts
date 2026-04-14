@@ -210,6 +210,78 @@ func planStats(p Plan) (chgKWh, disKWh, socMin, socMax float64) {
 	return
 }
 
+// TestAnnualSavingsProjection takes the full scenario set, picks the best
+// strategy per scenario, and projects annual SEK savings assuming the
+// scenarios are representative of the year's mix.
+//
+// Scenario weights (fraction of days):
+//
+//	sunny_mild       25%   typical good-weather day
+//	cloudy           30%   typical overcast day
+//	price_spike       5%   Europe-wide cold snap etc.
+//	flat_prices      10%   low-volatility day
+//	cheap_night      15%   typical overnight-cheap day
+//	solar_surplus    15%   high-summer surplus day
+//
+// Rough but grounded enough to give operators a ballpark annual figure.
+func TestAnnualSavingsProjection(t *testing.T) {
+	rng := rand.New(rand.NewSource(42))
+	scenarios := buildScenarios(rng)
+	weights := map[string]float64{
+		"sunny_mild":    0.25,
+		"cloudy":        0.30,
+		"price_spike":   0.05,
+		"flat_prices":   0.10,
+		"cheap_night":   0.15,
+		"solar_surplus": 0.15,
+	}
+	const (
+		capWh  = 15000.0
+		maxChg = 5000.0
+		maxDis = 5000.0
+	)
+	modes := []Mode{ModeSelfConsumption, ModeCheapCharge, ModeArbitrage}
+	fmt.Printf("\n=== ANNUAL SAVINGS PROJECTION (SEK / year) ===\n")
+	fmt.Printf("%-18s  %-8s  %10s  %10s  %10s\n",
+		"SCENARIO", "WEIGHT", "SELF", "CHEAP", "ARB")
+	fmt.Println("-----------------------------------------------------------------")
+	totals := map[Mode]float64{}
+	for _, sc := range scenarios {
+		w, ok := weights[sc.name]
+		if !ok {
+			continue
+		}
+		var mean float64
+		for _, s := range sc.slots {
+			mean += s.PriceOre
+		}
+		mean /= float64(len(sc.slots))
+		base := baselineCost(sc.slots, mean*0.7)
+		initKWh := sc.initSoC * capWh / 100 / 1000
+		baseNet := base/100 - mean*initKWh/100
+		row := fmt.Sprintf("%-18s  %-8.0f%%", sc.name, w*100)
+		for _, m := range modes {
+			plan := runMode(sc.slots, sc.initSoC, m, capWh, maxChg, maxDis)
+			endKWh := plan.Actions[len(plan.Actions)-1].SoCPct * capWh / 100 / 1000
+			netSek := plan.TotalCostOre/100 - mean*endKWh/100
+			savings := baseNet - netSek // positive = saving
+			annual := savings * 365 * w
+			totals[m] += annual
+			row += fmt.Sprintf("  %10.0f", annual)
+		}
+		fmt.Println(row)
+	}
+	fmt.Println("-----------------------------------------------------------------")
+	fmt.Printf("%-18s  %-9s%10.0f  %10.0f  %10.0f\n", "TOTAL SEK/yr", "",
+		totals[ModeSelfConsumption], totals[ModeCheapCharge], totals[ModeArbitrage])
+	fmt.Println()
+	// Sanity: at least one mode should save something per year.
+	best := math.Max(totals[ModeCheapCharge], totals[ModeArbitrage])
+	if best <= 0 {
+		t.Errorf("no positive savings projected — something is off: %+v", totals)
+	}
+}
+
 // TestStrategyComparison runs all three modes across all scenarios and
 // prints a table. Not a pass/fail test — it's a reporter. But we assert
 // some sanity invariants along the way.
