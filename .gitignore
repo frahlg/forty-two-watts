@@ -25,3 +25,4 @@ config.local.yaml
 /go/sim-ferroamp
 /go/sim-sungrow
 /go/forty-two-watts
+bin/
