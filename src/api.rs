@@ -56,6 +56,7 @@ pub fn start(
                     ("GET", "/api/config") => handle_get_config(&current_config),
                     ("POST", "/api/config") => handle_post_config(&current_config, &registry, &control, &config_path, &mut request),
                     ("GET", "/api/battery_models") => handle_get_models(&battery_models, &control),
+                    ("POST", "/api/battery_models/reset") => handle_reset_model(&battery_models, &state_store, &mut request),
                     ("POST", "/api/self_tune/start") => handle_self_tune_start(&self_tune, &battery_models, &control, &mut request),
                     ("GET", "/api/self_tune/status") => handle_self_tune_status(&self_tune),
                     ("POST", "/api/self_tune/cancel") => handle_self_tune_cancel(&self_tune),
@@ -552,6 +553,58 @@ fn handle_get_models(
         }));
     }
     json_response(200, &serde_json::Value::Object(out))
+}
+
+/// POST /api/battery_models/reset  body: {"battery": "ferroamp"}  or  {"all": true}
+/// Wipes the model back to fresh defaults so RLS converges from scratch.
+/// Use when a model has gotten stuck in a bad state (e.g., polluted from an
+/// earlier bug) and you want a clean slate without waiting hours for the
+/// forgetting factor to wash it out.
+fn handle_reset_model(
+    models: &Arc<RwLock<HashMap<String, BatteryModel>>>,
+    state_store: &Arc<crate::state::StateStore>,
+    request: &mut tiny_http::Request,
+) -> tiny_http::Response<std::io::Cursor<Vec<u8>>> {
+    let body = read_body(request);
+    #[derive(serde::Deserialize)]
+    struct Req {
+        #[serde(default)]
+        battery: Option<String>,
+        #[serde(default)]
+        all: bool,
+    }
+    let req: Req = match serde_json::from_str(&body) {
+        Ok(r) => r,
+        Err(e) => return json_response(400, &serde_json::json!({"error": format!("invalid body: {}", e)})),
+    };
+
+    let mut models_lock = models.write().unwrap();
+    let mut reset_names = Vec::new();
+    if req.all {
+        for (name, m) in models_lock.iter_mut() {
+            *m = BatteryModel::new(name);
+            reset_names.push(name.clone());
+        }
+    } else if let Some(name) = req.battery {
+        if let Some(m) = models_lock.get_mut(&name) {
+            *m = BatteryModel::new(&name);
+            reset_names.push(name);
+        } else {
+            return json_response(404, &serde_json::json!({"error": format!("battery '{}' not found", name)}));
+        }
+    } else {
+        return json_response(400, &serde_json::json!({"error": "provide 'battery' or 'all': true"}));
+    }
+    // Persist so the reset survives a restart
+    for name in &reset_names {
+        if let Some(m) = models_lock.get(name) {
+            if let Ok(json) = serde_json::to_string(m) {
+                state_store.save_battery_model(name, &json);
+            }
+        }
+    }
+    info!("reset battery models: {:?}", reset_names);
+    json_response(200, &serde_json::json!({"reset": reset_names}))
 }
 
 /// POST /api/self_tune/start  body: {"batteries": ["ferroamp", "sungrow"]}

@@ -46,6 +46,10 @@
 
   function renderCard(name, m) {
     var conf = (m.confidence * 100).toFixed(0) + "%";
+    var cascadeActive = m.confidence >= 0.5;
+    var cascadeBadge = cascadeActive
+      ? '<span style="color:#22c55e;font-size:0.7rem">● cascade</span>'
+      : '<span style="color:#f59e0b;font-size:0.7rem">○ direct</span>';
     var health = m.health_score;
     var healthPct = (health * 100).toFixed(0);
     var healthClass = health >= 0.8 ? "health-good" : health >= 0.5 ? "health-warn" : "health-bad";
@@ -63,7 +67,7 @@
 
     return '<div class="model-card">' +
       '<div class="model-card-header">' +
-      '<span class="model-name">' + esc(name) + '</span>' +
+      '<span class="model-name">' + esc(name) + ' ' + cascadeBadge + '</span>' +
       '<span class="model-confidence">' + m.n_samples + ' samples · ' + conf + '</span>' +
       '</div>' +
       '<div class="model-stats">' +
@@ -81,8 +85,28 @@
       '<span class="' + healthClass + '">health ' + healthPct + '%</span>' +
       '<span class="' + driftClass + '">' + driftStr + '</span>' +
       '</div>' +
+      '<button class="btn-reset-model" data-reset-battery="' + esc(name) + '" ' +
+      'style="margin-top:8px;padding:4px 10px;font-size:0.7rem;background:var(--surface2);' +
+      'border:1px solid var(--border);color:var(--text-dim);border-radius:3px;cursor:pointer;width:100%">' +
+      '↻ Reset model' +
+      '</button>' +
       '</div>';
   }
+
+  // Handle reset-button clicks via event delegation
+  grid.addEventListener("click", function (e) {
+    if (!e.target.dataset || !e.target.dataset.resetBattery) return;
+    var name = e.target.dataset.resetBattery;
+    if (!confirm("Reset " + name + " model to fresh defaults?\\n\\nRLS will re-learn from scratch. Baseline (if set by self-tune) will be cleared.")) return;
+    fetch("/api/battery_models/reset", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ battery: name }),
+    })
+      .then(function (r) { return r.ok ? r.json() : r.json().then(function (e) { throw new Error(e.error); }); })
+      .then(function () { fetchModels(); })
+      .catch(function (e) { alert("Reset failed: " + e.message); });
+  });
 
   function humanAge(s) {
     if (s < 60) return Math.round(s) + "s ago";

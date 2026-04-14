@@ -274,7 +274,21 @@ pub fn compute_dispatch_with_models(
     };
 
     // ---- Cascade: per-battery inner PI + saturation clamp + inverse model ----
-    // Skip when models are absent or cascade disabled — fall back to direct command.
+    //
+    // Layered safety:
+    //   1. Saturation clamp — ALWAYS safe (pure empirical observation of what
+    //      the battery can physically do at a given SoC). Applied regardless of
+    //      model confidence.
+    //   2. Inner PI + inverse model — ONLY when model.confidence() ≥ 0.5.
+    //      Below that threshold, an unconverged model would actively *harm*
+    //      stability by amplifying commands based on noisy gain/τ estimates.
+    //
+    // This is why Sungrow (confident model) and Ferroamp (ARX(1) poorly fits
+    // its MQTT+hysteresis behaviour) can coexist: Sungrow gets full cascade
+    // benefit, Ferroamp falls through to direct command + saturation clamp
+    // until its model proves itself (or a self-tune sets a baseline).
+    const CASCADE_CONFIDENCE_THRESHOLD: f64 = 0.5;
+
     if state.use_cascade && !models.is_empty() {
         for target in &mut targets {
             let model = match models.get(&target.driver) {
@@ -287,31 +301,31 @@ pub fn compute_dispatch_with_models(
                 None => continue,
             };
 
-            // Re-tune inner PI based on learned τ (only when model is confident)
-            if model.confidence() > 0.3 {
-                let inner = state.inner_pis.entry(target.driver.clone())
-                    .or_insert_with(InnerPi::new);
-                inner.retune_for(model.time_constant_s(dt_s));
-            }
-
-            // 1. Saturation clamp — never ask for more than the battery can deliver at this SoC
+            // 1. Saturation clamp — always applied. Prevents asking for more
+            //    than we've ever physically seen the battery deliver at this SoC.
             let (clamped_target, sat_clamped) = model.clamp_to_saturation(target.target_w, soc);
             if sat_clamped { target.clamped = true; }
 
-            // 2. Inner PI: drive the error (target − actual) toward zero with per-battery dynamics
+            // Low-confidence models: stop here. Direct command, no amplification.
+            if model.confidence() < CASCADE_CONFIDENCE_THRESHOLD {
+                target.target_w = clamped_target;
+                continue;
+            }
+
+            // 2. Inner PI — per-battery tracking of target vs actual. Auto-tuned
+            //    from learned τ. Only active for confident models.
             let pi_out = {
                 let inner = state.inner_pis.entry(target.driver.clone())
                     .or_insert_with(InnerPi::new);
-                // pid::Pid uses (setpoint − measurement). We set setpoint=0 and pass
-                // -error so the output is +K·(target−actual): positive when target above actual.
+                inner.retune_for(model.time_constant_s(dt_s));
                 let err = clamped_target - actual;
                 let out = inner.pid.next_control_output(-err);
                 out.output
             };
             let pi_corrected = clamped_target + pi_out;
 
-            // 3. Inverse model: command = corrected_target / steady_state_gain
-            //    (compensates for the battery's non-unity efficiency / response gain)
+            // 3. Inverse model — command = corrected / steady_state_gain.
+            //    Has its own health fallback for runaway raw gains.
             let command = model.inverse(pi_corrected);
 
             target.target_w = command;
@@ -886,9 +900,9 @@ mod tests {
         let mut model = BatteryModel::new("ferroamp");
         model.a = 0.5;
         model.b = 0.4; // gain = 0.4/0.5 = 0.8
-        // Force confidence high so inner PI gets re-tuned
+        // Force HIGH confidence so cascade applies inverse model (threshold 0.5)
         model.n_samples = 500;
-        model.residual_var_ema = 50.0;
+        model.residual_var_ema = 10.0;
         let mut models = HashMap::new();
         models.insert("ferroamp".to_string(), model);
 
@@ -940,6 +954,49 @@ mod tests {
         // The command should be clamped — at least flagged
         if let Some(t) = targets.first() {
             assert!(t.clamped, "expected clamping due to SoC saturation");
+        }
+    }
+
+    #[test]
+    fn cascade_low_confidence_bypasses_inverse_and_inner_pi() {
+        // Low-confidence model should NOT apply inverse model — it would amplify
+        // bad commands during warmup (this was the Ferroamp bug in prod).
+        let store = make_store_with(2000.0, &[("ferroamp", 0.0, 0.5)]);
+        let mut state = ControlState::new(0.0, 50.0, "ferroamp".into());
+        state.mode = Mode::SelfConsumption;
+        state.slew_rate_w = 100000.0;
+
+        let mut model = BatteryModel::new("ferroamp");
+        model.a = 0.7;
+        model.b = 0.3; // gain ≈ 1.0
+        model.n_samples = 50;      // low samples
+        model.residual_var_ema = 5000.0; // high variance → low confidence
+        assert!(model.confidence() < 0.5, "test setup: confidence must be < 0.5");
+
+        let mut models = HashMap::new();
+        models.insert("ferroamp".to_string(), model);
+
+        let targets_cascade = compute_dispatch_with_models(
+            &store, &mut state, &caps(&[("ferroamp", 15200.0)]), 11040.0, &models, 5.0,
+        );
+
+        let mut s_clone = ControlState::new(0.0, 50.0, "ferroamp".into());
+        s_clone.mode = Mode::SelfConsumption;
+        s_clone.slew_rate_w = 100000.0;
+        let empty: HashMap<String, BatteryModel> = HashMap::new();
+        let targets_no_cascade = compute_dispatch_with_models(
+            &store, &mut s_clone, &caps(&[("ferroamp", 15200.0)]), 11040.0, &empty, 5.0,
+        );
+
+        // With low confidence + empty models should produce IDENTICAL commands
+        // (cascade bypassed the inverse/inner-PI, only saturation clamp — which
+        // does nothing since curves are empty)
+        if let (Some(a), Some(b)) = (targets_cascade.first(), targets_no_cascade.first()) {
+            assert!(
+                (a.target_w - b.target_w).abs() < 1.0,
+                "low-confidence cascade should bypass: cascade={:.0} bare={:.0}",
+                a.target_w, b.target_w,
+            );
         }
     }
 
