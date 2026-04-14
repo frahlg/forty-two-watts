@@ -1,0 +1,208 @@
+package state
+
+import (
+	"context"
+	"path/filepath"
+	"testing"
+	"time"
+)
+
+func freshStore(t *testing.T) *Store {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "state.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	return s
+}
+
+func TestConfigRoundtrip(t *testing.T) {
+	s := freshStore(t)
+	if err := s.SaveConfig("mode", "self_consumption"); err != nil {
+		t.Fatal(err)
+	}
+	v, ok := s.LoadConfig("mode")
+	if !ok || v != "self_consumption" {
+		t.Errorf("mode: got %q ok=%v", v, ok)
+	}
+	// Upsert
+	if err := s.SaveConfig("mode", "charge"); err != nil {
+		t.Fatal(err)
+	}
+	v, _ = s.LoadConfig("mode")
+	if v != "charge" {
+		t.Errorf("after upsert: got %q", v)
+	}
+	if _, ok := s.LoadConfig("missing"); ok {
+		t.Error("missing key should not return ok")
+	}
+}
+
+func TestConfigPersistsAcrossReopen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	s1, err := Open(path)
+	if err != nil { t.Fatal(err) }
+	s1.SaveConfig("greeting", "hello")
+	s1.Close()
+
+	s2, err := Open(path)
+	if err != nil { t.Fatal(err) }
+	defer s2.Close()
+	v, ok := s2.LoadConfig("greeting")
+	if !ok || v != "hello" {
+		t.Errorf("persistence: got %q ok=%v", v, ok)
+	}
+}
+
+func TestEventsRecorded(t *testing.T) {
+	s := freshStore(t)
+	for i := 0; i < 5; i++ {
+		if err := s.RecordEvent("evt"); err != nil { t.Fatal(err) }
+	}
+	events, err := s.RecentEvents(10)
+	if err != nil { t.Fatal(err) }
+	if len(events) < 1 {
+		t.Errorf("expected ≥1 events, got %d", len(events))
+	}
+}
+
+func TestBatteryModelStore(t *testing.T) {
+	s := freshStore(t)
+	if err := s.SaveBatteryModel("ferroamp", `{"a":0.7,"b":0.3}`); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveBatteryModel("sungrow", `{"a":0.5,"b":0.4}`); err != nil {
+		t.Fatal(err)
+	}
+	all, err := s.LoadAllBatteryModels()
+	if err != nil { t.Fatal(err) }
+	if len(all) != 2 {
+		t.Errorf("expected 2 models, got %d", len(all))
+	}
+	if all["ferroamp"] != `{"a":0.7,"b":0.3}` {
+		t.Errorf("ferroamp: %s", all["ferroamp"])
+	}
+	if err := s.DeleteBatteryModel("sungrow"); err != nil { t.Fatal(err) }
+	all, _ = s.LoadAllBatteryModels()
+	if len(all) != 1 {
+		t.Errorf("after delete: got %d", len(all))
+	}
+}
+
+func TestHistoryRecordAndLoad(t *testing.T) {
+	s := freshStore(t)
+	now := time.Now().UnixMilli()
+	for i := 0; i < 10; i++ {
+		err := s.RecordHistory(HistoryPoint{
+			TsMs:   now + int64(i)*1000,
+			GridW:  float64(100 + i*10),
+			PVW:    -100,
+			BatW:   float64(i * 20),
+			LoadW:  500,
+			BatSoC: 0.5,
+			JSON:   `{"i":` + "0" + `}`,
+		})
+		if err != nil { t.Fatal(err) }
+	}
+	pts, err := s.LoadHistory(now, now+10000, 0)
+	if err != nil { t.Fatal(err) }
+	if len(pts) != 10 {
+		t.Errorf("expected 10 points, got %d", len(pts))
+	}
+	if pts[0].TsMs >= pts[1].TsMs {
+		t.Errorf("points should be ascending: %d vs %d", pts[0].TsMs, pts[1].TsMs)
+	}
+}
+
+func TestHistoryDownsampling(t *testing.T) {
+	s := freshStore(t)
+	now := time.Now().UnixMilli()
+	for i := 0; i < 100; i++ {
+		s.RecordHistory(HistoryPoint{
+			TsMs: now + int64(i),
+			GridW: float64(i),
+			JSON: "{}",
+		})
+	}
+	pts, err := s.LoadHistory(now, now+200, 10)
+	if err != nil { t.Fatal(err) }
+	if len(pts) != 10 {
+		t.Errorf("expected 10 downsampled points, got %d", len(pts))
+	}
+}
+
+func TestHistoryCounts(t *testing.T) {
+	s := freshStore(t)
+	now := time.Now().UnixMilli()
+	for i := 0; i < 5; i++ {
+		s.RecordHistory(HistoryPoint{TsMs: now + int64(i), JSON: "{}"})
+	}
+	hot, warm, cold, err := s.HistoryCounts()
+	if err != nil { t.Fatal(err) }
+	if hot != 5 || warm != 0 || cold != 0 {
+		t.Errorf("counts: hot=%d warm=%d cold=%d (want 5/0/0)", hot, warm, cold)
+	}
+}
+
+func TestHistoryPruneAggregates(t *testing.T) {
+	s := freshStore(t)
+	// Insert 20 rows, all older than HotRetention
+	oldMs := time.Now().UnixMilli() - int64(HotRetention.Milliseconds()) - 24*3600*1000
+	for i := 0; i < 20; i++ {
+		s.RecordHistory(HistoryPoint{
+			TsMs: oldMs + int64(i)*1000,
+			GridW: float64(100 + i),
+			JSON: "{}",
+		})
+	}
+	if err := s.Prune(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	hot, warm, _, _ := s.HistoryCounts()
+	if hot != 0 {
+		t.Errorf("prune: expected hot=0 after pruning old rows, got %d", hot)
+	}
+	if warm == 0 {
+		t.Errorf("prune: expected warm>0 (hot→warm aggregation), got 0")
+	}
+	t.Logf("after prune: hot=%d warm=%d", hot, warm)
+}
+
+func TestTelemetrySaveLoad(t *testing.T) {
+	s := freshStore(t)
+	if err := s.SaveTelemetry("ferroamp:battery", `{"w":1500}`); err != nil {
+		t.Fatal(err)
+	}
+	v, ok := s.LoadTelemetry("ferroamp:battery")
+	if !ok || v != `{"w":1500}` {
+		t.Errorf("telemetry: got %q ok=%v", v, ok)
+	}
+}
+
+func TestHistoryMultiTierMerge(t *testing.T) {
+	s := freshStore(t)
+	// Insert manually into each tier with overlapping timestamps
+	now := time.Now().UnixMilli()
+	if _, err := s.db.Exec(`INSERT INTO history_hot (ts_ms, json) VALUES (?, ?)`, now+1000, `{"t":"hot"}`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO history_warm (ts_ms, json) VALUES (?, ?)`, now+1000, `{"t":"warm"}`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO history_cold (ts_ms, json) VALUES (?, ?)`, now+2000, `{"t":"cold"}`); err != nil {
+		t.Fatal(err)
+	}
+	pts, err := s.LoadHistory(now, now+10000, 0)
+	if err != nil { t.Fatal(err) }
+	if len(pts) != 2 {
+		t.Errorf("expected 2 unique timestamps after dedup, got %d: %+v", len(pts), pts)
+	}
+	// 1000 should be hot (tier 0 wins over warm tier 1)
+	for _, p := range pts {
+		if p.TsMs == now+1000 && p.JSON != `{"t":"hot"}` {
+			t.Errorf("dedup should prefer hot at ts=%d: got %s", p.TsMs, p.JSON)
+		}
+	}
+}
