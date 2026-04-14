@@ -134,19 +134,48 @@
     // ---- Price bars ----
     // Color cheap (low) → green, expensive → red.
     const sortedTotals = [...totals].sort((a, b) => a - b);
+    // Price bars: use plan actions when available (covers full horizon
+    // including ML-forecasted slots). Confidence < 1 → reduced alpha +
+    // dashed top outline so it's obvious which slots are predicted.
     const p25 = sortedTotals[Math.floor(sortedTotals.length * 0.25)] || priceMin;
     const p75 = sortedTotals[Math.floor(sortedTotals.length * 0.75)] || priceMax;
-    for (const p of prices) {
-      const x0 = xScale(p.slot_ts_ms);
-      const x1 = xScale(p.slot_ts_ms + p.slot_len_min * 60 * 1000);
-      const y = priceY(p.total_ore_kwh);
+    state.priceBarBounds = []; // {x0,x1,yMinPx,yMaxPx, action} for hover hit-test
+    const barSource = (plan && plan.actions && plan.actions.length) ? plan.actions : prices;
+    for (const bar of barSource) {
+      const ts = bar.slot_ts_ms ?? bar.slot_start_ms;
+      const len = bar.slot_len_min;
+      const priceVal = bar.total_ore_kwh ?? bar.price_ore;
+      if (ts == null || priceVal == null) continue;
+      if (ts + len * 60 * 1000 < tMin || ts > tMax) continue;
+      const x0 = xScale(ts);
+      const x1 = xScale(ts + len * 60 * 1000);
+      const y = priceY(priceVal);
       const zero = priceY(Math.max(0, priceMin));
+      const isPredicted = bar.confidence != null && bar.confidence < 1.0;
+      const alpha = isPredicted ? 0.28 : 0.55;
       let color;
-      if (p.total_ore_kwh <= p25) color = 'rgba(34,197,94,0.55)';        // cheap = green
-      else if (p.total_ore_kwh >= p75) color = 'rgba(239,68,68,0.55)';   // expensive = red
-      else color = 'rgba(148,163,184,0.45)';                             // mid = slate
+      if (priceVal <= p25) color = `rgba(34,197,94,${alpha})`;
+      else if (priceVal >= p75) color = `rgba(239,68,68,${alpha})`;
+      else color = `rgba(148,163,184,${alpha * 0.85})`;
       ctx.fillStyle = color;
       ctx.fillRect(x0, Math.min(y, zero), Math.max(1, x1 - x0 - 1), Math.abs(y - zero));
+      // Dashed top outline on predicted bars so the style reads as "ML"
+      if (isPredicted) {
+        ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+        ctx.lineWidth = 1;
+        ctx.setLineDash([2, 2]);
+        ctx.beginPath();
+        ctx.moveTo(x0, y);
+        ctx.lineTo(x1 - 1, y);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+      // Track for hover hit-test
+      state.priceBarBounds.push({
+        x0: x0, x1: x1,
+        ts: ts, len: len,
+        action: bar, // either PricePoint or Action
+      });
     }
     // Price axis labels
     ctx.fillStyle = 'rgba(255,255,255,0.55)';
@@ -261,9 +290,88 @@
     }
   }
 
+  // Hover tooltip: hit-tests the x-coordinate against the cached
+  // priceBarBounds, pops a floating panel with slot details.
+  function setupHover() {
+    const canvas = document.getElementById('plan-chart');
+    let tip = document.getElementById('plan-tip');
+    if (!tip) {
+      tip = document.createElement('div');
+      tip.id = 'plan-tip';
+      tip.className = 'plan-tip';
+      tip.style.display = 'none';
+      document.body.appendChild(tip);
+    }
+    if (!canvas) return;
+    canvas.addEventListener('mousemove', function (e) {
+      if (!state.priceBarBounds || state.priceBarBounds.length === 0) {
+        tip.style.display = 'none';
+        return;
+      }
+      const rect = canvas.getBoundingClientRect();
+      const cx = e.clientX - rect.left;
+      let found = null;
+      for (const b of state.priceBarBounds) {
+        if (cx >= b.x0 && cx <= b.x1) { found = b; break; }
+      }
+      if (!found) { tip.style.display = 'none'; return; }
+      const a = found.action;
+      const d = new Date(found.ts);
+      const hh = d.getHours().toString().padStart(2, '0') + ':' + d.getMinutes().toString().padStart(2, '0');
+      const dayStr = d.toLocaleDateString(undefined, { weekday: 'short' });
+      const predicted = a.confidence != null && a.confidence < 1.0;
+      const price = a.total_ore_kwh ?? a.price_ore;
+      const lines = [
+        `<div class="tip-head">${dayStr} ${hh}${predicted ? ' <span class="tip-pred">predicted</span>' : ''}</div>`,
+        `<div class="tip-row"><span>Price</span><b>${price.toFixed(1)} öre/kWh</b></div>`,
+      ];
+      if (a.pv_w != null) lines.push(`<div class="tip-row"><span>PV</span><b>${(a.pv_w / 1000).toFixed(1)} kW</b></div>`);
+      if (a.load_w != null) lines.push(`<div class="tip-row"><span>Load</span><b>${(a.load_w / 1000).toFixed(1)} kW</b></div>`);
+      if (a.battery_w != null) {
+        const dir = a.battery_w > 100 ? 'charge' : a.battery_w < -100 ? 'discharge' : 'idle';
+        lines.push(`<div class="tip-row"><span>Battery</span><b>${(a.battery_w / 1000).toFixed(1)} kW (${dir})</b></div>`);
+      }
+      if (a.grid_w != null) {
+        const gdir = a.grid_w > 0 ? 'import' : 'export';
+        lines.push(`<div class="tip-row"><span>Grid</span><b>${(Math.abs(a.grid_w) / 1000).toFixed(1)} kW ${gdir}</b></div>`);
+      }
+      if (a.soc_pct != null) lines.push(`<div class="tip-row"><span>SoC (end)</span><b>${a.soc_pct.toFixed(0)}%</b></div>`);
+      if (a.reason) lines.push(`<div class="tip-reason">${a.reason}</div>`);
+      tip.innerHTML = lines.join('');
+      tip.style.left = (e.clientX + 14) + 'px';
+      tip.style.top = (e.clientY + 14) + 'px';
+      tip.style.display = 'block';
+    });
+    canvas.addEventListener('mouseleave', function () { tip.style.display = 'none'; });
+  }
+
+  // Strategy explanation — surfaces one-sentence logic for the current mode.
+  const STRATEGY_DESC = {
+    planner_self: 'Self-consumption. Battery only covers local load or absorbs PV surplus. Never imports to charge, never exports via the battery. Safest mode.',
+    planner_cheap: 'Cheap charging. Plans to import during the cheapest upcoming hours to top up the battery, still never exports via the battery. Good when export tariffs are low.',
+    planner_arbitrage: 'Arbitrage. Full freedom: charges in the cheapest slots, discharges into the most expensive slots (including exporting). Biggest savings on volatile days; pays attention to battery efficiency + SoC bounds.',
+    self_consumption: 'Manual self-consumption. Simple PI tracks grid-target = 0; no planning.',
+    peak_shaving: 'Manual peak shaving. Limits grid import to the peak-limit setting.',
+    charge: 'Manual full charge — forces the battery to charge regardless of price.',
+    idle: 'Battery idle — no dispatch.',
+  };
+  function renderStrategyHint() {
+    fetch('/api/status')
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        const el = document.getElementById('strategy-hint');
+        if (!el) return;
+        el.textContent = STRATEGY_DESC[d.mode] || '';
+      })
+      .catch(function () {});
+  }
+
   function init() {
     fetchAll();
+    setupHover();
+    renderStrategyHint();
     setInterval(fetchAll, PLAN_REFRESH_MS);
+    setInterval(renderStrategyHint, 5000);
     window.addEventListener('resize', render);
     const btn = document.getElementById('plan-replan');
     if (btn) btn.addEventListener('click', replan);

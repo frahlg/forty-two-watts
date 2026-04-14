@@ -66,17 +66,69 @@ type ZoneModel struct {
 	FittedAt int64             `json:"fitted_at"`
 }
 
-// NewZoneModel with neutral defaults. Bucket starts at the bidding-zone's
-// long-term typical spot (a safe middle value until we fit real data).
+// NewZoneModel with a baked-in typical-Nordic hour-of-week prior so the
+// model is useful before any real history has been fitted. Shape:
+//
+//   - morning ramp 06:00–09:00 peaking around 08:00
+//   - midday trough 11:00–14:00 (solar flood, industrial slack)
+//   - evening peak 17:00–20:00 peaking around 19:00
+//   - overnight baseline 00:00–05:00
+//
+// Weekend hours are ~15% lower during peaks (less industrial demand).
+// Level is zone-dependent but grossly similar for SE1–SE4 / NO / DK.
+// Overridden the moment real data is fitted.
 func NewZoneModel(zone string) *ZoneModel {
 	m := &ZoneModel{Zone: zone, Alpha: 0.15}
-	// 80 öre/kWh is a reasonable pre-2022 baseline for Nordic spot.
-	for i := 0; i < Buckets; i++ {
-		m.Bucket[i] = 80
+	// Base level in öre/kWh — post-2022 long-term typical.
+	base := 60.0
+	switch zone {
+	case "SE3", "SE4", "DK1", "DK2", "DE":
+		base = 80
+	case "NO2", "FI":
+		base = 70
+	case "SE1", "SE2", "NO1", "NO3", "NO4":
+		base = 50
+	}
+	for d := 0; d < 7; d++ {
+		isWeekend := d >= 5
+		for h := 0; h < 24; h++ {
+			shape := 1.0
+			// Shape factor: typical day-ahead curve.
+			switch {
+			case h >= 7 && h <= 9:
+				shape = 1.6 // morning peak
+			case h >= 17 && h <= 20:
+				shape = 1.85 // evening peak
+			case h >= 11 && h <= 14:
+				shape = 0.55 // midday dip
+			case h >= 0 && h <= 5:
+				shape = 0.65 // overnight baseline
+			case h == 6 || h == 10:
+				shape = 1.15 // ramp
+			case h == 15 || h == 16:
+				shape = 1.05 // afternoon
+			case h >= 21 && h <= 23:
+				shape = 1.1 // late evening
+			}
+			if isWeekend {
+				shape = 0.85 + 0.15*(shape-0.85) // blend toward base
+			}
+			m.Bucket[d*24+h] = base * shape
+			// Seed counts = MinTrustSamples so Predict() fully trusts
+			// the baked pattern from the first call. FitFromHistory
+			// replaces these outright once real data arrives.
+			m.Counts[d*24+h] = MinTrustSamples
+		}
 	}
 	for i := 0; i < 12; i++ {
 		m.Month[i] = 1.0
 	}
+	// Seasonal modifier — winter dearer, summer cheaper.
+	seasonal := [12]float64{
+		1.35, 1.30, 1.10, 0.95, 0.85, 0.75,
+		0.70, 0.75, 0.90, 1.05, 1.20, 1.40,
+	}
+	m.Month = seasonal
 	return m
 }
 

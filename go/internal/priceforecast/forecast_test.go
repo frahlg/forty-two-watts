@@ -10,13 +10,27 @@ import (
 	"github.com/frahlg/forty-two-watts/go/internal/state"
 )
 
-func TestFreshModelReturnsNeutralPrior(t *testing.T) {
+func TestFreshModelHasSensibleCurve(t *testing.T) {
+	// Untrained model returns baked-in typical Nordic pattern:
+	// midday trough, morning + evening peaks. Tests shape, not exact values.
 	m := NewZoneModel("SE3")
-	// Arbitrary time — fresh model has all buckets at 80, month modifier 1.
-	t0 := time.Date(2026, 6, 15, 14, 0, 0, 0, time.UTC)
-	got := m.Predict(t0)
-	if got != 80 {
-		t.Errorf("fresh model should return 80, got %f", got)
+	midday := time.Date(2026, 6, 15, 13, 0, 0, 0, time.UTC)
+	evening := time.Date(2026, 6, 15, 19, 0, 0, 0, time.UTC)
+	overnight := time.Date(2026, 6, 15, 3, 0, 0, 0, time.UTC)
+	pm := m.Predict(midday)
+	pe := m.Predict(evening)
+	po := m.Predict(overnight)
+	if !(pe > pm) {
+		t.Errorf("evening (%.1f) should exceed midday (%.1f)", pe, pm)
+	}
+	if !(pm < po) {
+		t.Errorf("midday (%.1f) should be below overnight (%.1f) due to solar flood", pm, po)
+	}
+	// Winter vs summer seasonality
+	wintr := time.Date(2026, 1, 15, 19, 0, 0, 0, time.UTC)
+	smrEv := time.Date(2026, 7, 15, 19, 0, 0, 0, time.UTC)
+	if !(m.Predict(wintr) > m.Predict(smrEv)) {
+		t.Errorf("winter (%.1f) should exceed summer (%.1f)", m.Predict(wintr), m.Predict(smrEv))
 	}
 }
 

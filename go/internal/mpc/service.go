@@ -68,7 +68,7 @@ func New(st *state.Store, tl *telemetry.Store, zone string, p Params) *Service {
 		Tele:     tl,
 		Zone:     zone,
 		Defaults: p,
-		Horizon:  24 * time.Hour,
+		Horizon:  48 * time.Hour, // always plan 48h — forecaster fills beyond day-ahead
 		Interval: 15 * time.Minute,
 		stop:     make(chan struct{}),
 		done:     make(chan struct{}),
@@ -329,12 +329,20 @@ func buildSlots(prices []state.PricePoint, forecasts []state.ForecastPoint, base
 		if load != nil {
 			loadW = load(slotT)
 		}
+		// Confidence from the price source: real day-ahead → 1.0,
+		// ML-forecasted → 0.6 (user-tunable hook for later). Anything
+		// else (seed data, ENTSOE, elprisetjustnu) → 1.0 too.
+		conf := 1.0
+		if pr.Source == "forecast" {
+			conf = 0.6
+		}
 		out = append(out, Slot{
-			StartMs:  pr.SlotTsMs,
-			LenMin:   slotLen,
-			PriceOre: pr.TotalOreKwh,
-			PVW:      -math.Abs(pvW), // PV pushes in → negative (site sign)
-			LoadW:    loadW,
+			StartMs:    pr.SlotTsMs,
+			LenMin:     slotLen,
+			PriceOre:   pr.TotalOreKwh,
+			PVW:        -math.Abs(pvW),
+			LoadW:      loadW,
+			Confidence: conf,
 		})
 	}
 	return out

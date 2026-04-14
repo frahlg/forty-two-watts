@@ -65,6 +65,13 @@ type Slot struct {
 	PriceOre float64 // total consumer öre/kWh (incl. grid + VAT) — used for IMPORT cost
 	PVW      float64 // negative (site sign). 0 if no forecast.
 	LoadW    float64 // positive (site sign). Defaults to a flat baseline.
+
+	// Confidence in [0, 1]. 1.0 = real day-ahead price; < 1.0 = ML-
+	// forecasted price where we're less sure of both level and shape.
+	// The DP blends low-confidence prices toward the horizon mean so
+	// the planner doesn't over-commit to uncertain spikes. Defaults to
+	// 1.0 when callers leave it zero.
+	Confidence float64
 }
 
 // Params bounds the optimization. All fields are required.
@@ -106,10 +113,12 @@ type Action struct {
 	PriceOre    float64 `json:"price_ore"`
 	PVW         float64 `json:"pv_w"`
 	LoadW       float64 `json:"load_w"`
-	BatteryW    float64 `json:"battery_w"` // decision (site sign, AC terminals)
-	GridW       float64 `json:"grid_w"`    // resulting grid power
-	SoCPct      float64 `json:"soc_pct"`   // SoC at END of slot
-	CostOre     float64 `json:"cost_ore"`  // this slot's cost (öre). Negative = revenue.
+	BatteryW    float64 `json:"battery_w"`  // decision (site sign, AC terminals)
+	GridW       float64 `json:"grid_w"`     // resulting grid power
+	SoCPct      float64 `json:"soc_pct"`    // SoC at END of slot
+	CostOre     float64 `json:"cost_ore"`   // this slot's cost (öre). Negative = revenue.
+	Confidence  float64 `json:"confidence"` // 1.0 real, <1.0 forecasted (UI uses this to style)
+	Reason      string  `json:"reason"`     // short human-readable explanation
 }
 
 // Plan is the output.
@@ -154,6 +163,24 @@ func Optimize(slots []Slot, p Params) Plan {
 
 	socStep := (p.SoCMaxPct - p.SoCMinPct) / float64(S-1)
 	socAt := func(i int) float64 { return p.SoCMinPct + float64(i)*socStep }
+
+	// Confidence handling: compute the horizon mean (real + forecast)
+	// so we can blend low-confidence prices toward it. Default any
+	// missing confidence to 1.0 (treat caller-unaware slots as "real").
+	var sumPrice float64
+	for i := range slots {
+		if slots[i].Confidence <= 0 {
+			slots[i].Confidence = 1.0
+		}
+		sumPrice += slots[i].PriceOre
+	}
+	meanPrice := sumPrice / float64(N)
+	// effPrice(slot) = c × raw + (1 − c) × mean. c=1 → raw; c<1 pulls
+	// toward horizon mean, dampening arbitrage the DP sees on shaky
+	// forecasted slots without hiding them entirely.
+	effPrice := func(s Slot) float64 {
+		return s.Confidence*s.PriceOre + (1-s.Confidence)*meanPrice
+	}
 
 	// Action grid spans −MaxDischargeW … +MaxChargeW. Forcing an odd
 	// ActionLevels puts 0 exactly at the midpoint.
@@ -215,13 +242,23 @@ func Optimize(slots []Slot, p Params) Plan {
 				}
 
 				// Per-slot cost in öre. Import cost at consumer price;
-				// export revenue at ExportOrePerKWh (may be 0).
+				// export revenue at ExportOrePerKWh (may be 0). Both
+				// sides use confidence-blended price so forecasted
+				// slots nudge less aggressively.
 				gridKWh := gridW * dtH / 1000.0
+				ep := effPrice(slot)
 				var cost float64
 				if gridKWh > 0 {
-					cost = slot.PriceOre * gridKWh
+					cost = ep * gridKWh
 				} else {
-					cost = -p.ExportOrePerKWh * (-gridKWh) // revenue → negative cost
+					exportOre := p.ExportOrePerKWh
+					// When price is blended lower-confidence, shrink
+					// export revenue too so we don't over-commit to
+					// selling into a forecasted peak.
+					if slot.Confidence < 1 {
+						exportOre = slot.Confidence*p.ExportOrePerKWh + (1-slot.Confidence)*meanPrice*0.7
+					}
+					cost = -exportOre * (-gridKWh)
 				}
 
 				// Next SoC index: linear interpolation between floor/ceil.
@@ -286,6 +323,10 @@ func Optimize(slots []Slot, p Params) Plan {
 		}
 		gridW := slot.LoadW + slot.PVW + actW
 		gridKWh := gridW * dtH / 1000.0
+		// Report the ACTUAL expected cost using the raw (un-blended)
+		// price, not the effective-blended price. The UI summary
+		// reflects "what we'd actually pay if prices hold" — the
+		// blending only affects the decision, not the reported impact.
 		var cost float64
 		if gridKWh > 0 {
 			cost = slot.PriceOre * gridKWh
@@ -297,12 +338,14 @@ func Optimize(slots []Slot, p Params) Plan {
 			SlotStartMs: slot.StartMs,
 			SlotLenMin:  slot.LenMin,
 			PriceOre:    slot.PriceOre,
+			Confidence:  slot.Confidence,
 			PVW:         slot.PVW,
 			LoadW:       slot.LoadW,
 			BatteryW:    actW,
 			GridW:       gridW,
 			SoCPct:      soc2,
 			CostOre:     cost,
+			Reason:      reasonFor(slot, actW, meanPrice),
 		})
 		soc = soc2
 		fIdx = (soc - p.SoCMinPct) / socStep
@@ -352,5 +395,41 @@ func modeAllows(m Mode, baselineGridW, gridW, actW float64) bool {
 		return true
 	default:
 		return true
+	}
+}
+
+// reasonFor returns a short human-readable explanation of the planner's
+// decision for a single slot. The UI surfaces this on hover so operators
+// can see *why* the battery is (dis)charging — explainable AI at the
+// level it actually helps: per-decision.
+func reasonFor(s Slot, batteryW, meanPrice float64) string {
+	baseline := s.LoadW + s.PVW // what grid would see with no battery
+	const chargeThresh = 100.0
+	priceTag := ""
+	if s.Confidence < 1.0 {
+		priceTag = " (predicted)"
+	}
+	switch {
+	case batteryW > chargeThresh && baseline < -chargeThresh:
+		// Exporting baseline, battery charging → absorbing PV surplus.
+		return "absorb PV surplus" + priceTag
+	case batteryW > chargeThresh && s.PriceOre < meanPrice*0.9:
+		return "charge — price below horizon mean" + priceTag
+	case batteryW > chargeThresh:
+		return "charge" + priceTag
+	case batteryW < -chargeThresh && baseline > chargeThresh:
+		return "discharge — cover local load" + priceTag
+	case batteryW < -chargeThresh && s.PriceOre > meanPrice*1.1:
+		return "discharge — price above horizon mean" + priceTag
+	case batteryW < -chargeThresh:
+		return "discharge" + priceTag
+	default:
+		if baseline > chargeThresh {
+			return "idle — import to cover load" + priceTag
+		}
+		if baseline < -chargeThresh {
+			return "idle — export PV surplus" + priceTag
+		}
+		return "idle" + priceTag
 	}
 }
