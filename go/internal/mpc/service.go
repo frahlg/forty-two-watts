@@ -21,6 +21,12 @@ type PVPredictor func(t time.Time, cloudPct float64) float64
 // *loadmodel.Service.Predict. Leave nil to fall back to Service.BaseLoad.
 type LoadPredictor func(t time.Time) float64
 
+// PricePredictor fills in spot price for future slots that the day-ahead
+// source hasn't published yet. Implemented by
+// *priceforecast.Service.Predict. Returns ÖRE/kWh spot (no tariff/VAT).
+// Leave nil to cap the plan horizon at what's been published.
+type PricePredictor func(zone string, t time.Time) float64
+
 // Service wires the optimizer to the rest of the stack: pulls prices +
 // forecast from the SQLite store, reads current SoC from the telemetry
 // store, and re-plans on a ticker. The latest plan is cached.
@@ -31,13 +37,20 @@ type Service struct {
 	BaseLoad float64 // baseline household load (W). 0 disables load assumption.
 	Horizon  time.Duration
 	Interval time.Duration
-	PV   PVPredictor   // optional — overrides stored pv_w_estimated
-	Load LoadPredictor // optional — overrides flat BaseLoad
+	PV    PVPredictor    // optional — overrides stored pv_w_estimated
+	Load  LoadPredictor  // optional — overrides flat BaseLoad
+	Price PricePredictor // optional — fills in future slots when day-ahead isn't published yet
 
 	// ExportBonusOreKwh and ExportFeeOreKwh flow in from config.Price.
 	// Used to compute default ExportOrePerKWh when Params doesn't set it.
 	ExportBonusOreKwh float64
 	ExportFeeOreKwh   float64
+
+	// GridTariffOreKwh and VATPercent let the MPC turn forecast spot
+	// prices into consumer-total prices when back-filling future slots
+	// using s.Price. Mirrors prices.Applier semantics.
+	GridTariffOreKwh float64
+	VATPercent       float64
 
 	Defaults Params
 
@@ -166,6 +179,15 @@ func (s *Service) replan(_ context.Context) *Plan {
 		slog.Warn("mpc: load prices", "err", err)
 		return nil
 	}
+	// Extend prices into the horizon using the learned forecast when
+	// the day-ahead source hasn't published that far yet. Otherwise
+	// the plan silently truncates the moment we pass the published
+	// cutoff — operators lose overnight planning exactly when they'd
+	// most want it.
+	if s.Price != nil {
+		prices = extendPricesWithForecast(prices, s.Zone, s.Price,
+			now.UnixMilli(), untilMs, s.GridTariffOreKwh, s.VATPercent)
+	}
 	if len(prices) == 0 {
 		slog.Info("mpc: no prices available yet")
 		return nil
@@ -223,6 +245,56 @@ func (s *Service) replan(_ context.Context) *Plan {
 		"soc_start", p.InitialSoCPct,
 		"cost_ore", plan.TotalCostOre)
 	return &plan
+}
+
+// extendPricesWithForecast appends synthesized price rows for slots between
+// the last published price and `untilMs`, using the learned predictor.
+// Synthesized rows are tagged `source="forecast"` so the UI can distinguish
+// them visually.
+func extendPricesWithForecast(prices []state.PricePoint, zone string, pricer PricePredictor, nowMs, untilMs int64, gridTariff, vatPct float64) []state.PricePoint {
+	// Find the latest published slot end.
+	var latestEndMs int64
+	slotLen := 60
+	for _, p := range prices {
+		sl := p.SlotLenMin
+		if sl <= 0 {
+			sl = 60
+		}
+		end := p.SlotTsMs + int64(sl)*60*1000
+		if end > latestEndMs {
+			latestEndMs = end
+		}
+		if sl > 0 {
+			slotLen = sl
+		}
+	}
+	// If published already covers the horizon, nothing to do.
+	if latestEndMs >= untilMs {
+		return prices
+	}
+	// Start synthesizing from the later of (latestEndMs, nowMs).
+	start := latestEndMs
+	if start < nowMs {
+		start = nowMs
+	}
+	// Round down to the slotLen grid.
+	mod := start % (int64(slotLen) * 60 * 1000)
+	start -= mod
+	for ts := start; ts < untilMs; ts += int64(slotLen) * 60 * 1000 {
+		t := time.UnixMilli(ts)
+		spot := pricer(zone, t)
+		total := (spot + gridTariff) * (1 + vatPct/100.0)
+		prices = append(prices, state.PricePoint{
+			Zone:        zone,
+			SlotTsMs:    ts,
+			SlotLenMin:  slotLen,
+			SpotOreKwh:  spot,
+			TotalOreKwh: total,
+			Source:      "forecast",
+			FetchedAtMs: nowMs,
+		})
+	}
+	return prices
 }
 
 // buildSlots joins price rows with forecast rows by start time. Prices drive

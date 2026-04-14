@@ -32,6 +32,7 @@ import (
 	mqttcli "github.com/frahlg/forty-two-watts/go/internal/mqtt"
 	modbuscli "github.com/frahlg/forty-two-watts/go/internal/modbus"
 	"github.com/frahlg/forty-two-watts/go/internal/mpc"
+	"github.com/frahlg/forty-two-watts/go/internal/priceforecast"
 	"github.com/frahlg/forty-two-watts/go/internal/prices"
 	"github.com/frahlg/forty-two-watts/go/internal/pvmodel"
 	"github.com/frahlg/forty-two-watts/go/internal/selftune"
@@ -177,6 +178,26 @@ func main() {
 	defer fxSvc.Stop()
 
 	priceSvc := prices.FromConfig(cfg.Price, st, fxSvc)
+
+	// ---- Price forecaster (fills in beyond day-ahead publication) ----
+	zones := []string{"SE3"}
+	if cfg.Price != nil && cfg.Price.Zone != "" {
+		zones = []string{cfg.Price.Zone}
+	}
+	priceFc := priceforecast.NewService(st, zones)
+	// Optional: seed from bundled CSV on first boot. Idempotent so safe
+	// to call every boot — no-op once data is already in the store.
+	seedPath := filepath.Join(filepath.Dir(*configPath), "seed", "prices.csv")
+	if _, err := os.Stat(seedPath); err == nil {
+		n, err := priceFc.SeedFromCSV(seedPath)
+		if err != nil {
+			slog.Warn("priceforecast seed failed", "path", seedPath, "err", err)
+		} else if n > 0 {
+			slog.Info("priceforecast seeded", "rows", n, "path", seedPath)
+		}
+	}
+	priceFc.Start(ctx)
+	defer priceFc.Stop()
 	if priceSvc != nil {
 		priceSvc.Start(ctx)
 		defer priceSvc.Stop()
@@ -284,9 +305,12 @@ func main() {
 			mpcSvc.PV = pvSvc.Predict
 		}
 		mpcSvc.Load = loadSvc.Predict
+		mpcSvc.Price = priceFc.Predict
 		if cfg.Price != nil {
 			mpcSvc.ExportBonusOreKwh = cfg.Price.ExportBonusOreKwh
 			mpcSvc.ExportFeeOreKwh = cfg.Price.ExportFeeOreKwh
+			mpcSvc.GridTariffOreKwh = cfg.Price.GridTariffOreKwh
+			mpcSvc.VATPercent = cfg.Price.VATPercent
 		}
 		mpcSvc.Start(ctx)
 		defer mpcSvc.Stop()
