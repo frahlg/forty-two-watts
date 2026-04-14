@@ -1,0 +1,378 @@
+package control
+
+import (
+	"math"
+	"testing"
+	"time"
+
+	"github.com/frahlg/forty-two-watts/go/internal/telemetry"
+)
+
+// ---- PI controller ----
+
+func TestPIProducesNegativeOutputWhenGridAboveTarget(t *testing.T) {
+	p := NewPI(0.5, 0.1, 3000, 10000)
+	p.Setpoint = 0
+	// grid = +2000 (too much import)
+	out := p.Update(2000)
+	if out.Output >= 0 {
+		t.Errorf("expected negative correction (→ more discharge), got %f", out.Output)
+	}
+	if out.Error != -2000 {
+		t.Errorf("error should be setpoint-measurement = -2000, got %f", out.Error)
+	}
+}
+
+func TestPIIntegralClampsAtLimit(t *testing.T) {
+	p := NewPI(0, 100, 500, 10000) // only integral term, small limit
+	p.Setpoint = 0
+	// Feed a persistent error far beyond limit
+	for i := 0; i < 100; i++ {
+		p.Update(1000)
+	}
+	out := p.Update(1000)
+	if math.Abs(out.I) > 500.0001 {
+		t.Errorf("integral should be clamped to ±500, got %f", out.I)
+	}
+}
+
+func TestPIReset(t *testing.T) {
+	p := NewPI(0.5, 0.1, 3000, 10000)
+	p.Setpoint = 0
+	for i := 0; i < 10; i++ {
+		p.Update(500)
+	}
+	p.Reset()
+	out := p.Update(0)
+	if out.I != 0 {
+		t.Errorf("integral should be 0 after reset, got %f", out.I)
+	}
+}
+
+// ---- Dispatch tests ----
+
+// helper: build a store with one site meter + N batteries at given SoC
+func seedStore(gridW float64, batteries []struct {
+	name    string
+	currentW, soc float64
+}) *telemetry.Store {
+	s := telemetry.NewStore()
+	s.Update("ferroamp", telemetry.DerMeter, gridW, nil, nil)
+	s.DriverHealthMut("ferroamp").RecordSuccess()
+	for _, b := range batteries {
+		soc := b.soc
+		s.Update(b.name, telemetry.DerBattery, b.currentW, &soc, nil)
+		s.DriverHealthMut(b.name).RecordSuccess()
+	}
+	return s
+}
+
+func caps(items map[string]float64) map[string]float64 { return items }
+
+func TestIdleModeReturnsNothing(t *testing.T) {
+	store := seedStore(2000, []struct{ name string; currentW, soc float64 }{
+		{"ferroamp", 0, 0.5},
+	})
+	st := NewState(0, 50, "ferroamp")
+	st.Mode = ModeIdle
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 0 {
+		t.Errorf("idle should dispatch nothing, got %d", len(targets))
+	}
+}
+
+func TestChargeModeForcesAllBatteriesPositive5kW(t *testing.T) {
+	store := seedStore(0, []struct{ name string; currentW, soc float64 }{
+		{"ferroamp", 0, 0.5},
+		{"sungrow", 0, 0.5},
+	})
+	st := NewState(0, 50, "ferroamp")
+	st.Mode = ModeCharge
+	targets := ComputeDispatch(store, st,
+		caps(map[string]float64{"ferroamp": 15200, "sungrow": 9600}), 11040)
+	if len(targets) != 2 {
+		t.Fatalf("expected 2 targets, got %d", len(targets))
+	}
+	for _, tg := range targets {
+		if tg.TargetW != 5000 {
+			t.Errorf("charge mode should set +5000, got %f", tg.TargetW)
+		}
+	}
+}
+
+func TestDeadbandSkipsWithinTolerance(t *testing.T) {
+	store := seedStore(30, []struct{ name string; currentW, soc float64 }{
+		{"ferroamp", 0, 0.5},
+	})
+	st := NewState(0, 50, "ferroamp") // tolerance 50W, error 30W → skip
+	st.Mode = ModeSelfConsumption
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 0 {
+		t.Errorf("within deadband should return nothing, got %d", len(targets))
+	}
+}
+
+func TestSelfConsumptionDischargesOnImport(t *testing.T) {
+	// grid = +1000 (importing too much) → want battery to discharge (negative target)
+	store := seedStore(1000, []struct{ name string; currentW, soc float64 }{
+		{"ferroamp", 0, 0.5},
+	})
+	st := NewState(0, 50, "ferroamp")
+	st.Mode = ModeSelfConsumption
+	st.SlewRateW = 100000 // big so slew doesn't interfere
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("expected 1 target")
+	}
+	if targets[0].TargetW >= 0 {
+		t.Errorf("site convention: importing should lead to NEGATIVE (discharge) target, got %f",
+			targets[0].TargetW)
+	}
+}
+
+func TestSelfConsumptionChargesOnExport(t *testing.T) {
+	// grid = -2000 (exporting) → want battery to charge (positive target)
+	store := seedStore(-2000, []struct{ name string; currentW, soc float64 }{
+		{"ferroamp", 0, 0.5},
+	})
+	st := NewState(0, 50, "ferroamp")
+	st.Mode = ModeSelfConsumption
+	st.SlewRateW = 100000
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 { t.Fatal("expected 1 target") }
+	if targets[0].TargetW <= 0 {
+		t.Errorf("exporting should lead to POSITIVE (charge) target, got %f", targets[0].TargetW)
+	}
+}
+
+func TestProportionalSplitByCapacity(t *testing.T) {
+	bats := []batteryInfo{
+		{driver: "big", capacityWh: 15000, currentW: 0, soc: 0.5, online: true},
+		{driver: "small", capacityWh: 5000, currentW: 0, soc: 0.5, online: true},
+	}
+	targets := distributeProportional(bats, -1000) // want -1000W total discharge
+	var big, small float64
+	for _, tg := range targets {
+		if tg.Driver == "big" { big = tg.TargetW }
+		if tg.Driver == "small" { small = tg.TargetW }
+	}
+	// Big is 75%, small 25% → big = -750, small = -250
+	if math.Abs(big+750) > 1 { t.Errorf("big got %f, want -750", big) }
+	if math.Abs(small+250) > 1 { t.Errorf("small got %f, want -250", small) }
+}
+
+func TestProportionalUsesTotalDesired(t *testing.T) {
+	// Both batteries currently at +500 (charging). Correction -200 means "reduce charging".
+	// Expected: both end up at +400 each (half of +800 total desired).
+	bats := []batteryInfo{
+		{driver: "a", capacityWh: 10000, currentW: 500, soc: 0.5, online: true},
+		{driver: "b", capacityWh: 10000, currentW: 500, soc: 0.5, online: true},
+	}
+	targets := distributeProportional(bats, -200)
+	for _, tg := range targets {
+		if math.Abs(tg.TargetW-400) > 1 {
+			t.Errorf("%s: got %f, want 400", tg.Driver, tg.TargetW)
+		}
+	}
+}
+
+func TestPriorityDrainsPrimaryFirst(t *testing.T) {
+	bats := []batteryInfo{
+		{driver: "primary", capacityWh: 15000, currentW: 0, soc: 0.5, online: true},
+		{driver: "secondary", capacityWh: 10000, currentW: 0, soc: 0.5, online: true},
+	}
+	// Small correction - primary should take it all
+	targets := distributePriority(bats, -1000, []string{"primary", "secondary"})
+	var p, s float64
+	for _, tg := range targets {
+		if tg.Driver == "primary" { p = tg.TargetW }
+		if tg.Driver == "secondary" { s = tg.TargetW }
+	}
+	if math.Abs(p+1000) > 1 { t.Errorf("primary: got %f, want -1000", p) }
+	if s != 0 { t.Errorf("secondary: got %f, want 0", s) }
+}
+
+func TestPriorityOverflowsToSecondary(t *testing.T) {
+	bats := []batteryInfo{
+		{driver: "primary", capacityWh: 15000, currentW: 0, soc: 0.5, online: true},
+		{driver: "secondary", capacityWh: 10000, currentW: 0, soc: 0.5, online: true},
+	}
+	// Big correction - primary saturates at -5000 (per-command cap), rest spills
+	targets := distributePriority(bats, -7000, []string{"primary", "secondary"})
+	var p, s float64
+	for _, tg := range targets {
+		if tg.Driver == "primary" { p = tg.TargetW }
+		if tg.Driver == "secondary" { s = tg.TargetW }
+	}
+	if p != -5000 { t.Errorf("primary: got %f, want -5000", p) }
+	if math.Abs(s+2000) > 1 { t.Errorf("secondary: got %f, want -2000", s) }
+}
+
+func TestWeightedDistribution(t *testing.T) {
+	bats := []batteryInfo{
+		{driver: "a", capacityWh: 10000, currentW: 0, soc: 0.5, online: true},
+		{driver: "b", capacityWh: 10000, currentW: 0, soc: 0.5, online: true},
+	}
+	weights := map[string]float64{"a": 0.8, "b": 0.2}
+	targets := distributeWeighted(bats, 1000, weights)
+	var a, b float64
+	for _, tg := range targets {
+		if tg.Driver == "a" { a = tg.TargetW }
+		if tg.Driver == "b" { b = tg.TargetW }
+	}
+	if math.Abs(a-800) > 1 { t.Errorf("a: got %f, want 800", a) }
+	if math.Abs(b-200) > 1 { t.Errorf("b: got %f, want 200", b) }
+}
+
+// ---- Clamps ----
+
+func TestClampWithSoCBlocksDischargeWhenEmpty(t *testing.T) {
+	v, was := clampWithSoC(-1000, 0.04)
+	if v != 0 || !was {
+		t.Errorf("SoC<5%%: discharge should be blocked, got %f clamped=%v", v, was)
+	}
+	v, was = clampWithSoC(+1000, 0.04)
+	if v != 1000 || was {
+		t.Error("charge at low SoC should pass through unchanged")
+	}
+}
+
+func TestClampWithSoCCapsAt5kW(t *testing.T) {
+	v, was := clampWithSoC(+7000, 0.5)
+	if v != 5000 || !was { t.Errorf("expected cap at +5000, got %f", v) }
+	v, was = clampWithSoC(-7000, 0.5)
+	if v != -5000 || !was { t.Errorf("expected cap at -5000, got %f", v) }
+}
+
+// ---- Fuse guard ----
+
+func TestFuseGuardScalesDischargeWhenPVHigh(t *testing.T) {
+	s := telemetry.NewStore()
+	s.Update("a", telemetry.DerPV, -8000, nil, nil) // site: PV = -8000 (generating)
+	s.DriverHealthMut("a").RecordSuccess()
+	targets := []DispatchTarget{{Driver: "a", TargetW: -6000}} // 6 kW discharge
+	// PV 8000 + discharge 6000 = 14 kW > 11040 fuse
+	scaled := applyFuseGuard(targets, s, 11040)
+	if !scaled[0].Clamped {
+		t.Error("expected clamped=true")
+	}
+	expected := -6000.0 * (11040.0 / 14000.0)
+	if math.Abs(scaled[0].TargetW-expected) > 1 {
+		t.Errorf("expected ~%.0f, got %f", expected, scaled[0].TargetW)
+	}
+}
+
+func TestFuseGuardDoesNotScaleCharging(t *testing.T) {
+	s := telemetry.NewStore()
+	s.Update("a", telemetry.DerPV, -12000, nil, nil)
+	targets := []DispatchTarget{{Driver: "a", TargetW: 3000}} // charging
+	scaled := applyFuseGuard(targets, s, 11040)
+	if scaled[0].TargetW != 3000 {
+		t.Error("charging shouldn't be scaled by fuse guard (doesn't add to generation)")
+	}
+}
+
+// ---- Full cycle ----
+
+func TestFullCycleRespondsToTransient(t *testing.T) {
+	store := seedStore(0, []struct{ name string; currentW, soc float64 }{
+		{"ferroamp", 0, 0.5},
+	})
+	st := NewState(0, 50, "ferroamp")
+	st.Mode = ModeSelfConsumption
+	st.SlewRateW = 100000
+	st.MinDispatchIntervalS = 0 // disable holdoff
+
+	// Cycle 1: grid balanced, no action
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 0 {
+		t.Error("balanced grid should not dispatch")
+	}
+
+	// Cycle 2: simulate a load step - grid rises to +1500
+	store.Update("ferroamp", telemetry.DerMeter, 1500, nil, nil)
+	time.Sleep(10 * time.Millisecond) // move past MinDispatchInterval=0
+	targets = ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatal("should dispatch on load step")
+	}
+	if targets[0].TargetW >= 0 {
+		t.Errorf("import → discharge target (negative), got %f", targets[0].TargetW)
+	}
+}
+
+func TestHoldoffBlocksRapidDispatch(t *testing.T) {
+	store := seedStore(2000, []struct{ name string; currentW, soc float64 }{
+		{"ferroamp", 0, 0.5},
+	})
+	st := NewState(0, 50, "ferroamp")
+	st.Mode = ModeSelfConsumption
+	now := time.Now()
+	st.LastDispatch = &now
+	st.MinDispatchIntervalS = 5
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 0 {
+		t.Error("holdoff should block dispatch")
+	}
+}
+
+func TestSetGridTargetUpdatesPI(t *testing.T) {
+	st := NewState(0, 50, "ferroamp")
+	st.SetGridTarget(-500)
+	if st.GridTargetW != -500 { t.Errorf("state: %f", st.GridTargetW) }
+	if st.PI.Setpoint != -500 { t.Errorf("pi setpoint: %f", st.PI.Setpoint) }
+}
+
+func TestEmptyBatteriesReturnsNoTargets(t *testing.T) {
+	store := seedStore(1000, nil)
+	st := NewState(0, 50, "ferroamp")
+	st.Mode = ModeSelfConsumption
+	targets := ComputeDispatch(store, st, caps(map[string]float64{}), 11040)
+	if len(targets) != 0 { t.Error("no batteries → no dispatch") }
+}
+
+func TestPeakShavingNoActionInBand(t *testing.T) {
+	store := seedStore(3000, []struct{ name string; currentW, soc float64 }{
+		{"ferroamp", 0, 0.5},
+	})
+	st := NewState(0, 50, "ferroamp")
+	st.Mode = ModePeakShaving
+	st.PeakLimitW = 5000
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 0 {
+		t.Errorf("within peak band should be no-op, got %d targets", len(targets))
+	}
+}
+
+func TestPeakShavingActsWhenOverLimit(t *testing.T) {
+	store := seedStore(7000, []struct{ name string; currentW, soc float64 }{
+		{"ferroamp", 0, 0.5},
+	})
+	st := NewState(0, 50, "ferroamp")
+	st.Mode = ModePeakShaving
+	st.PeakLimitW = 5000
+	st.SlewRateW = 100000
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) == 0 {
+		t.Error("over peak limit should dispatch")
+	}
+}
+
+func TestEVChargingSignalExcludedFromGrid(t *testing.T) {
+	// Grid = +3000 includes 2500W EV charging. Effective = +500W → within tolerance.
+	store := seedStore(3000, []struct{ name string; currentW, soc float64 }{
+		{"ferroamp", 0, 0.5},
+	})
+	st := NewState(0, 50, "ferroamp")
+	st.Mode = ModeSelfConsumption
+	st.EVChargingW = 2500
+	st.SlewRateW = 100000
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	// Effective grid 500 → beyond 50 band, but small correction expected
+	if len(targets) > 0 {
+		// Allow small dispatch, but verify not trying to cover all 3000W
+		if math.Abs(targets[0].TargetW) > 2000 {
+			t.Errorf("EV-corrected dispatch should be modest, got %f", targets[0].TargetW)
+		}
+	}
+}
