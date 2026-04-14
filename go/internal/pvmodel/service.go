@@ -134,6 +134,7 @@ func (s *Service) sample() {
 	now := time.Now()
 	cs := s.ClearSky(now)
 	if cs < 50 {
+		slog.Debug("pvmodel: skip (night)", "cs", cs)
 		return // night / near-night — no signal
 	}
 	cloud := 50.0 // neutral fallback if no forecast row
@@ -145,7 +146,8 @@ func (s *Service) sample() {
 	// Aggregate PV across all drivers. PV telemetry is stored as
 	// site-sign (negative = generating), so flip to positive.
 	var pvW float64
-	for _, r := range s.Tele.ReadingsByType(telemetry.DerPV) {
+	readings := s.Tele.ReadingsByType(telemetry.DerPV)
+	for _, r := range readings {
 		if r.SmoothedW < 0 {
 			pvW += -r.SmoothedW
 		}
@@ -153,13 +155,17 @@ func (s *Service) sample() {
 	// Guard: if all drivers report 0 when there's meaningful clear-sky,
 	// that's likely a driver outage — skip so we don't learn "0 output".
 	if pvW < 1 {
+		slog.Debug("pvmodel: skip (no PV reading)", "readings", len(readings), "cs", cs)
 		return
 	}
 
 	s.mu.Lock()
 	updated := s.model.Update(cs, cloud, now, pvW)
 	samples := s.model.Samples
+	mae := s.model.MAE
 	s.mu.Unlock()
+
+	slog.Info("pvmodel: sample", "cs_wm2", cs, "cloud_pct", cloud, "pv_w", pvW, "samples", samples, "mae_w", mae, "updated", updated)
 
 	if updated && samples%s.PersistEvery == 0 {
 		s.persist()

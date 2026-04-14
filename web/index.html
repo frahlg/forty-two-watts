@@ -143,57 +143,60 @@
       </div>
     </section>
 
-    <!-- Power Chart -->
-    <section id="chart-section">
-      <div class="chart-header">
-        <h2 id="chart-title">Power</h2>
-        <div class="chart-controls">
-          <div class="view-buttons" id="view-buttons">
-            <button data-view="power" class="active">Power (W)</button>
-            <button data-view="energy">Energy (kWh)</button>
-          </div>
-          <div class="range-buttons" id="range-buttons">
-            <button data-range="5m" class="active">5m</button>
-            <button data-range="15m">15m</button>
-            <button data-range="1h">1h</button>
-            <button data-range="6h">6h</button>
-            <button data-range="24h">24h</button>
-            <button data-range="3d">3d</button>
+    <!-- Live power + plan side-by-side -->
+    <section id="live-plan-row" class="live-plan-row">
+      <!-- Power Chart (left) -->
+      <section id="chart-section">
+        <div class="chart-header">
+          <h2 id="chart-title">Live</h2>
+          <div class="chart-controls">
+            <div class="range-buttons" id="range-buttons">
+              <button data-range="5m" class="active">5m</button>
+              <button data-range="15m">15m</button>
+              <button data-range="1h">1h</button>
+              <button data-range="6h">6h</button>
+              <button data-range="24h">24h</button>
+            </div>
           </div>
         </div>
-      </div>
-      <div class="chart-container">
-        <canvas id="power-chart" width="800" height="220"></canvas>
-      </div>
-      <div class="chart-legend" id="chart-legend">
-        <span class="legend-item"><span class="legend-color" style="background:#ef4444"></span> Grid</span>
-        <span class="legend-item"><span class="legend-color" style="background:#22c55e"></span> PV</span>
-        <span class="legend-item"><span class="legend-color" style="background:#e2e8f0"></span> Load</span>
-        <span class="legend-item"><span class="legend-color" style="background:#f59e0b"></span> Ferroamp</span>
-        <span class="legend-item"><span class="legend-color" style="background:#8b5cf6"></span> Sungrow</span>
-      </div>
-    </section>
+        <div class="chart-container">
+          <canvas id="power-chart" width="800" height="260"></canvas>
+        </div>
+        <div class="chart-legend" id="chart-legend">
+          <span class="legend-item"><span class="legend-color" style="background:#ef4444"></span> Grid</span>
+          <span class="legend-item"><span class="legend-color" style="background:#22c55e"></span> PV</span>
+          <span class="legend-item"><span class="legend-color" style="background:#e2e8f0"></span> Load</span>
+          <span class="legend-item"><span class="legend-color" style="background:#f59e0b"></span> Ferroamp</span>
+          <span class="legend-item"><span class="legend-color" style="background:#8b5cf6"></span> Sungrow</span>
+        </div>
+        <!-- Hidden view toggle kept for app.js compatibility -->
+        <div id="view-buttons" style="display:none">
+          <button data-view="power" class="active"></button>
+          <button data-view="energy"></button>
+        </div>
+      </section>
 
-    <!-- MPC Plan + Prices + Forecast -->
-    <section id="plan-section">
-      <div class="section-header">
-        <h2>Plan — prices, forecast, battery schedule</h2>
-        <div class="plan-actions">
-          <span id="plan-summary" class="plan-summary">…</span>
-          <button id="plan-replan" class="btn-send" title="Force a fresh plan">Replan</button>
+      <!-- MPC Plan (right) -->
+      <section id="plan-section">
+        <div class="chart-header">
+          <h2>Plan</h2>
+          <div class="plan-actions">
+            <span id="plan-summary" class="plan-summary">…</span>
+            <button id="plan-replan" class="btn-send" title="Force a fresh plan">Replan</button>
+          </div>
         </div>
-      </div>
-      <div class="chart-container">
-        <canvas id="plan-chart" width="800" height="260"></canvas>
-      </div>
-      <div class="chart-legend">
-        <span class="legend-item"><span class="legend-color" style="background:rgba(34,197,94,0.55)"></span> Cheap slot</span>
-        <span class="legend-item"><span class="legend-color" style="background:rgba(239,68,68,0.55)"></span> Expensive slot</span>
-        <span class="legend-item"><span class="legend-color" style="background:#22c55e"></span> PV forecast</span>
-        <span class="legend-item"><span class="legend-color" style="background:#f59e0b"></span> Batt charge</span>
-        <span class="legend-item"><span class="legend-color" style="background:#8b5cf6"></span> Batt discharge</span>
-        <span class="legend-item"><span class="legend-color" style="background:#60a5fa"></span> SoC</span>
-      </div>
+        <div class="chart-container">
+          <canvas id="plan-chart" width="800" height="260"></canvas>
+        </div>
+        <div class="chart-legend">
+          <span class="legend-item"><span class="legend-color" style="background:rgba(34,197,94,0.55)"></span> Cheap</span>
+          <span class="legend-item"><span class="legend-color" style="background:rgba(239,68,68,0.55)"></span> Expensive</span>
+          <span class="legend-item"><span class="legend-color" style="background:#22c55e"></span> PV fc</span>
+          <span class="legend-item"><span class="legend-color" style="background:#f59e0b"></span> Charge</span>
+          <span class="legend-item"><span class="legend-color" style="background:#8b5cf6"></span> Discharge</span>
+          <span class="legend-item"><span class="legend-color" style="background:#60a5fa"></span> SoC</span>
+        </div>
+      </section>
     </section>
 
     <!-- Drivers — compact -->

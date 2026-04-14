@@ -245,17 +245,18 @@
 
       case "weather":
         if (!currentConfig.weather) currentConfig.weather = { latitude: 59.3293, longitude: 18.0686 };
-        html = '<fieldset><legend>Weather forecast</legend>' +
+        html = '<fieldset><legend>Weather forecast &amp; PV</legend>' +
           selectField("Provider", "weather.provider", ["met_no", "openweather", "none"], "met_no") +
           '<div class="field-row"><div>' +
           field("Latitude", "weather.latitude", "number", 59.3293) +
           '</div><div>' +
           field("Longitude", "weather.longitude", "number", 18.0686) +
           '</div></div>' +
+          field("PV rated (W)", "weather.pv_rated_w", "number", 10000) +
           field("API key (OpenWeather only)", "weather.api_key", "text", "") +
           '</fieldset>' +
           '<p style="color:var(--text-dim);font-size:0.8rem;margin-top:8px">' +
-          'met.no is free and requires no key. Default location is Stockholm.' +
+          'met.no is free and requires no key. PV rated is your array nameplate (sum of all panels) — seeds the digital-twin prior so day-one PV forecasts are accurate. The twin refines from live telemetry automatically.' +
           '</p>';
         break;
 

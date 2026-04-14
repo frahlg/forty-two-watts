@@ -183,15 +183,20 @@ func main() {
 	}
 
 	// Sum rated PV from all drivers for the forecast estimator
+	// Prefer explicit config; fall back to heuristic if unset.
 	ratedPVW := 0.0
-	for _, d := range cfg.Drivers {
-		if d.BatteryCapacityWh > 0 {
-			// crude: use battery capacity / 3 as rated PV proxy
-			// users should set a real value via cfg.Weather if they care
-			ratedPVW += d.BatteryCapacityWh / 3
+	if cfg.Weather != nil && cfg.Weather.PVRatedW > 0 {
+		ratedPVW = cfg.Weather.PVRatedW
+	} else {
+		for _, d := range cfg.Drivers {
+			if d.BatteryCapacityWh > 0 {
+				ratedPVW += d.BatteryCapacityWh / 3
+			}
+		}
+		if ratedPVW == 0 {
+			ratedPVW = 10000
 		}
 	}
-	if ratedPVW == 0 { ratedPVW = 10000 } // 10 kW default
 	forecastSvc := forecast.FromConfig(cfg.Weather, ratedPVW, st,
 		"forty-two-watts/"+Version+" github.com/frahlg/forty-two-watts")
 	if forecastSvc != nil {
