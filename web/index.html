@@ -109,12 +109,13 @@
       <div class="card control-card">
         <div class="card-label">Mode</div>
         <div class="mode-buttons" id="mode-buttons">
-          <button data-mode="idle">Idle</button>
-          <button data-mode="self_consumption">Self</button>
-          <button data-mode="peak_shaving">Peak</button>
-          <button data-mode="charge">Charge</button>
-          <button data-mode="priority">Prio</button>
-          <button data-mode="weighted">Weighted</button>
+          <button data-mode="idle" title="Do nothing">Idle</button>
+          <button data-mode="self_consumption" title="Manual self-consumption (no plan)">Self</button>
+          <button data-mode="peak_shaving" title="Manual peak shaving">Peak</button>
+          <button data-mode="charge" title="Force full charge">Charge</button>
+          <button data-mode="planner_self" title="Planner — self-consumption (no grid-charge, no export)">Plan·Self</button>
+          <button data-mode="planner_cheap" title="Planner — grid-charge when cheap (no export)">Plan·Cheap</button>
+          <button data-mode="planner_arbitrage" title="Planner — full arbitrage (charge cheap, discharge expensive)">Plan·Arb</button>
         </div>
       </div>
       <div class="card control-card">

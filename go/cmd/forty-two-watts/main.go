@@ -248,6 +248,8 @@ func main() {
 		}
 		mpcSvc.Start(ctx)
 		defer mpcSvc.Stop()
+		// Inject plan → control.State so planner modes can override grid_target.
+		ctrl.PlanTarget = mpcSvc.GridTargetAt
 		slog.Info("mpc planner started",
 			"mode", mpcSvc.Defaults.Mode,
 			"capacity_wh", mpcSvc.Defaults.CapacityWh,

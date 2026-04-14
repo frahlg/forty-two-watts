@@ -67,6 +67,52 @@ func (s *Service) Latest() *Plan {
 	return s.last
 }
 
+// MaxPlanAge is the staleness cutoff. Once a plan's `generated_at_ms`
+// is older than this, we consider it stale and the control loop falls
+// back to self_consumption. Picked to be ~2× the replan interval so a
+// single missed replan doesn't flip us into fallback.
+const MaxPlanAge = 30 * time.Minute
+
+// GridTargetAt returns the plan's grid-power target for the slot
+// containing `now`. Returns (0, false) if the plan is missing, stale,
+// or `now` is outside the plan's horizon.
+//
+// The result is already in site sign convention (+ import, − export).
+func (s *Service) GridTargetAt(now time.Time) (float64, bool) {
+	if s == nil {
+		return 0, false
+	}
+	s.mu.RLock()
+	p := s.last
+	s.mu.RUnlock()
+	if p == nil {
+		return 0, false
+	}
+	if time.Since(time.UnixMilli(p.GeneratedAtMs)) > MaxPlanAge {
+		return 0, false
+	}
+	nowMs := now.UnixMilli()
+	for _, a := range p.Actions {
+		end := a.SlotStartMs + int64(a.SlotLenMin)*60*1000
+		if nowMs >= a.SlotStartMs && nowMs < end {
+			return a.GridW, true
+		}
+	}
+	return 0, false
+}
+
+// SetMode changes the planner's operating mode and forces an immediate
+// replan so the new mode takes effect within one control cycle.
+func (s *Service) SetMode(ctx context.Context, mode Mode) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.Defaults.Mode = mode
+	s.mu.Unlock()
+	s.replan(ctx)
+}
+
 // Start runs the planner in a goroutine. Does an initial plan immediately.
 func (s *Service) Start(ctx context.Context) {
 	if s == nil {

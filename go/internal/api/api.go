@@ -249,6 +249,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{
 		"version":         s.deps.Version,
 		"mode":            ctrl.Mode,
+		"plan_stale":      ctrl.PlanStale,
 		"grid_w":          gridW,
 		"pv_w":            pvW,
 		"bat_w":           batW,
@@ -321,14 +322,30 @@ func (s *Server) handleSetMode(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]string{"error": err.Error()})
 		return
 	}
-	s.deps.CtrlMu.Lock()
-	defer s.deps.CtrlMu.Unlock()
+	m := control.Mode(req.Mode)
 	// Validate mode string
-	switch control.Mode(req.Mode) {
+	switch m {
 	case control.ModeIdle, control.ModeSelfConsumption, control.ModePeakShaving,
-		control.ModeCharge, control.ModePriority, control.ModeWeighted:
-		s.deps.Ctrl.Mode = control.Mode(req.Mode)
+		control.ModeCharge, control.ModePriority, control.ModeWeighted,
+		control.ModePlannerSelf, control.ModePlannerCheap, control.ModePlannerArbitrage:
+		s.deps.CtrlMu.Lock()
+		s.deps.Ctrl.Mode = m
+		s.deps.CtrlMu.Unlock()
 		_ = s.deps.State.SaveConfig("mode", req.Mode)
+		// Propagate to MPC if switching to a planner mode. Map
+		// control.ModePlanner* → mpc.Mode and force an immediate replan.
+		if m.IsPlannerMode() && s.deps.MPC != nil {
+			var mm mpc.Mode
+			switch m {
+			case control.ModePlannerSelf:
+				mm = mpc.ModeSelfConsumption
+			case control.ModePlannerCheap:
+				mm = mpc.ModeCheapCharge
+			case control.ModePlannerArbitrage:
+				mm = mpc.ModeArbitrage
+			}
+			s.deps.MPC.SetMode(r.Context(), mm)
+		}
 		writeJSON(w, 200, map[string]string{"status": "ok", "mode": req.Mode})
 	default:
 		writeJSON(w, 400, map[string]string{"error": "unknown mode: " + req.Mode})

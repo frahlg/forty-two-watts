@@ -17,7 +17,29 @@ const (
 	ModeCharge          Mode = "charge"
 	ModePriority        Mode = "priority"
 	ModeWeighted        Mode = "weighted"
+
+	// Planner modes: control loop pulls GridTargetW from the MPC plan
+	// for the current 15-min slot. If the plan is stale (>30 min) or
+	// missing, we fall back to self_consumption behavior and log.
+	// The three flavors mirror mpc.Mode — the difference is only what
+	// the planner is allowed to do when it builds the plan:
+	//   - planner_self:      no grid-charging, no export discharge
+	//   - planner_cheap:     grid-charge ok, no export discharge
+	//   - planner_arbitrage: full freedom within SoC + power limits
+	ModePlannerSelf      Mode = "planner_self"
+	ModePlannerCheap     Mode = "planner_cheap"
+	ModePlannerArbitrage Mode = "planner_arbitrage"
 )
+
+// IsPlannerMode reports whether the mode is one of the planner modes.
+func (m Mode) IsPlannerMode() bool {
+	return m == ModePlannerSelf || m == ModePlannerCheap || m == ModePlannerArbitrage
+}
+
+// PlanTargetFunc is injected by main.go: given the current time, returns
+// (grid_target_w, ok). When ok=false, the plan is stale/missing and the
+// control loop falls back to self_consumption with grid_target_w = 0.
+type PlanTargetFunc func(now time.Time) (float64, bool)
 
 // DispatchTarget is one command to issue to a single battery driver.
 // `TargetW` is in site sign convention:
@@ -60,6 +82,15 @@ type State struct {
 
 	// Cascade toggle — set by main.go based on whether models exist
 	UseCascade bool
+
+	// PlanTarget is consulted at the top of each control cycle when
+	// Mode is a planner mode. Nil outside planner modes. Injected from
+	// main.go — the control package doesn't need to know about mpc.
+	PlanTarget PlanTargetFunc
+
+	// PlanStale tracks whether the last cycle fell back to self_consumption
+	// because the plan was missing. Surfaced via the API for the UI.
+	PlanStale bool
 }
 
 // NewState creates default control state (port of Rust ControlState::new).
@@ -111,8 +142,38 @@ func ComputeDispatch(
 	driverCapacities map[string]float64,
 	fuseMaxW float64,
 ) []DispatchTarget {
+	// ---- Planner modes: override grid_target from the plan ----
+	// We don't mutate state.Mode — the operator's selected mode is
+	// preserved for display. Once the grid_target is set from the plan,
+	// the rest of this function behaves like self_consumption: PI chases
+	// the target we just set. The downstream switches special-case this
+	// by treating planner modes as self_consumption.
+	if state.Mode.IsPlannerMode() {
+		var target float64
+		ok := false
+		if state.PlanTarget != nil {
+			target, ok = state.PlanTarget(time.Now())
+		}
+		if ok {
+			state.SetGridTarget(target)
+			state.PlanStale = false
+		} else {
+			// Plan missing or stale. Fail-safe: self_consumption with
+			// target=0. Operator sees PlanStale=true.
+			state.SetGridTarget(0)
+			state.PlanStale = true
+		}
+	}
+
+	// effectiveMode collapses planner modes into self_consumption for
+	// the rest of this function. Real state.Mode is untouched.
+	effectiveMode := state.Mode
+	if effectiveMode.IsPlannerMode() {
+		effectiveMode = ModeSelfConsumption
+	}
+
 	// ---- Idle + Charge short-circuits ----
-	switch state.Mode {
+	switch effectiveMode {
 	case ModeIdle:
 		state.LastTargets = nil
 		return nil
@@ -173,7 +234,7 @@ func ComputeDispatch(
 
 	// ---- Compute error based on mode ----
 	var errW float64
-	switch state.Mode {
+	switch effectiveMode {
 	case ModePeakShaving:
 		// Only act when grid import exceeds peak_limit. Allow any amount of
 		// export, allow import up to peak_limit.
@@ -202,7 +263,7 @@ func ComputeDispatch(
 	//
 	// For PeakShaving we feed a slightly different measurement so the same PI works.
 	var piMeasurement float64
-	if state.Mode == ModePeakShaving {
+	if effectiveMode == ModePeakShaving {
 		piMeasurement = state.GridTargetW + errW // puts the bias into the setpoint-error
 	} else {
 		piMeasurement = gridW
@@ -212,7 +273,7 @@ func ComputeDispatch(
 
 	// ---- Distribute across batteries ----
 	var raw []DispatchTarget
-	switch state.Mode {
+	switch effectiveMode {
 	case ModeSelfConsumption, ModePeakShaving:
 		raw = distributeProportional(onlineBats, totalCorrection)
 	case ModePriority:
