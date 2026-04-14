@@ -24,7 +24,23 @@ type Config struct {
 	State         *StateConf         `yaml:"state,omitempty"`
 	Price         *Price             `yaml:"price,omitempty"`
 	Weather       *Weather           `yaml:"weather,omitempty"`
+	Planner       *Planner           `yaml:"planner,omitempty"`
 	Batteries     map[string]Battery `yaml:"batteries,omitempty"`
+}
+
+// Planner configures the MPC scheduler (optional — disabled if omitted).
+// Mode: "self_consumption" (default) | "cheap_charge" | "arbitrage".
+type Planner struct {
+	Enabled             bool    `yaml:"enabled"`
+	Mode                string  `yaml:"mode,omitempty"`
+	BaseLoadW           float64 `yaml:"base_load_w,omitempty"`
+	HorizonHours        int     `yaml:"horizon_hours,omitempty"`
+	IntervalMin         int     `yaml:"interval_min,omitempty"`
+	SoCMinPct           float64 `yaml:"soc_min_pct,omitempty"`
+	SoCMaxPct           float64 `yaml:"soc_max_pct,omitempty"`
+	ChargeEfficiency    float64 `yaml:"charge_efficiency,omitempty"`
+	DischargeEfficiency float64 `yaml:"discharge_efficiency,omitempty"`
+	ExportOrePerKWh     float64 `yaml:"export_ore_per_kwh,omitempty"` // 0 = use mean spot
 }
 
 // Site is the top-level control loop config.

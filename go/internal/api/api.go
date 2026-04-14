@@ -23,6 +23,7 @@ import (
 	"github.com/frahlg/forty-two-watts/go/internal/config"
 	"github.com/frahlg/forty-two-watts/go/internal/control"
 	"github.com/frahlg/forty-two-watts/go/internal/forecast"
+	"github.com/frahlg/forty-two-watts/go/internal/mpc"
 	"github.com/frahlg/forty-two-watts/go/internal/prices"
 	"github.com/frahlg/forty-two-watts/go/internal/selftune"
 	"github.com/frahlg/forty-two-watts/go/internal/state"
@@ -52,6 +53,9 @@ type Deps struct {
 	// Optional: spot prices + weather forecast services. Nil if disabled.
 	Prices   *prices.Service
 	Forecast *forecast.Service
+
+	// Optional: MPC planner. Nil if disabled.
+	MPC *mpc.Service
 
 	Version string
 }
@@ -95,6 +99,8 @@ func (s *Server) routes() {
 	s.handle("GET  /api/history",             s.handleHistory)
 	s.handle("GET  /api/prices",              s.handlePrices)
 	s.handle("GET  /api/forecast",            s.handleForecast)
+	s.handle("GET  /api/mpc/plan",            s.handleMPCPlan)
+	s.handle("POST /api/mpc/replan",          s.handleMPCReplan)
 
 	// ---- Static web UI ----
 	// Everything not matched above falls through to the static server.
@@ -599,6 +605,30 @@ func (s *Server) handleForecast(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{"items": rows, "enabled": true})
+}
+
+// ---- MPC planner ----
+
+func (s *Server) handleMPCPlan(w http.ResponseWriter, r *http.Request) {
+	if s.deps.MPC == nil {
+		writeJSON(w, 200, map[string]any{"enabled": false})
+		return
+	}
+	plan := s.deps.MPC.Latest()
+	if plan == nil {
+		writeJSON(w, 200, map[string]any{"enabled": true, "plan": nil})
+		return
+	}
+	writeJSON(w, 200, map[string]any{"enabled": true, "plan": plan})
+}
+
+func (s *Server) handleMPCReplan(w http.ResponseWriter, r *http.Request) {
+	if s.deps.MPC == nil {
+		writeJSON(w, 400, map[string]string{"error": "mpc disabled"})
+		return
+	}
+	plan := s.deps.MPC.Replan(r.Context())
+	writeJSON(w, 200, map[string]any{"enabled": true, "plan": plan})
 }
 
 // ---- static ----

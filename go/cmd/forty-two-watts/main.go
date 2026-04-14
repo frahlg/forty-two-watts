@@ -29,6 +29,7 @@ import (
 	"github.com/frahlg/forty-two-watts/go/internal/ha"
 	mqttcli "github.com/frahlg/forty-two-watts/go/internal/mqtt"
 	modbuscli "github.com/frahlg/forty-two-watts/go/internal/modbus"
+	"github.com/frahlg/forty-two-watts/go/internal/mpc"
 	"github.com/frahlg/forty-two-watts/go/internal/prices"
 	"github.com/frahlg/forty-two-watts/go/internal/selftune"
 	"github.com/frahlg/forty-two-watts/go/internal/state"
@@ -193,6 +194,18 @@ func main() {
 			"lat", forecastSvc.Lat, "lon", forecastSvc.Lon, "rated_pv_w", ratedPVW)
 	}
 
+	// ---- Start MPC planner (optional) ----
+	mpcSvc := buildMPC(cfg, st, tel, capacities)
+	if mpcSvc != nil {
+		mpcSvc.Start(ctx)
+		defer mpcSvc.Stop()
+		slog.Info("mpc planner started",
+			"mode", mpcSvc.Defaults.Mode,
+			"capacity_wh", mpcSvc.Defaults.CapacityWh,
+			"horizon", mpcSvc.Horizon,
+			"interval", mpcSvc.Interval)
+	}
+
 	// ---- Start HTTP API ----
 	deps := &api.Deps{
 		Tel: tel, Ctrl: ctrl, CtrlMu: ctrlMu,
@@ -206,6 +219,7 @@ func main() {
 		WebDir:     *webDir,
 		Prices:     priceSvc,
 		Forecast:   forecastSvc,
+		MPC:        mpcSvc,
 		Version:    Version,
 	}
 	srv := api.New(deps)
@@ -379,6 +393,92 @@ func driverCapacitiesFrom(drivers []config.Driver) map[string]float64 {
 		}
 	}
 	return out
+}
+
+// buildMPC constructs a planner from config. Returns nil if disabled,
+// if prices aren't configured, or if there are no batteries with capacity.
+func buildMPC(cfg *config.Config, st *state.Store, tel *telemetry.Store, capacities map[string]float64) *mpc.Service {
+	if cfg.Planner == nil || !cfg.Planner.Enabled {
+		return nil
+	}
+	if cfg.Price == nil || cfg.Price.Provider == "" || cfg.Price.Provider == "none" {
+		slog.Warn("mpc requires price provider — skipping")
+		return nil
+	}
+	var totalCap, maxChg, maxDis float64
+	for _, d := range cfg.Drivers {
+		cap := capacities[d.Name]
+		if cap <= 0 {
+			continue
+		}
+		totalCap += cap
+		// Default max (de)charge = 0.5C unless overridden
+		defaultP := cap / 2
+		chg := defaultP
+		dis := defaultP
+		if b, ok := cfg.Batteries[d.Name]; ok {
+			if b.MaxChargeW != nil {
+				chg = *b.MaxChargeW
+			}
+			if b.MaxDischargeW != nil {
+				dis = *b.MaxDischargeW
+			}
+		}
+		maxChg += chg
+		maxDis += dis
+	}
+	if totalCap <= 0 {
+		slog.Warn("mpc: no battery capacity — skipping")
+		return nil
+	}
+	pl := cfg.Planner
+	zone := "SE3"
+	if cfg.Price != nil && cfg.Price.Zone != "" {
+		zone = cfg.Price.Zone
+	}
+	mode := mpc.Mode(pl.Mode)
+	if mode == "" {
+		mode = mpc.ModeSelfConsumption
+	}
+	socMin := pl.SoCMinPct
+	if socMin <= 0 {
+		socMin = 10
+	}
+	socMax := pl.SoCMaxPct
+	if socMax <= 0 || socMax > 100 {
+		socMax = 95
+	}
+	chgEff := pl.ChargeEfficiency
+	if chgEff <= 0 {
+		chgEff = 0.95
+	}
+	disEff := pl.DischargeEfficiency
+	if disEff <= 0 {
+		disEff = 0.95
+	}
+	params := mpc.Params{
+		Mode:                mode,
+		SoCLevels:           41,
+		CapacityWh:          totalCap,
+		SoCMinPct:           socMin,
+		SoCMaxPct:           socMax,
+		InitialSoCPct:       50,
+		ActionLevels:        21,
+		MaxChargeW:          maxChg,
+		MaxDischargeW:       maxDis,
+		ChargeEfficiency:    chgEff,
+		DischargeEfficiency: disEff,
+		ExportOrePerKWh:     pl.ExportOrePerKWh,
+	}
+	svc := mpc.New(st, tel, zone, params)
+	svc.BaseLoad = pl.BaseLoadW
+	if pl.HorizonHours > 0 {
+		svc.Horizon = time.Duration(pl.HorizonHours) * time.Hour
+	}
+	if pl.IntervalMin > 0 {
+		svc.Interval = time.Duration(pl.IntervalMin) * time.Minute
+	}
+	return svc
 }
 
 func recordHistory(st *state.Store, tel *telemetry.Store, ctrl *control.State, nowMs int64) {
