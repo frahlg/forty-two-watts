@@ -294,17 +294,38 @@ func ComputeDispatch(
 	}
 
 	// ---- Slew rate limit per driver ----
+	//
+	// Slew FROM the battery's actual measured output (SmoothedW), not
+	// from the previous command. When the battery can't meet a command
+	// (e.g. SoC at min and commanded to discharge, SoC at max and
+	// commanded to charge, or driver offline), the command stays pinned
+	// far from reality. Using the stored command as the slew anchor then
+	// forces `|target - stale_command| / slew_rate` cycles of ramping
+	// before the direction reverses — a 5 kW stale command with a 500
+	// W/cycle slew at 5 s interval means 50 s of wasted export before
+	// the surplus-absorb starts.
+	//
+	// Using actual-smoothed-W is the truth about where the battery is,
+	// and lets the dispatch pivot immediately when the setpoint reverses.
+	// Falls back to the previous command if no reading is available
+	// (driver just started, or stale telemetry).
 	for i := range raw {
-		if prev, ok := state.PrevTargets[raw[i].Driver]; ok {
-			delta := raw[i].TargetW - prev
-			if math.Abs(delta) > state.SlewRateW {
-				sign := 1.0
-				if delta < 0 {
-					sign = -1.0
-				}
-				raw[i].TargetW = prev + sign*state.SlewRateW
-				raw[i].Clamped = true
+		anchor, hasAnchor := state.PrevTargets[raw[i].Driver]
+		if r := store.Get(raw[i].Driver, telemetry.DerBattery); r != nil {
+			anchor = r.SmoothedW
+			hasAnchor = true
+		}
+		if !hasAnchor {
+			continue
+		}
+		delta := raw[i].TargetW - anchor
+		if math.Abs(delta) > state.SlewRateW {
+			sign := 1.0
+			if delta < 0 {
+				sign = -1.0
 			}
+			raw[i].TargetW = anchor + sign*state.SlewRateW
+			raw[i].Clamped = true
 		}
 	}
 
