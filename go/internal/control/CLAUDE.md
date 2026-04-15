@@ -1,0 +1,42 @@
+# control — site-level PI + dispatch modes + slew + fuse guard
+
+## What it does
+
+One cycle of site closed-loop control: reads the site meter from `telemetry`, runs an outer PI toward `GridTargetW`, splits the correction across online batteries by the active mode's distribution rule, applies per-driver slew + SoC + per-command clamps, then a global fuse guard. Returns a slice of `DispatchTarget` — the caller (main.go) is responsible for actually sending them to drivers. Entirely site-signed (see `../../../docs/site-convention.md`); no sign flips happen here.
+
+## Key types
+
+| Type | Purpose |
+|---|---|
+| `State` | All per-cycle persistent state (mode, setpoint, PI, slew memory, previous targets, planner hook). |
+| `Mode` | String enum: `idle`, `self_consumption`, `peak_shaving`, `charge`, `priority`, `weighted`, `planner_{self,cheap,arbitrage}`. |
+| `DispatchTarget` | `{Driver, TargetW, Clamped}` — one command per battery. |
+| `PIController` / `PIOutput` | 2-term controller with anti-windup on the integral. |
+| `PlanTargetFunc` | Callback into `mpc` — injected by main, returns `(grid_target_w, ok)` for the current slot. |
+| `batteryInfo` | Internal per-cycle snapshot of a battery (capacity, current W, SoC, online). |
+
+## Public API surface
+
+- `NewState(gridTargetW, gridToleranceW, siteMeter)` — defaults match the Rust port: `PI(Kp=0.5, Ki=0.1, iLim=3000, outLim=10000)`, slew 500 W, holdoff 5 s, peak 5 kW.
+- `(*State).SetGridTarget(w)` — updates both `GridTargetW` and the PI setpoint atomically.
+- `ComputeDispatch(store, state, driverCapacities, fuseMaxW)` — the one function main.go calls every cycle.
+- `NewPI(kp, ki, iLimit, outputLimit)` / `(*PIController).Update / Reset` — exposed for tests and any non-site PI use.
+- Mode constants: `ModeIdle`, `ModeSelfConsumption`, `ModePeakShaving`, `ModeCharge`, `ModePriority`, `ModeWeighted`, `ModePlannerSelf`, `ModePlannerCheap`, `ModePlannerArbitrage`; `(Mode).IsPlannerMode()`.
+
+Distribution (`distributeProportional`, `distributePriority`, `distributeWeighted`, `chargeAll`) and clamp helpers (`applyFuseGuard`, `clampWithSoC`) are unexported — tests reach them via `ComputeDispatch`.
+
+## How it talks to neighbors
+
+Imports `telemetry` only. Reads via `store.Get` (site meter, batteries), `store.ReadingsByType(DerPV)` (fuse guard), and `store.DriverHealth` (online check). **Does not call drivers** — `main.go` takes the returned `[]DispatchTarget` and forwards to the driver registry. `State.PlanTarget` is the only upward callback; main wires it to `mpc` so this package stays planner-agnostic. Consumers that mutate `State`: `api` (mode + grid_target changes), `ha.bridge` (Home Assistant select), `configreload.watcher` (YAML reload), `e2e` tests.
+
+## What to read first
+
+`dispatch.go` — `ComputeDispatch` (line 139) is the whole story in one function: planner override → idle/charge short-circuits → holdoff → read grid → pick error by mode → PI → distribute → slew → fuse guard. `pi.go` is ~60 lines; read it if you suspect integral windup.
+
+## What NOT to do
+
+- **Do NOT expect planner modes to stay distinct inside `ComputeDispatch`.** They collapse to `self_consumption` right after setting `grid_target` from the plan (dispatch.go:170–173). The operator-visible mode is preserved on `state.Mode`; the local `effectiveMode` is what drives behavior.
+- **Do NOT distribute from the delta.** `distributeProportional` + `distributeWeighted` split the TOTAL desired site battery power (`currentTotal + totalCorrection`), not the correction alone. This is the fix for the "batteries drift apart" bug — keep it that way (dispatch.go:317, 368).
+- **Do NOT issue charge commands when SoC < 5 % and target < 0.** `clampWithSoC` (dispatch.go:410) blocks discharge of an empty battery. Per-command cap is hard-coded to 5 kW.
+- **Do NOT flip signs.** Everything in this package is site convention: `+` = charge (import), `−` = discharge (export). `applyFuseGuard` reads `|battery discharge| + |PV|` as total generation; that's correct because PV is always `−` at the meter.
+- **Do NOT call drivers from here.** Return `[]DispatchTarget` and let main's driver registry own the actuation. Keeps the dispatcher test-friendly (no I/O) and preserves the one-way data flow telemetry → control → main → drivers.
