@@ -128,6 +128,22 @@ That's it — no real hardware, no external MQTT broker needed. Two
 simulators stand in for a Ferroamp EnergyHub (MQTT) and a Sungrow
 SH10RT (Modbus TCP) with realistic first-order battery response.
 
+## Driver development
+
+Writing a new driver is the usual way to add device support. Drop a
+`.lua` file in `drivers/`, wire it into `config.yaml`, restart. No
+build step.
+
+- [`docs/writing-a-driver.md`](docs/writing-a-driver.md) — canonical
+  walkthrough: DRIVER table, lifecycle functions, host API reference,
+  sign convention, pitfalls.
+- [`docs/writing-a-driver-with-claude-code.md`](docs/writing-a-driver-with-claude-code.md)
+  — hands-on recipe for using Claude Code to bootstrap a driver from
+  a vendor register map: prompts, porting checklist, common mistakes,
+  iteration loop.
+- `drivers/sungrow.lua` — full Modbus TCP reference implementation.
+- `drivers/ferroamp.lua` — full MQTT reference implementation.
+
 ## Features
 
 - **PI controller** with anti-windup, 6 dispatch modes (idle,
