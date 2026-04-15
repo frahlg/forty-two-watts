@@ -180,10 +180,15 @@ func main() {
 				}
 			}
 			reg.Reload(ctx, newCfg.Drivers)
-			// Refresh capacities
+			// Refresh capacities — mutate the existing map in place so
+			// Deps.Capacities (a map header captured at init) sees the
+			// update. Rebinding the local variable would orphan the
+			// reference the api server still holds.
 			capMu.Lock()
-			capacities = driverCapacitiesFrom(newCfg.Drivers)
-			_ = capacities // intentional — keep reference in scope
+			for k := range capacities { delete(capacities, k) }
+			for k, v := range driverCapacitiesFrom(newCfg.Drivers) {
+				capacities[k] = v
+			}
 			capMu.Unlock()
 		})
 	if err != nil {
