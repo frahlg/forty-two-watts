@@ -397,10 +397,10 @@
 
   // Strategy explanation — surfaces one-sentence logic for the current mode.
   const STRATEGY_DESC = {
-    planner_self: 'Self-consumption. Battery only covers local load or absorbs PV surplus. Never imports to charge, never exports via the battery. Safest mode.',
+    planner_self: 'Smart self-consumption (planner). Forecast-aware battery schedule that only covers local load or absorbs PV surplus. Never imports to charge, never exports via the battery.',
     planner_cheap: 'Cheap charging. Plans to import during the cheapest upcoming hours to top up the battery, still never exports via the battery. Good when export tariffs are low.',
     planner_arbitrage: 'Arbitrage. Full freedom: charges in the cheapest slots, discharges into the most expensive slots (including exporting). Biggest savings on volatile days; pays attention to battery efficiency + SoC bounds.',
-    self_consumption: 'Manual self-consumption. Simple PI tracks grid-target = 0; no planning.',
+    self_consumption: 'Self (manual). Simple PI tracks grid-target = 0 with no planner.',
     peak_shaving: 'Manual peak shaving. Limits grid import to the peak-limit setting.',
     charge: 'Manual full charge — forces the battery to charge regardless of price.',
     idle: 'Battery idle — no dispatch.',

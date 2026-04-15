@@ -37,9 +37,9 @@ type Service struct {
 	BaseLoad float64 // baseline household load (W). 0 disables load assumption.
 	Horizon  time.Duration
 	Interval time.Duration
-	PV    PVPredictor    // optional — overrides stored pv_w_estimated
-	Load  LoadPredictor  // optional — overrides flat BaseLoad
-	Price PricePredictor // optional — fills in future slots when day-ahead isn't published yet
+	PV       PVPredictor    // optional — overrides stored pv_w_estimated
+	Load     LoadPredictor  // optional — overrides flat BaseLoad
+	Price    PricePredictor // optional — fills in future slots when day-ahead isn't published yet
 
 	// Reactive replan: when the integrated energy gap between actual
 	// and the plan's current-slot prediction exceeds a threshold over
@@ -475,11 +475,12 @@ func buildSlots(prices []state.PricePoint, forecasts []state.ForecastPoint, base
 		}
 		slotT := time.UnixMilli(pr.SlotTsMs)
 		var pvW float64
+		forecastPVW := lookupPV(forecasts, pr.SlotTsMs)
 		if pv != nil {
 			cloud := lookupCloud(forecasts, pr.SlotTsMs)
-			pvW = pv(slotT, cloud)
+			pvW = selectPlannerPVW(forecastPVW, pv(slotT, cloud))
 		} else {
-			pvW = lookupPV(forecasts, pr.SlotTsMs)
+			pvW = forecastPVW
 		}
 		loadW := baseLoad
 		if load != nil {
@@ -503,6 +504,31 @@ func buildSlots(prices []state.PricePoint, forecasts []state.ForecastPoint, base
 		})
 	}
 	return out
+}
+
+const (
+	// When the learned PV twin collapses to (near) zero while the weather
+	// forecast still expects material daylight output, the planner
+	// degenerates into "import full load, battery idle". Fall back to the
+	// stored forecast in that quantifiable failure mode instead of trusting
+	// a near-zero model output.
+	plannerMinForecastPVFallbackW = 200.0
+	plannerMaxCollapsedPVW        = 50.0
+	plannerMaxCollapsedPVFrac     = 0.10
+)
+
+func selectPlannerPVW(forecastPVW, predictedPVW float64) float64 {
+	switch {
+	case math.IsNaN(predictedPVW), math.IsInf(predictedPVW, 0), predictedPVW < 0:
+		return forecastPVW
+	case forecastPVW < plannerMinForecastPVFallbackW:
+		return predictedPVW
+	}
+	collapseCeil := math.Max(plannerMaxCollapsedPVW, forecastPVW*plannerMaxCollapsedPVFrac)
+	if predictedPVW <= collapseCeil {
+		return forecastPVW
+	}
+	return predictedPVW
 }
 
 // lookupCloud returns the cloud cover (%) for the forecast row covering

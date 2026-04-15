@@ -38,21 +38,21 @@ import (
 // One instance is shared across all handlers; mutations use the contained
 // mutexes from each package.
 type Deps struct {
-	Tel             *telemetry.Store
-	Ctrl            *control.State
-	CtrlMu          *sync.Mutex
-	State           *state.Store
-	CapMu           *sync.RWMutex
-	Capacities      map[string]float64 // driver → battery_capacity_wh
-	CfgMu           *sync.RWMutex
-	Cfg             *config.Config
-	ConfigPath      string
-	Models          map[string]*battery.Model
-	ModelsMu        *sync.Mutex
-	SelfTune        *selftune.Coordinator
-	DtS             float64 // control interval seconds (for model τ / age displays)
-	SaveConfig      func(path string, c *config.Config) error // injection for testability
-	WebDir          string // static assets root (default "web")
+	Tel        *telemetry.Store
+	Ctrl       *control.State
+	CtrlMu     *sync.Mutex
+	State      *state.Store
+	CapMu      *sync.RWMutex
+	Capacities map[string]float64 // driver → battery_capacity_wh
+	CfgMu      *sync.RWMutex
+	Cfg        *config.Config
+	ConfigPath string
+	Models     map[string]*battery.Model
+	ModelsMu   *sync.Mutex
+	SelfTune   *selftune.Coordinator
+	DtS        float64                                   // control interval seconds (for model τ / age displays)
+	SaveConfig func(path string, c *config.Config) error // injection for testability
+	WebDir     string                                    // static assets root (default "web")
 
 	// Optional: spot prices + weather forecast services. Nil if disabled.
 	Prices   *prices.Service
@@ -82,8 +82,12 @@ type Server struct {
 
 // New creates a new API server.
 func New(deps *Deps) *Server {
-	if deps.Version == "" { deps.Version = "dev" }
-	if deps.WebDir == "" { deps.WebDir = "web" }
+	if deps.Version == "" {
+		deps.Version = "dev"
+	}
+	if deps.WebDir == "" {
+		deps.WebDir = "web"
+	}
 	s := &Server{deps: deps, mux: http.NewServeMux()}
 	s.routes()
 	return s
@@ -94,35 +98,35 @@ func (s *Server) Handler() http.Handler { return s.mux }
 
 func (s *Server) routes() {
 	// ---- JSON endpoints ----
-	s.handle("GET  /api/health",              s.handleHealth)
-	s.handle("GET  /api/status",              s.handleStatus)
-	s.handle("GET  /api/config",              s.handleGetConfig)
-	s.handle("POST /api/config",              s.handlePostConfig)
-	s.handle("GET  /api/mode",                s.handleGetMode)
-	s.handle("POST /api/mode",                s.handleSetMode)
-	s.handle("POST /api/target",              s.handleSetTarget)
-	s.handle("POST /api/peak_limit",          s.handleSetPeakLimit)
-	s.handle("POST /api/ev_charging",         s.handleSetEVCharging)
-	s.handle("GET  /api/drivers",             s.handleDrivers)
-	s.handle("GET  /api/drivers/catalog",     s.handleDriversCatalog)
-	s.handle("GET  /api/ha/status",           s.handleHAStatus)
-	s.handle("GET  /api/battery_models",      s.handleGetModels)
+	s.handle("GET  /api/health", s.handleHealth)
+	s.handle("GET  /api/status", s.handleStatus)
+	s.handle("GET  /api/config", s.handleGetConfig)
+	s.handle("POST /api/config", s.handlePostConfig)
+	s.handle("GET  /api/mode", s.handleGetMode)
+	s.handle("POST /api/mode", s.handleSetMode)
+	s.handle("POST /api/target", s.handleSetTarget)
+	s.handle("POST /api/peak_limit", s.handleSetPeakLimit)
+	s.handle("POST /api/ev_charging", s.handleSetEVCharging)
+	s.handle("GET  /api/drivers", s.handleDrivers)
+	s.handle("GET  /api/drivers/catalog", s.handleDriversCatalog)
+	s.handle("GET  /api/ha/status", s.handleHAStatus)
+	s.handle("GET  /api/battery_models", s.handleGetModels)
 	s.handle("POST /api/battery_models/reset", s.handleResetModel)
-	s.handle("POST /api/self_tune/start",     s.handleSelfTuneStart)
-	s.handle("GET  /api/self_tune/status",    s.handleSelfTuneStatus)
-	s.handle("POST /api/self_tune/cancel",    s.handleSelfTuneCancel)
-	s.handle("GET  /api/history",             s.handleHistory)
-	s.handle("GET  /api/prices",              s.handlePrices)
-	s.handle("GET  /api/forecast",            s.handleForecast)
-	s.handle("GET  /api/mpc/plan",            s.handleMPCPlan)
-	s.handle("POST /api/mpc/replan",          s.handleMPCReplan)
-	s.handle("GET  /api/pvmodel",             s.handlePVModel)
-	s.handle("POST /api/pvmodel/reset",       s.handlePVModelReset)
-	s.handle("GET  /api/loadmodel",           s.handleLoadModel)
-	s.handle("POST /api/loadmodel/reset",     s.handleLoadModelReset)
-	s.handle("GET  /api/series",              s.handleSeries)
-	s.handle("GET  /api/series/catalog",      s.handleSeriesCatalog)
-	s.handle("GET  /api/devices",             s.handleDevices)
+	s.handle("POST /api/self_tune/start", s.handleSelfTuneStart)
+	s.handle("GET  /api/self_tune/status", s.handleSelfTuneStatus)
+	s.handle("POST /api/self_tune/cancel", s.handleSelfTuneCancel)
+	s.handle("GET  /api/history", s.handleHistory)
+	s.handle("GET  /api/prices", s.handlePrices)
+	s.handle("GET  /api/forecast", s.handleForecast)
+	s.handle("GET  /api/mpc/plan", s.handleMPCPlan)
+	s.handle("POST /api/mpc/replan", s.handleMPCReplan)
+	s.handle("GET  /api/pvmodel", s.handlePVModel)
+	s.handle("POST /api/pvmodel/reset", s.handlePVModelReset)
+	s.handle("GET  /api/loadmodel", s.handleLoadModel)
+	s.handle("POST /api/loadmodel/reset", s.handleLoadModelReset)
+	s.handle("GET  /api/series", s.handleSeries)
+	s.handle("GET  /api/series/catalog", s.handleSeriesCatalog)
+	s.handle("GET  /api/devices", s.handleDevices)
 
 	// ---- Static web UI ----
 	// Everything not matched above falls through to the static server.
@@ -133,7 +137,9 @@ func (s *Server) routes() {
 // routing so GET + POST on the same path can be registered independently.
 func (s *Server) handle(methodPath string, h http.HandlerFunc) {
 	parts := strings.SplitN(strings.TrimSpace(methodPath), " ", 2)
-	for i := range parts { parts[i] = strings.TrimSpace(parts[i]) }
+	for i := range parts {
+		parts[i] = strings.TrimSpace(parts[i])
+	}
 	method, path := parts[0], parts[1]
 	s.mux.HandleFunc(method+" "+path, h)
 	_ = fmt.Sprintf // keep fmt import used elsewhere
@@ -151,7 +157,9 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 func readJSON(r *http.Request, v any) error {
 	defer r.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20)) // 1 MB cap
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	if len(body) == 0 {
 		return errors.New("empty body")
 	}
@@ -174,7 +182,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	status := "ok"
-	if off > 0 { status = "degraded" }
+	if off > 0 {
+		status = "degraded"
+	}
 	writeJSON(w, 200, map[string]any{
 		"status":           status,
 		"drivers_ok":       ok,
@@ -193,7 +203,9 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 	s.deps.CapMu.RLock()
 	caps := make(map[string]float64, len(s.deps.Capacities))
-	for k, v := range s.deps.Capacities { caps[k] = v }
+	for k, v := range s.deps.Capacities {
+		caps[k] = v
+	}
 	s.deps.CapMu.RUnlock()
 
 	// Aggregate readings
@@ -215,20 +227,28 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	//   but load is always positive. If calc goes negative it's a sign issue.
 	rawLoad := gridW - batW - pvW
 	loadW := s.deps.Tel.UpdateLoad(rawLoad)
-	if loadW < 0 { loadW = 0 }
+	if loadW < 0 {
+		loadW = 0
+	}
 
 	// Weighted average SoC by capacity
 	var totalCap, weightedSoC float64
 	for _, b := range s.deps.Tel.ReadingsByType(telemetry.DerBattery) {
 		cap, ok := caps[b.Driver]
-		if !ok { continue }
+		if !ok {
+			continue
+		}
 		totalCap += cap
 		soc := 0.0
-		if b.SoC != nil { soc = *b.SoC }
+		if b.SoC != nil {
+			soc = *b.SoC
+		}
 		weightedSoC += soc * cap
 	}
 	avgSoC := 0.0
-	if totalCap > 0 { avgSoC = weightedSoC / totalCap }
+	if totalCap > 0 {
+		avgSoC = weightedSoC / totalCap
+	}
 
 	// Per-driver details
 	drivers := make(map[string]any)
@@ -238,7 +258,9 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			"consecutive_errors": h.ConsecutiveErrors,
 			"tick_count":         h.TickCount,
 		}
-		if h.LastError != "" { d["last_error"] = h.LastError }
+		if h.LastError != "" {
+			d["last_error"] = h.LastError
+		}
 		if r := s.deps.Tel.Get(name, telemetry.DerMeter); r != nil {
 			d["meter_w"] = r.SmoothedW
 		}
@@ -247,7 +269,9 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		}
 		if r := s.deps.Tel.Get(name, telemetry.DerBattery); r != nil {
 			d["bat_w"] = r.SmoothedW
-			if r.SoC != nil { d["bat_soc"] = *r.SoC }
+			if r.SoC != nil {
+				d["bat_soc"] = *r.SoC
+			}
 		}
 		drivers[name] = d
 	}
@@ -271,21 +295,21 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, 200, map[string]any{
-		"version":         s.deps.Version,
-		"mode":            ctrl.Mode,
-		"plan_stale":      ctrl.PlanStale,
-		"grid_w":          gridW,
-		"pv_w":            pvW,
-		"pv_w_predicted":  pvPredictW,
-		"bat_w":           batW,
-		"load_w":          loadW,
+		"version":          s.deps.Version,
+		"mode":             ctrl.Mode,
+		"plan_stale":       ctrl.PlanStale,
+		"grid_w":           gridW,
+		"pv_w":             pvW,
+		"pv_w_predicted":   pvPredictW,
+		"bat_w":            batW,
+		"load_w":           loadW,
 		"load_w_predicted": loadPredictW,
-		"bat_soc":         avgSoC,
-		"grid_target_w":   ctrl.GridTargetW,
-		"peak_limit_w":    ctrl.PeakLimitW,
-		"ev_charging_w":   ctrl.EVChargingW,
-		"drivers":         drivers,
-		"dispatch":        dispatch,
+		"bat_soc":          avgSoC,
+		"grid_target_w":    ctrl.GridTargetW,
+		"peak_limit_w":     ctrl.PeakLimitW,
+		"ev_charging_w":    ctrl.EVChargingW,
+		"drivers":          drivers,
+		"dispatch":         dispatch,
 	})
 }
 
@@ -462,10 +486,10 @@ func (s *Server) handleHAStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{
-		"enabled":          true,
-		"connected":        s.deps.HA.IsConnected(),
-		"broker":           s.deps.HA.BrokerAddr(),
-		"last_publish_ms":  s.deps.HA.LastPublishMs(),
+		"enabled":           true,
+		"connected":         s.deps.HA.IsConnected(),
+		"broker":            s.deps.HA.BrokerAddr(),
+		"last_publish_ms":   s.deps.HA.LastPublishMs(),
 		"sensors_announced": s.deps.HA.SensorsAnnounced(),
 	})
 }
@@ -574,7 +598,9 @@ func (s *Server) handleSelfTuneCancel(w http.ResponseWriter, r *http.Request) {
 // Query params: range=5m|15m|1h|6h|24h|3d, points=N
 func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 	rangeStr := r.URL.Query().Get("range")
-	if rangeStr == "" { rangeStr = "5m" }
+	if rangeStr == "" {
+		rangeStr = "5m"
+	}
 	pointsStr := r.URL.Query().Get("points")
 	points := 200
 	if pointsStr != "" {
@@ -598,7 +624,9 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 		if row.JSON != "" {
 			_ = json.Unmarshal([]byte(row.JSON), &inner)
 		}
-		if inner == nil { inner = map[string]any{} }
+		if inner == nil {
+			inner = map[string]any{}
+		}
 		inner["ts"] = row.TsMs
 		// Fill from flat columns for charting
 		inner["grid_w"] = row.GridW
@@ -613,12 +641,20 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 
 func parseRange(s string) int64 {
 	switch s {
-	case "5m": return 5 * 60 * 1000
-	case "15m": return 15 * 60 * 1000
-	case "1h": return 60 * 60 * 1000
-	case "6h": return 6 * 60 * 60 * 1000
-	case "24h": return 24 * 60 * 60 * 1000
-	case "3d": return 3 * 24 * 60 * 60 * 1000
+	case "5m":
+		return 5 * 60 * 1000
+	case "15m":
+		return 15 * 60 * 1000
+	case "1h":
+		return 60 * 60 * 1000
+	case "6h":
+		return 6 * 60 * 60 * 1000
+	case "24h":
+		return 24 * 60 * 60 * 1000
+	case "48h":
+		return 48 * 60 * 60 * 1000
+	case "3d":
+		return 3 * 24 * 60 * 60 * 1000
 	}
 	return 5 * 60 * 1000
 }
@@ -626,9 +662,10 @@ func parseRange(s string) int64 {
 // ---- /api/prices ----
 //
 // Query params:
-//   range=24h|48h|3d  — window starting NOW unless since_ms given
-//   since_ms=…        — explicit start
-//   until_ms=…        — explicit end (default: now + 48h)
+//
+//	range=24h|48h|3d  — window starting NOW unless since_ms given
+//	since_ms=…        — explicit start
+//	until_ms=…        — explicit end (default: now + 48h)
 //
 // Response: {"zone": "...", "items": [{slot_ts_ms, slot_len_min, spot_ore_kwh, total_ore_kwh, ...}]}
 func (s *Server) handlePrices(w http.ResponseWriter, r *http.Request) {
@@ -639,13 +676,17 @@ func (s *Server) handlePrices(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	nowMs := time.Now().UnixMilli()
 	var since, until int64
-	since = nowMs - 1*3600*1000 // default 1h lookback
+	since = nowMs - 1*3600*1000  // default 1h lookback
 	until = nowMs + 48*3600*1000 // default 48h lookahead
 	if v := q.Get("since_ms"); v != "" {
-		if n, err := strconv.ParseInt(v, 10, 64); err == nil { since = n }
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+			since = n
+		}
 	}
 	if v := q.Get("until_ms"); v != "" {
-		if n, err := strconv.ParseInt(v, 10, 64); err == nil { until = n }
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+			until = n
+		}
 	}
 	if rng := q.Get("range"); rng != "" {
 		since = nowMs
@@ -729,10 +770,14 @@ func (s *Server) handleSeries(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rng := r.URL.Query().Get("range")
-	if rng == "" { rng = "1h" }
+	if rng == "" {
+		rng = "1h"
+	}
 	points := 0
 	if p := r.URL.Query().Get("points"); p != "" {
-		if v, err := strconv.Atoi(p); err == nil { points = v }
+		if v, err := strconv.Atoi(p); err == nil {
+			points = v
+		}
 	}
 	windowMs := parseRange(rng)
 	now := time.Now().UnixMilli()
@@ -805,14 +850,14 @@ func (s *Server) handlePVModel(w http.ResponseWriter, r *http.Request) {
 	}
 	m := s.deps.PVModel.Model()
 	writeJSON(w, 200, map[string]any{
-		"enabled":       true,
-		"samples":       m.Samples,
-		"mae_w":         m.MAE,
-		"rated_w":       m.RatedW,
-		"quality":       m.Quality(),
-		"last_ms":       m.LastMs,
-		"forgetting":    m.Forgetting,
-		"beta":          m.Beta,
+		"enabled":    true,
+		"samples":    m.Samples,
+		"mae_w":      m.MAE,
+		"rated_w":    m.RatedW,
+		"quality":    m.Quality(),
+		"last_ms":    m.LastMs,
+		"forgetting": m.Forgetting,
+		"beta":       m.Beta,
 	})
 }
 
@@ -841,15 +886,15 @@ func (s *Server) handleLoadModel(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, 200, map[string]any{
-		"enabled":             true,
-		"samples":             m.Samples,
-		"mae_w":               m.MAE,
-		"peak_w":              m.PeakW,
-		"quality":             m.Quality(),
-		"last_ms":             m.LastMs,
-		"heating_w_per_degc":  m.HeatingW_per_degC,
-		"buckets_warm":        warm,
-		"buckets_total":       loadmodel.Buckets,
+		"enabled":            true,
+		"samples":            m.Samples,
+		"mae_w":              m.MAE,
+		"peak_w":             m.PeakW,
+		"quality":            m.Quality(),
+		"last_ms":            m.LastMs,
+		"heating_w_per_degc": m.HeatingW_per_degC,
+		"buckets_warm":       warm,
+		"buckets_total":      loadmodel.Buckets,
 	})
 }
 
@@ -866,7 +911,9 @@ func (s *Server) handleLoadModelReset(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
-	if path == "/" { path = "/index.html" }
+	if path == "/" {
+		path = "/index.html"
+	}
 	// Prevent path traversal
 	clean := filepath.Clean(filepath.Join(s.deps.WebDir, path))
 	absWeb, _ := filepath.Abs(s.deps.WebDir)

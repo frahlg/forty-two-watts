@@ -117,7 +117,7 @@
       <div class="card control-card control-strategy">
         <div class="card-label">Strategy</div>
         <div class="mode-buttons mode-buttons-primary" id="mode-buttons-primary">
-          <button data-mode="planner_self" title="Self-consumption with forecast-aware planning — never grid-charge, never export via battery">Self-consumption</button>
+          <button data-mode="planner_self" title="Smart self-consumption with forecast-aware planning — never grid-charge, never export via battery">Smart self-consumption (planner)</button>
           <button data-mode="planner_cheap" title="Plan charges batteries when grid prices are low (still never exports via battery)">Cheap charging</button>
           <button data-mode="planner_arbitrage" title="Full price arbitrage — charge cheap, discharge into expensive hours">Arbitrage</button>
         </div>
@@ -127,7 +127,7 @@
         </div>
         <div class="mode-buttons mode-buttons-advanced advanced-only" id="mode-buttons" style="display:none">
           <button data-mode="idle" title="Do nothing — no dispatch">Idle</button>
-          <button data-mode="self_consumption" title="Manual self-consumption — PI chases grid_target, no plan">Self</button>
+          <button data-mode="self_consumption" title="Manual self-consumption — PI chases grid_target, no plan">Self (manual)</button>
           <button data-mode="peak_shaving" title="Limit import to peak-limit">Peak</button>
           <button data-mode="charge" title="Force full charge regardless of price">Charge</button>
         </div>
