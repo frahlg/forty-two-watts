@@ -1,0 +1,117 @@
+name: release
+
+# Run on every push to master. Pull requests do NOT trigger a release —
+# they only run when actually merged. Manual dispatch is allowed for
+# emergency re-runs (no-op if the analyzer doesn't find releasable
+# commits since the last tag).
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+# semantic-release needs to push a tag + the changelog commit.
+# The docker job needs to push a package to GHCR.
+permissions:
+  contents: write
+  packages: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  release:
+    name: semantic-release
+    runs-on: ubuntu-latest
+    outputs:
+      new_release_published: ${{ steps.semantic.outputs.new_release_published }}
+      new_release_version:   ${{ steps.semantic.outputs.new_release_version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # semantic-release walks every commit since the last tag, so
+          # it needs the full history. fetch-depth: 0 is the standard.
+          fetch-depth: 0
+          # Use the default GITHUB_TOKEN; persist-credentials lets the
+          # @semantic-release/git plugin push the changelog commit.
+          persist-credentials: true
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Run semantic-release
+        id: semantic
+        uses: cycjimmy/semantic-release-action@v4
+        with:
+          # Pin to a known-good major. Plugins listed here mirror
+          # .releaserc.json so the action installer picks them up
+          # without needing a package.json in the repo.
+          semantic_version: 24
+          extra_plugins: |
+            @semantic-release/changelog@6
+            @semantic-release/git@10
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  docker:
+    name: docker build + push
+    runs-on: ubuntu-latest
+    needs: release
+    # Only build if semantic-release actually cut a new version. Skipping
+    # when there's no release keeps `:latest` deterministic — every
+    # `:latest` corresponds to a real tagged version.
+    if: needs.release.outputs.new_release_published == 'true'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Pull the tag semantic-release just pushed so the build sees
+          # the new state of master (changelog commit included).
+          fetch-depth: 0
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          # ghcr.io/<owner>/<repo>:<tag>
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=v${{ needs.release.outputs.new_release_version }}
+            type=raw,value=${{ needs.release.outputs.new_release_version }}
+            type=raw,value=latest
+            type=sha,format=short
+          labels: |
+            org.opencontainers.image.title=forty-two-watts
+            org.opencontainers.image.description=Unified Home Energy Management System
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.version=${{ needs.release.outputs.new_release_version }}
+            org.opencontainers.image.licenses=MIT
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=v${{ needs.release.outputs.new_release_version }}
+          # Use the GHA cache backend so subsequent builds reuse layers.
+          cache-from: type=gha
+          cache-to:   type=gha,mode=max

@@ -1,5 +1,19 @@
-target/
-*.redb
-config.yaml
-data/
-.git/
+# Keep the Docker build context tiny. Whitelist what the new Go-based
+# Dockerfile needs and drop everything else (Rust target dir, local
+# state databases, secrets, .git, IDE files, release tarballs, etc).
+
+*
+
+!Dockerfile
+!.dockerignore
+!go/
+!drivers/
+!web/
+
+# Within those trees, drop test files and local state so they don't
+# bloat the build context or accidentally leak secrets.
+go/**/*_test.go
+**/state.db
+**/state.db-*
+**/cold/
+**/.DS_Store

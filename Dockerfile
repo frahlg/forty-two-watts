@@ -1,27 +1,89 @@
-# Multi-stage build for forty-two-watts 🐬
-# Uses musl for fully static binary — runs on any Linux without glibc dependency
-FROM rust:latest AS builder
-RUN rustup target add aarch64-unknown-linux-musl x86_64-unknown-linux-musl
-RUN apt-get update && apt-get install -y musl-tools && rm -rf /var/lib/apt/lists/*
-WORKDIR /build
-COPY Cargo.toml Cargo.lock ./
-COPY src/ src/
-ARG TARGETARCH
-RUN if [ "$TARGETARCH" = "arm64" ]; then \
-      cargo build --release --target aarch64-unknown-linux-musl; \
-      cp target/aarch64-unknown-linux-musl/release/forty-two-watts /build/forty-two-watts; \
-    else \
-      cargo build --release --target x86_64-unknown-linux-musl; \
-      cp target/x86_64-unknown-linux-musl/release/forty-two-watts /build/forty-two-watts; \
-    fi
+# forty-two-watts container — multi-stage Go build, alpine runtime.
+#
+# Builder uses golang:alpine to keep the final binary fully static and
+# the toolchain layer small. The runtime stage is plain alpine with
+# only ca-certificates + tzdata; everything else (Lua drivers, web
+# assets, the binary itself) ships verbatim.
+#
+# Multi-arch: linux/amd64 + linux/arm64 via docker buildx BUILDPLATFORM
+# / TARGETPLATFORM split so the toolchain runs natively on the build
+# host and only `go build` is cross-compiled.
 
-# Runtime — debian-slim (small, works with musl static binaries)
-FROM debian:bookworm-slim
-WORKDIR /app
-COPY --from=builder /build/forty-two-watts /app/forty-two-watts
+# --- Builder ---------------------------------------------------------------
+FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS builder
+
+# git is needed by `go build` to resolve VCS info baked into the binary
+# via -X main.Version. Everything else is in the base image.
+RUN apk add --no-cache git
+
+WORKDIR /src
+
+# Cache the module download as its own layer so source edits don't
+# bust the dep cache.
+COPY go/go.mod go/go.sum ./go/
+RUN cd go && go mod download
+
+COPY go/ ./go/
+
+# Cross-compile by mapping TARGETARCH → GOARCH. CGO is off so the
+# binary is fully static and runs on alpine without glibc.
+ARG TARGETOS
+ARG TARGETARCH
+ARG VERSION=dev
+RUN cd go && \
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build -trimpath -ldflags="-s -w -X main.Version=${VERSION}" \
+    -o /out/forty-two-watts ./cmd/forty-two-watts
+
+# --- Runtime ---------------------------------------------------------------
+FROM alpine:3.20
+
+# ca-certificates: HTTPS to elprisetjustnu / met.no / ECB FX.
+# tzdata:        timezone-aware price + plan windows (Europe/Stockholm etc).
+RUN apk add --no-cache ca-certificates tzdata && \
+    addgroup -S ftw && adduser -S ftw -G ftw
+
+# Image layout:
+#   /app/forty-two-watts  binary (immutable, replaced on upgrade)
+#   /app/drivers/         bundled Lua drivers (immutable, replaced on upgrade)
+#   /app/web/             bundled UI assets (immutable, replaced on upgrade)
+#   /app/data/            PERSISTENT — config.yaml, state.db, cold/, models
+#
+# The container's working directory is /app/data so that any *relative*
+# path in the user's config (state.path: state.db, state.cold_dir: cold)
+# resolves under the persistent volume by default. Without this, the
+# binary would default-write state.db to its CWD and lose every byte
+# on container recreate. See go/cmd/forty-two-watts/main.go:66 — there
+# is no path resolution against the config file's directory; the open
+# call is literally state.Open(cfg.State.Path).
+COPY --from=builder /out/forty-two-watts /app/forty-two-watts
 COPY drivers/ /app/drivers/
-COPY web/ /app/web/
-VOLUME /app/data
+COPY web/     /app/web/
+
+RUN mkdir -p /app/data && chown -R ftw:ftw /app
+
+USER ftw
+WORKDIR /app/data
+
+VOLUME ["/app/data"]
 EXPOSE 8080
+
+# Config + state both live in /app/data — one bind-mount is enough to
+# persist everything across upgrades. Drivers and web are absolute
+# paths into the immutable image layer so the bundled versions ship
+# with each release.
+#
+# UID note: the ftw user is uid 100 / gid 101 (alpine `adduser -S`
+# convention). Named docker volumes inherit ownership from the image
+# automatically and just work. For HOST BIND MOUNTS, the host
+# directory must be owned by uid 100 (or world-writable) before the
+# container starts:
+#
+#     mkdir -p /srv/ftw-data && chown -R 100:101 /srv/ftw-data
+#     docker run -v /srv/ftw-data:/app/data ghcr.io/<owner>/forty-two-watts:latest
+#
+# Without this the binary fails fast with "open state … unable to
+# open database file" because SQLite can't create state.db inside
+# a directory it doesn't own.
 ENTRYPOINT ["/app/forty-two-watts"]
-CMD ["/app/data/config.yaml"]
+CMD ["-config", "/app/data/config.yaml", "-web", "/app/web"]
