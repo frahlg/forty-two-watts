@@ -1,5 +1,8 @@
 # Host API Reference
 
+> Legacy WASM ABI reference. For the current Lua driver path, see
+> [writing-a-driver.md](writing-a-driver.md).
+
 The `host` table is available to all Lua drivers. It provides functions for logging, device communication, data decoding, JSON handling, and telemetry emission. These are the same APIs available on the Sourceful Zap gateway, so drivers are portable between forty-two-watts and the Zap.
 
 ## Core
