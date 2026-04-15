@@ -127,9 +127,14 @@ func TestElpriserURL(t *testing.T) {
 // ---- Service integration: fetch → save → load ----
 
 func TestServiceFetchesAndStores(t *testing.T) {
-	today := time.Date(2026, 4, 14, 0, 0, 0, 0, time.Local)
+	// Always use today's local date so the test doesn't break on a
+	// calendar boundary. fetchAndStore queries elprisetjustnu's URL
+	// shape for the current date — match it dynamically.
+	today := time.Now().In(time.Local)
+	today = time.Date(today.Year(), today.Month(), today.Day(), 0, 0, 0, 0, time.Local)
+	todayPath := today.Format("01-02_") // MM-DD_ — same fragment fetchAndStore uses
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.Contains(r.URL.Path, "04-14_") {
+		if strings.Contains(r.URL.Path, todayPath) {
 			_ = json.NewEncoder(w).Encode([]map[string]any{
 				{"SEK_per_kWh": 1.0, "time_start": today.Format(time.RFC3339), "time_end": today.Add(15 * time.Minute).Format(time.RFC3339)},
 				{"SEK_per_kWh": 2.0, "time_start": today.Add(15 * time.Minute).Format(time.RFC3339), "time_end": today.Add(30 * time.Minute).Format(time.RFC3339)},
