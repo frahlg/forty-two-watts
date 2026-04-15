@@ -24,8 +24,8 @@ DRIVER = {
 --   Battery w: positive = charging  (load), negative = discharging (source)
 --   Meter   w: positive = importing,        negative = exporting
 --
--- Pixii native meter reports negative = import (utility-perspective), so we
--- negate meter power/current to line up with the site convention.
+-- On this Pixii firmware the native meter already reports positive = import,
+-- matching the site convention, so W and A are passed through unchanged.
 
 PROTOCOL = "modbus"
 
@@ -244,33 +244,33 @@ function driver_poll()
         import_wh = scale(host.decode_u32_be(imp_regs[1], imp_regs[2]), meter_energy_sf)
     end
 
-    -- Pixii native: negative=import. Site convention: positive=import.
-    -- Negate W and A (voltage is always positive magnitude, leave alone).
+    -- Native Pixii meter already uses site convention (+import / -export),
+    -- so values are passed through without a sign flip.
     host.emit("meter", {
-        w         = -meter_w,
-        l1_w      = -l1_w,
-        l2_w      = -l2_w,
-        l3_w      = -l3_w,
+        w         = meter_w,
+        l1_w      = l1_w,
+        l2_w      = l2_w,
+        l3_w      = l3_w,
         l1_v      = l1_v,
         l2_v      = l2_v,
         l3_v      = l3_v,
-        l1_a      = -l1_a,
-        l2_a      = -l2_a,
-        l3_a      = -l3_a,
+        l1_a      = l1_a,
+        l2_a      = l2_a,
+        l3_a      = l3_a,
         hz        = meter_hz,
         import_wh = import_wh,
         export_wh = export_wh,
     })
-    host.emit_metric("meter_l1_w", -l1_w)
-    host.emit_metric("meter_l2_w", -l2_w)
-    host.emit_metric("meter_l3_w", -l3_w)
-    host.emit_metric("meter_l1_v",  l1_v)
-    host.emit_metric("meter_l2_v",  l2_v)
-    host.emit_metric("meter_l3_v",  l3_v)
-    host.emit_metric("meter_l1_a", -l1_a)
-    host.emit_metric("meter_l2_a", -l2_a)
-    host.emit_metric("meter_l3_a", -l3_a)
-    host.emit_metric("grid_hz",     meter_hz)
+    host.emit_metric("meter_l1_w", l1_w)
+    host.emit_metric("meter_l2_w", l2_w)
+    host.emit_metric("meter_l3_w", l3_w)
+    host.emit_metric("meter_l1_v", l1_v)
+    host.emit_metric("meter_l2_v", l2_v)
+    host.emit_metric("meter_l3_v", l3_v)
+    host.emit_metric("meter_l1_a", l1_a)
+    host.emit_metric("meter_l2_a", l2_a)
+    host.emit_metric("meter_l3_a", l3_a)
+    host.emit_metric("grid_hz",    meter_hz)
 
     return 5000
 end
