@@ -1,7 +1,8 @@
 # forty-two-watts — project orientation
 
-Unified Home Energy Management System. This branch (`go-port`) is the
-Go + WASM driver implementation. Master still has the original Rust port.
+Unified Home Energy Management System. The Go port is now mainline on
+`master`; the historical Rust implementation lives alongside in `src/` +
+`Cargo.toml` and is frozen (see `MIGRATION_PLAN.md` for context).
 
 ## Mental model
 
@@ -12,39 +13,60 @@ place sign conversion happens — above it, every layer uses the site
 convention. Read `docs/site-convention.md` before touching any power-math
 code.
 
-**FAT drivers**: WASM modules do all protocol work. Host exposes only
-capabilities (MQTT, Modbus, time, log). No `decode_u32_le` or other
-protocol helpers in the host. Drivers use real libraries (serde_json,
-etc.) inside the sandbox.
+**Lua-first drivers**: `drivers/*.lua` loaded by `gopher-lua` are the
+primary driver path. Each driver file implements the lifecycle
+(`driver_init`, `driver_poll`, `driver_command`, `driver_default_mode`,
+`driver_cleanup`) and talks to hardware through the `host.*` capabilities
+exposed by `go/internal/drivers/lua.go`. WASM drivers (`wasm-drivers/*/`
+compiled into `drivers-wasm/*.wasm`) are still supported via the same
+Registry and capability interface — dispatch lives in
+`go/internal/drivers/registry.go` — but Lua is recommended for new
+drivers because it's hot-editable on the Pi and doesn't need a Rust
+toolchain.
 
 **Clamping discipline**: every clamp must protect against a *quantifiable
 risk*. Read `docs/clamping.md` for the seven current clamps and the
 saturation-curve feedback-loop bug we shipped then fixed.
+
+**Hardware-stable identity**: every device a driver talks to gets a
+`device_id` resolved in priority order — `make:serial` (from
+`host.set_make` + `host.set_sn`) > `mac:<arp-resolved>` (for TCP devices
+on the same L2) > `ep:<endpoint>` (fallback). Persistent state such as
+battery models is keyed on `device_id` internally, so renaming a driver
+in YAML or re-adding it doesn't orphan a trained model. See
+`go/internal/state/devices.go` and `go/internal/arp/arp.go`.
 
 ## Key packages
 
 | Package | Purpose |
 |---|---|
 | `go/internal/config` | YAML config + validation + atomic save |
-| `go/internal/state` | SQLite persistence + tiered history |
-| `go/internal/telemetry` | DerStore with Kalman per signal + driver health |
+| `go/internal/state` | SQLite persistence, tiered history, long-format TS + Parquet rolloff, devices |
+| `go/internal/telemetry` | DerStore with Kalman per signal + driver health + WatchdogScan |
 | `go/internal/control` | PI + dispatch modes + slew + fuse guard |
 | `go/internal/battery` | ARX(1) model + RLS + cascade + saturation curves |
 | `go/internal/selftune` | Step-response state machine + fitter |
-| `go/internal/drivers` | wazero runtime + ABI + registry |
+| `go/internal/drivers` | Lua host (`lua.go`) + wazero host (`runtime.go`) + shared Registry + capability ABI |
 | `go/internal/api` | HTTP endpoints (Go 1.22+ method mux) |
 | `go/internal/configreload` | fsnotify watcher + reload dispatch |
 | `go/internal/ha` | Home Assistant MQTT autodiscovery + bridge |
 | `go/internal/mqtt` | paho client wrapper implementing drivers.MQTTCap |
 | `go/internal/modbus` | simonvetter wrapper implementing drivers.ModbusCap |
-| `wasm-drivers/ferroamp` | Rust → wasm32-wasip1 Ferroamp driver |
-| `wasm-drivers/sungrow` | Rust → wasm32-wasip1 Sungrow driver |
-| `go/test/e2e` | Full-stack test: sims + main + WASM drivers + HTTP |
+| `go/internal/arp` | L2 MAC resolver for device identity (linux/darwin) |
+| `go/internal/sunpos` | Physics-only solar zenith/azimuth (Spencer 1971) |
+| `go/internal/priceforecast` | Price twin — fills beyond day-ahead publication |
+| `go/internal/loadmodel` | Household load twin (bucketed + heating coefficient) |
+| `go/internal/pvmodel` | PV twin (RLS over sunpos / cloud prior) |
+| `go/internal/mpc` | MPC planner — DP over SoC grid, 48 h horizon |
+| `drivers/` | Lua drivers (`ferroamp.lua`, `sungrow.lua`, …) |
+| `wasm-drivers/ferroamp` | Legacy Rust → wasm32-wasip1 Ferroamp driver |
+| `wasm-drivers/sungrow` | Legacy Rust → wasm32-wasip1 Sungrow driver |
+| `go/test/e2e` | Full-stack test: sims + main + drivers + HTTP |
 
 ## Building & testing
 
 ```bash
-make wasm         # compile .wasm drivers (needs wasm32-wasip1 Rust target)
+make wasm         # compile legacy .wasm drivers (needs wasm32-wasip1 Rust target)
 make test         # unit + integration tests
 make e2e          # full-stack end-to-end test
 make dev          # start sims + main app locally
@@ -52,28 +74,60 @@ make build-arm64  # cross-compile for RPi
 make release      # tarballs for deploy
 ```
 
-No CGo anywhere — pure Go + Rust → WASM. `go build` produces a static
-single-binary distribution.
+Lua drivers need no build step — `drivers/*.lua` ships verbatim with the
+release tarball and is loaded on startup. `make wasm` is only needed when
+you're actually shipping a `.wasm` module.
+
+No CGo anywhere — pure Go + embedded Lua 5.1 (gopher-lua) + optional
+Rust→WASM. `go build` produces a static single-binary distribution.
 
 ## Adding a new driver
 
-1. Copy `wasm-drivers/ferroamp/` as a template into `wasm-drivers/mydevice/`
-2. Implement `driver_init`, `driver_poll`, `driver_command`, `driver_default`,
-   `driver_cleanup` in `src/lib.rs`. Use `host::` helpers for I/O.
-3. Add `"mydevice"` to `WASM_DRIVERS` in the Makefile
-4. Add an entry to `config.yaml` with the appropriate `capabilities:` block
-5. Driver starts on next restart (or hot-reload via file watcher)
+1. Copy `drivers/ferroamp.lua` as a template to `drivers/mydevice.lua`.
+2. Implement `driver_init`, `driver_poll`, `driver_command`, and
+   (optionally) `driver_default_mode` / `driver_cleanup`. Use the
+   `host.*` helpers for I/O — full API in `go/internal/drivers/lua.go`.
+3. Call `host.set_make("…")` + `host.set_sn("…")` inside `driver_init`
+   as soon as you've read them off the device — that's what anchors
+   `device_id` to hardware identity.
+4. Use `host.emit_metric("name_unit", value)` for any scalar diagnostic
+   that doesn't fit the structured pv/battery/meter emit (temperatures,
+   DC voltages, MPPT currents, inverter heatsink, grid frequency). It
+   lands in the long-format TS DB, queryable for life.
+5. Add an entry to `config.yaml` with `lua: drivers/mydevice.lua` and
+   the appropriate `capabilities:` block.
+6. Driver starts on next restart (or hot-reload via the file watcher).
 
-The host ABI is stable across drivers — see
-`go/internal/drivers/abi.go` for the contract.
+Full walkthrough in `docs/writing-a-driver.md`.
 
-## WASM ABI
+## Lua driver host
+
+See the top-of-file comment in `go/internal/drivers/lua.go`. The `host`
+global exposes:
+
+- `host.log(level, msg)`, `host.millis()`, `host.set_poll_interval(ms)`
+- `host.set_make(s)`, `host.set_sn(s)` — anchors device identity
+- `host.emit("battery"|"pv"|"meter", {…})` — structured telemetry
+- `host.emit_metric(name, value)` — arbitrary scalar diagnostics into TS DB
+- `host.mqtt_sub/pub/messages`, `host.modbus_read/write/write_multi`
+- `host.decode_u32_le/be`, `host.decode_i32_le/be`, `host.decode_i16`
+- `host.json_encode/decode`
+
+MQTT / Modbus calls return an error string if the driver wasn't granted
+the capability in config.
+
+## WASM ABI (legacy)
+
+Still supported for any `.wasm` driver built against v2.0 of the host —
+`go/internal/drivers/runtime.go` + `abi.go` are unchanged. New drivers
+should prefer Lua.
 
 - Driver EXPORTS: `wasm_alloc`, `wasm_dealloc`, `driver_init`,
   `driver_poll`, `driver_command`, `driver_default`, `driver_cleanup`
 - Host IMPORTS (under `"host"` namespace): `log`, `millis`,
   `set_poll_interval`, `emit_telemetry`, `set_sn`, `set_make`,
-  `mqtt_{subscribe,publish,poll_messages}`, `modbus_{read,write_single,write_multi}`
+  `mqtt_{subscribe,publish,poll_messages}`,
+  `modbus_{read,write_single,write_multi}`
 - All string / byte-slice parameters use `(ptr: i32, len: i32)` pairs
   into driver memory. Driver allocates its own memory via `wasm_alloc`
   so the host can copy strings into it.
@@ -81,12 +135,43 @@ The host ABI is stable across drivers — see
 MQTT / Modbus functions return `ErrNoCapability` via status codes if
 the driver wasn't granted the relevant capability in config.
 
+## Time-series DB (long-format)
+
+Every `host.emit_metric` call lands in three SQLite tables defined in
+`go/internal/state/store.go` and written through
+`go/internal/state/store_ts.go`:
+
+- `ts_drivers(id, name)` — interned driver names
+- `ts_metrics(id, name, unit)` — interned metric names
+- `ts_samples(driver_id, metric_id, ts_ms, value)` — `WITHOUT ROWID,
+  STRICT`, PK clusters rows by (driver, metric, ts) so the typical
+  "metric X for driver Y over range Z" query is a sequential scan.
+
+Samples older than `RecentRetention` (14 days) roll off to daily Parquet
+files under `<state.cold_dir>/YYYY/MM/DD.parquet` — see
+`go/internal/state/parquet.go`. Rolloff runs hourly from
+`go/cmd/forty-two-watts/main.go` (`rolloffLoop`). Parquet files are
+zstd-compressed and dictionary-encoded on `driver` + `metric`, so a
+year of 50 metrics is typically a few GB.
+
+## Watchdog + safety
+
+The control loop (`go/cmd/forty-two-watts/main.go`, the `ticker.C`
+branch) runs `tel.WatchdogScan(timeout)` every cycle. Any driver whose
+last successful telemetry is older than `site.watchdog_timeout_s`
+(default 60 s) flips to offline and receives `DefaultMode` — which in
+every driver means "drop into autonomous self-consumption". The host
+also short-circuits the dispatch cycle when the configured site-meter
+driver is stale, because a stale grid reading causes one battery to
+charge another.
+
 ## Code conventions
 
 - `slog` for all logging
 - Explicit mutexes — no atomic tricks unless measurably needed
-- SQLite queries in `internal/state/store.go`, nothing embedded elsewhere
-- Driver code in Rust, not Go — sandbox guarantees + ecosystem libraries
+- SQLite queries in `internal/state/*.go`, nothing embedded elsewhere
+- Driver code in Lua (preferred) or Rust→WASM (legacy); the Go side
+  only owns capabilities, not protocol logic
 - Tests colocated with code, `_test.go` files
 - Integration tests in `go/test/e2e/` (separate package to keep public
   and internal concerns cleanly split)
@@ -101,11 +186,37 @@ the driver wasn't granted the relevant capability in config.
   scans. `Prune()` should be running periodically to age data to warm/cold.
 - **Tests fail with `drivers-wasm/*.wasm not found`**: run `make wasm`
   first. CI should always do `make wasm` before `make test`.
+- **Driver hung (tick_count not advancing)**: restart the service and
+  check `WatchdogScan` transitions in the logs — the loop should have
+  already flipped it offline and sent `DefaultMode`. If it didn't,
+  `tel.health[name].LastSuccess` never got bumped; confirm the driver
+  is actually calling `host.emit`.
+- **PV prediction wild**: the twin's RLS coefficients drifted on a
+  run of bad weather data. `POST /api/pvmodel/reset` wipes them and
+  falls back to the physics-only `sunpos` prior.
+- **Battery model orphaned after rename**: it shouldn't — models are
+  keyed on `device_id`, not driver name. Verify with `GET /api/devices`
+  that the rename preserved the same `device_id`. If not, the driver
+  isn't reporting a stable make+serial; fix it there.
 
 ## Docs for operators + devs
 
 - `docs/site-convention.md` — sign convention (must-read)
-- `docs/battery-models.md` — ARX(1), RLS, self-tune
+- `docs/architecture.md` — system overview, layers, data flow (NEW)
+- `docs/writing-a-driver.md` — Lua driver tutorial (NEW)
+- `docs/tsdb.md` — long-format TS schema + Parquet rolloff (NEW)
+- `docs/device-identity.md` — `device_id` resolution + ARP (NEW)
+- `docs/safety.md` — watchdog, clamps, fuse guard, stale-meter guard (NEW)
+- `docs/ml-models.md` — PV + load + price twins, MPC inputs (NEW)
+- `docs/api.md` — HTTP endpoint reference (NEW)
+- `docs/operations.md` — deploy, backup, upgrade, troubleshooting (NEW)
+- `docs/testing.md` — test strategy, sims, e2e recipe (NEW)
+- `docs/configuration.md` — YAML schema reference
+- `docs/battery-models.md` — ARX(1), RLS, cascade, self-tune
 - `docs/clamping.md` — the safety clamps
-- `docs/configuration.md` — YAML schema
-- `MIGRATION_PLAN.md` — why Go + WASM (for historical context)
+- `docs/mpc-planner.md` — MPC strategies, confidence blending
+- `docs/ml-twins.md` — older twin notes (superseded by ml-models.md)
+- `docs/ha-integration.md` — Home Assistant MQTT bridge
+- `docs/host-api.md` — legacy WASM driver ABI
+- `docs/lua-drivers.md` — earlier Lua driver notes (superseded by writing-a-driver.md)
+- `MIGRATION_PLAN.md` — historical: why Go + WASM (Rust→Go migration is complete)
