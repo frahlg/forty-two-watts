@@ -164,6 +164,23 @@
     return Math.round(w) + " W";
   }
 
+  // Snap an axis range to "nice" round numbers. Returns { min, max, step }
+  // where step is a 1/2/5 × 10^k value chosen so the axis spans `count`
+  // ticks across roughly the original range. Guarantees that 0 lands on
+  // a gridline when the input range crosses zero.
+  function niceAxis(min, max, count) {
+    if (!(max > min)) { max = min + 1; }
+    var rough = (max - min) / count;
+    var mag = Math.pow(10, Math.floor(Math.log10(rough)));
+    var norm = rough / mag;
+    var step = (norm < 1.5 ? 1 : norm < 3 ? 2 : norm < 7 ? 5 : 10) * mag;
+    return {
+      min: Math.floor(min / step) * step,
+      max: Math.ceil(max / step) * step,
+      step: step,
+    };
+  }
+
   function formatSoc(soc) {
     return Math.round(soc * 100) + "%";
   }
@@ -445,16 +462,10 @@
         }
       }
     }
-    // Include forecast values from plan so future segment isn't off-scale
-    if (chartPlan && chartPlan.actions && chartView === "power") {
-      for (var pi = 0; pi < chartPlan.actions.length; pi++) {
-        var a = chartPlan.actions[pi];
-        var aEnd = a.slot_start_ms + a.slot_len_min * 60000;
-        if (aEnd < windowStart || a.slot_start_ms > windowEnd) continue;
-        if (a.pv_w != null) visibleVals.push(a.pv_w);
-        if (a.load_w != null) visibleVals.push(a.load_w);
-      }
-    }
+    // Forecast values are intentionally NOT included in the y-range.
+    // Including them made the live segment feel cramped whenever a
+    // future slot predicted extreme power. Instead, forecasts are
+    // clipped to the actual-data plot rect (see ctx.clip above).
     if (visibleVals.length === 0) {
       // Empty state — draw axes + "waiting for data" hint
       ctx.clearRect(0, 0, w, h);
@@ -480,6 +491,13 @@
       yRange = yMax - yMin;
     }
 
+    // Snap axis to "nice" round numbers so gridlines carry readable
+    // labels ("0 W", "1.0 kW") instead of the raw fractional tick value
+    // that the lerp produces mid-animation ("6 W", "1.04 kW").
+    var nice = niceAxis(yMin, yMax, 5);
+    yMin = nice.min; yMax = nice.max; yRange = yMax - yMin;
+    var yStep = nice.step;
+
     ctx.clearRect(0, 0, w, h);
 
     // Clip to plot area so flowing lines don't draw over the y-axis labels
@@ -496,11 +514,13 @@
       ctx.fillRect(xNowShade, pad.top, pad.left + plotW - xNowShade, plotH);
     }
 
-    // Grid lines (drawn inside clip so they only appear in the plot area)
+    // Grid lines (drawn inside clip so they only appear in the plot area).
+    // Walk yMin..yMax in yStep increments so every line lands on a round
+    // number — that's what lets the y-axis labels stay readable.
     ctx.strokeStyle = "#2a2a2a";
     ctx.lineWidth = 0.5;
     ctx.font = "11px monospace";
-    var steps = 5;
+    var steps = Math.round(yRange / yStep);
     for (var i = 0; i <= steps; i++) {
       var y = pad.top + plotH - (plotH * i / steps);
       ctx.beginPath();
@@ -631,15 +651,9 @@
     ctx.lineTo(xNow, pad.top + plotH);
     ctx.stroke();
     ctx.setLineDash([]);
-    // "now ·  predicted →" label above the divider
-    ctx.fillStyle = "rgba(251,191,36,0.9)";
-    ctx.font = "10px system-ui, sans-serif";
-    ctx.textAlign = "left";
-    ctx.fillText("predicted →", xNow + 4, pad.top + 10);
-    ctx.fillStyle = "rgba(255,255,255,0.6)";
-    ctx.textAlign = "right";
-    ctx.fillText("now", xNow - 4, pad.top + 10);
-    ctx.textAlign = "left";
+    // No in-canvas "now" / "predicted →" labels — the amber shaded
+    // band + dashed vertical divider already communicate the boundary,
+    // and the "now" text on the x-axis keeps the anchor obvious.
 
     ctx.restore();
 

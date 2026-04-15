@@ -455,7 +455,8 @@ footer {
 
 .chart-legend {
   display: flex;
-  gap: 20px;
+  flex-wrap: wrap;
+  gap: 6px 16px;
   justify-content: center;
   margin-top: 10px;
   font-size: 0.85rem;
@@ -463,9 +464,11 @@ footer {
 }
 
 .legend-item {
-  display: flex;
+  display: inline-flex;
   align-items: center;
   gap: 6px;
+  white-space: nowrap;
+  flex: 0 0 auto;
 }
 
 .legend-color {
