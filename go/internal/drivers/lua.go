@@ -13,7 +13,7 @@
 // surfaced as a `host` global in the Lua VM:
 //
 //	host.log(level, msg)            -- level: "debug"|"info"|"warn"|"error"
-//	host.emit(table)                -- telemetry: {type="battery", w=…, soc=…}
+//	host.emit(type, table)          -- type: "meter"|"pv"|"battery"|"ev"
 //	host.millis()                   -- ms since driver start
 //	host.set_poll_interval(ms)
 //	host.set_sn(s)                  -- device serial (metadata)
@@ -179,9 +179,19 @@ func registerHost(L *lua.LState, env *HostEnv) {
 		return 0
 	}))
 
-	// host.emit("meter"|"pv"|"battery", { w=…, soc=… })
+	// host.emit("meter"|"pv"|"battery"|"ev", { w=…, soc=…, connected=…, charging=… })
 	// The type string is prepended to the table as a `type` field and
 	// the whole thing serialized as the JSON the WASM host expects.
+	// Allowed fields per type:
+	//   meter   -> w, l1_w, l2_w, l3_w, l1_v, l2_v, l3_v, l1_a, l2_a, l3_a, freq_hz
+	//   pv      -> w, mppt1_v, mppt1_a, mppt2_v, mppt2_a, dc_v
+	//   battery -> w, soc, dc_v, dc_a, temp_c
+	//   ev      -> w (charge power, positive when charging),
+	//              connected (bool, plug inserted),
+	//              charging (bool, current flowing),
+	//              session_wh (optional, kWh for current session * 1000),
+	//              max_a (optional, charger current limit),
+	//              phases (optional, 1 or 3)
 	host.RawSetString("emit", L.NewFunction(func(L *lua.LState) int {
 		typ := L.CheckString(1)
 		tbl := L.CheckTable(2)

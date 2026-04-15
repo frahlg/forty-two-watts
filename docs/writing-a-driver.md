@@ -179,7 +179,21 @@ host.emit("battery", {
     charge_wh    = 98765,
     discharge_wh = 54321,
 })
+
+host.emit("ev", {
+    w          = 7200,  -- required. Charge power in W (positive when pulling
+                        -- from the grid). Zero when plug is idle.
+    connected  = true,  -- required. Plug inserted in the car.
+    charging   = true,  -- required. Current is actually flowing.
+    session_wh = 14500, -- optional. Energy delivered this plug session.
+    max_a      = 16,    -- optional. Charger current cap.
+    phases     = 3,     -- optional. 1 or 3.
+})
 ```
+
+EV readings feed directly into the dispatch clamp that keeps home
+batteries from discharging into the car (`dispatch.go`). If your driver
+only knows `w`, set `connected = (w > 0)` and `charging = (w > 0)`.
 
 For anything that doesn't fit the pv/battery/meter shape — temperatures,
 DC voltages, MPPT currents, grid frequency — use:
