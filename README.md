@@ -53,6 +53,20 @@ top-of-funnel overview.
 
 ---
 
+## Supported devices
+
+17 Lua drivers covering 15 manufacturers — Ferroamp, Sungrow, Solis,
+Huawei, Deye, SMA, Fronius, SolarEdge, Eastron SDM, Pixii, Kostal,
+GoodWe, Growatt, Sofar, Victron. Six drivers participate in EMS
+dispatch control; the rest are read-only telemetry.
+
+See [`docs/driver-catalog.md`](docs/driver-catalog.md) for the full
+table (protocols, capabilities, control, tested models) and
+[`docs/writing-a-driver.md`](docs/writing-a-driver.md) if your device
+isn't listed.
+
+---
+
 ## Architecture in one sentence
 
 A Go binary runs the control loop, the HTTP API, and the Home Assistant

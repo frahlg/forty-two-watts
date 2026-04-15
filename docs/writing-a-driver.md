@@ -352,6 +352,10 @@ curl localhost:8080/api/series/catalog
 
 ## 8. Driver catalog
 
+For the current list of shipped drivers (manufacturer, protocol,
+capabilities, control support, tested models), see
+[`docs/driver-catalog.md`](driver-catalog.md).
+
 The `DRIVER` metadata table is parsed by
 `go/internal/drivers/catalog.go:LoadCatalog` with a regex — no Lua VM
 is spun up. The `GET /api/drivers/catalog` endpoint returns the parsed
