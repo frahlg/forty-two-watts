@@ -14,9 +14,10 @@ const (
 	DerMeter DerType = iota
 	DerPV
 	DerBattery
+	DerEV
 )
 
-// String returns the canonical string form ("meter", "pv", "battery").
+// String returns the canonical string form ("meter", "pv", "battery", "ev").
 func (d DerType) String() string {
 	switch d {
 	case DerMeter:
@@ -25,6 +26,8 @@ func (d DerType) String() string {
 		return "pv"
 	case DerBattery:
 		return "battery"
+	case DerEV:
+		return "ev"
 	}
 	return "unknown"
 }
@@ -38,6 +41,8 @@ func ParseDerType(s string) (DerType, error) {
 		return DerPV, nil
 	case "battery":
 		return DerBattery, nil
+	case "ev":
+		return DerEV, nil
 	}
 	return 0, fmt.Errorf("unknown der type %q", s)
 }

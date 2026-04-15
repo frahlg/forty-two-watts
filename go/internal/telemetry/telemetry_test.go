@@ -161,7 +161,7 @@ func TestReadingPreservesData(t *testing.T) {
 // ---- DerType ----
 
 func TestDerTypeRoundtrip(t *testing.T) {
-	for _, name := range []string{"meter", "pv", "battery"} {
+	for _, name := range []string{"meter", "pv", "battery", "ev"} {
 		d, err := ParseDerType(name)
 		if err != nil {
 			t.Fatal(err)
