@@ -25,10 +25,6 @@
     grid: [],
     pv: [],
     load: [],
-    ferroamp_bat: [],
-    sungrow_bat: [],
-    ferroamp_target: [],
-    sungrow_target: [],
     timestamps: [],
     // Energy counters (cumulative Wh, today-scoped)
     e_import: [],
@@ -38,6 +34,69 @@
     e_discharged: [],
     e_load: [],
   };
+
+  // Per-battery-driver chart series. Discovered dynamically from the
+  // /api/status drivers map (any driver exposing bat_w is treated as a
+  // battery source). Shape: { [driverName]: { bat: [...], target: [...] } }.
+  // Kept separate from chartHistory so the Object.keys(...).shift() loops
+  // below don't stumble over a nested object.
+  var chartBatteries = {};
+
+  // Deterministic color palette for battery series — each driver gets a
+  // stable color based on name hash so reload is consistent.
+  var BATTERY_PALETTE = [
+    "#f59e0b", "#8b5cf6", "#ec4899", "#06b6d4",
+    "#eab308", "#14b8a6", "#f43f5e", "#a855f7",
+  ];
+  function batteryColor(name) {
+    var h = 0;
+    for (var i = 0; i < name.length; i++) {
+      h = ((h << 5) - h + name.charCodeAt(i)) | 0;
+    }
+    return BATTERY_PALETTE[Math.abs(h) % BATTERY_PALETTE.length];
+  }
+  // A driver name → presentation label. Capitalize first letter so
+  // "pixii" → "Pixii"; everything else passes through as-is.
+  function batteryLabel(name) {
+    if (!name) return name;
+    return name.charAt(0).toUpperCase() + name.slice(1);
+  }
+
+  // Ensure a battery-driver slot exists. Backfills bat/target arrays
+  // with zeros up to current timestamps length so row indices align
+  // with the other chartHistory series.
+  function ensureBatteryDriver(name) {
+    if (chartBatteries[name]) return chartBatteries[name];
+    var pad = chartHistory.timestamps.length;
+    var slot = { bat: new Array(pad).fill(0), target: new Array(pad).fill(0) };
+    chartBatteries[name] = slot;
+    syncBatteryLegend();
+    return slot;
+  }
+
+  // Append a legend item for any newly-discovered battery driver. Uses
+  // the same markup as the static legend entries so the click handler
+  // (delegated on #chart-legend) picks them up automatically.
+  function syncBatteryLegend() {
+    var host = document.getElementById("chart-legend");
+    if (!host) return;
+    Object.keys(chartBatteries).forEach(function (name) {
+      var key = "bat:" + name;
+      if (host.querySelector('[data-toggle="' + cssEscape(key) + '"]')) return;
+      var span = document.createElement("span");
+      span.className = "legend-item";
+      span.dataset.toggle = key;
+      if (legendHidden[key]) span.classList.add("legend-off");
+      var swatch = document.createElement("span");
+      swatch.className = "legend-color";
+      swatch.style.background = batteryColor(name);
+      span.appendChild(swatch);
+      span.appendChild(document.createTextNode(" " + batteryLabel(name)));
+      host.appendChild(span);
+    });
+  }
+  // Minimal CSS.escape polyfill (legend keys contain ':').
+  function cssEscape(s) { return String(s).replace(/[^a-zA-Z0-9_-]/g, function(c) { return "\\" + c; }); }
 
   // Latest MPC plan — refreshed every 30s. Drives the forward-looking
   // dashed PV + Load forecast on the live chart (right-hand segment
@@ -131,14 +190,13 @@
     // threw inside renderDispatch, which is between renderDrivers and
     // pushChartData, so the chart starved while ticks kept incrementing.)
     try {
-      var fd0 = (data.drivers || {}).ferroamp || {};
-      var sd0 = (data.drivers || {}).sungrow || {};
-      var ft0 = 0, st0 = 0;
-      (data.dispatch || []).forEach(function(d) {
-        if (d.driver === "ferroamp") ft0 = d.target_w;
-        if (d.driver === "sungrow") st0 = d.target_w;
+      // Build a {driver → target_w} index from the dispatch array so the
+      // per-battery push below doesn't need an inner loop.
+      var targetsByDriver = {};
+      (data.dispatch || []).forEach(function (d) {
+        if (d && d.driver) targetsByDriver[d.driver] = d.target_w || 0;
       });
-      pushChartData(data, fd0.bat_w||0, sd0.bat_w||0, ft0, st0);
+      pushChartData(data, targetsByDriver);
     } catch (e) { console.error("pushChartData error:", e); }
 
     // Version (live from API — survives stale browser cache of index.html)
@@ -261,7 +319,7 @@
     // Timestamp is updated in fetchStatus (before render, so it's robust to render errors)
   }
 
-  function pushChartData(data, ferroBat, sunBat, ferroTarget, sunTarget) {
+  function pushChartData(data, targetsByDriver) {
     var t = (data.energy && data.energy.today) || {};
     var now = Date.now();
     // Dedupe via JS-side push timer ONLY — never compare against server timestamps
@@ -273,10 +331,6 @@
     chartHistory.grid.push(data.grid_w);
     chartHistory.pv.push(data.pv_w);
     chartHistory.load.push(data.load_w || 0);
-    chartHistory.ferroamp_bat.push(ferroBat);
-    chartHistory.sungrow_bat.push(sunBat);
-    chartHistory.ferroamp_target.push(ferroTarget);
-    chartHistory.sungrow_target.push(sunTarget);
     chartHistory.timestamps.push(now);
     chartHistory.e_import.push(t.import_wh || 0);
     chartHistory.e_export.push(t.export_wh || 0);
@@ -284,8 +338,37 @@
     chartHistory.e_charged.push(t.bat_charged_wh || 0);
     chartHistory.e_discharged.push(t.bat_discharged_wh || 0);
     chartHistory.e_load.push(t.load_wh || 0);
+
+    // Per-battery-driver push. Any driver in data.drivers that exposes
+    // bat_w is considered battery-capable and gets its own chart series.
+    var drivers = data.drivers || {};
+    var seenBatteries = {};
+    Object.keys(drivers).forEach(function (name) {
+      var d = drivers[name] || {};
+      if (d.bat_w == null) return;
+      seenBatteries[name] = true;
+      var slot = ensureBatteryDriver(name);
+      slot.bat.push(d.bat_w || 0);
+      slot.target.push((targetsByDriver && targetsByDriver[name]) || 0);
+    });
+    // Drivers that have history but didn't report this cycle: push a
+    // 0 so index alignment with chartHistory.timestamps stays intact.
+    // (Keeps the line continuous; the driver offline/gap is already
+    // visible through the driver card's status indicator.)
+    Object.keys(chartBatteries).forEach(function (name) {
+      if (seenBatteries[name]) return;
+      var slot = chartBatteries[name];
+      slot.bat.push(0);
+      slot.target.push(0);
+    });
+
     if (chartHistory.grid.length > CHART_POINTS) {
       Object.keys(chartHistory).forEach(function(k) { chartHistory[k].shift(); });
+      Object.keys(chartBatteries).forEach(function (name) {
+        var slot = chartBatteries[name];
+        slot.bat.shift();
+        slot.target.shift();
+      });
     }
     lastDataTs = now;
     // Fire a discrete pulse for this new data point — heartbeat feel
@@ -335,14 +418,20 @@
       ];
     } else {
       series = [
-        { data: chartHistory.grid,            color: "#ef4444", width: 2,   dash: [],     name: "Grid",         fill: true,  toggle: "grid" },
-        { data: chartHistory.pv,              color: "#22c55e", width: 2,   dash: [],     name: "PV",           fill: true,  toggle: "pv" },
-        { data: chartHistory.load,            color: "#e2e8f0", width: 1.5, dash: [],     name: "Load",         fill: false, toggle: "load" },
-        { data: chartHistory.ferroamp_bat,    color: "#f59e0b", width: 2,   dash: [],     name: "Ferroamp",     fill: false, toggle: "ferroamp" },
-        { data: chartHistory.ferroamp_target, color: "#f59e0b", width: 1.5, dash: [6, 4], name: "Ferroamp tgt", fill: false, toggle: "ferroamp" },
-        { data: chartHistory.sungrow_bat,     color: "#8b5cf6", width: 2,   dash: [],     name: "Sungrow",      fill: false, toggle: "sungrow" },
-        { data: chartHistory.sungrow_target,  color: "#8b5cf6", width: 1.5, dash: [6, 4], name: "Sungrow tgt",  fill: false, toggle: "sungrow" },
+        { data: chartHistory.grid, color: "#ef4444", width: 2,   dash: [], name: "Grid", fill: true,  toggle: "grid" },
+        { data: chartHistory.pv,   color: "#22c55e", width: 2,   dash: [], name: "PV",   fill: true,  toggle: "pv" },
+        { data: chartHistory.load, color: "#e2e8f0", width: 1.5, dash: [], name: "Load", fill: false, toggle: "load" },
       ];
+      // Append one actual/target pair per discovered battery driver.
+      // Stable order so chart colors don't jump as the driver set grows.
+      Object.keys(chartBatteries).sort().forEach(function (name) {
+        var slot = chartBatteries[name];
+        var color = batteryColor(name);
+        var toggle = "bat:" + name;
+        var label = batteryLabel(name);
+        series.push({ data: slot.bat,    color: color, width: 2,   dash: [],     name: label,         fill: false, toggle: toggle });
+        series.push({ data: slot.target, color: color, width: 1.5, dash: [6, 4], name: label + " tgt", fill: false, toggle: toggle });
+      });
       // Respect click-to-hide from legend.
       series = series.filter(function (s) { return !legendHidden[s.toggle]; });
     }
@@ -713,16 +802,21 @@
       { name: "Charged",    data: chartHistory.e_charged,    color: "#3b82f6" },
       { name: "Discharged", data: chartHistory.e_discharged, color: "#f59e0b" },
       { name: "Load",       data: chartHistory.e_load,       color: "#e2e8f0" },
-    ] : [
-      { name: "Grid",     data: chartHistory.grid,     color: "#ef4444" },
-      { name: "PV",       data: chartHistory.pv,       color: "#22c55e" },
-      { name: "Load",     data: chartHistory.load,     color: "#e2e8f0" },
+    ] : (function () {
+      var rows = [
+        { name: "Grid", data: chartHistory.grid, color: "#ef4444" },
+        { name: "PV",   data: chartHistory.pv,   color: "#22c55e" },
+        { name: "Load", data: chartHistory.load, color: "#e2e8f0" },
+      ];
       // Battery rows render their target inline as "actual W (→ target W)"
       // so it's visually obvious the two numbers are the same metric — one
-      // measured, one commanded. See drawHoverOverlay's value formatter.
-      { name: "Ferroamp", data: chartHistory.ferroamp_bat, color: "#f59e0b", target: chartHistory.ferroamp_target },
-      { name: "Sungrow",  data: chartHistory.sungrow_bat,  color: "#8b5cf6", target: chartHistory.sungrow_target },
-    ];
+      // measured, one commanded. See value formatter below.
+      Object.keys(chartBatteries).sort().forEach(function (name) {
+        var slot = chartBatteries[name];
+        rows.push({ name: batteryLabel(name), data: slot.bat, color: batteryColor(name), target: slot.target });
+      });
+      return rows;
+    })();
 
     var ts = chartHistory.timestamps[i] || 0;
     var timeStr = ts > 0 ? new Date(ts).toLocaleTimeString() : "";
@@ -1168,19 +1262,15 @@
         if (!data || !data.items) return;
         // Populate chart history from persisted data
         Object.keys(chartHistory).forEach(function(k) { chartHistory[k] = []; });
+        // Reset the dynamic battery set and rediscover from the history
+        // items themselves — drivers that existed earlier but no longer
+        // appear in /api/status will simply not be recreated.
+        chartBatteries = {};
         data.items.forEach(function (it) {
-          var fd = (it.drivers || {}).ferroamp || {};
-          var sd = (it.drivers || {}).sungrow || {};
-          var ft = (it.targets || {}).ferroamp || 0;
-          var st = (it.targets || {}).sungrow || 0;
           var et = it.energy_today || {};
           chartHistory.grid.push(it.grid_w || 0);
           chartHistory.pv.push(it.pv_w || 0);
           chartHistory.load.push(it.load_w || 0);
-          chartHistory.ferroamp_bat.push(fd.bat_w || 0);
-          chartHistory.sungrow_bat.push(sd.bat_w || 0);
-          chartHistory.ferroamp_target.push(ft);
-          chartHistory.sungrow_target.push(st);
           chartHistory.timestamps.push(it.ts || 0);
           chartHistory.e_import.push(et.import_wh || 0);
           chartHistory.e_export.push(et.export_wh || 0);
@@ -1188,7 +1278,27 @@
           chartHistory.e_charged.push(et.bat_charged_wh || 0);
           chartHistory.e_discharged.push(et.bat_discharged_wh || 0);
           chartHistory.e_load.push(et.load_wh || 0);
+
+          // Per-battery discovery from this item's drivers + targets maps.
+          var itDrivers = it.drivers || {};
+          var itTargets = it.targets || {};
+          var seen = {};
+          Object.keys(itDrivers).forEach(function (name) {
+            var d = itDrivers[name] || {};
+            if (d.bat_w == null) return;
+            seen[name] = true;
+            var slot = ensureBatteryDriver(name);
+            slot.bat.push(d.bat_w || 0);
+            slot.target.push(itTargets[name] || 0);
+          });
+          Object.keys(chartBatteries).forEach(function (name) {
+            if (seen[name]) return;
+            var slot = chartBatteries[name];
+            slot.bat.push(0);
+            slot.target.push(0);
+          });
         });
+        syncBatteryLegend();
         renderChart();
       })
       .catch(function () { /* silent */ });

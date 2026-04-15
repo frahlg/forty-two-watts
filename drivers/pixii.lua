@@ -4,8 +4,21 @@
 -- Register type: ALL HOLDING (FC 0x03)
 -- Uses SunSpec scale factors (signed i16 exponents → value * 10^sf)
 --
--- Ported from sourceful-hugin/device-support/drivers/lua/pixii.lua
--- (read-only; control path not yet implemented).
+-- Read path ported from sourceful-hugin/device-support/drivers/lua/pixii.lua.
+-- Control path (active power setpoint) implemented against the Pixii
+-- PowerShaper Modbus Mapping doc 13300 rev 2.0 (page 15 note about
+-- control modes "simple" / "use control power activate"):
+--
+--   39903  Handshake counter (uint16)  — must be ticked at least once
+--                                         per 60 s or the system drops
+--                                         to idle.
+--   39905/06  Power regulation set-point (int32 W, generator frame)
+--                                         — must be written atomically
+--                                         as a two-register multi-write.
+--
+-- "Generator reference frame" inverts the EMS sign convention: positive
+-- setpoint = discharge on the Pixii side, positive power_w = charge on
+-- the EMS side. The driver negates at the setpoint boundary.
 
 DRIVER = {
   id           = "pixii",
@@ -24,12 +37,20 @@ DRIVER = {
 --   Battery w: positive = charging  (load), negative = discharging (source)
 --   Meter   w: positive = importing,        negative = exporting
 --
--- Pixii native meter reports negative = import (utility-perspective), so we
--- negate meter power/current to line up with the site convention.
+-- On this Pixii firmware the native meter already reports positive = import,
+-- matching the site convention, so W and A are passed through unchanged.
 
 PROTOCOL = "modbus"
 
+-- Pixii control registers (doc 13300, section "Register addresses below 40000")
+local REG_HEARTBEAT   = 39903  -- uint16, 0..100, must tick >= 1/min
+local REG_SETPOINT_HI = 39905  -- int32 MSB (big-endian, paired with 39906)
+local REG_SETPOINT_LO = 39906  -- int32 LSB
+
 local sn_read = false
+-- Handshake counter, bumped every poll so the Pixii never times out to idle.
+-- Any change is sufficient; we just walk 0..99 and wrap.
+local hb_tick = 0
 
 ----------------------------------------------------------------------------
 -- Helpers
@@ -85,6 +106,11 @@ end
 ----------------------------------------------------------------------------
 
 function driver_poll()
+    -- Keep the handshake counter moving so the Pixii never times out
+    -- to idle. Pixii only requires that the value changes; 0..99 wrap.
+    hb_tick = (hb_tick + 1) % 100
+    pcall(host.modbus_write, REG_HEARTBEAT, hb_tick)
+
     -- Read serial number once from SunSpec Common Model (offset 52 from
     -- the common block → absolute 40052, 16 regs ASCII).
     if not sn_read then
@@ -244,50 +270,101 @@ function driver_poll()
         import_wh = scale(host.decode_u32_be(imp_regs[1], imp_regs[2]), meter_energy_sf)
     end
 
-    -- Pixii native: negative=import. Site convention: positive=import.
-    -- Negate W and A (voltage is always positive magnitude, leave alone).
+    -- Native Pixii meter already uses site convention (+import / -export),
+    -- so values are passed through without a sign flip.
     host.emit("meter", {
-        w         = -meter_w,
-        l1_w      = -l1_w,
-        l2_w      = -l2_w,
-        l3_w      = -l3_w,
+        w         = meter_w,
+        l1_w      = l1_w,
+        l2_w      = l2_w,
+        l3_w      = l3_w,
         l1_v      = l1_v,
         l2_v      = l2_v,
         l3_v      = l3_v,
-        l1_a      = -l1_a,
-        l2_a      = -l2_a,
-        l3_a      = -l3_a,
+        l1_a      = l1_a,
+        l2_a      = l2_a,
+        l3_a      = l3_a,
         hz        = meter_hz,
         import_wh = import_wh,
         export_wh = export_wh,
     })
-    host.emit_metric("meter_l1_w", -l1_w)
-    host.emit_metric("meter_l2_w", -l2_w)
-    host.emit_metric("meter_l3_w", -l3_w)
-    host.emit_metric("meter_l1_v",  l1_v)
-    host.emit_metric("meter_l2_v",  l2_v)
-    host.emit_metric("meter_l3_v",  l3_v)
-    host.emit_metric("meter_l1_a", -l1_a)
-    host.emit_metric("meter_l2_a", -l2_a)
-    host.emit_metric("meter_l3_a", -l3_a)
-    host.emit_metric("grid_hz",     meter_hz)
+    host.emit_metric("meter_l1_w", l1_w)
+    host.emit_metric("meter_l2_w", l2_w)
+    host.emit_metric("meter_l3_w", l3_w)
+    host.emit_metric("meter_l1_v", l1_v)
+    host.emit_metric("meter_l2_v", l2_v)
+    host.emit_metric("meter_l3_v", l3_v)
+    host.emit_metric("meter_l1_a", l1_a)
+    host.emit_metric("meter_l2_a", l2_a)
+    host.emit_metric("meter_l3_a", l3_a)
+    host.emit_metric("grid_hz",    meter_hz)
 
     return 5000
 end
 
 ----------------------------------------------------------------------------
--- Control (read-only — not implemented)
+-- Control: active power setpoint (demand response)
 ----------------------------------------------------------------------------
+-- EMS convention on the 42W side: power_w > 0 = charge, < 0 = discharge.
+-- Pixii 39905/06 uses generator reference frame (positive = discharge),
+-- so the sign is flipped at the setpoint boundary. The two registers
+-- MUST be written atomically as a single write-multiple (FC 0x10) so
+-- the Pixii doesn't see a half-updated int32 — doc 13300 page 15 is
+-- explicit about this.
+
+-- Encode a signed int32 watt value into two big-endian u16 registers.
+-- Lua numbers are 64-bit doubles so the two's-complement math stays
+-- exact for any realistic setpoint (< ~2^53).
+local function encode_i32_be(value)
+    local raw = math.floor(value + 0.5)
+    if raw < 0 then raw = raw + 0x100000000 end
+    local hi = math.floor(raw / 0x10000) % 0x10000
+    local lo = raw % 0x10000
+    return hi, lo
+end
+
+local function write_setpoint_w(pixii_w)
+    local hi, lo = encode_i32_be(pixii_w)
+    local err = host.modbus_write_multi(REG_SETPOINT_HI, { hi, lo })
+    if err ~= nil and err ~= "" then
+        host.log("warn", "Pixii: setpoint write failed: " .. tostring(err))
+        return false
+    end
+    -- Bump the heartbeat on every command too — the dispatch tick is
+    -- often faster than the poll tick, and we don't want the Pixii to
+    -- edge into idle right after we told it to move.
+    hb_tick = (hb_tick + 1) % 100
+    pcall(host.modbus_write, REG_HEARTBEAT, hb_tick)
+    return true
+end
+
+local function set_battery_power(power_w)
+    -- Flip EMS → generator frame.
+    local pixii_w = -power_w
+    host.log("debug", "Pixii: setpoint ems_w=" .. tostring(power_w)
+        .. " pixii_w=" .. tostring(pixii_w))
+    return write_setpoint_w(pixii_w)
+end
 
 function driver_command(action, power_w, cmd)
-    host.log("info", "Pixii control not yet implemented: " .. tostring(action))
+    if action == "init" then
+        return true
+    elseif action == "battery" then
+        return set_battery_power(power_w or 0)
+    elseif action == "curtail_disable" or action == "deinit" then
+        return set_battery_power(0)
+    end
+    host.log("debug", "Pixii: unsupported action=" .. tostring(action))
     return false
 end
 
+-- Watchdog fallback: site-meter stale or driver-host decided to bail.
+-- Return the Pixii to idle (setpoint 0). The PI loop will re-assert
+-- its desired setpoint on the next cycle once telemetry recovers.
 function driver_default_mode()
-    -- No-op: read-only driver, nothing to revert.
+    host.log("info", "Pixii: watchdog → setpoint 0")
+    set_battery_power(0)
 end
 
 function driver_cleanup()
-    -- Nothing to clean up.
+    set_battery_power(0)
 end
