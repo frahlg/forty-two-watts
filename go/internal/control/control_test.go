@@ -376,3 +376,37 @@ func TestEVChargingSignalExcludedFromGrid(t *testing.T) {
 		}
 	}
 }
+
+func TestEVChargingSignalOverriddenByDerEVReading(t *testing.T) {
+	// A DerEV driver reports 4000W. EVChargingW was 0 (no manual slider).
+	// After ComputeDispatch, EVChargingW must reflect the live reading
+	// so the dispatch clamp works against real hardware.
+	store := seedStore(5000, []struct{ name string; currentW, soc float64 }{
+		{"ferroamp", 0, 0.5},
+	})
+	store.Update("easee", telemetry.DerEV, 4000, nil, nil)
+	store.DriverHealthMut("easee").RecordSuccess()
+	st := NewState(0, 50, "ferroamp")
+	st.Mode = ModeSelfConsumption
+	st.EVChargingW = 0
+	st.SlewRateW = 100000
+	_ = ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if st.EVChargingW != 4000 {
+		t.Errorf("expected EVChargingW to be overridden by live EV reading = 4000, got %f", st.EVChargingW)
+	}
+}
+
+func TestEVChargingManualPreservedWhenNoDriver(t *testing.T) {
+	// No DerEV reading. The manual slider value (1500W) must survive —
+	// we don't want an offline / stale driver to silently zero it out.
+	store := seedStore(1500, []struct{ name string; currentW, soc float64 }{
+		{"ferroamp", 0, 0.5},
+	})
+	st := NewState(0, 50, "ferroamp")
+	st.Mode = ModeSelfConsumption
+	st.EVChargingW = 1500
+	_ = ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if st.EVChargingW != 1500 {
+		t.Errorf("expected EVChargingW manual value 1500 to survive, got %f", st.EVChargingW)
+	}
+}

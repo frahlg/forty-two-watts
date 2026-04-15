@@ -196,6 +196,17 @@ func ComputeDispatch(
 	if r := store.Get(state.SiteMeterDriver, telemetry.DerMeter); r != nil {
 		rawGridW = r.SmoothedW
 	}
+	// Live EV charger readings override the manual slider on each tick —
+	// hardware truth beats guesses. Only override when something >0 is
+	// actually being reported, so an offline / stale EV driver doesn't
+	// silently zero out a user-set manual value.
+	var evSum float64
+	for _, r := range store.ReadingsByType(telemetry.DerEV) {
+		evSum += r.SmoothedW
+	}
+	if evSum > 0 {
+		state.EVChargingW = evSum
+	}
 	// EV signal: subtract EV load from grid so batteries don't try to cover it.
 	// EV is always a positive import at the meter; subtracting it makes the
 	// "effective grid" the controller works on the house-side portion only.
