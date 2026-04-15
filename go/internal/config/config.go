@@ -26,6 +26,22 @@ type Config struct {
 	Weather       *Weather           `yaml:"weather,omitempty" json:"weather,omitempty"`
 	Planner       *Planner           `yaml:"planner,omitempty" json:"planner,omitempty"`
 	Batteries     map[string]Battery `yaml:"batteries,omitempty" json:"batteries,omitempty"`
+	OCPP          *OCPP              `yaml:"ocpp,omitempty" json:"ocpp,omitempty"`
+}
+
+// OCPP configures the embedded OCPP 1.6J Central System for EV chargers.
+// When enabled, EV chargers connect to ws://<bind>:<port>/<chargerId>
+// and their power readings flow into telemetry.Store as DerEV samples,
+// which the dispatch clamp uses to keep home batteries from feeding
+// the car. See go/internal/ocpp.
+type OCPP struct {
+	Enabled            bool   `yaml:"enabled" json:"enabled"`
+	Bind               string `yaml:"bind,omitempty" json:"bind,omitempty"`
+	Port               int    `yaml:"port,omitempty" json:"port,omitempty"`
+	Path               string `yaml:"path,omitempty" json:"path,omitempty"`
+	Username           string `yaml:"username,omitempty" json:"username,omitempty"`
+	Password           string `yaml:"password,omitempty" json:"password,omitempty"`
+	HeartbeatIntervalS int    `yaml:"heartbeat_interval_s,omitempty" json:"heartbeat_interval_s,omitempty"`
 }
 
 // Planner configures the MPC scheduler (optional — disabled if omitted).

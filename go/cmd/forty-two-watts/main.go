@@ -33,6 +33,7 @@ import (
 	mqttcli "github.com/frahlg/forty-two-watts/go/internal/mqtt"
 	modbuscli "github.com/frahlg/forty-two-watts/go/internal/modbus"
 	"github.com/frahlg/forty-two-watts/go/internal/mpc"
+	"github.com/frahlg/forty-two-watts/go/internal/ocpp"
 	"github.com/frahlg/forty-two-watts/go/internal/priceforecast"
 	"github.com/frahlg/forty-two-watts/go/internal/prices"
 	"github.com/frahlg/forty-two-watts/go/internal/pvmodel"
@@ -432,6 +433,27 @@ func main() {
 			haBridge = bridge
 			defer haBridge.Stop()
 			deps.HA = haBridge // late-binding for API
+		}
+	}
+
+	// ---- OCPP 1.6J Central System (EV chargers) ----
+	if cfg.OCPP != nil && cfg.OCPP.Enabled {
+		ocppCfg := &ocpp.Config{
+			Enabled:            cfg.OCPP.Enabled,
+			Bind:               cfg.OCPP.Bind,
+			Port:               cfg.OCPP.Port,
+			Path:               cfg.OCPP.Path,
+			Username:           cfg.OCPP.Username,
+			Password:           cfg.OCPP.Password,
+			HeartbeatIntervalS: cfg.OCPP.HeartbeatIntervalS,
+		}
+		ocppSrv, err := ocpp.Start(ctx, ocppCfg, tel)
+		if err != nil {
+			slog.Warn("OCPP central system failed to start", "err", err)
+		} else {
+			defer ocppSrv.Stop()
+			// API surface for /api/ev_chargers etc. lands in Unit 5.
+			_ = ocppSrv
 		}
 	}
 
