@@ -303,10 +303,13 @@
         else ctx.lineTo(x, y);
       }
       ctx.stroke();
+      // SoC axis labels: right-align flush against the plot's right edge
+      // so they read as part of the chart frame instead of floating off
+      // in whitespace.
       ctx.fillStyle = 'rgba(255,255,255,0.55)';
       ctx.textAlign = 'right';
-      ctx.fillText('100%', cssW - pad.r + 40, socY(100) + 4);
-      ctx.fillText('0%', cssW - pad.r + 40, socY(0) + 4);
+      ctx.fillText('100%', cssW - pad.r - 4, socY(100) + 4);
+      ctx.fillText('0%',   cssW - pad.r - 4, socY(0)   + 4);
       ctx.textAlign = 'left';
       ctx.fillText('SoC', pad.l + 4, socY0 + 12);
     }
