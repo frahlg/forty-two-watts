@@ -19,27 +19,55 @@ Three layers in one binary:
    pattern from its own telemetry. Feed slot-by-slot forecasts into
    the MPC.
 
-**This branch (`go-port`)** is the current mainline: **Go + WASM drivers**
-(via wazero). The previous Rust implementation lives on `master` and is
-unchanged.
+The Go port is now **mainline on `master`**. The previous Rust
+implementation lives alongside in `src/` + `Cargo.toml` and is frozen
+(see `MIGRATION_PLAN.md` for historical context).
+
+## What's new in v2.1+
+
+- **Lua drivers are now the primary path.** Drop a `.lua` file in
+  `drivers/`, no build step. WASM drivers still load via the same
+  registry and capability ABI, but Lua is recommended for anything new.
+  See [`docs/architecture.md`](docs/architecture.md) for the current
+  driver host and [`docs/writing-a-driver.md`](docs/writing-a-driver.md)
+  for the walkthrough.
+- **Long-format TSDB.** `ts_drivers` / `ts_metrics` / `ts_samples`
+  (WITHOUT ROWID, STRICT) in SQLite, with automatic daily Parquet
+  rolloff past 14 days. Drivers push arbitrary scalar diagnostics with
+  `host.emit_metric(name, value)`. Details in
+  [`docs/tsdb.md`](docs/tsdb.md).
+- **Hardware-stable device identity.** Every device gets a `device_id`
+  resolved as `make:serial` > `mac:<arp-resolved>` > `ep:<endpoint>`.
+  Battery models and other persistent state are keyed on `device_id`,
+  so renaming a driver no longer orphans training data. See
+  [`docs/device-identity.md`](docs/device-identity.md).
+- **`sunpos` package.** Physics-only solar position (Spencer 1971),
+  used as a prior for the data-driven PV twin and as groundwork for
+  upcoming auto-PV.
+- **Watchdog safety.** `tel.WatchdogScan` flips stale drivers offline
+  and reverts them to autonomous mode; a stale site-meter
+  short-circuits the dispatch cycle.
+
+Start with [`docs/architecture.md`](docs/architecture.md) for the
+top-of-funnel overview.
 
 ---
 
 ## Architecture in one sentence
 
 A Go binary runs the control loop, the HTTP API, and the Home Assistant
-bridge; WASM driver modules (one `.wasm` file per device type) do all
-protocol work — MQTT, Modbus, JSON parsing, bit twiddling — inside a
-capability-scoped sandbox with a tiny host ABI.
+bridge; Lua driver modules (one `.lua` file per device type, WASM still
+supported) do all protocol work — MQTT, Modbus, JSON parsing, bit
+twiddling — inside a capability-scoped sandbox with a tiny host API.
 
 ```
 ┌────────────────────────────────────────────────────────────────┐
 │                   forty-two-watts (Go)                          │
 │                                                                 │
-│  ┌──────────┐  ┌──────────┐   WASM driver modules (wazero)     │
-│  │ Ferroamp │  │ Sungrow  │   — fat. all protocol logic here.  │
-│  │  .wasm   │  │  .wasm   │                                    │
-│  └────┬─────┘  └────┬─────┘                                    │
+│  ┌──────────┐  ┌──────────┐   Lua drivers (gopher-lua)         │
+│  │ferroamp  │  │ sungrow  │   — fat. all protocol logic here.  │
+│  │  .lua    │  │  .lua    │   (legacy .wasm still supported    │
+│  └────┬─────┘  └────┬─────┘    via the same Registry/ABI)      │
 │       │              │                                          │
 │       ▼              ▼                                          │
 │  ┌──────────────────────────┐                                  │
@@ -52,39 +80,44 @@ capability-scoped sandbox with a tiny host ABI.
 │  │  Control loop              │  │  HTTP API + web UI     │    │
 │  │  PI + cascade + self-tune  │  │  :8080                 │    │
 │  │  + ARX(1) RLS per battery  │  └────────────────────────┘    │
+│  │  + watchdog / stale-meter  │                                 │
 │  └──────────────┬────────────┘                                  │
 │                 │                 ┌────────────────────────┐    │
 │                 └────────────────▶│  HA MQTT bridge         │    │
 │                                   │  (autodiscovery)        │    │
 │                                   └────────────────────────┘    │
 │  ┌──────────────────────────┐                                  │
-│  │  SQLite state DB         │  config, events, battery models, │
-│  │  (tiered history)        │  history hot/warm/cold tiers,    │
-│  └──────────────────────────┘  prices, forecasts, twin state   │
+│  │  SQLite state DB         │  config, events, devices,        │
+│  │  + tiered history        │  battery models (keyed on        │
+│  │  + long-format TS (14d)  │  device_id), history hot/warm/   │
+│  │  + Parquet cold (>14d)   │  cold tiers, prices, forecasts   │
+│  └──────────────────────────┘                                  │
 │                                                                 │
 │  ┌──────────────────────────┐   ┌────────────────────────┐     │
 │  │  MPC planner (15 min)    │◀──│  Digital twins (1 min) │     │
 │  │  • DP over SoC grid      │   │  • pvmodel (RLS)       │     │
 │  │  • 48 h horizon          │   │  • loadmodel (buckets) │     │
 │  │  • three strategies      │   │  • priceforecast       │     │
-│  │  • confidence blending   │   │  • baked cold-start    │     │
-│  │  • per-slot reasons      │   │    priors + auto-fit   │     │
+│  │  • confidence blending   │   │  • sunpos prior        │     │
+│  │  • per-slot reasons      │   │    (physics-only)      │     │
 │  └────────────┬─────────────┘   └────────────────────────┘     │
 │               │  grid_target_w per slot                         │
 │               └─────▶ consumed by the control loop above        │
 └────────────────────────────────────────────────────────────────┘
 ```
 
-Read the whole story: [`MIGRATION_PLAN.md`](MIGRATION_PLAN.md)
+Architecture walkthrough: [`docs/architecture.md`](docs/architecture.md)
 Sign convention (critical): [`docs/site-convention.md`](docs/site-convention.md)
+Historical migration rationale: [`MIGRATION_PLAN.md`](MIGRATION_PLAN.md)
 
 ## Quick start
 
-Prereqs: Go 1.22+, Rust stable + `wasm32-wasip1` target (for building
-driver modules), `make`.
+Prereqs: Go 1.22+, `make`. Rust + `wasm32-wasip1` only needed if you
+want to build legacy WASM drivers — the default Lua drivers need
+nothing more.
 
 ```bash
-# Build WASM drivers + Go binaries, run the full local stack with simulators
+# Build Go binaries + (if present) WASM drivers, run the full local stack with simulators
 make dev
 
 # Open the UI
@@ -105,12 +138,22 @@ SH10RT (Modbus TCP) with realistic first-order battery response.
   factor, capability-aware saturation curves, hardware-health drift
 - **Self-tune** — 3-minute step-response calibration per battery to set
   a clean baseline; safety-gated by confidence
-- **WASM drivers** — FAT drivers. The host provides only capabilities
-  (MQTT, Modbus, time, logging). Each driver does its own protocol
-  parsing, state management, command translation. No `host.decode_*`
-  functions; everything lives inside the sandbox.
-- **Hot-reload** — config.yaml + settings UI round-trip, file watcher
+- **Lua drivers** — FAT drivers. The host provides only capabilities
+  (MQTT, Modbus, time, logging, TS metric emit). Each driver does its
+  own protocol parsing, state management, command translation. WASM
+  drivers still load through the same Registry for anyone shipping a
+  `.wasm` binary from v2.0.
+- **Hardware-stable device identity** — `make:serial` >
+  `mac:<arp-resolved>` > `ep:<endpoint>`. Persistent state (battery
+  models, calibration history) survives driver renames.
+- **Watchdog** — stale drivers flip offline and revert to autonomous
+  mode; stale site-meter short-circuits the dispatch cycle.
+- **Hot-reload** — `config.yaml` + settings UI round-trip, file watcher
   applies changes live for 99% of settings
+- **Long-format TSDB** — `host.emit_metric(name, value)` lands
+  diagnostics in an interned SQLite schema (`ts_samples`,
+  WITHOUT ROWID, STRICT). Past 14 days rolls off to daily Parquet
+  files for long-term retention.
 - **Tiered history** — 30d at 5s, 12mo at 15min buckets, forever at 1d
   buckets. Pure SQL aggregation (SQLite, no CGo).
 - **Home Assistant MQTT** — autodiscovery publishes sensors for grid,
@@ -119,7 +162,7 @@ SH10RT (Modbus TCP) with realistic first-order battery response.
 ## Deploy to a Raspberry Pi
 
 ```bash
-# One-time: make sure rustup has wasm32-wasip1 installed
+# One-time (only needed if you ship WASM drivers): wasm32-wasip1 toolchain
 rustup target add wasm32-wasip1
 
 # Build the release tarballs (arm64 + amd64)
@@ -136,8 +179,10 @@ gh release create v1.0.0 release/*.tar.gz --generate-notes
 
 | Need | Choice | Why |
 |---|---|---|
+| Lua runtime | [gopher-lua](https://github.com/yuin/gopher-lua) | Pure Go Lua 5.1, zero CGo |
 | WASM runtime | [wazero](https://wazero.io) | Zero CGo, zero deps, prod-ready |
 | State DB | [modernc.org/sqlite](https://gitlab.com/cznic/sqlite) | Pure Go SQLite, SQL queries for history |
+| Parquet (cold tier) | [parquet-go/parquet-go](https://github.com/parquet-go/parquet-go) | Pure Go, zstd + dictionary encoding |
 | MQTT client | eclipse/paho.mqtt.golang | Battle-tested |
 | MQTT broker (tests/sim) | mochi-mqtt/server | Embeddable |
 | Modbus TCP | simonvetter/modbus | Both client and server |
@@ -160,27 +205,34 @@ forty-two-watts/
 │   │   └── sim-sungrow/       # Modbus TCP Sungrow fake
 │   ├── internal/
 │   │   ├── api/               # HTTP handlers
+│   │   ├── arp/               # L2 MAC resolver (linux/darwin)
 │   │   ├── battery/           # ARX(1) + RLS + cascade
 │   │   ├── config/            # YAML + validation
 │   │   ├── configreload/      # fsnotify watcher
 │   │   ├── control/           # PI + dispatch modes + fuse guard
-│   │   ├── drivers/           # wazero runtime + registry + host ABI
+│   │   ├── drivers/           # Lua host + wazero host + registry
 │   │   ├── ha/                # Home Assistant MQTT bridge
+│   │   ├── loadmodel/         # household load twin
+│   │   ├── mpc/               # MPC planner (DP over SoC grid)
 │   │   ├── mqtt/              # paho wrapper
 │   │   ├── modbus/            # simonvetter wrapper
+│   │   ├── priceforecast/     # price twin (fills past day-ahead)
+│   │   ├── pvmodel/           # PV twin (RLS over sunpos/cloud)
 │   │   ├── selftune/          # step-response calibration
-│   │   ├── state/             # SQLite + tiered history
-│   │   └── telemetry/         # DER store + Kalman + health
+│   │   ├── state/             # SQLite + tiered history + long-format TS + Parquet + devices
+│   │   ├── sunpos/            # solar position (Spencer 1971)
+│   │   └── telemetry/         # DER store + Kalman + health + watchdog
 │   └── test/e2e/              # full-stack integration test
+├── drivers/                   # Lua drivers (ferroamp.lua, sungrow.lua, …)
 ├── wasm-drivers/
-│   ├── ferroamp/              # Rust → wasm32-wasip1
+│   ├── ferroamp/              # legacy Rust → wasm32-wasip1
 │   └── sungrow/               #     (~280 LOC each)
 ├── drivers-wasm/              # compiled .wasm modules (gitignored)
 ├── web/                       # static UI (HTML/CSS/JS)
-├── docs/                      # architecture docs
+├── docs/                      # architecture + operator docs
 ├── config.example.yaml        # sample config
 ├── Makefile                   # build orchestration
-└── MIGRATION_PLAN.md          # full rationale for the Go + WASM port
+└── MIGRATION_PLAN.md          # historical Rust→Go migration rationale
 ```
 
 ## Testing
@@ -190,7 +242,7 @@ make test        # all unit + integration tests (Go + Rust)
 make e2e         # full-stack end-to-end test (simulates real hardware)
 ```
 
-The e2e test stands up both simulators, loads the compiled WASM drivers,
+The e2e test stands up both simulators, loads the compiled drivers,
 runs the control loop, and verifies:
 - Drivers load, initialize, emit telemetry
 - Site sign convention holds (PV −, grid + for import, bat + for charge)
@@ -207,11 +259,17 @@ runs the control loop, and verifies:
 - [`docs/clamping.md`](docs/clamping.md) — the seven clamps and why each matters
 - [`docs/configuration.md`](docs/configuration.md) — full YAML schema reference
 - [`docs/mpc-planner.md`](docs/mpc-planner.md) — MPC strategies, confidence blending, decision reasons
-- [`docs/ml-twins.md`](docs/ml-twins.md) — PV + load + price digital twins
+- [`docs/ml-twins.md`](docs/ml-twins.md) — PV + load + price digital twins (older, being superseded)
 - [`docs/ha-integration.md`](docs/ha-integration.md) — Home Assistant MQTT bridge
-- [`docs/host-api.md`](docs/host-api.md) — WASM driver ABI
-- [`docs/lua-drivers.md`](docs/lua-drivers.md) — legacy Lua driver format
-- [`MIGRATION_PLAN.md`](MIGRATION_PLAN.md) — why Go + WASM, library evaluations
+- [`docs/host-api.md`](docs/host-api.md) — legacy WASM driver ABI
+- [`docs/lua-drivers.md`](docs/lua-drivers.md) — earlier Lua driver notes
+- [`MIGRATION_PLAN.md`](MIGRATION_PLAN.md) — historical: why Go + WASM, library evaluations
+
+These docs are being added by parallel work and will resolve once the
+sibling PRs land — the `docs/architecture.md` and `docs/writing-a-driver.md`
+links referenced at the top of this README are part of that set:
+`architecture.md`, `ml-models.md`, `tsdb.md`, `device-identity.md`,
+`safety.md`, `writing-a-driver.md`, `api.md`, `operations.md`, `testing.md`.
 
 ---
 
