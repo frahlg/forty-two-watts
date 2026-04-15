@@ -357,21 +357,37 @@ func (s *Service) replan(_ context.Context) *Plan {
 	p := s.Defaults
 	p.InitialSoCPct = currentSoCPct(s.Tele, p.InitialSoCPct)
 
-	// Default terminal valuation: mean import price over horizon (so the
-	// planner is SoC-neutral rather than always ending empty).
-	if p.TerminalSoCPrice <= 0 {
-		var sum float64
-		for _, pr := range prices {
-			sum += pr.TotalOreKwh
-		}
-		p.TerminalSoCPrice = sum / float64(len(prices))
-	}
 	// Export pricing is per-slot now: pass bonus/fee into Params so
 	// the DP can compute `slot.SpotOre + bonus − fee` per slot. Leave
 	// p.ExportOrePerKWh at 0 (operators can still set it via Params
 	// to force a flat feed-in tariff).
 	p.ExportBonusOreKwh = s.ExportBonusOreKwh
 	p.ExportFeeOreKwh = s.ExportFeeOreKwh
+
+	// Default terminal valuation. Mode-dependent because self-consumption
+	// is a constrained game: the battery can only offset local load, not
+	// export, so stored energy is worth what it SAVES on future import
+	// (retail) MINUS what you'd otherwise have earned exporting surplus
+	// PV into the grid. Using the full retail import price as the terminal
+	// value overvalues SoC by the export rate, so the DP always picks
+	// "idle, import to cover load" over "discharge now, refill from PV
+	// tomorrow" (because discharging loses η_rt while the extra retail-
+	// priced terminal credit is never realised).
+	if p.TerminalSoCPrice <= 0 {
+		switch p.Mode {
+		case ModeSelfConsumption, ModeCheapCharge:
+			p.TerminalSoCPrice = selfConsumptionTerminalPrice(prices,
+				s.ExportBonusOreKwh, s.ExportFeeOreKwh)
+		default:
+			// Arbitrage: battery can export, so full import price is the
+			// right upper bound on SoC value.
+			var sum float64
+			for _, pr := range prices {
+				sum += pr.TotalOreKwh
+			}
+			p.TerminalSoCPrice = sum / float64(len(prices))
+		}
+	}
 
 	plan := Optimize(slots, p)
 
@@ -516,6 +532,37 @@ const (
 	plannerMaxCollapsedPVW        = 50.0
 	plannerMaxCollapsedPVFrac     = 0.10
 )
+
+// selfConsumptionTerminalPrice is the per-kWh öre value of leftover SoC at
+// the end of the horizon, for the modes where the battery cannot export.
+// Equals the mean retail-import price minus the mean export price
+// (spot + bonus − fee, floored at 0). That's what one kWh in the battery
+// actually earns you: it displaces one kWh of future retail import
+// instead of one kWh that would otherwise have been exported.
+//
+// Floored at 0 so we never credit SoC negatively; if export rates exceed
+// retail (rare, subsidy edge cases) the planner in these modes should just
+// stay SoC-neutral rather than actively drain.
+func selfConsumptionTerminalPrice(prices []state.PricePoint, bonus, fee float64) float64 {
+	if len(prices) == 0 {
+		return 0
+	}
+	var importSum, exportSum float64
+	for _, pr := range prices {
+		importSum += pr.TotalOreKwh
+		exp := pr.SpotOreKwh + bonus - fee
+		if exp < 0 {
+			exp = 0
+		}
+		exportSum += exp
+	}
+	n := float64(len(prices))
+	spread := (importSum - exportSum) / n
+	if spread < 0 {
+		spread = 0
+	}
+	return spread
+}
 
 func selectPlannerPVW(forecastPVW, predictedPVW float64) float64 {
 	switch {
