@@ -316,6 +316,22 @@ main {
   font-variant-numeric: tabular-nums;
 }
 
+.driver-stats .stat-target {
+  margin-left: 0.4rem;
+  color: var(--text-dim);
+  font-size: 0.75rem;
+}
+.driver-stats .stat-dim {
+  margin-left: 0.4rem;
+  color: var(--text-dim);
+  font-size: 0.75rem;
+}
+.driver-stats .stat-warn {
+  margin-left: 0.4rem;
+  color: #f59e0b;
+  font-size: 0.75rem;
+}
+
 .driver-soc-bar {
   width: 100%;
   height: 6px;

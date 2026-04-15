@@ -245,8 +245,13 @@
       fuseFill.className = "fuse-fill" + (fusePct > 85 ? " crit" : fusePct > 65 ? " warn" : "");
     }
 
+    // Dispatch targets — keyed by driver name so the driver card can show
+    // its commanded target inline alongside the actual battery power.
+    var dispatchByDriver = {};
+    (data.dispatch || []).forEach(function (d) { dispatchByDriver[d.driver] = d; });
+
     // Drivers
-    renderDrivers(data.drivers || {});
+    renderDrivers(data.drivers || {}, dispatchByDriver);
 
     // Dispatch
     renderDispatch(data.dispatch || []);
@@ -712,16 +717,17 @@
       { name: "Grid",     data: chartHistory.grid,     color: "#ef4444" },
       { name: "PV",       data: chartHistory.pv,       color: "#22c55e" },
       { name: "Load",     data: chartHistory.load,     color: "#e2e8f0" },
-      { name: "Ferroamp", data: chartHistory.ferroamp_bat, color: "#f59e0b" },
-      { name: "  target", data: chartHistory.ferroamp_target, color: "#f59e0b", dim: true },
-      { name: "Sungrow",  data: chartHistory.sungrow_bat, color: "#8b5cf6" },
-      { name: "  target", data: chartHistory.sungrow_target, color: "#8b5cf6", dim: true },
+      // Battery rows render their target inline as "actual W (→ target W)"
+      // so it's visually obvious the two numbers are the same metric — one
+      // measured, one commanded. See drawHoverOverlay's value formatter.
+      { name: "Ferroamp", data: chartHistory.ferroamp_bat, color: "#f59e0b", target: chartHistory.ferroamp_target },
+      { name: "Sungrow",  data: chartHistory.sungrow_bat,  color: "#8b5cf6", target: chartHistory.sungrow_target },
     ];
 
     var ts = chartHistory.timestamps[i] || 0;
     var timeStr = ts > 0 ? new Date(ts).toLocaleTimeString() : "";
     var lineHeight = 16;
-    var boxW = 170;
+    var boxW = 200;
     var boxH = (labels.length + 1) * lineHeight + 10;
 
     // Position tooltip (avoid going off-screen)
@@ -746,12 +752,24 @@
       ctx.fillRect(boxX + 6, y - 8, 8, 8);
       ctx.fillStyle = lab.dim ? "#888" : "#ddd";
       ctx.fillText(lab.name, boxX + 18, y);
-      ctx.fillStyle = "#fff";
       ctx.textAlign = "right";
-      var val = chartView === "energy"
-        ? lab.data[i].toFixed(2) + " kWh"
-        : formatW(lab.data[i]);
-      ctx.fillText(val, boxX + boxW - 6, y);
+      if (chartView === "energy") {
+        ctx.fillStyle = "#fff";
+        ctx.fillText(lab.data[i].toFixed(2) + " kWh", boxX + boxW - 6, y);
+      } else {
+        var actual = formatW(lab.data[i]);
+        ctx.fillStyle = "#fff";
+        ctx.fillText(actual, boxX + boxW - 6, y);
+        // Inline target as dim "(→ -674 W)" so user sees commanded vs actual
+        // in one glance. Skip when target is 0 to reduce visual noise.
+        if (lab.target && i < lab.target.length && Math.abs(lab.target[i]) > 1) {
+          var actualW = ctx.measureText(actual).width;
+          ctx.fillStyle = "#888";
+          ctx.font = "9px monospace";
+          ctx.fillText("→ " + formatW(lab.target[i]), boxX + boxW - 10 - actualW, y);
+          ctx.font = "10px monospace";
+        }
+      }
       ctx.textAlign = "left";
     });
   }
@@ -825,7 +843,7 @@
     }
   }
 
-  function renderDrivers(drivers) {
+  function renderDrivers(drivers, dispatchByDriver) {
     driversGrid.innerHTML = "";
     var names = Object.keys(drivers).sort();
     names.forEach(function (name) {
@@ -840,6 +858,21 @@
       var ticks = d.tick_count != null ? d.tick_count : 0;
       var errors = d.consecutive_errors != null ? d.consecutive_errors : 0;
 
+      // Battery target + tracking deviation. Skip if no dispatch (planner
+      // hasn't run) OR this driver has no battery (target meaningless).
+      var batteryRow =
+        '  <span class="stat-label">Battery</span><span class="stat-value">' + formatW(batWVal) + "</span>";
+      var disp = (dispatchByDriver || {})[name];
+      if (disp && d.bat_w != null) {
+        var dev = batWVal - disp.target_w;
+        var devClass = Math.abs(dev) > 200 ? "stat-warn" : "stat-dim";
+        batteryRow =
+          '  <span class="stat-label">Battery</span><span class="stat-value">' + formatW(batWVal) +
+          '    <span class="stat-target">→ ' + formatW(disp.target_w) + '</span>' +
+          '    <span class="' + devClass + '">Δ ' + formatW(dev) + '</span>' +
+          "</span>";
+      }
+
       card.innerHTML =
         '<div class="driver-header">' +
         '  <span class="driver-name">' + escHtml(name) + "</span>" +
@@ -848,7 +881,7 @@
         '<div class="driver-stats">' +
         '  <span class="stat-label">Meter</span><span class="stat-value">' + formatW(meterW) + "</span>" +
         '  <span class="stat-label">PV</span><span class="stat-value">' + formatW(pvWVal) + "</span>" +
-        '  <span class="stat-label">Battery</span><span class="stat-value">' + formatW(batWVal) + "</span>" +
+        batteryRow +
         '  <span class="stat-label">SoC</span><span class="stat-value">' + formatSoc(batSocVal) + "</span>" +
         '  <span class="stat-label">Ticks</span><span class="stat-value">' + ticks + "</span>" +
         '  <span class="stat-label">Errors</span><span class="stat-value">' + errors + "</span>" +

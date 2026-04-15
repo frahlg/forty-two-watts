@@ -65,12 +65,28 @@
     var driftClass = Math.abs(driftPerDay) < 0.001 ? "tune-delta-neutral"
       : driftPerDay < 0 ? "tune-delta-negative" : "tune-delta-positive";
 
-    return '<div class="model-card">' +
-      '<div class="model-card-header">' +
-      '<span class="model-name">' + esc(name) + ' ' + cascadeBadge + '</span>' +
+    // Persist expanded state per battery name across re-renders.
+    var expandKey = "model-expanded:" + name;
+    var expanded = localStorage.getItem(expandKey) === "1";
+    var caret = expanded ? "▾" : "▸";
+
+    var headerLine =
+      '<div class="model-card-header" data-expand="' + esc(name) + '" style="cursor:pointer">' +
+      '<span class="model-name">' + caret + ' ' + esc(name) + ' ' + cascadeBadge + '</span>' +
       '<span class="model-confidence">' + m.n_samples + ' samples · ' + conf + '</span>' +
-      '</div>' +
-      '<div class="model-stats">' +
+      '</div>';
+
+    // Compact summary always visible: health bar + drift.
+    var summary =
+      '<div class="model-bar"><div class="model-bar-fill" style="width:' + healthPct + '%"></div></div>' +
+      '<div class="model-health-text">' +
+      '<span class="' + healthClass + '">health ' + healthPct + '%</span>' +
+      '<span class="' + driftClass + '">' + driftStr + '</span>' +
+      '</div>';
+
+    // Details only rendered when expanded — keeps the section quiet.
+    var details = !expanded ? "" :
+      '<div class="model-stats" style="margin-top:8px">' +
       '<span class="model-stat-label">τ (response)</span>' +
       '<span class="model-stat-value">' + tau + ' s</span>' +
       '<span class="model-stat-label">gain</span>' +
@@ -80,21 +96,31 @@
       '<span class="model-stat-label">calibrated</span>' +
       '<span class="model-stat-value">' + calibratedAgo + '</span>' +
       '</div>' +
-      '<div class="model-bar"><div class="model-bar-fill" style="width:' + healthPct + '%"></div></div>' +
-      '<div class="model-health-text">' +
-      '<span class="' + healthClass + '">health ' + healthPct + '%</span>' +
-      '<span class="' + driftClass + '">' + driftStr + '</span>' +
-      '</div>' +
       '<button class="btn-reset-model" data-reset-battery="' + esc(name) + '" ' +
       'style="margin-top:8px;padding:4px 10px;font-size:0.7rem;background:var(--surface2);' +
       'border:1px solid var(--border);color:var(--text-dim);border-radius:3px;cursor:pointer;width:100%">' +
       '↻ Reset model' +
-      '</button>' +
-      '</div>';
+      '</button>';
+
+    return '<div class="model-card">' + headerLine + summary + details + '</div>';
   }
 
-  // Handle reset-button clicks via event delegation
+  // Expand/collapse on header click. Use closest() so clicks on the inner
+  // spans still toggle the card. Persisted to localStorage so state
+  // survives polling re-renders.
   grid.addEventListener("click", function (e) {
+    var hdr = e.target.closest && e.target.closest("[data-expand]");
+    if (hdr && !e.target.dataset.resetBattery) {
+      var name = hdr.dataset.expand;
+      var key = "model-expanded:" + name;
+      if (localStorage.getItem(key) === "1") {
+        localStorage.removeItem(key);
+      } else {
+        localStorage.setItem(key, "1");
+      }
+      fetchModels();
+      return;
+    }
     if (!e.target.dataset || !e.target.dataset.resetBattery) return;
     var name = e.target.dataset.resetBattery;
     if (!confirm("Reset " + name + " model to fresh defaults?\\n\\nRLS will re-learn from scratch. Baseline (if set by self-tune) will be cleared.")) return;
