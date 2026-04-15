@@ -135,8 +135,10 @@ func (m Model) Predict(clearSkyW, cloudPct float64, t time.Time) float64 {
 	if y < 0 {
 		return 0
 	}
-	if m.RatedW > 0 && y > 1.3*m.RatedW {
-		y = 1.3 * m.RatedW
+	// Hard cap at 105% of nameplate. Anything above is RLS having a bad
+	// day — fall back to the physics prior, which is bounded by construction.
+	if m.RatedW > 0 && y > 1.05*m.RatedW {
+		return prior
 	}
 	return y
 }
@@ -151,14 +153,25 @@ func (m *Model) Update(clearSkyW, cloudPct float64, t time.Time, actualPVW float
 	if actualPVW < 0 {
 		return false
 	}
+	// Physical sanity envelope: anything wildly above nameplate is sensor
+	// noise (inverter restart, transient) — never feed it to RLS.
+	if m.RatedW > 0 && actualPVW > 1.2*m.RatedW {
+		return false
+	}
 	x := Features(clearSkyW, cloudPct, t)
 	var yHat float64
 	for i := 0; i < NFeat; i++ {
 		yHat += m.Beta[i] * x[i]
 	}
 	err := actualPVW - yHat
-	// After some warm-up, reject 10σ outliers. MAE is in W; use it as a
-	// proxy for σ (scales with system size, unlike a hard-coded threshold).
+	// Cold-start outlier guard: before the MAE-based filter kicks in, reject
+	// samples where the predicted value is already absurd (>2× rated). This
+	// stops a single bad sample from cascading into wild β coefficients.
+	if m.RatedW > 0 && math.Abs(yHat) > 2*m.RatedW {
+		return false
+	}
+	// After warm-up, reject 10σ outliers. MAE is in W; use it as a proxy
+	// for σ (scales with system size, unlike a hard-coded threshold).
 	if m.Samples > 50 {
 		band := math.Max(m.MAE*10, 200)
 		if math.Abs(err) > band {
