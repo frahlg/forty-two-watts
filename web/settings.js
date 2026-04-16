@@ -80,7 +80,7 @@
       var path = input.dataset.path;
       var val = input.type === "number" ? parseFloat(input.value) : input.value;
       if (input.type === "number" && isNaN(val)) val = 0;
-      // Scale display units back to internal units (e.g. kWh -> Wh)
+      // Scale display units back to internal units (e.g. kWh → Wh)
       if (input.type === "number" && input.dataset.unitScale) {
         val = val * parseFloat(input.dataset.unitScale);
       }
@@ -463,6 +463,21 @@
 
       case "ev":
         if (!currentConfig.ev_charger) currentConfig.ev_charger = {};
+        // If ev_charger is empty but an easee driver exists with config,
+        // populate the EV tab from the driver's config block so the UI
+        // reflects what's actually running.
+        if (!currentConfig.ev_charger.email && currentConfig.drivers) {
+          for (var di = 0; di < currentConfig.drivers.length; di++) {
+            var drv = currentConfig.drivers[di];
+            if (drv.name === "easee" && drv.config) {
+              currentConfig.ev_charger.provider = "easee";
+              currentConfig.ev_charger.email = drv.config.email || "";
+              currentConfig.ev_charger.password = drv.config.password || "";
+              currentConfig.ev_charger.serial = drv.config.serial || "";
+              break;
+            }
+          }
+        }
         var evHasPassword = !!getByPath(currentConfig, "ev_charger.password", "");
         html = '<div id="ev-status-indicator" class="ha-status-indicator">checking…</div>' +
           '<fieldset><legend>EV Charger</legend>' +
