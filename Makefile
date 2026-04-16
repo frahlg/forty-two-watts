@@ -11,7 +11,8 @@
 #   make clean        — remove all build artifacts
 
 .PHONY: help test wasm build build-arm64 build-amd64 release \
-        run-sim dev fmt vet clean e2e docs
+        run-sim dev fmt vet clean e2e docs \
+        build-lua test-lua dev-lua
 
 # Rustup's stable toolchain — separate from Homebrew's rust.
 # Adjust if rustup isn't here.
@@ -21,7 +22,7 @@ CARGO_WASM := PATH="$(RUSTUP_STABLE):$$PATH" cargo
 WASM_DRIVERS := ferroamp sungrow
 WASM_OUT_DIR := drivers-wasm
 
-VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+VERSION ?= $(shell git describe --tags --exact-match 2>/dev/null || echo "$(shell git describe --tags --abbrev=0 2>/dev/null || echo v0.0.0)-dev")
 LDFLAGS := -s -w -X main.Version=$(VERSION)
 
 help:
@@ -35,6 +36,9 @@ help:
 	@echo "  release      arm64 + amd64 tarballs"
 	@echo "  run-sim      start Ferroamp + Sungrow simulators"
 	@echo "  dev          start sims + main app against config.local.yaml"
+	@echo "  build-lua    build main binary only (skip WASM/Rust compile)"
+	@echo "  test-lua     run Go tests, skip WASM rebuild (uses checked-in .wasm)"
+	@echo "  dev-lua      run main app against config.local.yaml, no WASM rebuild"
 	@echo "  e2e          run the full-stack e2e test"
 	@echo "  fmt vet      Go format + static checks"
 	@echo "  clean        nuke build artifacts"
@@ -101,6 +105,33 @@ run-sim:
 
 dev: wasm
 	@echo "Starting sims + main app (Ctrl+C to stop)..."
+	@trap 'kill 0' SIGINT; \
+	(cd go && go run ./cmd/sim-ferroamp) & \
+	(cd go && go run ./cmd/sim-sungrow) & \
+	sleep 2 && \
+	(cd go && go run ./cmd/forty-two-watts -config ../config.local.yaml -web ../web) & \
+	wait
+
+# ---- Lua-only workflow ----
+#
+# These targets skip the Rust → WASM compile step entirely. Useful when
+# you're developing Lua drivers on a machine without the Rust toolchain
+# (or without the wasm32-wasip1 target). The checked-in drivers-wasm/*.wasm
+# binaries are reused as-is, so the legacy Ferroamp/Sungrow WASM drivers
+# still load if your config references them.
+
+build-lua:
+	@mkdir -p bin
+	cd go && go build -ldflags="$(LDFLAGS)" -o ../bin/forty-two-watts ./cmd/forty-two-watts
+	cd go && go build -ldflags="$(LDFLAGS)" -o ../bin/sim-ferroamp ./cmd/sim-ferroamp
+	cd go && go build -ldflags="$(LDFLAGS)" -o ../bin/sim-sungrow ./cmd/sim-sungrow
+	@ls -la bin/
+
+test-lua:
+	cd go && go test ./...
+
+dev-lua:
+	@echo "Starting sims + main app against config.local.yaml (Ctrl+C to stop)..."
 	@trap 'kill 0' SIGINT; \
 	(cd go && go run ./cmd/sim-ferroamp) & \
 	(cd go && go run ./cmd/sim-sungrow) & \
