@@ -80,6 +80,10 @@
       var path = input.dataset.path;
       var val = input.type === "number" ? parseFloat(input.value) : input.value;
       if (input.type === "number" && isNaN(val)) val = 0;
+      // Scale display units back to internal units (e.g. kWh -> Wh)
+      if (input.type === "number" && input.dataset.unitScale) {
+        val = val * parseFloat(input.dataset.unitScale);
+      }
       // Don't overwrite a saved password with empty string when user hasn't typed anything
       if (input.type === "password" && val === "" && getByPath(currentConfig, path, "")) return;
       setByPath(currentConfig, path, val);
@@ -144,6 +148,13 @@
           field("Slew rate (W/cycle)", "site.slew_rate_w", "number", 500) +
           '</div><div>' +
           field("Min dispatch interval (s)", "site.min_dispatch_interval_s", "number", 5) +
+          '</div></div>' +
+          '<div class="field-row"><div>' +
+          field("Smoothing alpha", "site.smoothing_alpha", "number", 0.3,
+            "EMA smoothing factor for the grid reading (0-1). Lower = smoother but slower response.") +
+          '</div><div>' +
+          field("PI gain", "site.gain", "number", 0.5,
+            "Proportional gain of the PI controller. Higher = more aggressive correction.") +
           '</div></div>' +
           '<div class="field-row"><div>' +
           field("Control interval (s)", "site.control_interval_s", "number", 5) +
@@ -229,8 +240,8 @@
             '<label>Driver file ' + help('Path to the .wasm (or legacy .lua) driver. Absolute or relative to the config file directory.') + '</label>' +
             '<input type="text" data-path="drivers.' + idx + '.' + fmtKind + '" value="' + escHtml(driverFile) + '">' +
             '</div><div>' +
-            '<label>Battery capacity (Wh) ' + help('Nameplate storage capacity in watt-hours. Used for SoC scaling and MPC planning.') + '</label>' +
-            '<input type="number" data-path="drivers.' + idx + '.battery_capacity_wh" value="' + (d.battery_capacity_wh || 0) + '">' +
+            '<label>Battery capacity (kWh) ' + help('Nameplate storage capacity in kilowatt-hours. Stored internally as Wh.') + '</label>' +
+            '<input type="number" step="0.1" data-path="drivers.' + idx + '.battery_capacity_wh" data-unit-scale="1000" value="' + ((d.battery_capacity_wh || 0) / 1000) + '">' +
             '</div></div>' +
             '<label><input type="checkbox" data-checkbox-path="drivers.' + idx + '.is_site_meter"' + (d.is_site_meter ? ' checked' : '') + '> Site meter ' + help('Exactly one driver should be the site meter — its grid reading defines the point-of-measurement the PI loop balances.') + '</label>';
           if (mqtt) {
@@ -358,6 +369,47 @@
               '</fieldset>';
           }
         });
+        break;
+
+      case "planner":
+        if (!currentConfig.planner) currentConfig.planner = {};
+        html = '<fieldset><legend>MPC Planner</legend>' +
+          '<label><input type="checkbox" data-checkbox-path="planner.enabled"' + (currentConfig.planner.enabled ? ' checked' : '') + '> Enabled ' +
+          help('Enable the MPC planner. When active it overrides manual mode with an optimised schedule.') + '</label>' +
+          selectField("Mode", "planner.mode", ["self_consumption", "cheap_charge", "arbitrage"], "self_consumption",
+            "self_consumption = minimise grid import. cheap_charge = charge batteries during cheapest hours. arbitrage = buy low / sell high.") +
+          '<div class="field-row"><div>' +
+          field("SoC min (%)", "planner.soc_min_pct", "number", 10,
+            "Lowest SoC the planner will discharge to (percent). 10 = 10%.") +
+          '</div><div>' +
+          field("SoC max (%)", "planner.soc_max_pct", "number", 90,
+            "Highest SoC the planner will charge to (percent). 90 = 90%.") +
+          '</div></div>' +
+          '<div class="field-row"><div>' +
+          field("Base load (W)", "planner.base_load_w", "number", 0,
+            "Constant household load estimate used when the load twin has no data yet.") +
+          '</div><div>' +
+          field("Horizon (hours)", "planner.horizon_hours", "number", 48,
+            "Planning horizon in hours. 48 h covers two day-ahead price windows.") +
+          '</div></div>' +
+          '<div class="field-row"><div>' +
+          field("Replan interval (min)", "planner.interval_min", "number", 15,
+            "How often the planner re-solves. Lower = more responsive but more CPU.") +
+          '</div><div>' +
+          field("Export value (ore/kWh)", "planner.export_ore_per_kwh", "number", 0,
+            "Override export value. 0 = use mean spot price.") +
+          '</div></div>' +
+          '<div class="field-row"><div>' +
+          field("Charge efficiency", "planner.charge_efficiency", "number", 0.95,
+            "Round-trip charge efficiency (0-1). 0.95 = 5% loss charging.") +
+          '</div><div>' +
+          field("Discharge efficiency", "planner.discharge_efficiency", "number", 0.95,
+            "Round-trip discharge efficiency (0-1). 0.95 = 5% loss discharging.") +
+          '</div></div>' +
+          '</fieldset>' +
+          '<p style="color:var(--text-dim);font-size:0.8rem;margin-top:8px">' +
+          'The planner requires working price + weather forecasts. When disabled the system runs in the manual mode set on the Control page.' +
+          '</p>';
         break;
 
       case "ha":

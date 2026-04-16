@@ -48,10 +48,14 @@ type OCPP struct {
 // EVCharger is the high-level EV charger config written by the Settings UI.
 // The backend auto-generates a Lua driver entry from this on startup so
 // users never touch raw driver YAML for their EV charger.
+//
+// Password is stored in state.db (key "ev_charger_password"), NOT in config.yaml.
+// It is populated at runtime by main.go after loading state and by the API
+// handler on POST /api/config.
 type EVCharger struct {
 	Provider string `yaml:"provider" json:"provider"` // "easee" (only option for now)
 	Email    string `yaml:"email" json:"email"`
-	Password string `yaml:"password" json:"password"`
+	Password string `yaml:"-" json:"password"` // persisted in state.db, not YAML
 	Serial   string `yaml:"serial,omitempty" json:"serial,omitempty"`
 }
 

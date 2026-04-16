@@ -34,6 +34,15 @@ import (
 	"github.com/frahlg/forty-two-watts/go/internal/telemetry"
 )
 
+const (
+	// evPasswordKey is the state.db key for the EV charger password
+	// (stored outside config.yaml for security).
+	evPasswordKey = "ev_charger_password"
+	// maskedPlaceholder is sent to the UI to indicate a password is set
+	// without revealing the actual value.
+	maskedPlaceholder = "••••••••"
+)
+
 // Deps is the full set of runtime dependencies the API handlers need.
 // One instance is shared across all handlers; mutations use the contained
 // mutexes from each package.
@@ -396,7 +405,18 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 	s.deps.CfgMu.RLock()
 	cfg := *s.deps.Cfg
 	s.deps.CfgMu.RUnlock()
-	writeJSON(w, 200, cfg.MaskSecrets())
+	masked := cfg.MaskSecrets()
+	// EV charger password lives in state.db, not YAML. Signal to the UI
+	// that a password is set by using a masked placeholder (MaskSecrets
+	// blanked it to "").
+	if masked.EVCharger != nil {
+		if pw, ok := s.deps.State.LoadConfig(evPasswordKey); ok && pw != "" {
+			cp := *masked.EVCharger
+			cp.Password = maskedPlaceholder
+			masked.EVCharger = &cp
+		}
+	}
+	writeJSON(w, 200, masked)
 }
 
 func (s *Server) handlePostConfig(w http.ResponseWriter, r *http.Request) {
@@ -409,11 +429,30 @@ func (s *Server) handlePostConfig(w http.ResponseWriter, r *http.Request) {
 	s.deps.CfgMu.RLock()
 	newCfg.PreserveMaskedSecrets(s.deps.Cfg)
 	s.deps.CfgMu.RUnlock()
+
+	// EV charger password: persist to state.db instead of config.yaml.
+	// Empty or the masked placeholder means "keep existing"; a new value
+	// means the user typed a real password.
+	if newCfg.EVCharger != nil {
+		pw := newCfg.EVCharger.Password
+		if pw != "" && pw != maskedPlaceholder {
+			if err := s.deps.State.SaveConfig(evPasswordKey, pw); err != nil {
+				slog.Warn("failed to persist ev_charger_password", "err", err)
+			}
+		}
+		// Restore the real password into the in-memory config so
+		// InjectEVChargerDriver (called by the config-reload watcher)
+		// sees it.
+		if stored, ok := s.deps.State.LoadConfig(evPasswordKey); ok {
+			newCfg.EVCharger.Password = stored
+		}
+	}
+
 	if err := newCfg.Validate(); err != nil {
 		writeJSON(w, 400, map[string]string{"error": "validation: " + err.Error()})
 		return
 	}
-	// Persist atomically
+	// Persist atomically (Password has yaml:"-" so it won't appear in YAML)
 	if err := s.deps.SaveConfig(s.deps.ConfigPath, &newCfg); err != nil {
 		writeJSON(w, 500, map[string]string{"error": "save failed: " + err.Error()})
 		return

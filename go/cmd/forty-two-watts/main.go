@@ -63,9 +63,6 @@ func main() {
 	}
 	slog.Info("config loaded", "site", cfg.Site.Name, "drivers", len(cfg.Drivers))
 
-	// ---- Auto-generate EV charger driver from high-level config ----
-	cfg.InjectEVChargerDriver()
-
 	// ---- Open persistent state (SQLite) ----
 	statePath := "state.db"
 	coldDir := "cold"
@@ -82,6 +79,16 @@ func main() {
 	if err := st.RecordEvent("startup"); err != nil {
 		slog.Warn("failed to persist startup event", "err", err)
 	}
+
+	// ---- Restore EV charger password from state.db (not stored in YAML) ----
+	if cfg.EVCharger != nil {
+		if pw, ok := st.LoadConfig("ev_charger_password"); ok {
+			cfg.EVCharger.Password = pw
+		}
+	}
+
+	// ---- Auto-generate EV charger driver from high-level config ----
+	cfg.InjectEVChargerDriver()
 
 	// ---- Telemetry store ----
 	tel := telemetry.NewStore()
@@ -177,6 +184,12 @@ func main() {
 	// ---- Config hot-reload watcher ----
 	watcher, err := configreload.New(*configPath, cfgMu, cfg, ctrlMu, ctrl,
 		func(newCfg, oldCfg *config.Config) {
+			// Restore EV charger password from state.db (not in YAML).
+			if newCfg.EVCharger != nil {
+				if pw, ok := st.LoadConfig("ev_charger_password"); ok {
+					newCfg.EVCharger.Password = pw
+				}
+			}
 			// Regenerate the synthetic EV charger driver entry from the
 			// high-level ev_charger config, matching what main() does at startup.
 			newCfg.InjectEVChargerDriver()
