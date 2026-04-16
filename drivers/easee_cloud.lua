@@ -28,6 +28,7 @@ DRIVER = {
   capabilities = { "ev" },
   description  = "Easee Home/Charge via Cloud REST API. No local protocol needed.",
   homepage     = "https://easee.com",
+  http_hosts   = { "api.easee.com" },
   authors      = { "forty-two-watts contributors" },
   tested_models = { "Home", "Charge" },
 }
