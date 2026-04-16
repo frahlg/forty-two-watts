@@ -527,7 +527,21 @@ func (c *Config) SiteMeterDriver() string {
 
 // SaveAtomic writes config to disk via tmp-file + rename. Safe from partial writes.
 func SaveAtomic(path string, c *Config) error {
-	data, err := yaml.Marshal(c)
+	// Driver paths are resolved to absolute-ish paths at Load() time.
+	// Convert them back to config-relative before writing so that
+	// repeated save cycles don't accumulate extra "../" prefixes.
+	baseDir := filepath.Dir(path)
+	out := *c
+	if len(out.Drivers) > 0 {
+		drivers := make([]Driver, len(out.Drivers))
+		copy(drivers, out.Drivers)
+		for i := range drivers {
+			drivers[i].Lua = relDriverPath(baseDir, drivers[i].Lua)
+			drivers[i].WASM = relDriverPath(baseDir, drivers[i].WASM)
+		}
+		out.Drivers = drivers
+	}
+	data, err := yaml.Marshal(&out)
 	if err != nil {
 		return fmt.Errorf("yaml marshal: %w", err)
 	}
@@ -536,4 +550,15 @@ func SaveAtomic(path string, c *Config) error {
 		return fmt.Errorf("write tmp: %w", err)
 	}
 	return os.Rename(tmp, path)
+}
+
+func relDriverPath(baseDir, p string) string {
+	if p == "" {
+		return ""
+	}
+	rel, err := filepath.Rel(baseDir, p)
+	if err != nil {
+		return p
+	}
+	return rel
 }
