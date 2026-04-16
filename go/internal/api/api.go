@@ -330,6 +330,20 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Fuse + site meter details (used by the dashboard to render per-phase
+	// amperage bars). We expose the fuse config verbatim so the frontend
+	// doesn't need a second /api/config fetch, and pull per-phase readings
+	// from the site meter driver's raw emit payload.
+	s.deps.CfgMu.RLock()
+	fuseCfg := map[string]any{
+		"max_amps": s.deps.Cfg.Fuse.MaxAmps,
+		"phases":   s.deps.Cfg.Fuse.Phases,
+		"voltage":  s.deps.Cfg.Fuse.Voltage,
+	}
+	s.deps.CfgMu.RUnlock()
+
+	phaseAmps := siteMeterPhaseAmps(s.deps.Tel, ctrl.SiteMeterDriver)
+
 	resp := map[string]any{
 		"version":          s.deps.Version,
 		"mode":             ctrl.Mode,
@@ -344,6 +358,8 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"grid_target_w":    ctrl.GridTargetW,
 		"peak_limit_w":     ctrl.PeakLimitW,
 		"ev_charging_w":    ctrl.EVChargingW,
+		"fuse":             fuseCfg,
+		"phase_amps":       phaseAmps,
 		"drivers":          drivers,
 		"dispatch":         dispatch,
 	}
@@ -351,6 +367,27 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		resp["energy"] = map[string]any{"today": energyToday}
 	}
 	writeJSON(w, 200, resp)
+}
+
+// siteMeterPhaseAmps pulls per-phase L1/L2/L3 current (in amps) from the
+// site meter driver's emit payload. Returns an empty slice if the site
+// meter isn't reporting per-phase data — the frontend falls back to a
+// total-amps bar in that case. Signed: negative = export on that phase.
+func siteMeterPhaseAmps(tel *telemetry.Store, siteMeter string) []float64 {
+	if siteMeter == "" { return nil }
+	r := tel.Get(siteMeter, telemetry.DerMeter)
+	if r == nil || len(r.Data) == 0 { return nil }
+	var payload struct {
+		L1A *float64 `json:"l1_a"`
+		L2A *float64 `json:"l2_a"`
+		L3A *float64 `json:"l3_a"`
+	}
+	if err := json.Unmarshal(r.Data, &payload); err != nil { return nil }
+	out := make([]float64, 0, 3)
+	if payload.L1A != nil { out = append(out, *payload.L1A) }
+	if payload.L2A != nil { out = append(out, *payload.L2A) }
+	if payload.L3A != nil { out = append(out, *payload.L3A) }
+	return out
 }
 
 // ---- /api/config ----

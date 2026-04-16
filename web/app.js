@@ -147,6 +147,7 @@
   const fuseFill = $("fuse-fill");
   const evW = $("ev-w");
   const evStatus = $("ev-status");
+  const fusePhases = $("fuse-phases");
   const eImport = $("e-import");
   const eExport = $("e-export");
   const ePv = $("e-pv");
@@ -155,8 +156,6 @@
   const eLoad = $("e-load");
   const lastUpdate = $("last-update");
   const versionEl = $("version");
-  const FUSE_MAX_W = 11040; // 16A * 230V * 3ph
-
   // ---- Formatting ----
   function formatW(w) {
     const abs = Math.abs(w);
@@ -220,7 +219,7 @@
 
     // Version (live from API — survives stale browser cache of index.html)
     if (versionEl && data.version) {
-      versionEl.textContent = "v" + data.version;
+      versionEl.textContent = data.version;
     }
     // Grid + target indicator
     gridW.textContent = formatW(data.grid_w);
@@ -314,17 +313,75 @@
       if (eLoad) eLoad.textContent = formatKwh(t.load_wh);
     }
 
-    // Fuse gauge (if present)
+    // Fuse gauge — per-phase bars if the server reports phase amperage,
+    // otherwise a single aggregate bar + number (fallback).
     if (fuseUse && fuseFill) {
-      var totalDischarge = 0;
-      if (data.bat_w < 0) totalDischarge = Math.abs(data.bat_w);
-      var pvGen = Math.abs(data.pv_w);
-      var throughput = Math.max(Math.abs(data.grid_w), pvGen + totalDischarge);
-      var fusePct = Math.min(100, (throughput / FUSE_MAX_W) * 100);
-      var amps = throughput / 230 / 3;
-      fuseUse.textContent = amps.toFixed(1) + " A";
-      fuseFill.style.width = fusePct + "%";
-      fuseFill.className = "fuse-fill" + (fusePct > 85 ? " crit" : fusePct > 65 ? " warn" : "");
+      var fuseCfg = data.fuse || {};
+      var maxAmps = fuseCfg.max_amps || 16;
+      var phases  = fuseCfg.phases   || 3;
+      var voltage = fuseCfg.voltage  || 230;
+
+      var phaseI = Array.isArray(data.phase_amps) ? data.phase_amps : [];
+      var hasPhaseData = phaseI.length > 0;
+
+      // Show fallback (single bar + headline amps) only when no per-phase data.
+      var fallbackBar = $("fuse-bar-fallback");
+      if (fallbackBar) fallbackBar.style.display = hasPhaseData ? "none" : "block";
+      fuseUse.style.display = hasPhaseData ? "none" : "block";
+
+      if (!hasPhaseData) {
+        var totalDischarge = 0;
+        if (data.bat_w < 0) totalDischarge = Math.abs(data.bat_w);
+        var pvGen = Math.abs(data.pv_w);
+        var throughput = Math.max(Math.abs(data.grid_w), pvGen + totalDischarge);
+        var peakA = throughput / voltage / phases;
+        fuseUse.textContent = peakA.toFixed(1) + " A";
+        var totalFusePct = Math.min(100, (peakA / maxAmps) * 100);
+        fuseFill.style.width = totalFusePct + "%";
+        fuseFill.className = "fuse-fill" + (totalFusePct > 85 ? " crit" : totalFusePct > 65 ? " warn" : "");
+      }
+
+      // Per-phase bars: create/update one row per configured phase.
+      if (fusePhases) {
+        // Rebuild if phase count changed (first render, or config reload).
+        if (fusePhases.childElementCount !== phases) {
+          fusePhases.innerHTML = "";
+          for (var p = 0; p < phases; p++) {
+            var row = document.createElement("div");
+            row.className = "fuse-phase-row";
+            var label = document.createElement("span");
+            label.className = "fuse-phase-label";
+            label.textContent = "L" + (p + 1);
+            var bar = document.createElement("div");
+            bar.className = "fuse-phase-bar";
+            var fill = document.createElement("div");
+            fill.className = "fuse-phase-fill";
+            bar.appendChild(fill);
+            var val = document.createElement("span");
+            val.className = "fuse-phase-val";
+            val.textContent = "-- A";
+            row.appendChild(label);
+            row.appendChild(bar);
+            row.appendChild(val);
+            fusePhases.appendChild(row);
+          }
+        }
+        // Populate current values. If fewer phase_amps than phases
+        // configured, any missing entries fall back to 0.
+        var rows = fusePhases.querySelectorAll(".fuse-phase-row");
+        for (var r = 0; r < rows.length; r++) {
+          var rawA = r < phaseI.length ? phaseI[r] : 0;
+          var magA = Math.abs(rawA);
+          var pct = Math.min(100, (magA / maxAmps) * 100);
+          var fill = rows[r].querySelector(".fuse-phase-fill");
+          var val  = rows[r].querySelector(".fuse-phase-val");
+          fill.style.width = pct + "%";
+          fill.className = "fuse-phase-fill"
+            + (pct > 85 ? " crit" : pct > 65 ? " warn" : "")
+            + (rawA < -0.1 ? " export" : "");
+          val.textContent = magA.toFixed(1) + " A";
+        }
+      }
     }
 
     // EV status card

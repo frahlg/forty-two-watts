@@ -80,8 +80,11 @@
       </div>
       <div class="card summary-card" id="card-fuse">
         <div class="card-label">Fuse</div>
-        <div class="card-value" id="fuse-use">-- A</div>
-        <div class="fuse-bar"><div class="fuse-fill" id="fuse-fill"></div></div>
+        <!-- Per-phase bars, populated dynamically from fuse.phases + phase_amps. -->
+        <div class="fuse-phases" id="fuse-phases"></div>
+        <!-- Fallback for single-phase or when site meter has no per-phase data. -->
+        <div class="fuse-bar" id="fuse-bar-fallback"><div class="fuse-fill" id="fuse-fill"></div></div>
+        <div class="card-value fuse-fallback-value" id="fuse-use">-- A</div>
       </div>
       <div class="card summary-card" id="card-ev">
         <div class="card-label">EV</div>

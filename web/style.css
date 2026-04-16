@@ -577,6 +577,49 @@ footer {
 .fuse-fill.warn { background: #f59e0b; }
 .fuse-fill.crit { background: #ef4444; }
 
+/* Per-phase fuse bars — one row per phase configured in fuse.phases. */
+.fuse-phases {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 8px;
+}
+.fuse-phase-row {
+  display: grid;
+  grid-template-columns: 24px 1fr 48px;
+  align-items: center;
+  gap: 6px;
+}
+.fuse-phase-label {
+  font-size: 11px;
+  color: var(--text-dim);
+  font-family: monospace;
+}
+.fuse-phase-bar {
+  height: 5px;
+  background: var(--border);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.fuse-phase-fill {
+  height: 100%;
+  background: #22c55e;
+  transition: width 0.3s, background 0.3s;
+}
+.fuse-phase-fill.warn { background: #f59e0b; }
+.fuse-phase-fill.crit { background: #ef4444; }
+/* When the phase is exporting (current flowing out of site), tint the
+   bar blue so the direction is visible at a glance. */
+.fuse-phase-fill.export { background: #3b82f6; }
+.fuse-phase-fill.export.warn { background: #60a5fa; }
+.fuse-phase-fill.export.crit { background: #93c5fd; }
+.fuse-phase-val {
+  font-size: 11px;
+  color: var(--text);
+  font-family: monospace;
+  text-align: right;
+}
+
 .controls-row {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
