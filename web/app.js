@@ -145,6 +145,8 @@
   const evSend = $("ev-send");
   const fuseUse = $("fuse-use");
   const fuseFill = $("fuse-fill");
+  const evW = $("ev-w");
+  const evStatus = $("ev-status");
   const eImport = $("e-import");
   const eExport = $("e-export");
   const ePv = $("e-pv");
@@ -323,6 +325,22 @@
       fuseUse.textContent = amps.toFixed(1) + " A";
       fuseFill.style.width = fusePct + "%";
       fuseFill.className = "fuse-fill" + (fusePct > 85 ? " crit" : fusePct > 65 ? " warn" : "");
+    }
+
+    // EV status card
+    if (evW && evStatus) {
+      var evPower = data.ev_charging_w || 0;
+      evW.textContent = formatW(evPower);
+      if (evPower > 100) {
+        evStatus.textContent = "charging";
+        evW.className = "card-value val-ev-charging";
+      } else if (evPower > 0) {
+        evStatus.textContent = "connected";
+        evW.className = "card-value val-ev-connected";
+      } else {
+        evStatus.textContent = "idle";
+        evW.className = "card-value val-neutral";
+      }
     }
 
     // Dispatch targets — keyed by driver name so the driver card can show

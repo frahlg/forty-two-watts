@@ -166,6 +166,14 @@ main {
   color: var(--yellow);
 }
 
+.val-ev-charging {
+  color: var(--green);
+}
+
+.val-ev-connected {
+  color: var(--yellow);
+}
+
 /* ---- SoC bar ---- */
 .soc-bar {
   width: 100%;
