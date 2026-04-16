@@ -295,27 +295,34 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			d["ev_w"] = r.SmoothedW
 			// Surface the structured fields the driver put in Data so the
 			// UI can render a proper EV card (plug state, reason, limits).
+			// All labels are rendered by the driver itself — the UI
+			// just displays strings verbatim. Codes are also surfaced
+			// for anyone who wants to filter/route on them.
 			var ev struct {
-				Connected       *bool    `json:"connected"`
-				Charging        *bool    `json:"charging"`
-				SessionWh       *float64 `json:"session_wh"`
-				OpMode          *int     `json:"op_mode"`
-				ReasonNoCurrent *int     `json:"reason_no_current"`
-				IsOnline        *bool    `json:"is_online"`
-				CableLocked     *bool    `json:"cable_locked"`
-				MaxA            *float64 `json:"max_a"`
-				Phases          *int     `json:"phases"`
+				Connected            *bool    `json:"connected"`
+				Charging             *bool    `json:"charging"`
+				SessionWh            *float64 `json:"session_wh"`
+				OpMode               *int     `json:"op_mode"`
+				StateLabel           *string  `json:"state_label"`
+				ReasonNoCurrent      *int     `json:"reason_no_current"`
+				ReasonNoCurrentLabel *string  `json:"reason_no_current_label"`
+				IsOnline             *bool    `json:"is_online"`
+				CableLocked          *bool    `json:"cable_locked"`
+				MaxA                 *float64 `json:"max_a"`
+				Phases               *int     `json:"phases"`
 			}
 			if r.Data != nil && json.Unmarshal(r.Data, &ev) == nil {
-				if ev.Connected != nil       { d["ev_connected"] = *ev.Connected }
-				if ev.Charging != nil        { d["ev_charging"] = *ev.Charging }
-				if ev.SessionWh != nil       { d["ev_session_wh"] = *ev.SessionWh }
-				if ev.OpMode != nil          { d["ev_op_mode"] = *ev.OpMode }
-				if ev.ReasonNoCurrent != nil { d["ev_reason_no_current"] = *ev.ReasonNoCurrent }
-				if ev.IsOnline != nil        { d["ev_is_online"] = *ev.IsOnline }
-				if ev.CableLocked != nil     { d["ev_cable_locked"] = *ev.CableLocked }
-				if ev.MaxA != nil            { d["ev_max_a"] = *ev.MaxA }
-				if ev.Phases != nil          { d["ev_phases"] = *ev.Phases }
+				if ev.Connected != nil            { d["ev_connected"] = *ev.Connected }
+				if ev.Charging != nil             { d["ev_charging"] = *ev.Charging }
+				if ev.SessionWh != nil            { d["ev_session_wh"] = *ev.SessionWh }
+				if ev.OpMode != nil               { d["ev_op_mode"] = *ev.OpMode }
+				if ev.StateLabel != nil           { d["ev_state_label"] = *ev.StateLabel }
+				if ev.ReasonNoCurrent != nil      { d["ev_reason_no_current"] = *ev.ReasonNoCurrent }
+				if ev.ReasonNoCurrentLabel != nil { d["ev_reason_no_current_label"] = *ev.ReasonNoCurrentLabel }
+				if ev.IsOnline != nil             { d["ev_is_online"] = *ev.IsOnline }
+				if ev.CableLocked != nil          { d["ev_cable_locked"] = *ev.CableLocked }
+				if ev.MaxA != nil                 { d["ev_max_a"] = *ev.MaxA }
+				if ev.Phases != nil               { d["ev_phases"] = *ev.Phases }
 			}
 		}
 		drivers[name] = d

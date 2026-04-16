@@ -128,6 +128,55 @@ end
 --   5 = error
 --   6 = ready to charge
 
+local OP_MODE_LABELS = {
+    [0] = "offline",
+    [1] = "disconnected",
+    [2] = "awaiting start",
+    [3] = "charging",
+    [4] = "completed",
+    [5] = "error",
+    [6] = "ready",
+}
+
+-- Easee ReasonForNoCurrent. 0 = charger OK (no reason to surface).
+-- Source: developer.easee.com/docs/enumerations
+local REASON_LABELS = {
+    [0]   = nil, -- no reason
+    [1]   = "max circuit current too low",
+    [2]   = "dynamic circuit current too low",
+    [3]   = "offline fallback circuit current too low",
+    [4]   = "circuit fuse too low",
+    [5]   = "waiting in queue",
+    [6]   = "waiting (other cars fully charged)",
+    [7]   = "illegal grid type",
+    [8]   = "no current request from primary",
+    [9]   = "max dynamic charger current too low",
+    [10]  = "phase imbalance",
+    [11]  = "equalizer communication lost",
+    [25]  = "equalizer dynamic limit too low",
+    [26]  = "equalizer static limit too low",
+    [27]  = "offline fallback equalizer too low",
+    [28]  = "fuse limit reached",
+    [29]  = "current limited by equalizer",
+    [30]  = "current limited by offline equalizer",
+    [50]  = "secondary unit not requesting current",
+    [51]  = "max charger current too low",
+    [52]  = "max dynamic charger current too low",
+    [53]  = "charger disabled",
+    [54]  = "pending scheduled charging",
+    [55]  = "pending authorization",
+    [56]  = "charger in error state",
+    [57]  = "erratic EV",
+    [75]  = "limited by cable rating",
+    [76]  = "limited by schedule",
+    [77]  = "limited by charger current",
+    [78]  = "limited by dynamic charger current",
+    [79]  = "car not drawing current",
+    [80]  = "current ramping",
+    [81]  = "limited by car",
+    [100] = "undefined error",
+}
+
 local email, password
 
 function driver_init(config)
@@ -184,17 +233,20 @@ function driver_poll()
     local connected = (op_mode >= 2 and op_mode <= 6)
     local charging = (op_mode == 3)
 
+    local reason_code = state.reasonForNoCurrent
     host.emit("ev", {
-        w                 = power_w,
-        connected         = connected,
-        charging          = charging,
-        session_wh        = session_wh,
-        op_mode           = op_mode,                     -- 1=disc,2=awaiting,3=charging,4=completed,5=error,6=ready
-        reason_no_current = state.reasonForNoCurrent,    -- int: 0=ok; why NOT drawing current
-        is_online         = state.isOnline,              -- Easee cloud considers charger online
-        cable_locked      = state.cableLocked,
-        max_a             = state.dynamicChargerCurrent, -- current dynamic limit (A)
-        phases            = 3,                           -- Easee defaults 3-phase
+        w                       = power_w,
+        connected               = connected,
+        charging                = charging,
+        session_wh              = session_wh,
+        op_mode                 = op_mode,                     -- 1=disc,2=awaiting,3=charging,4=completed,5=error,6=ready
+        state_label             = OP_MODE_LABELS[op_mode] or "unknown",
+        reason_no_current       = reason_code,                 -- int: 0=ok; why NOT drawing current
+        reason_no_current_label = reason_code and REASON_LABELS[reason_code], -- nil if 0/ok, string otherwise
+        is_online               = state.isOnline,              -- Easee cloud considers charger online
+        cable_locked            = state.cableLocked,
+        max_a                   = state.dynamicChargerCurrent, -- current dynamic limit (A)
+        phases                  = 3,                           -- Easee defaults 3-phase
     })
 
     -- Diagnostic metrics
