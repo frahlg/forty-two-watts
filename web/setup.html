@@ -1,0 +1,697 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Setup — forty-two-watts</title>
+  <link rel="icon" type="image/jpeg" href="/logo.jpg">
+  <link rel="stylesheet" href="/style.css">
+  <style>
+    /* ---- Wizard layout ---- */
+    .wizard {
+      max-width: 600px;
+      margin: 0 auto;
+      padding: 2rem 1rem;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .wizard-header {
+      text-align: center;
+      margin-bottom: 2rem;
+    }
+
+    .wizard-logo {
+      height: 64px;
+      width: auto;
+      border-radius: 8px;
+    }
+
+    .wizard-title {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      margin-bottom: 0.5rem;
+    }
+
+    .wizard-title h1 {
+      font-size: 1.3rem;
+      font-weight: 600;
+    }
+
+    /* ---- Step indicator ---- */
+    .step-dots {
+      display: flex;
+      justify-content: center;
+      gap: 8px;
+      margin-bottom: 2rem;
+    }
+
+    .step-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--border);
+      transition: background 0.3s;
+    }
+
+    .step-dot.active {
+      background: var(--green);
+    }
+
+    .step-dot.done {
+      background: var(--accent);
+    }
+
+    /* ---- Step panels ---- */
+    .step {
+      display: none;
+      flex: 1;
+    }
+
+    .step.visible {
+      display: flex;
+      flex-direction: column;
+    }
+
+    .step h2 {
+      font-size: 1.1rem;
+      margin-bottom: 0.75rem;
+    }
+
+    .step p {
+      color: var(--text-dim);
+      font-size: 0.9rem;
+      margin-bottom: 1rem;
+      line-height: 1.5;
+    }
+
+    /* ---- Form elements ---- */
+    .form-group {
+      margin-bottom: 1rem;
+    }
+
+    .form-group label {
+      display: block;
+      font-size: 0.8rem;
+      color: var(--text-dim);
+      margin-bottom: 4px;
+    }
+
+    .form-group input[type="text"],
+    .form-group input[type="number"],
+    .form-group input[type="password"],
+    .form-group select {
+      width: 100%;
+      padding: 8px 10px;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      color: var(--text);
+      font-family: inherit;
+      font-size: 0.85rem;
+    }
+
+    .form-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+
+    .form-row-3 {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 12px;
+    }
+
+    .form-check {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin: 0.75rem 0;
+      font-size: 0.85rem;
+    }
+
+    .form-check input[type="checkbox"] {
+      accent-color: var(--green);
+      width: 16px;
+      height: 16px;
+    }
+
+    /* ---- Buttons ---- */
+    .wizard-actions {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-top: auto;
+      padding-top: 1.5rem;
+      gap: 12px;
+    }
+
+    .btn-primary {
+      padding: 10px 24px;
+      border: none;
+      border-radius: var(--radius);
+      background: var(--green);
+      color: #fff;
+      font-size: 0.9rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity 0.2s;
+    }
+
+    .btn-primary:hover { opacity: 0.85; }
+    .btn-primary:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    .btn-secondary {
+      padding: 8px 18px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: var(--surface2);
+      color: var(--text);
+      font-size: 0.85rem;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+
+    .btn-secondary:hover { background: var(--border); }
+
+    .btn-skip {
+      background: none;
+      border: none;
+      color: var(--text-dim);
+      cursor: pointer;
+      font-size: 0.8rem;
+      text-decoration: underline dotted;
+      padding: 4px 8px;
+    }
+
+    .btn-skip:hover { color: var(--text); }
+
+    /* ---- Welcome step ---- */
+    .welcome-center {
+      text-align: center;
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 1rem;
+    }
+
+    .welcome-center h2 {
+      font-size: 1.4rem;
+    }
+
+    /* ---- Scan results ---- */
+    .scan-table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 1rem 0;
+      font-size: 0.82rem;
+    }
+
+    .scan-table th {
+      text-align: left;
+      padding: 6px 8px;
+      font-size: 0.72rem;
+      color: var(--text-dim);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .scan-table td {
+      padding: 8px;
+      border-bottom: 1px solid var(--border);
+      font-family: monospace;
+      font-size: 0.82rem;
+    }
+
+    .scan-table tr:hover {
+      background: rgba(255,255,255,0.03);
+    }
+
+    .scan-table .btn-use {
+      padding: 4px 12px;
+      border: 1px solid var(--green);
+      border-radius: 4px;
+      background: transparent;
+      color: var(--green);
+      cursor: pointer;
+      font-size: 0.75rem;
+    }
+
+    .scan-table .btn-use:hover {
+      background: rgba(0,204,102,0.1);
+    }
+
+    .spinner {
+      display: inline-block;
+      width: 18px;
+      height: 18px;
+      border: 2px solid var(--border);
+      border-top-color: var(--green);
+      border-radius: 50%;
+      animation: spin 0.6s linear infinite;
+      vertical-align: middle;
+      margin-right: 8px;
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    .scan-status {
+      color: var(--text-dim);
+      font-size: 0.85rem;
+      margin: 1rem 0;
+    }
+
+    /* ---- Driver picker ---- */
+    .driver-desc {
+      margin-top: 0.5rem;
+      padding: 10px 12px;
+      background: rgba(255,255,255,0.03);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      font-size: 0.82rem;
+      color: var(--text-dim);
+      line-height: 1.4;
+    }
+
+    /* ---- Configured drivers summary ---- */
+    .drivers-summary {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin: 1rem 0;
+    }
+
+    .driver-summary-item {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 10px 14px;
+      font-size: 0.85rem;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .driver-summary-item .driver-info {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .driver-summary-item .driver-info .driver-label {
+      font-weight: 600;
+    }
+
+    .driver-summary-item .driver-info .driver-detail {
+      font-size: 0.75rem;
+      color: var(--text-dim);
+      font-family: monospace;
+    }
+
+    .btn-remove-sm {
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--red);
+      padding: 4px 10px;
+      border-radius: 4px;
+      font-size: 0.72rem;
+      cursor: pointer;
+    }
+
+    .btn-remove-sm:hover {
+      background: rgba(239,68,68,0.1);
+    }
+
+    /* ---- Review summary ---- */
+    .review-section {
+      margin-bottom: 1rem;
+    }
+
+    .review-section h3 {
+      font-size: 0.85rem;
+      color: var(--text-dim);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 6px;
+    }
+
+    .review-item {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 10px 14px;
+      font-size: 0.85rem;
+      margin-bottom: 6px;
+      line-height: 1.5;
+    }
+
+    /* ---- Integration fieldset ---- */
+    .integration-section {
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 14px 16px;
+      margin-bottom: 1rem;
+    }
+
+    .integration-section h3 {
+      font-size: 0.9rem;
+      margin-bottom: 0.75rem;
+    }
+
+    /* ---- Success screen ---- */
+    .success-screen {
+      text-align: center;
+      padding: 3rem 1rem;
+    }
+
+    .success-screen .checkmark {
+      font-size: 3rem;
+      color: var(--green);
+      margin-bottom: 1rem;
+    }
+
+    .error-msg {
+      color: var(--red);
+      font-size: 0.85rem;
+      margin-top: 0.5rem;
+      padding: 8px 10px;
+      background: rgba(239,68,68,0.1);
+      border: 1px solid rgba(239,68,68,0.3);
+      border-radius: 4px;
+    }
+
+    @media (max-width: 480px) {
+      .wizard { padding: 1rem 0.75rem; }
+      .form-row, .form-row-3 { grid-template-columns: 1fr; }
+      .wizard-logo { height: 48px; }
+    }
+  </style>
+</head>
+<body>
+
+<div class="wizard" id="wizard">
+
+  <!-- Header -->
+  <div class="wizard-header">
+    <div class="wizard-title">
+      <img src="/logo.jpg" alt="42W" class="wizard-logo">
+      <h1>42W</h1>
+    </div>
+  </div>
+
+  <!-- Step dots -->
+  <div class="step-dots" id="step-dots"></div>
+
+  <!-- Step 1: Welcome -->
+  <div class="step" id="step-1" data-step="1">
+    <div class="welcome-center">
+      <h2>Welcome to forty-two-watts</h2>
+      <p>Let's set up your home energy system in a few steps.</p>
+      <button class="btn-primary" onclick="goStep(2)">Get started</button>
+    </div>
+  </div>
+
+  <!-- Step 2: Site basics -->
+  <div class="step" id="step-2" data-step="2">
+    <h2>Site basics</h2>
+    <p>Tell us about your electrical installation.</p>
+
+    <div class="form-group">
+      <label for="site-name">Site name</label>
+      <input type="text" id="site-name" value="My Home" placeholder="My Home">
+    </div>
+
+    <div class="form-row-3">
+      <div class="form-group">
+        <label for="fuse-amps">Fuse rating (A)</label>
+        <input type="number" id="fuse-amps" value="16" min="1" max="100">
+      </div>
+      <div class="form-group">
+        <label for="fuse-phases">Phases</label>
+        <select id="fuse-phases">
+          <option value="1">1</option>
+          <option value="3" selected>3</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label for="fuse-voltage">Voltage (V)</label>
+        <input type="number" id="fuse-voltage" value="230" min="100" max="400">
+      </div>
+    </div>
+
+    <div class="form-group">
+      <label for="price-zone">Electricity price zone</label>
+      <select id="price-zone">
+        <option value="SE1">SE1</option>
+        <option value="SE2">SE2</option>
+        <option value="SE3" selected>SE3</option>
+        <option value="SE4">SE4</option>
+        <option value="NO1">NO1</option>
+        <option value="NO2">NO2</option>
+        <option value="NO3">NO3</option>
+        <option value="NO4">NO4</option>
+        <option value="NO5">NO5</option>
+        <option value="DK1">DK1</option>
+        <option value="DK2">DK2</option>
+        <option value="FI">FI</option>
+      </select>
+    </div>
+
+    <div class="wizard-actions">
+      <button class="btn-secondary" onclick="goStep(1)">Back</button>
+      <button class="btn-primary" onclick="goStep(3)">Continue</button>
+    </div>
+  </div>
+
+  <!-- Step 3: Find devices -->
+  <div class="step" id="step-3" data-step="3">
+    <h2>Find devices</h2>
+    <p>Scan your network for inverters, batteries, and meters.</p>
+
+    <div id="scan-controls">
+      <button class="btn-primary" id="scan-btn" onclick="startScan()">Scan network</button>
+      <button class="btn-skip" id="manual-ip-toggle" onclick="showManualIP()">I know my device IP</button>
+    </div>
+
+    <div id="scan-status" class="scan-status" style="display:none"></div>
+
+    <div id="scan-results" style="display:none">
+      <table class="scan-table">
+        <thead>
+          <tr><th>IP</th><th>Port</th><th>Protocol</th><th></th></tr>
+        </thead>
+        <tbody id="scan-tbody"></tbody>
+      </table>
+    </div>
+
+    <div id="manual-ip-form" style="display:none">
+      <div class="form-row">
+        <div class="form-group">
+          <label for="manual-ip">IP address</label>
+          <input type="text" id="manual-ip" placeholder="192.168.1.10">
+        </div>
+        <div class="form-group">
+          <label for="manual-port">Port</label>
+          <input type="number" id="manual-port" value="502" min="1" max="65535">
+        </div>
+      </div>
+      <button class="btn-primary" onclick="useManualDevice()" style="margin-top:0.5rem">Use this device</button>
+    </div>
+
+    <div class="wizard-actions">
+      <button class="btn-secondary" onclick="goStep(2)">Back</button>
+      <button class="btn-skip" onclick="goStep(7)">Skip (no devices)</button>
+    </div>
+  </div>
+
+  <!-- Step 4: Pick driver -->
+  <div class="step" id="step-4" data-step="4">
+    <h2>Pick driver</h2>
+    <p>Select the driver that matches your device.</p>
+
+    <div class="form-group">
+      <label for="driver-select">Driver</label>
+      <select id="driver-select" onchange="onDriverSelected()">
+        <option value="">-- Select a driver --</option>
+      </select>
+    </div>
+
+    <div id="driver-description" class="driver-desc" style="display:none"></div>
+
+    <div class="wizard-actions">
+      <button class="btn-secondary" onclick="goStep(3)">Back</button>
+      <button class="btn-primary" id="driver-next-btn" onclick="goStep(5)" disabled>Continue</button>
+    </div>
+  </div>
+
+  <!-- Step 5: Configure driver -->
+  <div class="step" id="step-5" data-step="5">
+    <h2>Configure driver</h2>
+    <p>Fine-tune the connection settings.</p>
+
+    <div class="form-group">
+      <label for="drv-name">Name</label>
+      <input type="text" id="drv-name" placeholder="sungrow">
+    </div>
+
+    <div class="form-row">
+      <div class="form-group">
+        <label for="drv-ip">IP address</label>
+        <input type="text" id="drv-ip" placeholder="192.168.1.10">
+      </div>
+      <div class="form-group">
+        <label for="drv-port">Port</label>
+        <input type="number" id="drv-port" value="502" min="1" max="65535">
+      </div>
+    </div>
+
+    <div class="form-group" id="drv-unitid-group">
+      <label for="drv-unitid">Unit ID (Modbus)</label>
+      <input type="number" id="drv-unitid" value="1" min="0" max="255">
+    </div>
+
+    <div class="form-check">
+      <input type="checkbox" id="drv-site-meter" checked>
+      <label for="drv-site-meter">This is my site meter</label>
+    </div>
+
+    <div class="form-group" id="drv-battery-group" style="display:none">
+      <label for="drv-battery-kwh">Battery capacity (kWh)</label>
+      <input type="number" id="drv-battery-kwh" value="10" min="0" step="0.1">
+    </div>
+
+    <div class="wizard-actions">
+      <button class="btn-secondary" onclick="goStep(4)">Back</button>
+      <button class="btn-primary" onclick="saveDriver()">Add device</button>
+    </div>
+  </div>
+
+  <!-- Step 6: Add more? -->
+  <div class="step" id="step-6" data-step="6">
+    <h2>Configured devices</h2>
+    <p>Review your devices or add more.</p>
+
+    <div class="drivers-summary" id="drivers-summary"></div>
+
+    <div class="wizard-actions">
+      <button class="btn-secondary" onclick="addAnotherDevice()">Add another device</button>
+      <button class="btn-primary" onclick="goStep(7)">Continue</button>
+    </div>
+  </div>
+
+  <!-- Step 7: Optional integrations -->
+  <div class="step" id="step-7" data-step="7">
+    <h2>Optional integrations</h2>
+    <p>Connect additional services. All fields are optional.</p>
+
+    <div class="integration-section">
+      <h3>EV Charger</h3>
+      <div class="form-group">
+        <label for="ev-provider">Provider</label>
+        <select id="ev-provider">
+          <option value="">None</option>
+          <option value="easee">Easee</option>
+        </select>
+      </div>
+      <div id="ev-fields" style="display:none">
+        <div class="form-group">
+          <label for="ev-email">Email</label>
+          <input type="text" id="ev-email" placeholder="user@example.com">
+        </div>
+        <div class="form-group">
+          <label for="ev-password">Password</label>
+          <input type="password" id="ev-password">
+        </div>
+        <div class="form-group">
+          <label for="ev-serial">Serial number</label>
+          <input type="text" id="ev-serial" placeholder="EHHZBKPF">
+        </div>
+      </div>
+    </div>
+
+    <div class="integration-section">
+      <h3>Home Assistant</h3>
+      <div class="form-check">
+        <input type="checkbox" id="ha-enabled">
+        <label for="ha-enabled">Enable MQTT bridge</label>
+      </div>
+      <div id="ha-fields" style="display:none">
+        <div class="form-row">
+          <div class="form-group">
+            <label for="ha-broker">Broker IP</label>
+            <input type="text" id="ha-broker" placeholder="192.168.1.1">
+          </div>
+          <div class="form-group">
+            <label for="ha-port">Port</label>
+            <input type="number" id="ha-port" value="1883" min="1" max="65535">
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label for="ha-user">Username</label>
+            <input type="text" id="ha-user">
+          </div>
+          <div class="form-group">
+            <label for="ha-pass">Password</label>
+            <input type="password" id="ha-pass">
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="integration-section">
+      <h3>Price provider</h3>
+      <div class="form-group">
+        <label for="price-provider">Provider</label>
+        <select id="price-provider">
+          <option value="elprisetjustnu">elprisetjustnu</option>
+          <option value="entsoe">ENTSO-E</option>
+          <option value="">None</option>
+        </select>
+      </div>
+      <div class="form-group" id="price-zone-display">
+        <label>Zone</label>
+        <input type="text" id="price-zone-readonly" readonly>
+      </div>
+    </div>
+
+    <div class="wizard-actions">
+      <button class="btn-secondary" onclick="goStepBack7()">Back</button>
+      <button class="btn-primary" onclick="goStep(8)">Continue</button>
+    </div>
+  </div>
+
+  <!-- Step 8: Review + Save -->
+  <div class="step" id="step-8" data-step="8">
+    <h2>Review and save</h2>
+    <p>Confirm your configuration before starting.</p>
+
+    <div id="review-content"></div>
+    <div id="save-error" style="display:none"></div>
+
+    <div id="save-actions" class="wizard-actions">
+      <button class="btn-secondary" onclick="goStep(7)">Back</button>
+      <button class="btn-primary" id="save-btn" onclick="saveConfig()">Start 42W</button>
+    </div>
+
+    <div id="save-success" class="success-screen" style="display:none">
+      <div class="checkmark">&#10003;</div>
+      <h2>Configuration saved!</h2>
+      <p>Restarting... you will be redirected to the dashboard.</p>
+    </div>
+  </div>
+
+</div>
+
+<script src="/setup.js"></script>
+</body>
+</html>
