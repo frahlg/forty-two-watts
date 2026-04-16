@@ -124,32 +124,58 @@ func (s *Service) Latest() *Plan {
 // single missed replan doesn't flip us into fallback.
 const MaxPlanAge = 30 * time.Minute
 
-// GridTargetAt returns the plan's grid-power target for the slot
-// containing `now`. Returns (0, false) if the plan is missing, stale,
-// or `now` is outside the plan's horizon.
-//
-// The result is already in site sign convention (+ import, − export).
-func (s *Service) GridTargetAt(now time.Time) (float64, bool) {
+// SlotAt returns the plan's directive for the slot containing `now`.
+// Returns (mode, grid_target_w, ok). Dispatch uses `mode` to select
+// the EMS strategy and `grid_target_w` as the PI setpoint. The plan is
+// a scheduler (decides WHEN); the EMS is the regulator (decides HOW).
+func (s *Service) SlotAt(now time.Time) (string, float64, bool) {
 	if s == nil {
-		return 0, false
+		return "", 0, false
 	}
 	s.mu.RLock()
 	p := s.last
 	s.mu.RUnlock()
 	if p == nil {
-		return 0, false
+		return "", 0, false
 	}
 	if time.Since(time.UnixMilli(p.GeneratedAtMs)) > MaxPlanAge {
-		return 0, false
+		return "", 0, false
 	}
 	nowMs := now.UnixMilli()
 	for _, a := range p.Actions {
 		end := a.SlotStartMs + int64(a.SlotLenMin)*60*1000
 		if nowMs >= a.SlotStartMs && nowMs < end {
-			return a.GridW, true
+			return actionToSlot(a, s.Defaults.Mode)
 		}
 	}
-	return 0, false
+	return "", 0, false
+}
+
+// actionToSlot translates an MPC action into (mode_string, grid_target_w, true).
+// The mapping from planner-mode + action to EMS mode:
+//   - self_consumption → always self_consumption with grid_target=0
+//   - cheap_charge → "charge" when the plan says charge, otherwise self_consumption
+//   - arbitrage → "charge" / "peak_shaving" (for export) / self_consumption
+func actionToSlot(a Action, plannerMode Mode) (string, float64, bool) {
+	switch plannerMode {
+	case ModeSelfConsumption:
+		return "self_consumption", 0, true
+	case ModeCheapCharge:
+		if a.BatteryW > 100 {
+			return "charge", 0, true
+		}
+		return "self_consumption", 0, true
+	case ModeArbitrage:
+		if a.BatteryW > 100 {
+			return "charge", 0, true
+		}
+		if a.BatteryW < -100 {
+			return "peak_shaving", a.GridW, true
+		}
+		return "self_consumption", 0, true
+	default:
+		return "self_consumption", 0, true
+	}
 }
 
 // SetMode changes the planner's operating mode and forces an immediate

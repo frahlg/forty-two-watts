@@ -37,9 +37,14 @@ func (m Mode) IsPlannerMode() bool {
 }
 
 // PlanTargetFunc is injected by main.go: given the current time, returns
-// (grid_target_w, ok). When ok=false, the plan is stale/missing and the
-// control loop falls back to self_consumption with grid_target_w = 0.
-type PlanTargetFunc func(now time.Time) (float64, bool)
+// the plan's directive for the current slot. When ok=false, the plan is
+// stale/missing and the control loop falls back to self_consumption with
+// grid_target=0.
+//
+// Returns (mode_string, grid_target_w, ok). mode_string maps to a Mode
+// constant; the dispatch uses its existing mode logic for HOW batteries
+// respond. The plan is a scheduler, not a regulator.
+type PlanTargetFunc func(now time.Time) (string, float64, bool)
 
 // DispatchTarget is one command to issue to a single battery driver.
 // `TargetW` is in site sign convention:
@@ -142,34 +147,32 @@ func ComputeDispatch(
 	driverCapacities map[string]float64,
 	fuseMaxW float64,
 ) []DispatchTarget {
-	// ---- Planner modes: override grid_target from the plan ----
-	// We don't mutate state.Mode — the operator's selected mode is
-	// preserved for display. Once the grid_target is set from the plan,
-	// the rest of this function behaves like self_consumption: PI chases
-	// the target we just set. The downstream switches special-case this
-	// by treating planner modes as self_consumption.
+	// ---- Planner modes: the plan is a scheduler, not a regulator ----
+	// The plan decides WHEN each strategy applies (self-consumption now,
+	// charge at 02:00, export at 17:00). The EMS's existing mode logic
+	// decides HOW batteries respond every 5 s based on the live meter.
+	//
+	// The planner's PlanSlot.Mode replaces the effective mode for this
+	// cycle. PlanSlot.GridW overrides the grid target when the slot's
+	// mode needs it (e.g. charge → target = +max_charge). For self-
+	// consumption slots, grid_target is always 0.
+	effectiveMode := state.Mode
 	if state.Mode.IsPlannerMode() {
-		var target float64
+		var modeStr string
+		var gridW float64
 		ok := false
 		if state.PlanTarget != nil {
-			target, ok = state.PlanTarget(time.Now())
+			modeStr, gridW, ok = state.PlanTarget(time.Now())
 		}
 		if ok {
-			state.SetGridTarget(target)
+			effectiveMode = Mode(modeStr)
+			state.SetGridTarget(gridW)
 			state.PlanStale = false
 		} else {
-			// Plan missing or stale. Fail-safe: self_consumption with
-			// target=0. Operator sees PlanStale=true.
+			effectiveMode = ModeSelfConsumption
 			state.SetGridTarget(0)
 			state.PlanStale = true
 		}
-	}
-
-	// effectiveMode collapses planner modes into self_consumption for
-	// the rest of this function. Real state.Mode is untouched.
-	effectiveMode := state.Mode
-	if effectiveMode.IsPlannerMode() {
-		effectiveMode = ModeSelfConsumption
 	}
 
 	// ---- Idle + Charge short-circuits ----
