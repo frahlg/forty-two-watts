@@ -1,3 +1,13 @@
+## [0.5.3](https://github.com/frahlg/forty-two-watts/compare/v0.5.2...v0.5.3) (2026-04-16)
+
+### Bug Fixes
+
+* add HTTP capability support for catalog drivers + clarify grid tariff label ([02a3001](https://github.com/frahlg/forty-two-watts/commit/02a300173861c9d9e8a61e52c72dd708a48fbd5c))
+
+### UI
+
+* move EV credentials to Devices tab, remove EV Charger tab ([7cd2d9f](https://github.com/frahlg/forty-two-watts/commit/7cd2d9f3af4a547cf9370c29614607b764d9e59f))
+
 ## [0.5.2](https://github.com/frahlg/forty-two-watts/compare/v0.5.1...v0.5.2) (2026-04-16)
 
 ### Bug Fixes
