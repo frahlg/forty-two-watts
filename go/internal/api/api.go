@@ -29,6 +29,7 @@ import (
 	"github.com/frahlg/forty-two-watts/go/internal/mpc"
 	"github.com/frahlg/forty-two-watts/go/internal/prices"
 	"github.com/frahlg/forty-two-watts/go/internal/pvmodel"
+	"github.com/frahlg/forty-two-watts/go/internal/scanner"
 	"github.com/frahlg/forty-two-watts/go/internal/selftune"
 	"github.com/frahlg/forty-two-watts/go/internal/state"
 	"github.com/frahlg/forty-two-watts/go/internal/telemetry"
@@ -136,6 +137,7 @@ func (s *Server) routes() {
 	s.handle("GET  /api/series", s.handleSeries)
 	s.handle("GET  /api/series/catalog", s.handleSeriesCatalog)
 	s.handle("GET  /api/devices", s.handleDevices)
+	s.handle("GET  /api/scan", s.handleScan)
 
 	// ---- Static web UI ----
 	// Everything not matched above falls through to the static server.
@@ -965,6 +967,21 @@ func (s *Server) handleDevices(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, 200, map[string]any{"devices": out})
+}
+
+// ---- network scan ----
+
+// handleScan: GET /api/scan
+// Probes the local network for devices on common energy-protocol ports
+// (Modbus 502, MQTT 1883, HTTP 80). Used by Settings → Scan and the
+// bootstrap wizard.
+func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
+	devices, err := scanner.Scan(r.Context())
+	if err != nil {
+		writeJSON(w, 500, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, 200, devices)
 }
 
 // ---- PV digital twin ----

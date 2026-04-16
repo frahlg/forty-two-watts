@@ -7,6 +7,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -15,6 +16,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -58,6 +60,11 @@ func main() {
 	// ---- Load config ----
 	cfg, err := config.Load(*configPath)
 	if err != nil {
+		if isConfigMissing(err) {
+			driverDir := filepath.Join(filepath.Dir(*configPath), "drivers")
+			runBootstrap(*configPath, *webDir, driverDir)
+			return
+		}
 		slog.Error("load config", "err", err)
 		os.Exit(1)
 	}
@@ -766,6 +773,20 @@ func buildMPC(cfg *config.Config, st *state.Store, tel *telemetry.Store, capacit
 		svc.Interval = time.Duration(pl.IntervalMin) * time.Minute
 	}
 	return svc
+}
+
+// isConfigMissing checks whether the error from config.Load indicates the
+// config file does not exist (as opposed to a parse or validation error).
+// config.Load wraps the os error with fmt.Errorf, so we use errors.Is to
+// unwrap through the chain.
+func isConfigMissing(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return true
+	}
+	return strings.Contains(err.Error(), "no such file")
 }
 
 func recordHistory(st *state.Store, tel *telemetry.Store, ctrl *control.State, nowMs int64) {
