@@ -222,7 +222,8 @@ function driver_command(action, power_w, cmd)
     elseif action == "ev_resume" then
         return post_command("/commands/resume_charging")
     elseif action == "ev_set_current" then
-        local amps = math.floor((power_w or 0) / 230)
+        -- Easee dynamicChargerCurrent is per-phase amps; assume 3-phase.
+        local amps = math.floor((power_w or 0) / 230 / 3)
         local body = host.json_encode({dynamicChargerCurrent = amps})
         local _, err = host.http_post(
             BASE_URL .. "/chargers/" .. charger_serial .. "/settings",

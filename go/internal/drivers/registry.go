@@ -120,6 +120,9 @@ func (r *Registry) Add(ctx context.Context, cfg config.Driver) error {
 			if mac, ok := r.ARPLookup(mb.Host); ok { env.SetMAC(mac) }
 		}
 	}
+	if cfg.Capabilities.HTTP != nil {
+		env.WithHTTP()
+	}
 
 	luaDrv, err := NewLuaDriver(cfg.Lua, env)
 	if err != nil {

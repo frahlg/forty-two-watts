@@ -433,6 +433,11 @@ func registerHost(L *lua.LState, env *HostEnv) {
 	}
 
 	host.RawSetString("http_get", L.NewFunction(func(L *lua.LState) int {
+		if !env.HTTP {
+			L.Push(lua.LNil)
+			L.Push(lua.LString("http: capability not granted"))
+			return 2
+		}
 		url := L.CheckString(1)
 		req, err := net_http.NewRequest("GET", url, nil)
 		if err != nil {
@@ -464,6 +469,11 @@ func registerHost(L *lua.LState, env *HostEnv) {
 	}))
 
 	host.RawSetString("http_post", L.NewFunction(func(L *lua.LState) int {
+		if !env.HTTP {
+			L.Push(lua.LNil)
+			L.Push(lua.LString("http: capability not granted"))
+			return 2
+		}
 		url := L.CheckString(1)
 		payload := L.CheckString(2)
 		req, err := net_http.NewRequest("POST", url, strings.NewReader(payload))

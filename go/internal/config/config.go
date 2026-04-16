@@ -333,6 +333,16 @@ func (incoming *Config) PreserveMaskedSecrets(existing *Config) {
 					}
 				}
 			}
+			// Restore MQTT password in capabilities block.
+			if incoming.Drivers[i].Capabilities.MQTT != nil && ed.Capabilities.MQTT != nil &&
+				incoming.Drivers[i].Capabilities.MQTT.Password == "" {
+				incoming.Drivers[i].Capabilities.MQTT.Password = ed.Capabilities.MQTT.Password
+			}
+			// Restore MQTT password in legacy block.
+			if incoming.Drivers[i].MQTT != nil && ed.MQTT != nil &&
+				incoming.Drivers[i].MQTT.Password == "" {
+				incoming.Drivers[i].MQTT.Password = ed.MQTT.Password
+			}
 			break
 		}
 	}

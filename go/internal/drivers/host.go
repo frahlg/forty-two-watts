@@ -46,6 +46,7 @@ type HostEnv struct {
 	Telemetry  *telemetry.Store
 	MQTT       MQTTCap    // nil → mqtt_* calls return ErrNoCapability
 	Modbus     ModbusCap  // nil → modbus_* calls return ErrNoCapability
+	HTTP       bool       // false → http_* calls return ErrNoCapability
 	Start      time.Time  // monotonic start; host.millis() computed from here
 
 	mu sync.Mutex
@@ -78,6 +79,9 @@ func (h *HostEnv) WithMQTT(m MQTTCap) *HostEnv { h.MQTT = m; return h }
 
 // WithModbus binds a Modbus capability.
 func (h *HostEnv) WithModbus(m ModbusCap) *HostEnv { h.Modbus = m; return h }
+
+// WithHTTP enables the HTTP capability.
+func (h *HostEnv) WithHTTP() *HostEnv { h.HTTP = true; return h }
 
 // millis returns monotonic milliseconds since host startup.
 func (h *HostEnv) millis() int64 {

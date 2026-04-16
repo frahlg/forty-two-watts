@@ -126,22 +126,6 @@ function driver_poll()
         pv_gen_wh = host.decode_u32_be(yield_regs[1], yield_regs[2]) * 0.01 * 1000
     end
 
-    -- Emit PV telemetry (site convention: generation is negative).
-    host.emit("pv", {
-        w           = -pv_w,
-        mppt1_v     = pv1_v,
-        mppt1_a     = pv1_a,
-        mppt2_v     = pv2_v,
-        mppt2_a     = pv2_a,
-        lifetime_wh = pv_gen_wh,
-        temp_c      = inv_temp,
-    })
-    host.emit_metric("pv_mppt1_v",      pv1_v)
-    host.emit_metric("pv_mppt1_a",      pv1_a)
-    host.emit_metric("pv_mppt2_v",      pv2_v)
-    host.emit_metric("pv_mppt2_a",      pv2_a)
-    host.emit_metric("inverter_temp_c", inv_temp)
-
     -- ---- Battery ----
 
     -- Battery power: 37001-37002, I32 BE, watts
@@ -188,19 +172,6 @@ function driver_poll()
         bat_discharge_wh = host.decode_u32_be(benergy_regs[3], benergy_regs[4]) * 0.01 * 1000
     end
 
-    host.emit("battery", {
-        w            = bat_w,
-        v            = bat_v,
-        a            = bat_a,
-        soc          = bat_soc,
-        temp_c       = bat_temp,
-        charge_wh    = bat_charge_wh,
-        discharge_wh = bat_discharge_wh,
-    })
-    host.emit_metric("battery_dc_v",    bat_v)
-    host.emit_metric("battery_dc_a",    bat_a)
-    host.emit_metric("battery_temp_c",  bat_temp)
-
     -- ---- Meter ----
 
     -- Per-phase voltage: 37101-37106, I32 BE × 0.1 pairs (L1 V, L2 V, L3 V)
@@ -223,11 +194,12 @@ function driver_poll()
 
     -- Meter total power: 37113-37114, I32 BE, watts.
     -- Huawei sign: positive = export, negative = import. Negate for site convention.
-    -- If this read fails, skip the entire meter emit so the watchdog catches
-    -- staleness — publishing zeros would mislead the control loop.
+    -- If this read fails, skip ALL emits so the watchdog catches staleness —
+    -- emitting PV/battery while meter is down would keep the driver "healthy"
+    -- but give the control loop a stale grid reading.
     local ok_mw, mw_regs = pcall(host.modbus_read, 37113, 2, "holding")
     if not ok_mw or not mw_regs then
-        host.log("warn", "Huawei: meter power read failed, skipping emit")
+        host.log("warn", "Huawei: meter power read failed, skipping all emits")
         return 5000
     end
     local meter_w = host.decode_i32_be(mw_regs[1], mw_regs[2])
@@ -255,6 +227,38 @@ function driver_poll()
         l2_w = host.decode_i32_be(lpw_regs[3], lpw_regs[4])
         l3_w = host.decode_i32_be(lpw_regs[5], lpw_regs[6])
     end
+
+    -- ---- All reads succeeded — emit everything ----
+
+    -- PV telemetry (site convention: generation is negative).
+    host.emit("pv", {
+        w           = -pv_w,
+        mppt1_v     = pv1_v,
+        mppt1_a     = pv1_a,
+        mppt2_v     = pv2_v,
+        mppt2_a     = pv2_a,
+        lifetime_wh = pv_gen_wh,
+        temp_c      = inv_temp,
+    })
+    host.emit_metric("pv_mppt1_v",      pv1_v)
+    host.emit_metric("pv_mppt1_a",      pv1_a)
+    host.emit_metric("pv_mppt2_v",      pv2_v)
+    host.emit_metric("pv_mppt2_a",      pv2_a)
+    host.emit_metric("inverter_temp_c", inv_temp)
+
+    -- Battery telemetry.
+    host.emit("battery", {
+        w            = bat_w,
+        v            = bat_v,
+        a            = bat_a,
+        soc          = bat_soc,
+        temp_c       = bat_temp,
+        charge_wh    = bat_charge_wh,
+        discharge_wh = bat_discharge_wh,
+    })
+    host.emit_metric("battery_dc_v",    bat_v)
+    host.emit_metric("battery_dc_a",    bat_a)
+    host.emit_metric("battery_temp_c",  bat_temp)
 
     -- Negate meter power + per-phase power + per-phase current to site convention
     -- (positive = import from grid).
