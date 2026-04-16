@@ -71,7 +71,8 @@ local function base_url()
 end
 
 -- Walk GET /api/devices and pick the first `p1_uart` entry's serial.
--- Returns (serial, err). Logs at info on success, warn on any failure.
+-- Returns (serial, err). Does not log — the caller owns that so success
+-- and failure messages stay co-located with the backoff / retry logic.
 local function discover_p1_serial()
     local url = base_url() .. "/api/devices"
     local body, err = host.http_get(url)

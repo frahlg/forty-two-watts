@@ -273,13 +273,15 @@
       driver.capabilities.mqtt = { host: ip, port: port };
     } else if (protocol === 'http') {
       driver.capabilities.http = { allowed_hosts: [ip] };
-      // A catalog entry that declares http_hosts is a local-HTTP driver
-      // reaching a device at a known hostname — seed config.host from the
-      // IP the user just entered. Catalog entries without http_hosts are
-      // cloud drivers (Easee etc.) whose endpoint is hardcoded; those
-      // drivers key off config.email/password and shouldn't carry a host.
-      var declared = (selectedCatalog && selectedCatalog.http_hosts) || [];
-      if (declared.length > 0) {
+      // connection_defaults.host is declared only by drivers that take a
+      // user-configurable local endpoint — seed config.host from the IP the
+      // user just entered. Cloud drivers (Easee etc.) declare http_hosts
+      // for allowed-hosts handling but have no connection_defaults.host;
+      // their vendor endpoint is hardcoded and they key off
+      // config.email/password instead, so leave config untouched here.
+      var connHost = (selectedCatalog && selectedCatalog.connection_defaults &&
+                      selectedCatalog.connection_defaults.host) || '';
+      if (connHost) {
         driver.config = driver.config || {};
         driver.config.host = ip;
       }

@@ -203,6 +203,10 @@
               opt.dataset.protocols = protoLabel;
               opt.dataset.id = e.id || "";
               opt.dataset.httpHosts = (e.http_hosts || []).join(",");
+              // connection_defaults.host is the local-HTTP discriminator —
+              // http_hosts is declared by cloud drivers too (Easee uses it
+              // for allowed-hosts), so it can't be used on its own.
+              opt.dataset.connectionHost = (e.connection_defaults && e.connection_defaults.host) || "";
               sel.appendChild(opt);
             });
           });
@@ -221,12 +225,15 @@
             if (protocols.indexOf("http") >= 0) {
               var hosts = (chosen.dataset.httpHosts || "").split(",").filter(Boolean);
               driver.capabilities.http = { allowed_hosts: hosts };
-              // A driver that declares http_hosts in its catalog block is
-              // reaching a known local device at a fixed hostname — seed a
-              // config.host field. Anything else is a cloud driver whose
-              // vendor endpoint is hardcoded and instead needs auth creds.
-              if (hosts.length > 0) {
-                driver.config = { host: hosts[0] };
+              // connection_defaults.host is declared only by drivers that
+              // take a user-configurable local endpoint (e.g. Sourceful
+              // Zap → "zap.local"). Cloud drivers like Easee declare
+              // http_hosts for allowed-hosts but have no connection_defaults
+              // — their endpoint is hardcoded and they need email/password
+              // in config instead.
+              var connHost = chosen.dataset.connectionHost || "";
+              if (connHost) {
+                driver.config = { host: connHost };
               } else {
                 driver.config = { email: "", password: "", serial: "" };
               }
