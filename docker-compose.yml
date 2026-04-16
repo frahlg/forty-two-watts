@@ -1,11 +1,9 @@
 services:
-  home-ems:
+  forty-two-watts:
     build: .
-    image: home-ems:latest
-    container_name: home-ems
+    image: forty-two-watts:latest
+    container_name: forty-two-watts
     restart: unless-stopped
     network_mode: host  # needed for MQTT/Modbus access to local devices
     volumes:
       - ./data:/app/data
-    environment:
-      - RUST_LOG=home_ems=info
