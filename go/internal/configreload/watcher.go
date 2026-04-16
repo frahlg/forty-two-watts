@@ -28,8 +28,9 @@ type Watcher struct {
 	ctrl     *control.State
 	applier  Applier
 
-	fsw  *fsnotify.Watcher
-	stop chan struct{}
+	fsw      *fsnotify.Watcher
+	stop     chan struct{}
+	stopOnce sync.Once
 }
 
 // New creates a watcher. `applier` is called with (new, old) after a
@@ -61,10 +62,12 @@ func (w *Watcher) Start() {
 	go w.loop()
 }
 
-// Stop terminates the watcher.
+// Stop terminates the watcher. It is safe to call multiple times.
 func (w *Watcher) Stop() {
-	close(w.stop)
-	w.fsw.Close()
+	w.stopOnce.Do(func() {
+		close(w.stop)
+		w.fsw.Close()
+	})
 }
 
 func (w *Watcher) loop() {

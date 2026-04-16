@@ -1,0 +1,158 @@
+package configreload
+
+import (
+	"os"
+	"path/filepath"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/frahlg/forty-two-watts/go/internal/config"
+	"github.com/frahlg/forty-two-watts/go/internal/control"
+)
+
+// minimalYAML is the smallest config that passes config.Load validation.
+const minimalYAML = `
+site:
+  name: Test
+  grid_target_w: 0
+fuse:
+  max_amps: 16
+drivers:
+  - name: ferroamp
+    wasm: drivers/ferroamp.wasm
+    is_site_meter: true
+    capabilities:
+      mqtt:
+        host: 192.168.1.153
+api:
+  port: 8080
+`
+
+// writeConfig writes YAML content to the config file.
+func writeConfig(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// newTestWatcher creates a Watcher wired to track applier invocations.
+// Returns the watcher plus an atomic counter and a channel that receives
+// each (new, old) pair delivered to the applier.
+func newTestWatcher(t *testing.T, cfgPath string, cfg *config.Config) (
+	*Watcher, *atomic.Int32, chan [2]*config.Config,
+) {
+	t.Helper()
+	var cfgMu sync.RWMutex
+	var ctrlMu sync.Mutex
+	ctrl := control.NewState(cfg.Site.GridTargetW, cfg.Site.GridToleranceW, cfg.SiteMeterDriver())
+
+	var calls atomic.Int32
+	applyCh := make(chan [2]*config.Config, 8)
+
+	w, err := New(cfgPath, &cfgMu, cfg, &ctrlMu, ctrl, func(newCfg, oldCfg *config.Config) {
+		calls.Add(1)
+		applyCh <- [2]*config.Config{newCfg, oldCfg}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return w, &calls, applyCh
+}
+
+func TestWatcherFiresOnChange(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	writeConfig(t, cfgPath, minimalYAML)
+
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	w, _, applyCh := newTestWatcher(t, cfgPath, cfg)
+	w.Start()
+	defer w.Stop()
+
+	// Modify the config: change grid_target_w from 0 to 100.
+	updatedYAML := `
+site:
+  name: Test
+  grid_target_w: 100
+fuse:
+  max_amps: 16
+drivers:
+  - name: ferroamp
+    wasm: drivers/ferroamp.wasm
+    is_site_meter: true
+    capabilities:
+      mqtt:
+        host: 192.168.1.153
+api:
+  port: 8080
+`
+	// Small delay to let the watcher goroutine start and register.
+	time.Sleep(100 * time.Millisecond)
+	writeConfig(t, cfgPath, updatedYAML)
+
+	select {
+	case pair := <-applyCh:
+		newCfg := pair[0]
+		if newCfg.Site.GridTargetW != 100 {
+			t.Errorf("expected grid_target_w=100, got %f", newCfg.Site.GridTargetW)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("applier not called within 3 s after config change")
+	}
+}
+
+func TestWatcherIgnoresInvalidYAML(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	writeConfig(t, cfgPath, minimalYAML)
+
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	w, calls, _ := newTestWatcher(t, cfgPath, cfg)
+	w.Start()
+	defer w.Stop()
+
+	// Let the watcher start.
+	time.Sleep(100 * time.Millisecond)
+
+	// Write invalid YAML — config.Load will fail, reload() returns early,
+	// and the applier should NOT be called.
+	writeConfig(t, cfgPath, "{{{{not: valid: yaml: [")
+
+	// Wait long enough for debounce (500 ms) + some margin.
+	time.Sleep(1500 * time.Millisecond)
+
+	if n := calls.Load(); n != 0 {
+		t.Errorf("applier called %d times on invalid YAML; expected 0", n)
+	}
+}
+
+func TestWatcherStopIsIdempotent(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	writeConfig(t, cfgPath, minimalYAML)
+
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	w, _, _ := newTestWatcher(t, cfgPath, cfg)
+	w.Start()
+
+	// First Stop should succeed normally.
+	w.Stop()
+
+	// Second Stop must not panic (guarded by sync.Once).
+	w.Stop()
+}
