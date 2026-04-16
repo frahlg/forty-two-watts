@@ -182,7 +182,17 @@ function driver_poll()
         end
     end
     if need_sf_read then
-        sf_cache = load_scale_factors()
+        local fresh = load_scale_factors()
+        if sf_cache == nil then
+            -- First read: accept everything (zeros will trigger retries).
+            sf_cache = fresh
+        else
+            -- Merge: only overwrite with non-zero values so a transient
+            -- read failure doesn't clobber a previously good SF.
+            for k, v in pairs(fresh) do
+                if v ~= 0 then sf_cache[k] = v end
+            end
+        end
         sf_retries = sf_retries + 1
         if sf_retries >= SF_MAX_RETRIES then
             host.log("warn", "SolarEdge: accepting scale factors after "

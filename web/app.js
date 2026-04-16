@@ -1287,6 +1287,9 @@
         });
         chartView = e.target.dataset.view;
         if (chartTitle) chartTitle.textContent = chartView === "energy" ? "Energy (cumulative today)" : "Power";
+        // Reset cached layout so the y-axis snaps to the new view's range
+        // instead of lerp-ing from the previous view's scale.
+        chartLayout = null;
         updateLegend();
         renderChart();
       }

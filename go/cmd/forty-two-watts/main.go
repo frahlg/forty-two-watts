@@ -177,6 +177,9 @@ func main() {
 	// ---- Config hot-reload watcher ----
 	watcher, err := configreload.New(*configPath, cfgMu, cfg, ctrlMu, ctrl,
 		func(newCfg, oldCfg *config.Config) {
+			// Regenerate the synthetic EV charger driver entry from the
+			// high-level ev_charger config, matching what main() does at startup.
+			newCfg.InjectEVChargerDriver()
 			// Resolve relative paths
 			for i := range newCfg.Drivers {
 				if newCfg.Drivers[i].WASM != "" && !filepath.IsAbs(newCfg.Drivers[i].WASM) {
