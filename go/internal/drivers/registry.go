@@ -127,7 +127,12 @@ func (r *Registry) Add(ctx context.Context, cfg config.Driver) error {
 	}
 	var drv driverRuntime = &luaRuntime{LuaDriver: luaDrv}
 
-	if err := drv.Init(ctx, nil); err != nil {
+	// Pass the driver's config map as JSON to driver_init.
+	var initCfg []byte
+	if cfg.Config != nil {
+		initCfg, _ = json.Marshal(cfg.Config)
+	}
+	if err := drv.Init(ctx, initCfg); err != nil {
 		drv.Cleanup(ctx)
 		return fmt.Errorf("driver_init: %w", err)
 	}
