@@ -73,6 +73,14 @@ func Start(ctx context.Context, cfg *Config, tel *telemetry.Store) (*Server, err
 		slog.Info("OCPP central system listening",
 			"bind", cfg.Bind, "port", cfg.Port, "path", cfg.Path,
 			"basic_auth", cfg.Username != "")
+		// TODO: cfg.Bind is not honored here. The ocpp-go library's
+		// CentralSystem.Start(port, path) and ws.Server.Start(port, path)
+		// only accept a port — there is no SetAddr or bind-address parameter.
+		// To support bind-address natively we would need to either:
+		//   (a) upstream a PR to ocpp-go adding a SetListenAddr method, or
+		//   (b) create our own net.Listener bound to cfg.Bind:cfg.Port and
+		//       serve the ws.Server's http.Handler on it.
+		// For now cfg.Bind is advisory-only (documented in Config).
 		// cs.Start blocks until cs.Stop is called.
 		s.cs.Start(cfg.Port, fmt.Sprintf("%s{ws}", cfg.Path))
 	}()

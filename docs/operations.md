@@ -2,7 +2,7 @@
 
 The operator's guide. From "I have a fresh Raspberry Pi" to "I can debug a hung driver at 3am".
 
-Sign convention reminder: throughout this doc, `grid_w > 0` means **import** (buying from grid), `grid_w < 0` means **export** (selling). Battery `bat_w > 0` means **discharging** (battery → AC), `bat_w < 0` means **charging** (AC → battery). PV `pv_w` is always ≥ 0. See [site-convention.md](site-convention.md) for the full convention.
+Sign convention reminder: throughout this doc, `grid_w > 0` means **import** (buying from grid), `grid_w < 0` means **export** (selling). Battery `bat_w > 0` means **charging** (load, draws from grid), `bat_w < 0` means **discharging** (source, reduces import). PV `pv_w` is always ≤ 0 (generation pushes energy into the site). See [site-convention.md](site-convention.md) for the full convention.
 
 ## 1. Build + cross-compile
 
@@ -248,7 +248,7 @@ curl -s localhost:8080/api/status | jq '{targets: .dispatch, drivers: .drivers}'
 - `power_w` field not threaded through the driver payload (a real regression that was fixed; see commit `9237156`).
 - Driver forced into a manual/autonomous mode that conflicts with EMS commands.
 - Saturation curve in the battery model too restrictive — check `/api/models` for a pathological gain.
-- Sign confusion: remember `bat_w > 0` = discharging, `bat_w < 0` = charging.
+- Sign confusion: remember `bat_w > 0` = charging (load), `bat_w < 0` = discharging (source).
 
 ### PV prediction wildly off
 

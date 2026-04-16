@@ -46,6 +46,10 @@ func (m Mode) IsPlannerMode() bool {
 // respond. The plan is a scheduler, not a regulator.
 type PlanTargetFunc func(now time.Time) (string, float64, bool)
 
+// MaxCommandW is the hard per-command power cap (±5 kW). Used by both
+// clampWithSoC (distribution) and the post-slew re-clamp.
+const MaxCommandW = 5000
+
 // DispatchTarget is one command to issue to a single battery driver.
 // `TargetW` is in site sign convention:
 //   + = charge the battery (battery becomes a load, site imports more)
@@ -205,6 +209,9 @@ func ComputeDispatch(
 	// silently zero out a user-set manual value.
 	var evSum float64
 	for _, r := range store.ReadingsByType(telemetry.DerEV) {
+		if h := store.DriverHealth(r.Driver); h == nil || !h.IsOnline() {
+			continue
+		}
 		evSum += r.SmoothedW
 	}
 	if evSum > 0 {
@@ -332,6 +339,22 @@ func ComputeDispatch(
 		}
 	}
 
+	// ---- Re-clamp after slew ----
+	// The slew anchor is the battery's actual output (SmoothedW). If the
+	// battery was already beyond the ±5 kW per-command cap (e.g. after a
+	// manual restart, external control, or driver returning an out-of-range
+	// reading), the slewed target inherits the overshoot. Re-apply the
+	// hard per-command cap so we never issue a command outside safe bounds.
+	for i := range raw {
+		if raw[i].TargetW > MaxCommandW {
+			raw[i].TargetW = MaxCommandW
+			raw[i].Clamped = true
+		} else if raw[i].TargetW < -MaxCommandW {
+			raw[i].TargetW = -MaxCommandW
+			raw[i].Clamped = true
+		}
+	}
+
 	// ---- Fuse guard ----
 	raw = applyFuseGuard(raw, store, fuseMaxW)
 
@@ -451,13 +474,12 @@ func clampWithSoC(target, soc float64) (float64, bool) {
 		wasClamped = true
 	}
 	// Per-command cap
-	const maxPower = 5000
-	if math.Abs(clamped) > maxPower {
+	if math.Abs(clamped) > MaxCommandW {
 		sign := 1.0
 		if clamped < 0 {
 			sign = -1.0
 		}
-		clamped = sign * maxPower
+		clamped = sign * MaxCommandW
 		wasClamped = true
 	}
 	return clamped, wasClamped
