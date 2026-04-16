@@ -1,6 +1,7 @@
 package control
 
 import (
+	"log/slog"
 	"math"
 	"time"
 
@@ -173,6 +174,7 @@ func ComputeDispatch(
 			state.SetGridTarget(gridW)
 			state.PlanStale = false
 		} else {
+			slog.Warn("mpc plan stale — falling back to self_consumption")
 			effectiveMode = ModeSelfConsumption
 			state.SetGridTarget(0)
 			state.PlanStale = true
@@ -230,7 +232,10 @@ func ComputeDispatch(
 		if r == nil || h == nil {
 			continue
 		}
-		soc := 0.5
+		// Default to near-empty SoC so dispatch errs on the side of
+		// caution (no discharge) if a battery never reports SoC.
+		// Using 0.5 would allow discharge of a potentially empty battery.
+		soc := 0.1
 		if r.SoC != nil {
 			soc = *r.SoC
 		}

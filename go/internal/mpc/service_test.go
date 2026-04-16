@@ -141,6 +141,42 @@ func TestOptimizeSelfConsumptionDischargesWithSpreadTerminalPrice(t *testing.T) 
 	}
 }
 
+// ---- Edge cases / hardening ----
+
+func TestBuildSlotsEmptyForecast(t *testing.T) {
+	ts := time.Date(2026, 4, 15, 14, 0, 0, 0, time.UTC).UnixMilli()
+	slots := buildSlots(
+		[]state.PricePoint{{
+			SlotTsMs:    ts,
+			SlotLenMin:  60,
+			SpotOreKwh:  100,
+			TotalOreKwh: 200,
+		}},
+		nil, // empty forecasts
+		1500,
+		ts,
+		nil,
+		nil,
+	)
+	if len(slots) != 1 {
+		t.Fatalf("expected 1 slot, got %d", len(slots))
+	}
+	// With no forecast, PVW should be 0 (no panic).
+	if slots[0].PVW != 0 {
+		t.Errorf("expected PVW=0 with empty forecast, got %f", slots[0].PVW)
+	}
+	if slots[0].LoadW != 1500 {
+		t.Errorf("expected LoadW=1500, got %f", slots[0].LoadW)
+	}
+}
+
+func TestSelectPlannerPVWBothNaN(t *testing.T) {
+	got := selectPlannerPVW(math.NaN(), math.NaN())
+	if got != 0 {
+		t.Errorf("both NaN should return 0, got %f", got)
+	}
+}
+
 // Guardrail: if we had used the OLD default (mean retail import price as
 // terminal value), the same scenario wouldn't discharge. This test exists
 // to document *why* the fix matters.

@@ -421,7 +421,9 @@ func (s *Server) handleSetMode(w http.ResponseWriter, r *http.Request) {
 		s.deps.CtrlMu.Lock()
 		s.deps.Ctrl.Mode = m
 		s.deps.CtrlMu.Unlock()
-		_ = s.deps.State.SaveConfig("mode", req.Mode)
+		if err := s.deps.State.SaveConfig("mode", req.Mode); err != nil {
+			slog.Warn("failed to persist mode", "err", err)
+		}
 		// Propagate to MPC if switching to a planner mode. Map
 		// control.ModePlanner* → mpc.Mode and force an immediate replan.
 		if m.IsPlannerMode() && s.deps.MPC != nil {
@@ -455,7 +457,9 @@ func (s *Server) handleSetTarget(w http.ResponseWriter, r *http.Request) {
 	s.deps.CtrlMu.Lock()
 	s.deps.Ctrl.SetGridTarget(req.GridTargetW)
 	s.deps.CtrlMu.Unlock()
-	_ = s.deps.State.SaveConfig("grid_target_w", strconv.FormatFloat(req.GridTargetW, 'f', 1, 64))
+	if err := s.deps.State.SaveConfig("grid_target_w", strconv.FormatFloat(req.GridTargetW, 'f', 1, 64)); err != nil {
+		slog.Warn("failed to persist grid_target_w", "err", err)
+	}
 	slog.Info("grid target changed", "w", req.GridTargetW)
 	writeJSON(w, 200, map[string]any{"status": "ok", "grid_target_w": req.GridTargetW})
 }
@@ -594,7 +598,9 @@ func (s *Server) handleResetModel(w http.ResponseWriter, r *http.Request) {
 	for _, name := range reset {
 		if m, ok := s.deps.Models[name]; ok {
 			if data, err := json.Marshal(m); err == nil {
-				_ = s.deps.State.SaveBatteryModel(name, string(data))
+				if err := s.deps.State.SaveBatteryModel(name, string(data)); err != nil {
+				slog.Warn("failed to persist battery model", "battery", name, "err", err)
+			}
 			}
 		}
 	}

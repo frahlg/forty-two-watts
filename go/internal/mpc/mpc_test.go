@@ -424,6 +424,88 @@ func TestCurtailmentSkipsWhenExportProfitable(t *testing.T) {
 	}
 }
 
+// ---- Edge cases / hardening ----
+
+func TestOptimizeWithNaNPVDoesNotPanic(t *testing.T) {
+	slots := []Slot{
+		{StartMs: 0, LenMin: 60, PriceOre: 100, LoadW: 1000, PVW: math.NaN()},
+		{StartMs: 3600 * 1000, LenMin: 60, PriceOre: 100, LoadW: 1000, PVW: 0},
+	}
+	p := baseParams(ModeArbitrage)
+	// Must not panic — NaN propagates through arithmetic without crashing.
+	plan := Optimize(slots, p)
+	if len(plan.Actions) != 2 {
+		t.Errorf("expected 2 actions, got %d", len(plan.Actions))
+	}
+}
+
+func TestOptimizeZeroCapacityReturnsEmptyPlan(t *testing.T) {
+	slots := flatLoadSlots([]float64{100, 200, 50, 300})
+	p := baseParams(ModeArbitrage)
+	p.CapacityWh = 0
+	plan := Optimize(slots, p)
+	if len(plan.Actions) != 0 {
+		t.Errorf("zero capacity should return empty plan, got %d actions", len(plan.Actions))
+	}
+}
+
+func TestOptimizeZeroActionLevelsDoesNotPanic(t *testing.T) {
+	slots := flatLoadSlots([]float64{100, 200})
+	p := baseParams(ModeArbitrage)
+
+	// ActionLevels = 0 — the optimizer clamps to 3 internally.
+	p.ActionLevels = 0
+	plan := Optimize(slots, p)
+	if len(plan.Actions) != 2 {
+		t.Errorf("ActionLevels=0: expected 2 actions, got %d", len(plan.Actions))
+	}
+
+	// ActionLevels = 1 — also clamped to 3.
+	p.ActionLevels = 1
+	plan = Optimize(slots, p)
+	if len(plan.Actions) != 2 {
+		t.Errorf("ActionLevels=1: expected 2 actions, got %d", len(plan.Actions))
+	}
+}
+
+func TestZeroEfficiencyDoesNotPanic(t *testing.T) {
+	// Zero or negative efficiency must not cause division-by-zero or NaN.
+	// The optimizer should silently default to 0.95.
+	slots := flatLoadSlots([]float64{100, 200, 50, 300})
+	p := baseParams(ModeArbitrage)
+	p.ChargeEfficiency = 0
+	p.DischargeEfficiency = 0
+	p.InitialSoCPct = 50
+	p.ExportOrePerKWh = 100
+
+	plan := Optimize(slots, p) // must not panic
+
+	if len(plan.Actions) != len(slots) {
+		t.Fatalf("expected %d actions, got %d", len(slots), len(plan.Actions))
+	}
+	for i, a := range plan.Actions {
+		if math.IsNaN(a.SoCPct) || math.IsInf(a.SoCPct, 0) {
+			t.Errorf("slot %d: SoC is NaN/Inf", i)
+		}
+		if math.IsNaN(a.CostOre) || math.IsInf(a.CostOre, 0) {
+			t.Errorf("slot %d: cost is NaN/Inf", i)
+		}
+		if a.SoCPct < p.SoCMinPct-1e-6 || a.SoCPct > p.SoCMaxPct+1e-6 {
+			t.Errorf("slot %d: SoC %f outside bounds", i, a.SoCPct)
+		}
+	}
+
+	// Also test negative efficiency values.
+	p.ChargeEfficiency = -0.5
+	p.DischargeEfficiency = -1.0
+	plan2 := Optimize(slots, p)
+	for i, a := range plan2.Actions {
+		if math.IsNaN(a.SoCPct) || math.IsInf(a.SoCPct, 0) {
+			t.Errorf("negative-eff slot %d: SoC is NaN/Inf", i)
+		}
+	}
+}
+
 func TestSelfConsumptionWithZeroBaseline(t *testing.T) {
 	// load==PV → baseline=0. Battery must stay at 0.
 	slots := []Slot{

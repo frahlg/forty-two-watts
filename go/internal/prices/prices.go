@@ -197,16 +197,12 @@ func (e *ENTSOEProvider) Fetch(ctx context.Context, zone string, day time.Time) 
 	return parseENTSOEXML(body, day.UTC())
 }
 
-// parseENTSOEXML is intentionally lightweight — encoding/xml's Unmarshal
-// handles this well enough for our needs without a full schema.
+// parseENTSOEXML is a stub — real implementation will use encoding/xml
+// with the ENTSOE Publication_MarketDocument schema.
 func parseENTSOEXML(body []byte, dayStart time.Time) ([]RawPrice, error) {
-	// Stub: real XML parsing omitted for brevity. Production would use
-	// encoding/xml with the published schema. This returns an empty slice
-	// without erroring so configuration-wise it's safe to enable, you'll
-	// just get no prices until this is implemented.
 	_ = body
 	_ = dayStart
-	return []RawPrice{}, nil
+	return nil, fmt.Errorf("entsoe: XML parser not yet implemented")
 }
 
 // ---- Applier: turns raw SEK/kWh into consumer öre/kWh ----

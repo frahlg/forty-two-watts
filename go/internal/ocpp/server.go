@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	ocpp16 "github.com/lorenzodonini/ocpp-go/ocpp1.6"
 	"github.com/lorenzodonini/ocpp-go/ws"
@@ -92,12 +93,17 @@ func Start(ctx context.Context, cfg *Config, tel *telemetry.Store) (*Server, err
 }
 
 // Stop closes the WebSocket server and waits for the listener goroutine to exit.
+// A 5-second timeout prevents deadlock if the listener goroutine is stuck.
 func (s *Server) Stop() {
 	if s == nil || s.cs == nil {
 		return
 	}
 	s.cs.Stop()
-	<-s.done
+	select {
+	case <-s.done:
+	case <-time.After(5 * time.Second):
+		slog.Warn("ocpp: shutdown timeout — forcing close")
+	}
 }
 
 // Handler exposes per-charger state for tests + introspection.
