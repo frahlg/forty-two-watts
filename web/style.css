@@ -506,7 +506,7 @@ footer {
 /* ========== Compact layout overrides ========== */
 
 .summary-cards {
-  grid-template-columns: repeat(6, 1fr);
+  grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
   gap: 8px;
 }
 
@@ -991,7 +991,7 @@ footer {
   gap: 16px;
   margin-top: 14px;
 }
-@media (min-width: 1500px) {
+@media (min-width: 1800px) {
   .live-plan-row { grid-template-columns: 1fr 1fr; }
 }
 .live-plan-row > section { min-width: 0; }
