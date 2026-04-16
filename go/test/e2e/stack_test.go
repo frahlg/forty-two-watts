@@ -90,7 +90,6 @@ type stack struct {
 	sungSim    *sungrow.Simulator
 
 	// Core pieces
-	rt       *drivers.Runtime
 	reg      *drivers.Registry
 	tel      *telemetry.Store
 	st       *state.Store
@@ -242,8 +241,7 @@ func setupStack(t *testing.T) *stack {
 	s.models["sungrow"] = battery.New("sungrow")
 
 	ctx := context.Background()
-	s.rt = drivers.NewRuntime(ctx)
-	s.reg = drivers.NewRegistry(s.rt, s.tel)
+	s.reg = drivers.NewRegistry(s.tel)
 	s.reg.MQTTFactory = func(name string, c *config.MQTTConfig) (drivers.MQTTCap, error) {
 		return mqttcli.Dial(c.Host, c.Port, c.Username, c.Password, "ftw-e2e-"+name)
 	}
@@ -347,7 +345,6 @@ func (s *stack) Close() {
 		_ = s.httpSrv.Shutdown(ctx)
 	}
 	if s.reg != nil { s.reg.ShutdownAll() }
-	if s.rt != nil { _ = s.rt.Close(context.Background()) }
 	close(s.stopSim)
 	s.simWg.Wait()
 	if s.modbusSrv != nil { s.modbusSrv.Stop() }

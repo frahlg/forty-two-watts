@@ -1,8 +1,7 @@
-# Top-level build for the Go + WASM port.
+# Top-level build for forty-two-watts (pure Go + Lua drivers).
 #
 # Common targets:
-#   make test         — full test suite (Go + WASM drivers + e2e)
-#   make wasm         — build WASM drivers into drivers-wasm/
+#   make test         — full test suite
 #   make build        — native binaries for this machine
 #   make build-arm64  — cross-compile for linux/arm64 (RPi)
 #   make release      — arm64 + amd64 tarballs in release/
@@ -10,26 +9,17 @@
 #   make dev          — start sims + main app (hot-reload workflow)
 #   make clean        — remove all build artifacts
 
-.PHONY: help test wasm build build-arm64 build-amd64 release \
+.PHONY: help test build build-arm64 build-amd64 release \
         run-sim dev fmt vet clean e2e docs
-
-# Rustup's stable toolchain — separate from Homebrew's rust.
-# Adjust if rustup isn't here.
-RUSTUP_STABLE ?= /Users/fredde/.rustup/toolchains/stable-aarch64-apple-darwin/bin
-CARGO_WASM := PATH="$(RUSTUP_STABLE):$$PATH" cargo
-
-WASM_DRIVERS := ferroamp sungrow
-WASM_OUT_DIR := drivers-wasm
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X main.Version=$(VERSION)
 
 help:
-	@echo "forty-two-watts — Go + WASM port"
+	@echo "forty-two-watts — Go + Lua EMS"
 	@echo ""
 	@echo "Targets:"
 	@echo "  test         run full test suite"
-	@echo "  wasm         build WASM drivers ($(WASM_DRIVERS))"
 	@echo "  build        native binaries into bin/"
 	@echo "  build-arm64  cross-compile for linux/arm64"
 	@echo "  release      arm64 + amd64 tarballs"
@@ -41,38 +31,28 @@ help:
 
 # ---- Testing ----
 
-test: wasm
+test:
 	cd go && go test ./...
 
-e2e: wasm
+e2e:
 	cd go && go test ./test/e2e -v -timeout 180s
-
-# ---- WASM drivers ----
-
-wasm: $(foreach d,$(WASM_DRIVERS),$(WASM_OUT_DIR)/$(d).wasm)
-
-$(WASM_OUT_DIR)/%.wasm: wasm-drivers/%/src/lib.rs wasm-drivers/%/Cargo.toml
-	@mkdir -p $(WASM_OUT_DIR)
-	cd wasm-drivers/$* && $(CARGO_WASM) build --target wasm32-wasip1 --release
-	cp wasm-drivers/$*/target/wasm32-wasip1/release/$*_driver.wasm $@
-	@printf "built %s (%s bytes)\n" "$@" "$$(wc -c <"$@")"
 
 # ---- Native builds ----
 
-build: wasm
+build:
 	@mkdir -p bin
 	cd go && go build -ldflags="$(LDFLAGS)" -o ../bin/forty-two-watts ./cmd/forty-two-watts
 	cd go && go build -ldflags="$(LDFLAGS)" -o ../bin/sim-ferroamp ./cmd/sim-ferroamp
 	cd go && go build -ldflags="$(LDFLAGS)" -o ../bin/sim-sungrow ./cmd/sim-sungrow
 	@ls -la bin/
 
-build-arm64: wasm
+build-arm64:
 	@mkdir -p bin
 	cd go && GOOS=linux GOARCH=arm64 CGO_ENABLED=0 \
 		go build -ldflags="$(LDFLAGS)" -o ../bin/forty-two-watts-linux-arm64 ./cmd/forty-two-watts
 	@ls -la bin/forty-two-watts-linux-arm64
 
-build-amd64: wasm
+build-amd64:
 	@mkdir -p bin
 	cd go && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
 		go build -ldflags="$(LDFLAGS)" -o ../bin/forty-two-watts-linux-amd64 ./cmd/forty-two-watts
@@ -85,7 +65,7 @@ release: build-arm64 build-amd64
 	@for arch in arm64 amd64; do \
 		tar czf release/forty-two-watts-linux-$$arch.tar.gz \
 			-C bin forty-two-watts-linux-$$arch \
-			-C .. $(WASM_OUT_DIR) web config.example.yaml; \
+			-C .. drivers web config.example.yaml; \
 		printf "built release/forty-two-watts-linux-%s.tar.gz (%s bytes)\n" "$$arch" \
 			"$$(wc -c <release/forty-two-watts-linux-$$arch.tar.gz)"; \
 	done
@@ -99,7 +79,7 @@ run-sim:
 	(cd go && go run ./cmd/sim-sungrow) & \
 	wait
 
-dev: wasm
+dev:
 	@echo "Starting sims + main app (Ctrl+C to stop)..."
 	@trap 'kill 0' SIGINT; \
 	(cd go && go run ./cmd/sim-ferroamp) & \
@@ -117,10 +97,8 @@ vet:
 	cd go && go vet ./...
 
 clean:
-	rm -rf $(WASM_OUT_DIR) bin release
+	rm -rf bin release
 	cd go && go clean
-	cd wasm-drivers/ferroamp && rm -rf target Cargo.lock
-	cd wasm-drivers/sungrow && rm -rf target Cargo.lock
 
 docs:
 	@echo "see docs/ for:"

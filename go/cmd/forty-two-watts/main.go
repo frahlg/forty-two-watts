@@ -129,9 +129,7 @@ func main() {
 	// ---- WASM driver registry ----
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	rt := drivers.NewRuntime(ctx)
-	defer rt.Close(ctx)
-	reg := drivers.NewRegistry(rt, tel)
+	reg := drivers.NewRegistry(tel)
 	reg.MQTTFactory = func(name string, c *config.MQTTConfig) (drivers.MQTTCap, error) {
 		return mqttcli.Dial(c.Host, c.Port, c.Username, c.Password, "ftw-"+name)
 	}

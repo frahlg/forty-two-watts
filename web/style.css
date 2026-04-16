@@ -125,6 +125,13 @@ main {
   margin-top: 0.25rem;
 }
 
+.header-logo {
+  height: 36px;
+  width: auto;
+  border-radius: 4px;
+  margin-right: 10px;
+}
+
 .card-target {
   font-size: 0.65rem;
   color: var(--text-dim);

@@ -84,16 +84,29 @@ func (h *HostEnv) millis() int64 {
 	return time.Since(h.Start).Milliseconds()
 }
 
-// log writes a line to the driver's slog logger.
+const (
+	logDebug int32 = 0
+	logInfo  int32 = 1
+	logWarn  int32 = 2
+	logError int32 = 3
+)
+
+const (
+	ModbusCoil     int32 = 0
+	ModbusDiscrete int32 = 1
+	ModbusHolding  int32 = 2
+	ModbusInput    int32 = 3
+)
+
 func (h *HostEnv) log(level int32, msg string) {
 	switch level {
-	case LogTrace, LogDebug:
+	case logDebug:
 		h.Logger.Debug(msg)
-	case LogInfo:
+	case logInfo:
 		h.Logger.Info(msg)
-	case LogWarn:
+	case logWarn:
 		h.Logger.Warn(msg)
-	case LogError:
+	case logError:
 		h.Logger.Error(msg)
 	default:
 		h.Logger.Info(msg)

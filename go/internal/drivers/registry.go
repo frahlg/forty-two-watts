@@ -12,11 +12,10 @@ import (
 	"github.com/frahlg/forty-two-watts/go/internal/telemetry"
 )
 
-// Registry manages running WASM driver instances — spawn, poll, command, stop.
+// Registry manages running Lua driver instances — spawn, poll, command, stop.
 // Thread-safe.
 type Registry struct {
-	runtime *Runtime
-	tel     *telemetry.Store
+	tel *telemetry.Store
 
 	// MQTTFactory creates an MQTT capability for a driver given its config.
 	// Called on Add; the returned MQTTCap belongs to that driver alone.
@@ -31,18 +30,16 @@ type Registry struct {
 	rec map[string]*runningDriver
 }
 
-// NewRegistry builds a registry that shares one wazero runtime across drivers.
-func NewRegistry(rt *Runtime, tel *telemetry.Store) *Registry {
+// NewRegistry builds a driver registry.
+func NewRegistry(tel *telemetry.Store) *Registry {
 	return &Registry{
-		runtime: rt,
-		tel:     tel,
-		rec:     map[string]*runningDriver{},
+		tel: tel,
+		rec: map[string]*runningDriver{},
 	}
 }
 
-// driverRuntime abstracts over WASM and Lua driver backends so the
-// registry's run-loop, command dispatch, and health tracking don't
-// care which flavor a driver was authored in.
+// driverRuntime abstracts the Lua driver lifecycle so the registry's
+// run-loop, command dispatch, and health tracking stay clean.
 type driverRuntime interface {
 	Init(ctx context.Context, configJSON []byte) error
 	Poll(ctx context.Context) (time.Duration, error)
@@ -52,19 +49,9 @@ type driverRuntime interface {
 	Env() *HostEnv
 }
 
-// wasmRuntime adapts *Driver (wazero-backed) to driverRuntime.
-type wasmRuntime struct{ *Driver }
-
-func (w *wasmRuntime) Init(ctx context.Context, cfg []byte) error {
-	if cfg == nil {
-		cfg = []byte(`{}`)
-	}
-	return w.Driver.Init(ctx, cfg)
-}
-
-// luaRuntime adapts *LuaDriver to driverRuntime. Note LuaDriver's
-// internal signatures take a map (not raw JSON) for ergonomics, so we
-// decode once at the boundary.
+// luaRuntime adapts *LuaDriver to driverRuntime. LuaDriver's internal
+// signatures take a map (not raw JSON) for ergonomics, so we decode
+// once at the boundary.
 type luaRuntime struct{ *LuaDriver }
 
 func (l *luaRuntime) Init(ctx context.Context, cfg []byte) error {
@@ -104,8 +91,8 @@ func (r *Registry) Add(ctx context.Context, cfg config.Driver) error {
 	}
 	r.mu.Unlock()
 
-	if cfg.WASM == "" && cfg.Lua == "" {
-		return fmt.Errorf("driver %q: must specify `wasm` or `lua` path", cfg.Name)
+	if cfg.Lua == "" {
+		return fmt.Errorf("driver %q: must specify `lua` path", cfg.Name)
 	}
 
 	env := NewHostEnv(cfg.Name, r.tel)
@@ -134,23 +121,11 @@ func (r *Registry) Add(ctx context.Context, cfg config.Driver) error {
 		}
 	}
 
-	// Pick driver runtime based on file extension. Lua is preferred
-	// (community-friendly, hot-editable); WASM stays available for
-	// anyone who built a .wasm driver on v2.0.
-	var drv driverRuntime
-	if cfg.Lua != "" {
-		luaDrv, err := NewLuaDriver(cfg.Lua, env)
-		if err != nil {
-			return fmt.Errorf("load lua: %w", err)
-		}
-		drv = &luaRuntime{LuaDriver: luaDrv}
-	} else {
-		wdrv, err := r.runtime.Load(ctx, cfg.WASM, env)
-		if err != nil {
-			return fmt.Errorf("load wasm: %w", err)
-		}
-		drv = &wasmRuntime{Driver: wdrv}
+	luaDrv, err := NewLuaDriver(cfg.Lua, env)
+	if err != nil {
+		return fmt.Errorf("load lua: %w", err)
 	}
+	var drv driverRuntime = &luaRuntime{LuaDriver: luaDrv}
 
 	if err := drv.Init(ctx, nil); err != nil {
 		drv.Cleanup(ctx)

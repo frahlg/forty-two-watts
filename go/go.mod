@@ -9,7 +9,6 @@ require (
 	github.com/mochi-mqtt/server/v2 v2.7.9
 	github.com/parquet-go/parquet-go v0.29.0
 	github.com/simonvetter/modbus v1.6.4
-	github.com/tetratelabs/wazero v1.11.0
 	github.com/yuin/gopher-lua v1.1.2
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.48.2
