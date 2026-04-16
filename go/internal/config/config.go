@@ -27,6 +27,7 @@ type Config struct {
 	Planner       *Planner           `yaml:"planner,omitempty" json:"planner,omitempty"`
 	Batteries     map[string]Battery `yaml:"batteries,omitempty" json:"batteries,omitempty"`
 	OCPP          *OCPP              `yaml:"ocpp,omitempty" json:"ocpp,omitempty"`
+	EVCharger     *EVCharger         `yaml:"ev_charger,omitempty" json:"ev_charger,omitempty"`
 }
 
 // OCPP configures the embedded OCPP 1.6J Central System for EV chargers.
@@ -42,6 +43,16 @@ type OCPP struct {
 	Username           string `yaml:"username,omitempty" json:"username,omitempty"`
 	Password           string `yaml:"password,omitempty" json:"password,omitempty"`
 	HeartbeatIntervalS int    `yaml:"heartbeat_interval_s,omitempty" json:"heartbeat_interval_s,omitempty"`
+}
+
+// EVCharger is the high-level EV charger config written by the Settings UI.
+// The backend auto-generates a Lua driver entry from this on startup so
+// users never touch raw driver YAML for their EV charger.
+type EVCharger struct {
+	Provider string `yaml:"provider" json:"provider"` // "easee" (only option for now)
+	Email    string `yaml:"email" json:"email"`
+	Password string `yaml:"password" json:"password"`
+	Serial   string `yaml:"serial,omitempty" json:"serial,omitempty"`
 }
 
 // Planner configures the MPC scheduler (optional — disabled if omitted).
@@ -226,6 +237,138 @@ type Battery struct {
 	MaxChargeW    *float64 `yaml:"max_charge_w,omitempty" json:"max_charge_w,omitempty"`
 	MaxDischargeW *float64 `yaml:"max_discharge_w,omitempty" json:"max_discharge_w,omitempty"`
 	Weight        *float64 `yaml:"weight,omitempty" json:"weight,omitempty"`
+}
+
+// MaskSecrets returns a copy of the config with sensitive fields (passwords,
+// API keys) replaced by empty strings so they are never exposed via the API.
+// The original config is not modified.
+func (c Config) MaskSecrets() Config {
+	out := c
+
+	if out.EVCharger != nil {
+		cp := *out.EVCharger
+		cp.Password = ""
+		out.EVCharger = &cp
+	}
+	if out.HomeAssistant != nil {
+		cp := *out.HomeAssistant
+		cp.Password = ""
+		out.HomeAssistant = &cp
+	}
+	if out.OCPP != nil {
+		cp := *out.OCPP
+		cp.Password = ""
+		out.OCPP = &cp
+	}
+	if out.Price != nil {
+		cp := *out.Price
+		cp.APIKey = ""
+		out.Price = &cp
+	}
+	if out.Weather != nil {
+		cp := *out.Weather
+		cp.APIKey = ""
+		out.Weather = &cp
+	}
+
+	if len(out.Drivers) > 0 {
+		drivers := make([]Driver, len(out.Drivers))
+		copy(drivers, out.Drivers)
+		for i := range drivers {
+			if drivers[i].Config != nil {
+				cp := make(map[string]any, len(drivers[i].Config))
+				for k, v := range drivers[i].Config {
+					cp[k] = v
+				}
+				if _, has := cp["password"]; has {
+					cp["password"] = ""
+				}
+				drivers[i].Config = cp
+			}
+			if drivers[i].Capabilities.MQTT != nil {
+				cp := *drivers[i].Capabilities.MQTT
+				cp.Password = ""
+				drivers[i].Capabilities.MQTT = &cp
+			}
+			if drivers[i].MQTT != nil {
+				cp := *drivers[i].MQTT
+				cp.Password = ""
+				drivers[i].MQTT = &cp
+			}
+		}
+		out.Drivers = drivers
+	}
+
+	return out
+}
+
+// PreserveMaskedSecrets copies real secrets from `existing` into `incoming`
+// wherever the incoming value is empty (the UI sends "" for masked fields).
+// Call this before saving a config received from the API.
+func (incoming *Config) PreserveMaskedSecrets(existing *Config) {
+	if incoming.EVCharger != nil && existing.EVCharger != nil && incoming.EVCharger.Password == "" {
+		incoming.EVCharger.Password = existing.EVCharger.Password
+	}
+	if incoming.HomeAssistant != nil && existing.HomeAssistant != nil && incoming.HomeAssistant.Password == "" {
+		incoming.HomeAssistant.Password = existing.HomeAssistant.Password
+	}
+	if incoming.OCPP != nil && existing.OCPP != nil && incoming.OCPP.Password == "" {
+		incoming.OCPP.Password = existing.OCPP.Password
+	}
+	if incoming.Price != nil && existing.Price != nil && incoming.Price.APIKey == "" {
+		incoming.Price.APIKey = existing.Price.APIKey
+	}
+	if incoming.Weather != nil && existing.Weather != nil && incoming.Weather.APIKey == "" {
+		incoming.Weather.APIKey = existing.Weather.APIKey
+	}
+	for i := range incoming.Drivers {
+		for _, ed := range existing.Drivers {
+			if incoming.Drivers[i].Name != ed.Name {
+				continue
+			}
+			if incoming.Drivers[i].Config != nil && ed.Config != nil {
+				if pw, ok := incoming.Drivers[i].Config["password"]; ok {
+					if pw == "" || pw == nil {
+						incoming.Drivers[i].Config["password"] = ed.Config["password"]
+					}
+				}
+			}
+			break
+		}
+	}
+}
+
+// InjectEVChargerDriver auto-generates a driver entry from EVCharger config.
+// If a driver named "easee" already exists it is replaced; otherwise a new
+// entry is appended. This lets the Settings UI write ev_charger config and
+// never worry about raw driver YAML.
+func (c *Config) InjectEVChargerDriver() {
+	if c.EVCharger == nil || c.EVCharger.Provider != "easee" {
+		return
+	}
+	ev := c.EVCharger
+	drvCfg := map[string]any{
+		"email":    ev.Email,
+		"password": ev.Password,
+	}
+	if ev.Serial != "" {
+		drvCfg["serial"] = ev.Serial
+	}
+	d := Driver{
+		Name: "easee",
+		Lua:  "drivers/easee_cloud.lua",
+		Capabilities: Capabilities{
+			HTTP: &HTTPCapability{AllowedHosts: []string{"api.easee.com"}},
+		},
+		Config: drvCfg,
+	}
+	for i, existing := range c.Drivers {
+		if existing.Name == "easee" {
+			c.Drivers[i] = d
+			return
+		}
+	}
+	c.Drivers = append(c.Drivers, d)
 }
 
 // Load parses a config file from disk. Returns a fully-validated Config.

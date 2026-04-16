@@ -359,7 +359,7 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 	s.deps.CfgMu.RLock()
 	cfg := *s.deps.Cfg
 	s.deps.CfgMu.RUnlock()
-	writeJSON(w, 200, cfg)
+	writeJSON(w, 200, cfg.MaskSecrets())
 }
 
 func (s *Server) handlePostConfig(w http.ResponseWriter, r *http.Request) {
@@ -368,6 +368,10 @@ func (s *Server) handlePostConfig(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]string{"error": "invalid config: " + err.Error()})
 		return
 	}
+	// Preserve secrets the UI sent back as empty (masked) values.
+	s.deps.CfgMu.RLock()
+	newCfg.PreserveMaskedSecrets(s.deps.Cfg)
+	s.deps.CfgMu.RUnlock()
 	if err := newCfg.Validate(); err != nil {
 		writeJSON(w, 400, map[string]string{"error": "validation: " + err.Error()})
 		return

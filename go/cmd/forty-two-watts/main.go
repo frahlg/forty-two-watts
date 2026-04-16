@@ -63,6 +63,9 @@ func main() {
 	}
 	slog.Info("config loaded", "site", cfg.Site.Name, "drivers", len(cfg.Drivers))
 
+	// ---- Auto-generate EV charger driver from high-level config ----
+	cfg.InjectEVChargerDriver()
+
 	// ---- Open persistent state (SQLite) ----
 	statePath := "state.db"
 	coldDir := "cold"
