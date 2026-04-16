@@ -47,19 +47,18 @@ local function decode_f32_be(hi, lo)
 end
 
 -- Read a block of F32 BE values starting at `addr`. Returns an array of
--- `count` floats, or an array of zeros on read failure.
+-- `count` floats on success, or nil on read failure.
 local function read_f32_block(addr, count)
     local regs_needed = count * 2
     local ok, regs = pcall(host.modbus_read, addr, regs_needed, "input")
+    if not ok or not regs or #regs < regs_needed then
+        return nil
+    end
     local out = {}
-    if ok and regs and #regs >= regs_needed then
-        for i = 1, count do
-            local hi = regs[(i - 1) * 2 + 1]
-            local lo = regs[(i - 1) * 2 + 2]
-            out[i] = decode_f32_be(hi, lo)
-        end
-    else
-        for i = 1, count do out[i] = 0 end
+    for i = 1, count do
+        local hi = regs[(i - 1) * 2 + 1]
+        local lo = regs[(i - 1) * 2 + 2]
+        out[i] = decode_f32_be(hi, lo)
     end
     return out
 end
@@ -80,17 +79,15 @@ end
 ----------------------------------------------------------------------------
 
 function driver_poll()
-    -- Per-phase voltage (V): registers 0-5, three F32 BE pairs.
-    local volts = read_f32_block(0, 3)
-    local l1_v, l2_v, l3_v = volts[1], volts[2], volts[3]
-
-    -- Per-phase current (A): registers 6-11, three F32 BE pairs.
-    local amps = read_f32_block(6, 3)
-    local l1_a, l2_a, l3_a = amps[1], amps[2], amps[3]
-
     -- Per-phase active power (W): registers 12-17, three F32 BE pairs.
     -- SDM630 reports signed watts (import positive) — aligns with site convention.
+    -- If this primary read fails, skip the entire emit so the watchdog catches
+    -- staleness — publishing zeros would mislead the control loop.
     local watts = read_f32_block(12, 3)
+    if watts == nil then
+        host.log("warn", "SDM630: power read failed, skipping emit")
+        return 5000
+    end
     local l1_w, l2_w, l3_w = watts[1], watts[2], watts[3]
 
     -- Total active power: register 52-53. Sum of phases is preferred for
@@ -98,17 +95,32 @@ function driver_poll()
     local total_w = l1_w + l2_w + l3_w
     if total_w == 0 then
         local tw = read_f32_block(52, 1)
-        total_w = tw[1]
+        if tw then total_w = tw[1] end
     end
+
+    -- Per-phase voltage (V): registers 0-5, three F32 BE pairs.
+    -- Diagnostic reads — failures are not fatal.
+    local volts = read_f32_block(0, 3)
+    local l1_v, l2_v, l3_v = 0, 0, 0
+    if volts then l1_v, l2_v, l3_v = volts[1], volts[2], volts[3] end
+
+    -- Per-phase current (A): registers 6-11, three F32 BE pairs.
+    local amps = read_f32_block(6, 3)
+    local l1_a, l2_a, l3_a = 0, 0, 0
+    if amps then l1_a, l2_a, l3_a = amps[1], amps[2], amps[3] end
 
     -- Grid frequency: registers 70-71, F32 BE Hz.
     local hz_block = read_f32_block(70, 1)
-    local hz = hz_block[1]
+    local hz = 0
+    if hz_block then hz = hz_block[1] end
 
     -- Import/export energy: registers 72-75, two F32 BE kWh values → Wh.
     local energy = read_f32_block(72, 2)
-    local import_wh = energy[1] * 1000
-    local export_wh = energy[2] * 1000
+    local import_wh, export_wh = 0, 0
+    if energy then
+        import_wh = energy[1] * 1000
+        export_wh = energy[2] * 1000
+    end
 
     host.emit("meter", {
         w         = total_w,

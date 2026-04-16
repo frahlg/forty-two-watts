@@ -223,11 +223,14 @@ function driver_poll()
 
     -- Meter total power: 37113-37114, I32 BE, watts.
     -- Huawei sign: positive = export, negative = import. Negate for site convention.
+    -- If this read fails, skip the entire meter emit so the watchdog catches
+    -- staleness — publishing zeros would mislead the control loop.
     local ok_mw, mw_regs = pcall(host.modbus_read, 37113, 2, "holding")
-    local meter_w = 0
-    if ok_mw and mw_regs then
-        meter_w = host.decode_i32_be(mw_regs[1], mw_regs[2])
+    if not ok_mw or not mw_regs then
+        host.log("warn", "Huawei: meter power read failed, skipping emit")
+        return 5000
     end
+    local meter_w = host.decode_i32_be(mw_regs[1], mw_regs[2])
 
     -- Grid frequency: 37118, I16 × 0.01 Hz
     local ok_hz, hz_regs = pcall(host.modbus_read, 37118, 1, "holding")

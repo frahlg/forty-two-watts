@@ -58,11 +58,12 @@ function driver_poll()
     -- PV (solar generation)
     ------------------------------------------------------------------
 
-    -- PV AC-coupled output power: register 808 (U16, W)
-    local ok_pvac, pvac_regs = pcall(host.modbus_read, 808, 1, "holding")
+    -- PV AC-coupled output power: registers 808/809/810 (U16, W per phase L1/L2/L3).
+    -- Sum all three phases for total AC-coupled PV.
+    local ok_pvac, pvac_regs = pcall(host.modbus_read, 808, 3, "holding")
     local pv_ac_w = 0
     if ok_pvac and pvac_regs then
-        pv_ac_w = pvac_regs[1]
+        pv_ac_w = (pvac_regs[1] or 0) + (pvac_regs[2] or 0) + (pvac_regs[3] or 0)
     end
 
     -- PV DC-coupled MPPT output power: register 850 (U16, W)
@@ -84,24 +85,15 @@ function driver_poll()
     -- Meter (grid connection point)
     ------------------------------------------------------------------
 
-    -- Grid block: 820-828 in one atomic read.
-    --   820/821/822 — per-phase power (I16, W), import positive (matches site)
-    --   823/824/825 — per-phase voltage (U16, 0.1 V)
-    --   826/827/828 — per-phase current (I16, 0.1 A)
-    local ok_grid, grid_regs = pcall(host.modbus_read, 820, 9, "holding")
+    -- Grid per-phase power: 820/821/822 (I16, W), import positive (matches site).
+    -- NOTE: 823-825 are genset power (not voltage), 826 is active-input source
+    -- (not current). Only 820-822 are grid power registers on Venus OS unit 100.
+    local ok_grid, grid_regs = pcall(host.modbus_read, 820, 3, "holding")
     local l1_w, l2_w, l3_w = 0, 0, 0
-    local l1_v, l2_v, l3_v = 0, 0, 0
-    local l1_a, l2_a, l3_a = 0, 0, 0
     if ok_grid and grid_regs then
         l1_w = host.decode_i16(grid_regs[1])
         l2_w = host.decode_i16(grid_regs[2])
         l3_w = host.decode_i16(grid_regs[3])
-        l1_v = grid_regs[4] * 0.1
-        l2_v = grid_regs[5] * 0.1
-        l3_v = grid_regs[6] * 0.1
-        l1_a = host.decode_i16(grid_regs[7]) * 0.1
-        l2_a = host.decode_i16(grid_regs[8]) * 0.1
-        l3_a = host.decode_i16(grid_regs[9]) * 0.1
     end
 
     local grid_total_w = l1_w + l2_w + l3_w
@@ -111,24 +103,12 @@ function driver_poll()
         l1_w = l1_w,
         l2_w = l2_w,
         l3_w = l3_w,
-        l1_v = l1_v,
-        l2_v = l2_v,
-        l3_v = l3_v,
-        l1_a = l1_a,
-        l2_a = l2_a,
-        l3_a = l3_a,
     })
 
     -- Diagnostics: long-format TS DB
     host.emit_metric("meter_l1_w", l1_w)
     host.emit_metric("meter_l2_w", l2_w)
     host.emit_metric("meter_l3_w", l3_w)
-    host.emit_metric("meter_l1_v", l1_v)
-    host.emit_metric("meter_l2_v", l2_v)
-    host.emit_metric("meter_l3_v", l3_v)
-    host.emit_metric("meter_l1_a", l1_a)
-    host.emit_metric("meter_l2_a", l2_a)
-    host.emit_metric("meter_l3_a", l3_a)
 
     ------------------------------------------------------------------
     -- Battery

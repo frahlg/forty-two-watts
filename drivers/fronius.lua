@@ -15,7 +15,7 @@ DRIVER = {
   manufacturer = "Fronius",
   version      = "1.0.0",
   protocols    = { "modbus" },
-  capabilities = { "meter", "pv", "battery" },
+  capabilities = { "pv", "battery" },
   description  = "Fronius Symo / Primo GEN24 hybrid inverters via Modbus TCP (SunSpec).",
   homepage     = "https://www.fronius.com",
   authors      = { "forty-two-watts contributors" },
@@ -273,38 +273,11 @@ function driver_poll()
     })
     host.emit_metric("battery_dc_v", bat_v)
 
-    -- ------------------------------------------------------------- Meter
-    -- Fronius SunSpec inverter model reports AC output power only — it
-    -- does not expose a grid-side meter. We derive a meter-shaped emission
-    -- from the inverter's AC values so the UI/API has per-phase data; the
-    -- site grid meter should normally come from a separate driver
-    -- (fronius_smart_meter / p1_meter / etc.) flagged `is_site_meter: true`.
-    local l1_w = l1_v * l1_a
-    local l2_w = l2_v * l2_a
-    local l3_w = l3_v * l3_a
-
-    host.emit("meter", {
-        w    = ac_w,
-        l1_w = l1_w,
-        l2_w = l2_w,
-        l3_w = l3_w,
-        l1_v = l1_v,
-        l2_v = l2_v,
-        l3_v = l3_v,
-        l1_a = l1_a,
-        l2_a = l2_a,
-        l3_a = l3_a,
-        hz   = hz,
-    })
-    host.emit_metric("meter_l1_w", l1_w)
-    host.emit_metric("meter_l2_w", l2_w)
-    host.emit_metric("meter_l3_w", l3_w)
-    host.emit_metric("meter_l1_v", l1_v)
-    host.emit_metric("meter_l2_v", l2_v)
-    host.emit_metric("meter_l3_v", l3_v)
-    host.emit_metric("meter_l1_a", l1_a)
-    host.emit_metric("meter_l2_a", l2_a)
-    host.emit_metric("meter_l3_a", l3_a)
+    -- NOTE: This driver does NOT emit meter telemetry. A Fronius inverter is
+    -- NOT a grid meter — its AC output represents inverter production, not the
+    -- grid boundary. Operators need a separate meter driver (fronius_smart_meter.lua,
+    -- sdm630.lua, p1_meter.lua, etc.) with `is_site_meter: true` in config.yaml
+    -- for accurate grid power readings.
 
     return 5000
 end

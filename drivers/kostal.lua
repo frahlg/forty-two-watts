@@ -71,10 +71,12 @@ end
 
 function driver_poll()
     -- -----------------------------------------------------------------
-    -- Serial number (SunSpec Common Model 1: regs 40020-40035, 32 chars)
+    -- Serial number (SunSpec Common Model 1: SN at regs 40052-40067,
+    -- 16 regs = 32 chars ASCII. NOTE: 40004-40019 is Md (manufacturer),
+    -- 40020-40035 is Opt (model string) — NOT serial number.)
     -- -----------------------------------------------------------------
     if not sn_read then
-        local ok_sn, sn_regs = pcall(host.modbus_read, 40020, 16, "holding")
+        local ok_sn, sn_regs = pcall(host.modbus_read, 40052, 16, "holding")
         if ok_sn and sn_regs then
             local sn = ""
             for i = 1, 16 do
