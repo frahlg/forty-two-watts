@@ -1,3 +1,28 @@
+## [1.1.0](https://github.com/erikarenhill/forty-two-watts/compare/v1.0.1...v1.1.0) (2026-04-16)
+
+### Bug Fixes
+
+* 5 Go-side P1 bugs from Codex review ([#46](https://github.com/erikarenhill/forty-two-watts/issues/46)) ([0cd2885](https://github.com/erikarenhill/forty-two-watts/commit/0cd2885bdb79d6a4c3116bb4930ec785cea8f944))
+* 5 Go-side P1 bugs from Codex review ([#47](https://github.com/erikarenhill/forty-two-watts/issues/47)) ([4f2eaf6](https://github.com/erikarenhill/forty-two-watts/commit/4f2eaf69f626caddf2bae456ac047301f9a36840))
+* **solaredge_pv:** read SunSpec scale factors every poll, not cached ([#38](https://github.com/erikarenhill/forty-two-watts/issues/38)) ([26f8793](https://github.com/erikarenhill/forty-two-watts/commit/26f8793f22888dc11d29fd157b10b4340da34c8d))
+
+### Drivers
+
+* fix 9 P1 bugs flagged by Codex review ([#44](https://github.com/erikarenhill/forty-two-watts/issues/44)) ([b20e485](https://github.com/erikarenhill/forty-two-watts/commit/b20e485f5fa0a5a20d3a4e83d49410528f81ea1e))
+
+### UI
+
+* show mode band in plan chart + grid target on status card ([877e0bd](https://github.com/erikarenhill/forty-two-watts/commit/877e0bde83964ddb26ce4894ab0adc446fd7801b))
+
+### Control loop
+
+* slew-rate anchors on actual battery power, not stale command ([#41](https://github.com/erikarenhill/forty-two-watts/issues/41)) ([4f73f19](https://github.com/erikarenhill/forty-two-watts/commit/4f73f19abfb6e322a4934d9e9bb46b645afd1352))
+
+### MPC planner
+
+* log optimize params + ems_mode per action for plan chart ([9e8c14b](https://github.com/erikarenhill/forty-two-watts/commit/9e8c14bd388b869091c2315bd4a42def648bf987))
+* value SoC at import−export spread in self-consumption modes ([#40](https://github.com/erikarenhill/forty-two-watts/issues/40)) ([a90d525](https://github.com/erikarenhill/forty-two-watts/commit/a90d5259209ca9fd8094927b060f62633dd3b5d0))
+
 ## [1.0.1](https://github.com/erikarenhill/forty-two-watts/compare/v1.0.0...v1.0.1) (2026-04-15)
 
 ### Bug Fixes
