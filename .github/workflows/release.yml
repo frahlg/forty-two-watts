@@ -26,7 +26,7 @@ jobs:
       new_release_version:   ${{ steps.semantic.outputs.new_release_version }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           # semantic-release walks every commit since the last tag, so
           # it needs the full history. fetch-depth: 0 is the standard.
@@ -36,21 +36,28 @@ jobs:
           persist-credentials: true
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
-          node-version: '20'
+          node-version: '22'
 
       - name: Run semantic-release
         id: semantic
-        uses: cycjimmy/semantic-release-action@v4
+        uses: cycjimmy/semantic-release-action@v5
         with:
           # Pin to a known-good major. Plugins listed here mirror
           # .releaserc.json so the action installer picks them up
           # without needing a package.json in the repo.
+          #
+          # conventional-changelog-conventionalcommits is the preset
+          # backing the `conventionalcommits` config in .releaserc.json
+          # (the analyzer + notes generator look it up by name at
+          # runtime, so it must be in node_modules even though we
+          # never import it directly).
           semantic_version: 24
           extra_plugins: |
             @semantic-release/changelog@6
             @semantic-release/git@10
+            conventional-changelog-conventionalcommits@8
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -64,7 +71,7 @@ jobs:
     if: needs.release.outputs.new_release_published == 'true'
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           # Pull the tag semantic-release just pushed so the build sees
           # the new state of master (changelog commit included).
