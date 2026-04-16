@@ -1385,8 +1385,98 @@
     setPeakLimit(Number(peakLimitSlider.value));
   });
 
-  // EV slider removed — ev_charging_w now comes from the Easee driver.
-  // Manual override still available via /api/ev_charging (debug only).
+  // EV detail modal
+  var evModal = document.getElementById("ev-modal");
+  var evModalBody = document.getElementById("ev-modal-body");
+  var evModalClose = document.getElementById("ev-modal-close");
+  var cardEv = document.getElementById("card-ev");
+
+  // Render the EV modal by building DOM nodes (textContent) rather than
+  // concatenating strings into innerHTML — d.driver comes from driver
+  // config and would otherwise be an XSS vector if the config is edited
+  // by a lower-trust user.
+  function renderEvStatusTable(d) {
+    var status = d.charging ? "Charging" : (d.connected ? "Connected" : "Idle");
+    var rows = [
+      ["Status", status],
+      ["Power", formatW(d.w || 0)],
+    ];
+    if (d.session_wh != null) rows.push(["Session", (d.session_wh / 1000).toFixed(1) + " kWh"]);
+    if (d.driver) rows.push(["Driver", String(d.driver)]);
+
+    var table = document.createElement("table");
+    table.style.width = "100%";
+    table.style.borderCollapse = "collapse";
+    rows.forEach(function (r) {
+      var tr = document.createElement("tr");
+      var tdLabel = document.createElement("td");
+      tdLabel.style.padding = "0.3rem 0";
+      tdLabel.style.color = "var(--text-dim)";
+      tdLabel.textContent = r[0];
+      var tdVal = document.createElement("td");
+      tdVal.style.padding = "0.3rem 0";
+      tdVal.style.textAlign = "right";
+      tdVal.style.fontWeight = "600";
+      tdVal.textContent = r[1];
+      tr.appendChild(tdLabel);
+      tr.appendChild(tdVal);
+      table.appendChild(tr);
+    });
+    return table;
+  }
+
+  function setEvModalMessage(text) {
+    evModalBody.textContent = "";
+    var p = document.createElement("p");
+    p.style.color = "var(--text-dim)";
+    p.textContent = text;
+    evModalBody.appendChild(p);
+  }
+
+  function refreshEvModal() {
+    fetch("/api/ev/status").then(function (r) { return r.json(); }).then(function (d) {
+      if (!d || d.connected === false) {
+        setEvModalMessage("No EV charger connected");
+        return;
+      }
+      evModalBody.textContent = "";
+      evModalBody.appendChild(renderEvStatusTable(d));
+    }).catch(function () {
+      setEvModalMessage("Failed to load EV status");
+    });
+  }
+
+  var evRefreshTimer = null;
+  if (cardEv && evModal) {
+    cardEv.addEventListener("click", function () {
+      evModal.classList.remove("hidden");
+      refreshEvModal();
+      // Guard against stacked timers if the card is clicked while the
+      // modal is still open (e.g. background click that didn't close).
+      if (evRefreshTimer) { clearInterval(evRefreshTimer); }
+      evRefreshTimer = setInterval(refreshEvModal, 5000);
+    });
+    function closeEvModal() {
+      evModal.classList.add("hidden");
+      if (evRefreshTimer) { clearInterval(evRefreshTimer); evRefreshTimer = null; }
+    }
+    evModalClose.addEventListener("click", closeEvModal);
+    evModal.addEventListener("click", function (e) {
+      if (e.target === evModal) closeEvModal();
+    });
+
+    function evCommand(action, btn) {
+      btn.disabled = true;
+      postJson("/api/ev/command", { action: action });
+      setTimeout(function () { refreshEvModal(); btn.disabled = false; }, 3000);
+    }
+    var evBtnStart = document.getElementById("ev-btn-start");
+    var evBtnPause = document.getElementById("ev-btn-pause");
+    var evBtnResume = document.getElementById("ev-btn-resume");
+    evBtnStart.addEventListener("click", function () { evCommand("ev_start", evBtnStart); });
+    evBtnPause.addEventListener("click", function () { evCommand("ev_pause", evBtnPause); });
+    evBtnResume.addEventListener("click", function () { evCommand("ev_resume", evBtnResume); });
+  }
 
   // Click-to-toggle legend items. Each item has data-toggle with a
   // key; clicking toggles visibility of the matching series and

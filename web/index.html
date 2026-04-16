@@ -86,7 +86,7 @@
         <div class="fuse-bar" id="fuse-bar-fallback"><div class="fuse-fill" id="fuse-fill"></div></div>
         <div class="card-value fuse-fallback-value" id="fuse-use">-- A</div>
       </div>
-      <div class="card summary-card" id="card-ev">
+      <div class="card summary-card" id="card-ev" style="cursor:pointer">
         <div class="card-label">EV</div>
         <div class="card-value" id="ev-w">-- W</div>
         <div class="card-sub" id="ev-status">--</div>
@@ -274,6 +274,24 @@
     <span class="footer-tagline">Don't Panic 🐬</span>
   </footer>
 
+  <!-- EV detail popup -->
+  <div id="ev-modal" class="modal hidden">
+    <div class="modal-content" style="max-width:380px">
+      <div class="modal-header">
+        <h2>EV Charger</h2>
+        <button id="ev-modal-close" class="modal-close">&times;</button>
+      </div>
+      <div class="modal-body" id="ev-modal-body" style="padding:1rem">
+        <p style="color:var(--text-dim)">Loading...</p>
+      </div>
+      <div style="display:flex;gap:0.5rem;padding:0 1rem 1rem">
+        <button class="btn-add" id="ev-btn-start" style="flex:1">Start</button>
+        <button class="btn-add" id="ev-btn-pause" style="flex:1">Pause</button>
+        <button class="btn-add" id="ev-btn-resume" style="flex:1">Resume</button>
+      </div>
+    </div>
+  </div>
+
   <script src="/app.js?v=de88f43m"></script>
   <script src="/settings.js?v=de88f43m"></script>
   <script src="/models.js?v=de88f43m"></script>
@@ -307,5 +325,7 @@
       });
     })();
   </script>
+
+
 </body>
 </html>

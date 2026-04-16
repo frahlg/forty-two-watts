@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -416,8 +417,15 @@ func Parse(data []byte, baseDir string) (*Config, error) {
 	if err := c.Validate(); err != nil {
 		return nil, err
 	}
-	// Resolve relative driver paths
+	c.ResolveDriverPaths(baseDir)
+	return &c, nil
+}
+
+// ResolveDriverPaths joins relative Lua/WASM driver paths with baseDir.
+func (c *Config) ResolveDriverPaths(baseDir string) {
 	for i := range c.Drivers {
+		c.Drivers[i].Lua = stripLeadingDotDot(c.Drivers[i].Lua)
+		c.Drivers[i].WASM = stripLeadingDotDot(c.Drivers[i].WASM)
 		if c.Drivers[i].WASM != "" && !filepath.IsAbs(c.Drivers[i].WASM) {
 			c.Drivers[i].WASM = filepath.Join(baseDir, c.Drivers[i].WASM)
 		}
@@ -425,7 +433,40 @@ func Parse(data []byte, baseDir string) (*Config, error) {
 			c.Drivers[i].Lua = filepath.Join(baseDir, c.Drivers[i].Lua)
 		}
 	}
-	return &c, nil
+}
+
+func stripLeadingDotDot(p string) string {
+	for strings.HasPrefix(p, "../") {
+		p = p[3:]
+	}
+	return p
+}
+
+// UnresolveDriverPaths converts resolved driver paths back to config-relative form.
+//
+// Paths that are outside baseDir (filepath.Rel would yield a ../-prefixed
+// result) are left absolute — otherwise the next ResolveDriverPaths would
+// strip the leading ../ via stripLeadingDotDot and silently re-anchor the
+// driver under baseDir.
+func (c *Config) UnresolveDriverPaths(baseDir string) {
+	for i := range c.Drivers {
+		c.Drivers[i].Lua = relToBaseDir(baseDir, c.Drivers[i].Lua)
+		c.Drivers[i].WASM = relToBaseDir(baseDir, c.Drivers[i].WASM)
+	}
+}
+
+func relToBaseDir(baseDir, p string) string {
+	if p == "" {
+		return p
+	}
+	rel, err := filepath.Rel(baseDir, p)
+	if err != nil {
+		return p
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return p
+	}
+	return rel
 }
 
 // applyDefaults fills in sensible zero-value defaults.
