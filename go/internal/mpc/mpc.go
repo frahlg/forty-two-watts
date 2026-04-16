@@ -127,6 +127,7 @@ type Action struct {
 	CostOre     float64 `json:"cost_ore"`   // this slot's cost (öre). Negative = revenue.
 	Confidence  float64 `json:"confidence"` // 1.0 real, <1.0 forecasted (UI uses this to style)
 	Reason      string  `json:"reason"`     // short human-readable explanation
+	EMSMode     string  `json:"ems_mode"`   // effective EMS mode for this slot (set by SlotAt post-processing)
 
 	// PVLimitW is the recommended cap on PV inverter output (W, positive).
 	// 0 = no curtailment. Set by post-processing when exporting would

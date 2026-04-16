@@ -237,24 +237,24 @@ function driver_poll()
 
     --------------------------------------------------------------- Meter --
 
-    -- Meter total power: 30885-30886, U32 BE, watts (+ = import)
+    -- Meter total power: 30885-30886, I32 BE, watts (signed: + = import, - = export)
     local ok_mw, mw_regs = pcall(host.modbus_read, 30885, 2, "input")
     local meter_w = 0
     if ok_mw and mw_regs then
-        local v = host.decode_u32_be(mw_regs[1], mw_regs[2])
-        if u32_valid(v) then meter_w = v end
+        local v = host.decode_i32_be(mw_regs[1], mw_regs[2])
+        if i32_valid(v) then meter_w = v end
     end
 
-    -- Per-phase meter power: 30887-30892, U32 BE pairs, watts
+    -- Per-phase meter power: 30887-30892, I32 BE pairs, watts (signed)
     local ok_mpw, mpw_regs = pcall(host.modbus_read, 30887, 6, "input")
     local l1_w, l2_w, l3_w = 0, 0, 0
     if ok_mpw and mpw_regs then
-        local v1 = host.decode_u32_be(mpw_regs[1], mpw_regs[2])
-        local v2 = host.decode_u32_be(mpw_regs[3], mpw_regs[4])
-        local v3 = host.decode_u32_be(mpw_regs[5], mpw_regs[6])
-        if u32_valid(v1) then l1_w = v1 end
-        if u32_valid(v2) then l2_w = v2 end
-        if u32_valid(v3) then l3_w = v3 end
+        local v1 = host.decode_i32_be(mpw_regs[1], mpw_regs[2])
+        local v2 = host.decode_i32_be(mpw_regs[3], mpw_regs[4])
+        local v3 = host.decode_i32_be(mpw_regs[5], mpw_regs[6])
+        if i32_valid(v1) then l1_w = v1 end
+        if i32_valid(v2) then l2_w = v2 end
+        if i32_valid(v3) then l3_w = v3 end
     end
 
     -- Grid frequency: 30901-30902, U32 BE × 0.01 Hz

@@ -410,3 +410,67 @@ func TestEVChargingManualPreservedWhenNoDriver(t *testing.T) {
 		t.Errorf("expected EVChargingW manual value 1500 to survive, got %f", st.EVChargingW)
 	}
 }
+
+// ---- Slew rate anchor ----
+
+// xorath's reported bug: battery at 10% SoC was commanded -5000 W the
+// previous cycle but physically responded with 0 W (empty). When the user
+// removed EV load creating surplus, the PI wanted +2000 W, but slew
+// anchored on the stale -5000 W command capped new command at
+// -5000 + 500 = -4500 W. Reversing direction took 5000/500 = 10 cycles
+// (~50 s at 5 s interval). Anchoring slew on actual smoothed power
+// (which was 0 W, not -5000 W) lets dispatch pivot within one slew step.
+func TestSlewAnchorsOnActualNotStaleCommand(t *testing.T) {
+	// Battery: previous command -5000 W, actual output 0 W (empty).
+	// Grid: -2000 W (surplus → PI wants to charge the battery).
+	store := seedStore(-2000, []struct{ name string; currentW, soc float64 }{
+		{"pixii", 0, 0.10}, // at SoC min, actual bat_w = 0 despite command
+	})
+	st := NewState(0, 50, "ferroamp")
+	st.Mode = ModeSelfConsumption
+	st.SlewRateW = 500
+	// Seed the stale command — this is what the dispatch stored after
+	// last cycle, when it commanded -5000 W and the battery couldn't
+	// comply.
+	st.PrevTargets["pixii"] = -5000
+	// Note: no battery called "ferroamp" in this store, so dispatch
+	// skips it as unavailable. Only pixii is in the game.
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"pixii": 10000}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("expected 1 dispatch target, got %d", len(targets))
+	}
+	got := targets[0].TargetW
+	// With actual-anchored slew (anchor = 0 W), one step toward +W
+	// should land the command in (0, +500]. With the old stale-anchored
+	// slew it would land at -4500 W.
+	if got < 0 {
+		t.Errorf("expected positive (charge) target, got %f W — slew still anchored to stale command", got)
+	}
+	if got > st.SlewRateW+1e-6 {
+		t.Errorf("expected target within one slew step of 0 W actual, got %f W", got)
+	}
+}
+
+// Ensure normal in-tracking operation (actual ≈ command) still respects
+// the slew limit from the actual. This prevents the fix from letting the
+// PI jump more than slew_rate per cycle when the battery is tracking well.
+func TestSlewRespectsRateWhenTracking(t *testing.T) {
+	// Battery actively discharging at -1000 W, both actual and prev command.
+	store := seedStore(1500, []struct{ name string; currentW, soc float64 }{
+		{"pixii", -1000, 0.6},
+	})
+	st := NewState(0, 50, "ferroamp")
+	st.Mode = ModeSelfConsumption
+	st.SlewRateW = 500
+	st.PrevTargets["pixii"] = -1000
+	// PI will want a big discharge to cover the +1500 import.
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"pixii": 10000}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("expected 1 target, got %d", len(targets))
+	}
+	got := targets[0].TargetW
+	// Anchor is actual -1000; one slew step toward negative lands at -1500.
+	if math.Abs(got-(-1500)) > 1e-6 {
+		t.Errorf("expected slewed target = -1500 W (anchor -1000 + step -500), got %f W", got)
+	}
+}

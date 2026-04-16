@@ -220,7 +220,7 @@
     if (versionEl && data.version) {
       versionEl.textContent = "v" + data.version;
     }
-    // Grid
+    // Grid + target indicator
     gridW.textContent = formatW(data.grid_w);
     if (data.grid_w > 10) {
       gridDir.textContent = "importing";
@@ -231,6 +231,11 @@
     } else {
       gridDir.textContent = "balanced";
       gridW.className = "card-value val-neutral";
+    }
+    var targetDisp = document.getElementById("grid-target-display");
+    if (targetDisp) {
+      var t = data.grid_target_w || 0;
+      targetDisp.textContent = t === 0 ? "target 0" : "target " + formatW(t);
     }
 
     // PV — negative = generating

@@ -68,3 +68,95 @@ func TestBuildSlotsKeepsTwinWhenPredictionIsSane(t *testing.T) {
 		t.Fatalf("slot PVW = %f, want %f", got, -twinPV)
 	}
 }
+
+// ---- Terminal SoC valuation ----
+
+func TestSelfConsumptionTerminalPriceIsImportMinusExport(t *testing.T) {
+	// Retail 300 öre/kWh, spot 80 öre/kWh, bonus 60, fee 6.
+	// Per slot: export rate = 80 + 60 − 6 = 134. Spread = 300 − 134 = 166.
+	prices := []state.PricePoint{
+		{SpotOreKwh: 80, TotalOreKwh: 300},
+		{SpotOreKwh: 80, TotalOreKwh: 300},
+	}
+	got := selfConsumptionTerminalPrice(prices, 60, 6)
+	if math.Abs(got-166) > 1e-9 {
+		t.Fatalf("terminal price = %f, want 166", got)
+	}
+}
+
+func TestSelfConsumptionTerminalPriceClampsToZero(t *testing.T) {
+	// Export rate (spot+bonus−fee) > retail → spread would be negative.
+	// Must floor at 0 so we never actively credit draining the battery.
+	prices := []state.PricePoint{{SpotOreKwh: 500, TotalOreKwh: 100}}
+	got := selfConsumptionTerminalPrice(prices, 0, 0)
+	if got != 0 {
+		t.Fatalf("terminal price = %f, want 0", got)
+	}
+}
+
+func TestSelfConsumptionTerminalPriceEmpty(t *testing.T) {
+	got := selfConsumptionTerminalPrice(nil, 0, 0)
+	if got != 0 {
+		t.Fatalf("terminal price = %f, want 0", got)
+	}
+}
+
+// End-to-end proof: with the new self-consumption terminal valuation, a
+// battery that's ≥50% full WILL discharge to cover load instead of
+// choosing "idle — import to cover load". Regression test for the exact
+// bug we saw on homelab-rpi (bat_w=0 on every slot with SoC=84%).
+func TestOptimizeSelfConsumptionDischargesWithSpreadTerminalPrice(t *testing.T) {
+	// 4-slot horizon, PV < load in every slot so battery has work to do.
+	slots := []Slot{
+		{StartMs: 0, LenMin: 60, PriceOre: 300, SpotOre: 80, LoadW: 3000, PVW: -500, Confidence: 1},
+		{StartMs: 3600 * 1000, LenMin: 60, PriceOre: 300, SpotOre: 80, LoadW: 3000, PVW: -500, Confidence: 1},
+		{StartMs: 7200 * 1000, LenMin: 60, PriceOre: 300, SpotOre: 80, LoadW: 3000, PVW: -500, Confidence: 1},
+		{StartMs: 10800 * 1000, LenMin: 60, PriceOre: 300, SpotOre: 80, LoadW: 3000, PVW: -500, Confidence: 1},
+	}
+
+	// Build PricePoints identical to the slots and compute the
+	// mode-appropriate terminal price. Mirrors what service.replan does.
+	prices := []state.PricePoint{
+		{SpotOreKwh: 80, TotalOreKwh: 300}, {SpotOreKwh: 80, TotalOreKwh: 300},
+		{SpotOreKwh: 80, TotalOreKwh: 300}, {SpotOreKwh: 80, TotalOreKwh: 300},
+	}
+	p := baseParams(ModeSelfConsumption)
+	p.InitialSoCPct = 80
+	p.ExportBonusOreKwh = 60
+	p.ExportFeeOreKwh = 6
+	p.TerminalSoCPrice = selfConsumptionTerminalPrice(prices, 60, 6)
+
+	plan := Optimize(slots, p)
+	var discharging int
+	for _, a := range plan.Actions {
+		if a.BatteryW < -1e-6 {
+			discharging++
+		}
+		if a.BatteryW > 1e-6 {
+			t.Errorf("slot at %d charging %.0fW with no PV surplus", a.SlotStartMs, a.BatteryW)
+		}
+	}
+	if discharging == 0 {
+		t.Fatalf("expected at least one discharging slot with SoC=80%% and load>PV, got %+v", plan.Actions)
+	}
+}
+
+// Guardrail: if we had used the OLD default (mean retail import price as
+// terminal value), the same scenario wouldn't discharge. This test exists
+// to document *why* the fix matters.
+func TestOptimizeSelfConsumptionDoesNotDischargeWithOldTerminalPrice(t *testing.T) {
+	slots := []Slot{
+		{StartMs: 0, LenMin: 60, PriceOre: 300, SpotOre: 80, LoadW: 3000, PVW: -500, Confidence: 1},
+		{StartMs: 3600 * 1000, LenMin: 60, PriceOre: 300, SpotOre: 80, LoadW: 3000, PVW: -500, Confidence: 1},
+	}
+	p := baseParams(ModeSelfConsumption)
+	p.InitialSoCPct = 80
+	p.TerminalSoCPrice = 300 // old default = mean import price
+
+	plan := Optimize(slots, p)
+	for _, a := range plan.Actions {
+		if a.BatteryW < -1e-6 {
+			t.Fatalf("OLD behavior unexpectedly discharged — test is stale. got %+v", plan.Actions)
+		}
+	}
+}

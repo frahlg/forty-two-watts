@@ -263,6 +263,13 @@ function driver_command(action, power_w, cmd)
         return true
 
     elseif action == "battery" then
+        if power_w == 0 then
+            -- Zero setpoint: release to auto mode instead of holding the
+            -- inverter in forced-zero power mode.
+            host.modbus_write(6000, 0)  -- auto mode
+            host.log("debug", "Ferroamp Modbus: battery ref 0 → auto mode")
+            return true
+        end
         -- Site convention: positive power_w = charge
         -- Ferroamp: negative kW = charge → negate, convert W to kW
         local ref_kw = -power_w / 1000

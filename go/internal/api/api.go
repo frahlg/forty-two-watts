@@ -294,7 +294,43 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		loadPredictW = s.deps.LoadModel.Predict(time.Now())
 	}
 
-	writeJSON(w, 200, map[string]any{
+	// Energy today: integrate history points since midnight local time.
+	// Each point is ~5 s apart; multiply W × dt_hours for Wh per interval.
+	var energyToday map[string]any
+	if s.deps.State != nil {
+		now := time.Now()
+		midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+		pts, err := s.deps.State.LoadHistory(midnight.UnixMilli(), now.UnixMilli(), 0)
+		if err == nil && len(pts) > 1 {
+			var importWh, exportWh, pvWh, chargedWh, dischargedWh, loadWh float64
+			for i := 1; i < len(pts); i++ {
+				dtH := float64(pts[i].TsMs-pts[i-1].TsMs) / 3_600_000.0
+				g := pts[i].GridW
+				if g > 0 {
+					importWh += g * dtH
+				} else {
+					exportWh += -g * dtH
+				}
+				pvWh += -pts[i].PVW * dtH
+				if pts[i].BatW > 0 {
+					chargedWh += pts[i].BatW * dtH
+				} else {
+					dischargedWh += -pts[i].BatW * dtH
+				}
+				loadWh += pts[i].LoadW * dtH
+			}
+			energyToday = map[string]any{
+				"import_wh":       importWh,
+				"export_wh":       exportWh,
+				"pv_wh":           pvWh,
+				"bat_charged_wh":  chargedWh,
+				"bat_discharged_wh": dischargedWh,
+				"load_wh":         loadWh,
+			}
+		}
+	}
+
+	resp := map[string]any{
 		"version":          s.deps.Version,
 		"mode":             ctrl.Mode,
 		"plan_stale":       ctrl.PlanStale,
@@ -310,7 +346,11 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"ev_charging_w":    ctrl.EVChargingW,
 		"drivers":          drivers,
 		"dispatch":         dispatch,
-	})
+	}
+	if energyToday != nil {
+		resp["energy"] = map[string]any{"today": energyToday}
+	}
+	writeJSON(w, 200, resp)
 }
 
 // ---- /api/config ----

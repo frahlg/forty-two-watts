@@ -71,6 +71,9 @@
     const tMax = now + 48 * 60 * 60 * 1000;
     const xScale = t => pad.l + (t - tMin) / (tMax - tMin) * plotW;
 
+    // Layout: price bars (top) | mode band (thin strip) | power bars (middle) | SoC (bottom)
+    const modeBandH = 10;
+
     // Price range
     const prices = (state.prices || []).filter(p => p.slot_ts_ms >= tMin && p.slot_ts_ms <= tMax);
     const totals = prices.map(p => p.total_ore_kwh);
@@ -78,13 +81,18 @@
     const priceMax = totals.length ? Math.max(...totals, 1) : 200;
     const priceRange = priceMax - priceMin;
 
-    // Price band on top third
+    // Price band on top
     const priceY0 = pad.t;
-    const priceH = plotH * 0.32;
+    const priceH = plotH * 0.29;
     const priceY = v => priceY0 + priceH - (v - priceMin) / priceRange * priceH;
 
+    // Mode band — thin strip below price bars showing which EMS mode
+    // is active per slot. Color-coded so operators see the schedule at a
+    // glance without reading per-slot tooltips.
+    const modeBandY0 = priceY0 + priceH + 2;
+
     // Power band in middle — covers battery + grid
-    const powerY0 = priceY0 + priceH + 10;
+    const powerY0 = modeBandY0 + modeBandH + 4;
     const powerH = plotH * 0.42;
     // Scale based on plan battery + PV magnitudes
     const plan = state.plan;
@@ -274,6 +282,25 @@
     ctx.textAlign = 'left';
     ctx.fillText('Power', pad.l + 4, powerY0 + 12);
 
+    // ---- Battery action band — colored strip showing charge/discharge/idle per slot ----
+    if (plan && plan.actions) {
+      for (const a of plan.actions) {
+        if (a.slot_start_ms > tMax) break;
+        const x0 = xScale(a.slot_start_ms);
+        const x1 = xScale(a.slot_start_ms + a.slot_len_min * 60 * 1000);
+        let color;
+        if (a.battery_w > 100)       color = 'rgba(245,158,11,0.6)';   // amber = charging
+        else if (a.battery_w < -100) color = 'rgba(139,92,246,0.6)';   // purple = discharging
+        else                         color = 'rgba(100,116,139,0.2)';  // slate = idle
+        ctx.fillStyle = color;
+        ctx.fillRect(x0, modeBandY0, Math.max(1, x1 - x0 - 1), modeBandH);
+      }
+      ctx.fillStyle = 'rgba(255,255,255,0.45)';
+      ctx.font = '9px system-ui, sans-serif';
+      ctx.textAlign = 'left';
+      ctx.fillText('Battery', pad.l + 4, modeBandY0 + modeBandH - 2);
+    }
+
     // ---- Plan battery bars ----
     if (plan && plan.actions) {
       for (const a of plan.actions) {
@@ -386,6 +413,13 @@
         lines.push(`<div class="tip-row"><span>Grid</span><b>${(Math.abs(a.grid_w) / 1000).toFixed(1)} kW ${gdir}</b></div>`);
       }
       if (a.soc_pct != null) lines.push(`<div class="tip-row"><span>SoC (end)</span><b>${a.soc_pct.toFixed(0)}%</b></div>`);
+      if (a.battery_w != null) {
+        let action;
+        if (a.battery_w > 100) action = 'Charging';
+        else if (a.battery_w < -100) action = 'Discharging';
+        else action = 'Idle';
+        lines.push(`<div class="tip-row"><span>Plan</span><b>${action}</b></div>`);
+      }
       if (a.reason) lines.push(`<div class="tip-reason">${a.reason}</div>`);
       tip.innerHTML = lines.join('');
       tip.style.left = (e.clientX + 14) + 'px';

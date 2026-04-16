@@ -37,9 +37,18 @@ func (m Mode) IsPlannerMode() bool {
 }
 
 // PlanTargetFunc is injected by main.go: given the current time, returns
-// (grid_target_w, ok). When ok=false, the plan is stale/missing and the
-// control loop falls back to self_consumption with grid_target_w = 0.
-type PlanTargetFunc func(now time.Time) (float64, bool)
+// the plan's directive for the current slot. When ok=false, the plan is
+// stale/missing and the control loop falls back to self_consumption with
+// grid_target=0.
+//
+// Returns (mode_string, grid_target_w, ok). mode_string maps to a Mode
+// constant; the dispatch uses its existing mode logic for HOW batteries
+// respond. The plan is a scheduler, not a regulator.
+type PlanTargetFunc func(now time.Time) (string, float64, bool)
+
+// MaxCommandW is the hard per-command power cap (±5 kW). Used by both
+// clampWithSoC (distribution) and the post-slew re-clamp.
+const MaxCommandW = 5000
 
 // DispatchTarget is one command to issue to a single battery driver.
 // `TargetW` is in site sign convention:
@@ -142,34 +151,32 @@ func ComputeDispatch(
 	driverCapacities map[string]float64,
 	fuseMaxW float64,
 ) []DispatchTarget {
-	// ---- Planner modes: override grid_target from the plan ----
-	// We don't mutate state.Mode — the operator's selected mode is
-	// preserved for display. Once the grid_target is set from the plan,
-	// the rest of this function behaves like self_consumption: PI chases
-	// the target we just set. The downstream switches special-case this
-	// by treating planner modes as self_consumption.
+	// ---- Planner modes: the plan is a scheduler, not a regulator ----
+	// The plan decides WHEN each strategy applies (self-consumption now,
+	// charge at 02:00, export at 17:00). The EMS's existing mode logic
+	// decides HOW batteries respond every 5 s based on the live meter.
+	//
+	// The planner's PlanSlot.Mode replaces the effective mode for this
+	// cycle. PlanSlot.GridW overrides the grid target when the slot's
+	// mode needs it (e.g. charge → target = +max_charge). For self-
+	// consumption slots, grid_target is always 0.
+	effectiveMode := state.Mode
 	if state.Mode.IsPlannerMode() {
-		var target float64
+		var modeStr string
+		var gridW float64
 		ok := false
 		if state.PlanTarget != nil {
-			target, ok = state.PlanTarget(time.Now())
+			modeStr, gridW, ok = state.PlanTarget(time.Now())
 		}
 		if ok {
-			state.SetGridTarget(target)
+			effectiveMode = Mode(modeStr)
+			state.SetGridTarget(gridW)
 			state.PlanStale = false
 		} else {
-			// Plan missing or stale. Fail-safe: self_consumption with
-			// target=0. Operator sees PlanStale=true.
+			effectiveMode = ModeSelfConsumption
 			state.SetGridTarget(0)
 			state.PlanStale = true
 		}
-	}
-
-	// effectiveMode collapses planner modes into self_consumption for
-	// the rest of this function. Real state.Mode is untouched.
-	effectiveMode := state.Mode
-	if effectiveMode.IsPlannerMode() {
-		effectiveMode = ModeSelfConsumption
 	}
 
 	// ---- Idle + Charge short-circuits ----
@@ -202,6 +209,9 @@ func ComputeDispatch(
 	// silently zero out a user-set manual value.
 	var evSum float64
 	for _, r := range store.ReadingsByType(telemetry.DerEV) {
+		if h := store.DriverHealth(r.Driver); h == nil || !h.IsOnline() {
+			continue
+		}
 		evSum += r.SmoothedW
 	}
 	if evSum > 0 {
@@ -294,17 +304,54 @@ func ComputeDispatch(
 	}
 
 	// ---- Slew rate limit per driver ----
+	//
+	// Slew FROM the battery's actual measured output (SmoothedW), not
+	// from the previous command. When the battery can't meet a command
+	// (e.g. SoC at min and commanded to discharge, SoC at max and
+	// commanded to charge, or driver offline), the command stays pinned
+	// far from reality. Using the stored command as the slew anchor then
+	// forces `|target - stale_command| / slew_rate` cycles of ramping
+	// before the direction reverses — a 5 kW stale command with a 500
+	// W/cycle slew at 5 s interval means 50 s of wasted export before
+	// the surplus-absorb starts.
+	//
+	// Using actual-smoothed-W is the truth about where the battery is,
+	// and lets the dispatch pivot immediately when the setpoint reverses.
+	// Falls back to the previous command if no reading is available
+	// (driver just started, or stale telemetry).
 	for i := range raw {
-		if prev, ok := state.PrevTargets[raw[i].Driver]; ok {
-			delta := raw[i].TargetW - prev
-			if math.Abs(delta) > state.SlewRateW {
-				sign := 1.0
-				if delta < 0 {
-					sign = -1.0
-				}
-				raw[i].TargetW = prev + sign*state.SlewRateW
-				raw[i].Clamped = true
+		anchor, hasAnchor := state.PrevTargets[raw[i].Driver]
+		if r := store.Get(raw[i].Driver, telemetry.DerBattery); r != nil {
+			anchor = r.SmoothedW
+			hasAnchor = true
+		}
+		if !hasAnchor {
+			continue
+		}
+		delta := raw[i].TargetW - anchor
+		if math.Abs(delta) > state.SlewRateW {
+			sign := 1.0
+			if delta < 0 {
+				sign = -1.0
 			}
+			raw[i].TargetW = anchor + sign*state.SlewRateW
+			raw[i].Clamped = true
+		}
+	}
+
+	// ---- Re-clamp after slew ----
+	// The slew anchor is the battery's actual output (SmoothedW). If the
+	// battery was already beyond the ±5 kW per-command cap (e.g. after a
+	// manual restart, external control, or driver returning an out-of-range
+	// reading), the slewed target inherits the overshoot. Re-apply the
+	// hard per-command cap so we never issue a command outside safe bounds.
+	for i := range raw {
+		if raw[i].TargetW > MaxCommandW {
+			raw[i].TargetW = MaxCommandW
+			raw[i].Clamped = true
+		} else if raw[i].TargetW < -MaxCommandW {
+			raw[i].TargetW = -MaxCommandW
+			raw[i].Clamped = true
 		}
 	}
 
@@ -427,13 +474,12 @@ func clampWithSoC(target, soc float64) (float64, bool) {
 		wasClamped = true
 	}
 	// Per-command cap
-	const maxPower = 5000
-	if math.Abs(clamped) > maxPower {
+	if math.Abs(clamped) > MaxCommandW {
 		sign := 1.0
 		if clamped < 0 {
 			sign = -1.0
 		}
-		clamped = sign * maxPower
+		clamped = sign * MaxCommandW
 		wasClamped = true
 	}
 	return clamped, wasClamped

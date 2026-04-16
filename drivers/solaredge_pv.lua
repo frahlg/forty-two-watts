@@ -45,11 +45,12 @@ DRIVER = {
 
 PROTOCOL = "modbus"
 
--- Cached per-device metadata. Scale factors are factory-set constants
--- (SunSpec guarantees they never change during a session), so we read
--- them once and cache.
+-- Per-device identity is read once; SunSpec scale factors however are
+-- DYNAMIC (the spec explicitly says they can change at runtime for
+-- optimal resolution) so they must be read together with the values
+-- they scale — never cached. We do one big batch read of the Model 103
+-- block every poll so values + SFs come from a consistent snapshot.
 local sn_read = false
-local sf_cache = nil
 
 ----------------------------------------------------------------------------
 -- SunSpec helpers
@@ -74,23 +75,21 @@ local function scale(value, sf)
     return value * pow10(sf)
 end
 
-local function read_sf(addr)
-    local ok, regs = pcall(host.modbus_read, addr, 1, "holding")
-    if ok and regs then
-        return host.decode_i16(regs[1])
-    end
-    return 0
+-- Read a contiguous Model 103 block starting at 40069 so every value
+-- and every paired scale factor come from the same Modbus transaction.
+-- Returns the raw register slice, or nil on error.
+local function read_inverter_block()
+    -- 40069..40120 covers the header (id + len) + everything we care
+    -- about: AC V/A/W + SFs, DC V/A/W + SFs, temperatures + SF, state.
+    local ok, regs = pcall(host.modbus_read, 40069, 52, "holding")
+    if not ok or not regs then return nil end
+    return regs
 end
 
-local function load_scale_factors()
-    return {
-        ac_power = read_sf(40084),
-        hz       = read_sf(40086),
-        energy   = read_sf(40095),
-        temp     = read_sf(40106),
-        mppt_a   = read_sf(40123),
-        mppt_v   = read_sf(40124),
-    }
+-- Offset helper: Model 103 data starts at doc offset 40069 → Lua index 1.
+-- reg(40083) -> regs[40083 - 40069 + 1] = regs[15]
+local function reg(regs, addr)
+    return regs[addr - 40069 + 1]
 end
 
 local function decode_ascii(regs, n)
@@ -126,56 +125,49 @@ function driver_poll()
         end
     end
 
-    -- ---- Scale factors (cached one-shot) ----
-    if sf_cache == nil then
-        sf_cache = load_scale_factors()
-    end
-    local sf = sf_cache
-
-    -- ---- Inverter AC ----
-
-    -- AC power: 40083, I16
-    local ok_acw, acw_regs = pcall(host.modbus_read, 40083, 1, "holding")
-    local ac_w = 0
-    if ok_acw and acw_regs then
-        ac_w = scale(host.decode_i16(acw_regs[1]), sf.ac_power)
+    -- ---- Model 103 in one shot: value + SF reads are atomic ----
+    local regs = read_inverter_block()
+    if regs == nil then
+        host.log("warn", "SolarEdge: inverter block read failed")
+        return 5000
     end
 
-    -- Frequency: 40085, U16
-    local ok_hz, hz_regs = pcall(host.modbus_read, 40085, 1, "holding")
-    local hz = 0
-    if ok_hz and hz_regs then
-        hz = scale(hz_regs[1], sf.hz)
-    end
+    -- AC power: 40083 I16, SF at 40084 — read from the same snapshot.
+    local ac_w_sf = host.decode_i16(reg(regs, 40084))
+    local ac_w    = scale(host.decode_i16(reg(regs, 40083)), ac_w_sf)
 
-    -- Lifetime energy: 40093-40094, U32 BE (Wh once scaled)
-    local ok_le, le_regs = pcall(host.modbus_read, 40093, 2, "holding")
-    local lifetime_wh = 0
-    if ok_le and le_regs then
-        lifetime_wh = scale(host.decode_u32_be(le_regs[1], le_regs[2]), sf.energy)
-    end
+    -- Frequency: 40085 U16, SF at 40086
+    local hz_sf = host.decode_i16(reg(regs, 40086))
+    local hz    = scale(reg(regs, 40085), hz_sf)
 
-    -- Heat-sink temperature: 40103, I16
-    local ok_temp, temp_regs = pcall(host.modbus_read, 40103, 1, "holding")
-    local temp_c = 0
-    if ok_temp and temp_regs then
-        temp_c = scale(host.decode_i16(temp_regs[1]), sf.temp)
-    end
+    -- Lifetime Wh: 40093-40094 U32 BE, SF at 40095
+    local energy_sf  = host.decode_i16(reg(regs, 40095))
+    local lifetime_wh = scale(host.decode_u32_be(reg(regs, 40093), reg(regs, 40094)), energy_sf)
 
-    -- MPPT1 A/V: 40140-40141, U16 each
-    local ok_m1, m1_regs = pcall(host.modbus_read, 40140, 2, "holding")
+    -- Heat-sink temperature: 40103 I16, SF at 40106
+    local temp_sf = host.decode_i16(reg(regs, 40106))
+    local temp_c  = scale(host.decode_i16(reg(regs, 40103)), temp_sf)
+
+    -- MPPT readings live outside Model 103 (in SolarEdge's proprietary
+    -- block past the standard inverter model), so they need their own
+    -- reads. These are occasional / optional, so failures are silent.
+    local mppt_a_sf, mppt_v_sf = 0, 0
+    local ok_mppt_sf, mppt_sf_regs = pcall(host.modbus_read, 40123, 2, "holding")
+    if ok_mppt_sf and mppt_sf_regs then
+        mppt_a_sf = host.decode_i16(mppt_sf_regs[1])
+        mppt_v_sf = host.decode_i16(mppt_sf_regs[2])
+    end
     local mppt1_a, mppt1_v = 0, 0
+    local ok_m1, m1_regs = pcall(host.modbus_read, 40140, 2, "holding")
     if ok_m1 and m1_regs then
-        mppt1_a = scale(m1_regs[1], sf.mppt_a)
-        mppt1_v = scale(m1_regs[2], sf.mppt_v)
+        mppt1_a = scale(m1_regs[1], mppt_a_sf)
+        mppt1_v = scale(m1_regs[2], mppt_v_sf)
     end
-
-    -- MPPT2 A/V: 40160-40161, U16 each
-    local ok_m2, m2_regs = pcall(host.modbus_read, 40160, 2, "holding")
     local mppt2_a, mppt2_v = 0, 0
+    local ok_m2, m2_regs = pcall(host.modbus_read, 40160, 2, "holding")
     if ok_m2 and m2_regs then
-        mppt2_a = scale(m2_regs[1], sf.mppt_a)
-        mppt2_v = scale(m2_regs[2], sf.mppt_v)
+        mppt2_a = scale(m2_regs[1], mppt_a_sf)
+        mppt2_v = scale(m2_regs[2], mppt_v_sf)
     end
 
     -- Emit PV (site convention: generation is negative W)

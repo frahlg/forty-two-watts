@@ -124,32 +124,63 @@ func (s *Service) Latest() *Plan {
 // single missed replan doesn't flip us into fallback.
 const MaxPlanAge = 30 * time.Minute
 
-// GridTargetAt returns the plan's grid-power target for the slot
-// containing `now`. Returns (0, false) if the plan is missing, stale,
-// or `now` is outside the plan's horizon.
-//
-// The result is already in site sign convention (+ import, − export).
-func (s *Service) GridTargetAt(now time.Time) (float64, bool) {
+// SlotAt returns the plan's directive for the slot containing `now`.
+// Returns (mode, grid_target_w, ok). Dispatch uses `mode` to select
+// the EMS strategy and `grid_target_w` as the PI setpoint. The plan is
+// a scheduler (decides WHEN); the EMS is the regulator (decides HOW).
+func (s *Service) SlotAt(now time.Time) (string, float64, bool) {
 	if s == nil {
-		return 0, false
+		return "", 0, false
 	}
 	s.mu.RLock()
 	p := s.last
 	s.mu.RUnlock()
 	if p == nil {
-		return 0, false
+		return "", 0, false
 	}
 	if time.Since(time.UnixMilli(p.GeneratedAtMs)) > MaxPlanAge {
-		return 0, false
+		return "", 0, false
 	}
 	nowMs := now.UnixMilli()
 	for _, a := range p.Actions {
 		end := a.SlotStartMs + int64(a.SlotLenMin)*60*1000
 		if nowMs >= a.SlotStartMs && nowMs < end {
-			return a.GridW, true
+			return actionToSlot(a, s.Defaults.Mode)
 		}
 	}
-	return 0, false
+	return "", 0, false
+}
+
+// actionToSlot translates an MPC action into (mode_string, grid_target_w, true).
+// The mapping from planner-mode + action to EMS mode:
+//   - self_consumption → always self_consumption with grid_target=0
+//   - cheap_charge → "charge" when the plan says charge, otherwise self_consumption
+//   - arbitrage → "charge" / "self_consumption" (with negative grid target for export) / self_consumption
+func actionToSlot(a Action, plannerMode Mode) (string, float64, bool) {
+	switch plannerMode {
+	case ModeSelfConsumption:
+		return "self_consumption", 0, true
+	case ModeCheapCharge:
+		if a.BatteryW > 100 {
+			return "charge", 0, true
+		}
+		return "self_consumption", 0, true
+	case ModeArbitrage:
+		if a.BatteryW > 100 {
+			return "charge", 0, true
+		}
+		if a.BatteryW < -100 {
+			// Planned discharge-to-export: use self_consumption with a
+			// negative grid target so the PI actively drives grid negative
+			// (i.e. discharges batteries to export). peak_shaving doesn't
+			// work here because it only reacts to over-peak import and
+			// won't push the grid into export territory.
+			return "self_consumption", a.GridW, true
+		}
+		return "self_consumption", 0, true
+	default:
+		return "self_consumption", 0, true
+	}
 }
 
 // SetMode changes the planner's operating mode and forces an immediate
@@ -357,15 +388,6 @@ func (s *Service) replan(_ context.Context) *Plan {
 	p := s.Defaults
 	p.InitialSoCPct = currentSoCPct(s.Tele, p.InitialSoCPct)
 
-	// Default terminal valuation: mean import price over horizon (so the
-	// planner is SoC-neutral rather than always ending empty).
-	if p.TerminalSoCPrice <= 0 {
-		var sum float64
-		for _, pr := range prices {
-			sum += pr.TotalOreKwh
-		}
-		p.TerminalSoCPrice = sum / float64(len(prices))
-	}
 	// Export pricing is per-slot now: pass bonus/fee into Params so
 	// the DP can compute `slot.SpotOre + bonus − fee` per slot. Leave
 	// p.ExportOrePerKWh at 0 (operators can still set it via Params
@@ -373,7 +395,49 @@ func (s *Service) replan(_ context.Context) *Plan {
 	p.ExportBonusOreKwh = s.ExportBonusOreKwh
 	p.ExportFeeOreKwh = s.ExportFeeOreKwh
 
+	// Default terminal valuation. Mode-dependent because self-consumption
+	// is a constrained game: the battery can only offset local load, not
+	// export, so stored energy is worth what it SAVES on future import
+	// (retail) MINUS what you'd otherwise have earned exporting surplus
+	// PV into the grid. Using the full retail import price as the terminal
+	// value overvalues SoC by the export rate, so the DP always picks
+	// "idle, import to cover load" over "discharge now, refill from PV
+	// tomorrow" (because discharging loses η_rt while the extra retail-
+	// priced terminal credit is never realised).
+	if p.TerminalSoCPrice <= 0 {
+		switch p.Mode {
+		case ModeSelfConsumption, ModeCheapCharge:
+			p.TerminalSoCPrice = selfConsumptionTerminalPrice(prices,
+				s.ExportBonusOreKwh, s.ExportFeeOreKwh)
+		default:
+			// Arbitrage: battery can export, so full import price is the
+			// right upper bound on SoC value.
+			var sum float64
+			for _, pr := range prices {
+				sum += pr.TotalOreKwh
+			}
+			p.TerminalSoCPrice = sum / float64(len(prices))
+		}
+	}
+
+	slog.Info("mpc: optimize params",
+		"mode", p.Mode,
+		"terminal_ore", p.TerminalSoCPrice,
+		"max_charge_w", p.MaxChargeW,
+		"max_discharge_w", p.MaxDischargeW,
+		"capacity_wh", p.CapacityWh,
+		"soc_levels", p.SoCLevels,
+		"action_levels", p.ActionLevels,
+		"soc_start", p.InitialSoCPct,
+	)
 	plan := Optimize(slots, p)
+
+	// Tag each action with the effective EMS mode so the UI can render
+	// a mode-band showing which strategy drives each slot.
+	for i := range plan.Actions {
+		mode, _, _ := actionToSlot(plan.Actions[i], p.Mode)
+		plan.Actions[i].EMSMode = mode
+	}
 
 	s.mu.Lock()
 	s.last = &plan
@@ -516,6 +580,37 @@ const (
 	plannerMaxCollapsedPVW        = 50.0
 	plannerMaxCollapsedPVFrac     = 0.10
 )
+
+// selfConsumptionTerminalPrice is the per-kWh öre value of leftover SoC at
+// the end of the horizon, for the modes where the battery cannot export.
+// Equals the mean retail-import price minus the mean export price
+// (spot + bonus − fee, floored at 0). That's what one kWh in the battery
+// actually earns you: it displaces one kWh of future retail import
+// instead of one kWh that would otherwise have been exported.
+//
+// Floored at 0 so we never credit SoC negatively; if export rates exceed
+// retail (rare, subsidy edge cases) the planner in these modes should just
+// stay SoC-neutral rather than actively drain.
+func selfConsumptionTerminalPrice(prices []state.PricePoint, bonus, fee float64) float64 {
+	if len(prices) == 0 {
+		return 0
+	}
+	var importSum, exportSum float64
+	for _, pr := range prices {
+		importSum += pr.TotalOreKwh
+		exp := pr.SpotOreKwh + bonus - fee
+		if exp < 0 {
+			exp = 0
+		}
+		exportSum += exp
+	}
+	n := float64(len(prices))
+	spread := (importSum - exportSum) / n
+	if spread < 0 {
+		spread = 0
+	}
+	return spread
+}
 
 func selectPlannerPVW(forecastPVW, predictedPVW float64) float64 {
 	switch {

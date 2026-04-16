@@ -70,8 +70,12 @@ PROTOCOL = "modbus"
 -- Cached per-device metadata. Scale factors are factory-set constants
 -- (SunSpec guarantees they never change during a session), so we read
 -- them once and cache. That cuts 11 Modbus round trips per poll.
+-- However, if the first read attempt fails (returns zeros), we retry on
+-- subsequent polls until all SFs are non-zero or we exhaust retries.
 local sn_read = false
 local sf_cache = nil
+local sf_retries = 0
+local SF_MAX_RETRIES = 5
 
 ----------------------------------------------------------------------------
 -- SunSpec helpers
@@ -167,9 +171,23 @@ function driver_poll()
         end
     end
 
-    -- ---- Scale factors (cached one-shot) ----
-    if sf_cache == nil then
+    -- ---- Scale factors (cached with retry on zero reads) ----
+    -- A failed modbus read returns 0 from read_sf(), which would cause raw
+    -- register values to be emitted unscaled — wrong by orders of magnitude.
+    -- Re-read all SFs until none are 0 or we exhaust retries.
+    local need_sf_read = (sf_cache == nil)
+    if not need_sf_read and sf_retries < SF_MAX_RETRIES then
+        for _, v in pairs(sf_cache) do
+            if v == 0 then need_sf_read = true; break end
+        end
+    end
+    if need_sf_read then
         sf_cache = load_scale_factors()
+        sf_retries = sf_retries + 1
+        if sf_retries >= SF_MAX_RETRIES then
+            host.log("warn", "SolarEdge: accepting scale factors after "
+                .. tostring(SF_MAX_RETRIES) .. " retries (some may be 0)")
+        end
     end
     local sf = sf_cache
 

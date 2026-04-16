@@ -125,6 +125,16 @@ main {
   margin-top: 0.25rem;
 }
 
+.card-target {
+  font-size: 0.65rem;
+  color: var(--text-dim);
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+  opacity: 0.7;
+  margin-left: 0.5em;
+}
+
 .val-import {
   color: var(--red);
 }
