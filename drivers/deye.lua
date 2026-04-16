@@ -49,6 +49,12 @@ PROTOCOL = "modbus"
 -- Cached across polls
 local is_hv = false
 local sn_read = false
+local control_initialized = false
+local rated_power_w = 0
+-- Grid → battery charge current cap (reg 128). Sized to the install's main
+-- fuse / grid subscription, not the battery's max charge rate. Overridable
+-- via config.max_grid_charge_a; default 31 A matches Zap's init profile.
+local grid_charge_current_a = 31
 
 ----------------------------------------------------------------------------
 -- Initialization
@@ -57,17 +63,60 @@ local sn_read = false
 function driver_init(config)
     host.set_make("Deye")
 
-    -- Detect HV vs LV up-front so the first poll already uses the right scales.
+    -- Strict HV detect (reg 0 raw value == 6 is the HV variant per Deye
+    -- protocol docs). Earlier ports also accepted the value in the high
+    -- byte, but the Zap reference on real hardware uses strict equality
+    -- and we match that to avoid false HV positives on LV units.
     local ok, mode_regs = pcall(host.modbus_read, 0, 1, "holding")
     if ok and mode_regs then
         local val = mode_regs[1]
-        -- Lua 5.1: no bitwise ops; check high byte via floor div.
-        is_hv = (val == 6) or (math.floor(val / 256) == 6)
-        host.log("info", "Deye: device type 0x" .. string.format("%04x", val)
-            .. " (" .. (is_hv and "HV" or "LV") .. " battery)")
+        is_hv = (val == 6)
+        host.log("info", string.format("Deye: device type 0x%04x (%s battery)",
+            val, is_hv and "HV" or "LV"))
     else
         host.log("warn", "Deye: device type read failed; assuming LV")
     end
+
+    -- Rated power drives curtailment ceiling and the init profile's max-sell
+    -- register. Prefer an operator-supplied value from YAML, else pull the
+    -- device-reported rating from regs 20-21 (U32 LE × 0.1 kW), else default.
+    if config and type(config) == "table" and tonumber(config.rated_w) then
+        rated_power_w = math.floor(tonumber(config.rated_w))
+    else
+        local ok_r, rated_regs = pcall(host.modbus_read, 20, 2, "holding")
+        if ok_r and rated_regs then
+            rated_power_w = math.floor(
+                host.decode_u32_le(rated_regs[1], rated_regs[2]) * 0.1 * 1000)
+        end
+    end
+    if rated_power_w <= 0 then rated_power_w = 5000 end
+
+    if config and type(config) == "table" and tonumber(config.max_grid_charge_a) then
+        local a = math.floor(tonumber(config.max_grid_charge_a))
+        if a < 0 then a = 0 end
+        if a > 185 then a = 185 end  -- register ceiling per Deye V105.3 spec
+        grid_charge_current_a = a
+    end
+
+    local function clamp_soc(v)
+        v = math.floor(v)
+        if v < 0   then v = 0   end
+        if v > 100 then v = 100 end
+        return v
+    end
+    if config and type(config) == "table" then
+        if tonumber(config.soc_max) then soc_max = clamp_soc(tonumber(config.soc_max)) end
+        if tonumber(config.soc_min) then soc_min = clamp_soc(tonumber(config.soc_min)) end
+        if soc_min > soc_max then
+            host.log("warn", string.format(
+                "Deye: soc_min (%d) > soc_max (%d); swapping", soc_min, soc_max))
+            soc_min, soc_max = soc_max, soc_min
+        end
+    end
+
+    host.log("info", string.format(
+        "Deye: driver_init (rated=%dW, max_grid_charge=%dA, soc=%d..%d)",
+        rated_power_w, grid_charge_current_a, soc_min, soc_max))
 end
 
 ----------------------------------------------------------------------------
@@ -315,71 +364,234 @@ end
 -- Battery control
 ----------------------------------------------------------------------------
 --
--- Deye's control model:
---   141 : Energy Management Mode
---           0 = Selling First        (default autonomous self-consumption)
---           1 = Zero Export To Load
+-- Register map (holding, all FC 0x06):
+--   108 : Max battery charge current           (A)
+--   109 : Max battery discharge current        (A)
+--   128 : Charging current                     (A)
+--   129 : Generator charge enable              (0/1)
+--   130 : Utility (grid) charge enable         (0/1)
+--   141 : Energy management mode
+--           0 = Selling First (self-consume)
+--           1 = Load First    (self-consume, battery tops up after load)
 --           2 = Zero Export To CT
 --           3 = External EMS / Forced
---   143 : Grid-charge enable        (0 = off, 1 = on)
---   144 : Forced power limit (W)     — interpretation depends on mode 3
+--   142 : Limit control
+--           0 = enable discharge
+--           1 = no CT clamps
+--           2 = extraposition enable (forced-setpoint gate)
+--   143 : Max sell power                       (W, scaled HV/LV) — also curtail setpoint
+--   145 : PV sell enable                       (0/1)
+--   146 : Advanced peak-shaving enable
+--   148 : TOU timestamp 1
+--   149 : TOU timestamp 2
+--   154 : Battery output (discharge) power     (W, scaled HV/LV)
+--   166 : Battery SoC target                   (percent, 20=min / 100=max)
+--   172 : Charge enable                        (3 = grid + PV)
+--   178 : Control-board special function       (vendor magic 11816)
+--   587 : Battery voltage                      (HV × 0.1 V, LV × 0.01 V)
 --
--- In external-EMS mode (141=3) the inverter treats reg 144 as an absolute
--- power target and reg 143 as the direction hint (1 → pull from grid to
--- charge; 0 → push to load/grid to discharge).  Going back to mode 0
--- restores the inverter's native self-consumption behaviour.
+-- HV models encode 10 W per register unit on 143/154; LV models 1 W.
+-- Charging is expressed as current on reg 108 (A = W / V).
+-- Deye firmware tolerates ≥50 ms between consecutive holding writes.
 
-local REG_EMS_MODE    = 141
-local REG_GRID_CHARGE = 143
-local REG_POWER_LIMIT = 144
+local REG_MAX_CHARGE_A       = 108
+local REG_MAX_DISCHARGE_A    = 109
+local REG_CHARGE_CURRENT     = 128
+local REG_GEN_CHARGE_ENABLE  = 129
+local REG_GRID_CHARGE_ENABLE = 130
+local REG_EMS_MODE           = 141
+local REG_LIMIT_CONTROL      = 142
+local REG_MAX_SELL_POWER     = 143
+local REG_PV_SELL_ENABLE     = 145
+local REG_PEAK_SHAVING       = 146
+local REG_TOU_TS1            = 148
+local REG_TOU_TS2            = 149
+local REG_DISCHARGE_POWER    = 154
+local REG_SOC_TARGET         = 166
+local REG_CHARGE_ENABLE      = 172
+local REG_SPECIAL_FUNC       = 178
+local REG_BATTERY_VOLTAGE    = 587
 
-local MODE_SELLING_FIRST = 0
-local MODE_EXTERNAL_EMS  = 3
+local EMS_LOAD_FIRST  = 1  -- native self-consumption, battery tops up load
+local EMS_EXTERNAL    = 3  -- forced setpoints via reg 108/154
 
--- Return to the inverter's native self-consumption mode.
-local function set_self_consumption()
-    local ok1 = pcall(host.modbus_write, REG_GRID_CHARGE, 0)
-    local ok2 = pcall(host.modbus_write, REG_EMS_MODE,    MODE_SELLING_FIRST)
-    if not (ok1 and ok2) then
-        host.log("warn", "Deye: self-consumption write failed")
+-- SoC targets written to reg 166. Charge commands aim for soc_max,
+-- discharge commands floor at soc_min. Defaults match Zap; overridable
+-- via config.soc_max / config.soc_min.
+local soc_max = 100
+local soc_min = 20
+
+local CHARGE_CURRENT_DEFAULT_A = 31  -- matches Zap init profile
+
+local WRITE_DELAY_MS = 50
+
+local function write_reg(addr, val)
+    local ok, err = pcall(host.modbus_write, addr, val)
+    host.sleep(WRITE_DELAY_MS)
+    if not ok then
+        host.log("warn", string.format("Deye: write %d=%d failed: %s",
+            addr, val, tostring(err)))
         return false
     end
-    host.log("debug", "Deye: self-consumption mode")
     return true
 end
 
--- Set battery to a specific charge/discharge power (site convention).
--- power_w > 0 : charge at power_w W
--- power_w < 0 : discharge at |power_w| W
--- power_w = 0 : revert to self-consumption
-local function set_battery_power(power_w)
-    if power_w == 0 then
-        return set_self_consumption()
+local function write_sequence(writes)
+    for i = 1, #writes do
+        if not write_reg(writes[i][1], writes[i][2]) then return false end
     end
-
-    local watts = math.floor(math.min(math.abs(power_w), 12000))
-    local charge_dir = (power_w > 0) and 1 or 0
-
-    local ok1 = pcall(host.modbus_write, REG_POWER_LIMIT, watts)
-    local ok2 = pcall(host.modbus_write, REG_GRID_CHARGE, charge_dir)
-    local ok3 = pcall(host.modbus_write, REG_EMS_MODE,    MODE_EXTERNAL_EMS)
-
-    if not (ok1 and ok2 and ok3) then
-        host.log("warn", "Deye: battery control write failed")
-        return false
-    end
-
-    host.log("debug", string.format("Deye: %s %dW",
-        charge_dir == 1 and "force charge" or "force discharge", watts))
     return true
+end
+
+local function clamp_u16(v)
+    if v < 0 then return 0 end
+    if v > 65535 then return 65535 end
+    return math.floor(v)
+end
+
+-- HV registers are in 10 W units; LV in 1 W. Returns the register value.
+local function scale_power(watts)
+    local abs_w = math.abs(watts)
+    if is_hv then abs_w = abs_w / 10 end
+    return clamp_u16(abs_w)
+end
+
+local function read_battery_voltage()
+    local ok, regs = pcall(host.modbus_read, REG_BATTERY_VOLTAGE, 1, "holding")
+    if not (ok and regs) then return nil end
+    return regs[1] * (is_hv and 0.1 or 0.01)
+end
+
+-- Full init profile (13 writes). Reapplied whenever we re-enter forced
+-- mode after a cleanup/default-mode revert so the inverter has a known
+-- baseline for charge-current limits, peak-shaving and TOU boundaries.
+local function initialize_control()
+    local max_sell = scale_power(rated_power_w)
+    local ok = write_sequence({
+        { REG_SPECIAL_FUNC,       11816 },
+        { REG_MAX_CHARGE_A,       CHARGE_CURRENT_DEFAULT_A },
+        { REG_MAX_DISCHARGE_A,    CHARGE_CURRENT_DEFAULT_A },
+        { REG_CHARGE_CURRENT,     grid_charge_current_a },
+        { REG_GEN_CHARGE_ENABLE,  1 },
+        { REG_GRID_CHARGE_ENABLE, 1 },
+        { REG_EMS_MODE,           EMS_EXTERNAL },
+        { REG_LIMIT_CONTROL,      2 },
+        { REG_MAX_SELL_POWER,     max_sell },
+        { REG_PV_SELL_ENABLE,     1 },
+        { REG_PEAK_SHAVING,       255 },
+        { REG_TOU_TS1,            0 },
+        { REG_TOU_TS2,            2355 },
+    })
+    control_initialized = ok
+    if ok then
+        host.log("info", string.format(
+            "Deye: control initialized (%s, rated=%dW, max_sell_reg=%d)",
+            is_hv and "HV" or "LV", rated_power_w, max_sell))
+    else
+        host.log("error", "Deye: control init failed")
+    end
+    return ok
+end
+
+local function ensure_initialized()
+    return control_initialized or initialize_control()
+end
+
+-- Site convention: power_w > 0 = charge, < 0 = discharge, 0 = stop both.
+-- Charging path converts watts to amps using the live battery voltage —
+-- the Deye charge register is current, not power.
+local function set_battery_power(power_w)
+    if not ensure_initialized() then return false end
+
+    if power_w > 0 then
+        local voltage = read_battery_voltage()
+        if not voltage or voltage <= 0.1 then
+            host.log("error", string.format(
+                "Deye: charge rejected, invalid battery voltage %s",
+                tostring(voltage)))
+            return false
+        end
+        local current = math.floor(power_w / voltage + 0.5)
+        if current < 1 then current = 1 end
+        current = clamp_u16(current)
+
+        host.log("debug", string.format("Deye: charge %dW @ %.2fV → %dA",
+            power_w, voltage, current))
+
+        return write_sequence({
+            { REG_SOC_TARGET,    soc_max },
+            { REG_MAX_CHARGE_A,  current },
+            { REG_CHARGE_ENABLE, 3 },  -- 3 = grid + PV
+        })
+    end
+
+    if power_w < 0 then
+        local power_val = scale_power(power_w)
+        host.log("debug", string.format("Deye: discharge %dW → reg=%d",
+            math.abs(power_w), power_val))
+        return write_sequence({
+            { REG_DISCHARGE_POWER, power_val },
+            { REG_SOC_TARGET,      soc_min },
+            { REG_LIMIT_CONTROL,   0 },  -- enable discharge
+        })
+    end
+
+    -- Zero setpoint: hold forced mode but drive both directions to 0 so
+    -- the inverter idles without leaving external-EMS control.
+    host.log("debug", "Deye: setpoint 0W (hold)")
+    return write_sequence({
+        { REG_MAX_CHARGE_A,    0 },
+        { REG_DISCHARGE_POWER, 0 },
+    })
+end
+
+local function enable_curtailment(power_w)
+    if not ensure_initialized() then return false end
+    if power_w < 0 then power_w = 0 end
+    local limit = scale_power(power_w)
+    host.log("debug", string.format("Deye: curtail → %dW (reg=%d)",
+        power_w, limit))
+    return write_sequence({
+        { REG_PV_SELL_ENABLE, 1 },
+        { REG_MAX_SELL_POWER, limit },
+    })
+end
+
+local function disable_curtailment()
+    if not ensure_initialized() then return false end
+    local limit = scale_power(rated_power_w)
+    host.log("debug", string.format("Deye: curtail disabled → %dW", rated_power_w))
+    return write_sequence({
+        { REG_PV_SELL_ENABLE, 1 },
+        { REG_MAX_SELL_POWER, limit },
+    })
+end
+
+-- Drop the inverter back to native self-consumption. Mirrors Zap's
+-- applyDefaultSelfConsumptionMode(): Load First + PV sell + TOU on,
+-- grid-charging off, CT-clamp extraposition left enabled.
+local function set_self_consumption()
+    local ok = write_sequence({
+        { REG_LIMIT_CONTROL,      2 },
+        { REG_EMS_MODE,           EMS_LOAD_FIRST },
+        { REG_PV_SELL_ENABLE,     1 },
+        { REG_PEAK_SHAVING,       1 },
+        { REG_GRID_CHARGE_ENABLE, 0 },
+    })
+    if ok then control_initialized = false end
+    return ok
 end
 
 function driver_command(action, power_w, cmd)
     if action == "init" then
-        return true
+        return initialize_control()
     elseif action == "battery" then
-        return set_battery_power(power_w)
-    elseif action == "curtail_disable" or action == "deinit" then
+        return set_battery_power(power_w or 0)
+    elseif action == "curtail" then
+        return enable_curtailment(power_w or 0)
+    elseif action == "curtail_disable" then
+        return disable_curtailment()
+    elseif action == "deinit" then
         return set_self_consumption()
     end
     host.log("debug", "Deye: unsupported action: " .. tostring(action))
@@ -394,8 +606,12 @@ function driver_default_mode()
 end
 
 function driver_cleanup()
-    set_self_consumption()
-    -- Reset cached state so a reload starts from a clean slate.
+    pcall(set_self_consumption)
     is_hv = false
     sn_read = false
+    control_initialized = false
+    rated_power_w = 0
+    grid_charge_current_a = 31
+    soc_max = 100
+    soc_min = 20
 end

@@ -15,6 +15,7 @@
 //	host.log(level, msg)            -- level: "debug"|"info"|"warn"|"error"
 //	host.emit(type, table)          -- type: "meter"|"pv"|"battery"|"ev"
 //	host.millis()                   -- ms since driver start
+//	host.sleep(ms)                  -- block driver goroutine for ms (inter-write pacing)
 //	host.set_poll_interval(ms)
 //	host.set_sn(s)                  -- device serial (metadata)
 //	host.set_make(s)                -- manufacturer name
@@ -233,6 +234,17 @@ func registerHost(L *lua.LState, env *HostEnv) {
 	host.RawSetString("millis", L.NewFunction(func(L *lua.LState) int {
 		L.Push(lua.LNumber(env.millis()))
 		return 1
+	}))
+
+	// host.sleep(ms) — block the driver goroutine for ms milliseconds.
+	// Used for vendor-required inter-write pacing (Solis 100ms, Deye 50ms);
+	// safe because each driver has its own goroutine and VM lock.
+	host.RawSetString("sleep", L.NewFunction(func(L *lua.LState) int {
+		ms := L.CheckInt(1)
+		if ms > 0 {
+			time.Sleep(time.Duration(ms) * time.Millisecond)
+		}
+		return 0
 	}))
 
 	host.RawSetString("set_poll_interval", L.NewFunction(func(L *lua.LState) int {

@@ -36,12 +36,16 @@
 --   33285-33286  Export energy     U32 BE × 0.01 kWh
 --   33004-33019  Inverter SN       ASCII, 2 chars per register (16 regs = 32 chars)
 --
--- Control registers (HOLDING):
---   43049  Storage control mode   0=auto (self-consumption)
---                                 1=forced charge
---                                 2=forced discharge
---   43050  Charge limit (W)
---   43051  Discharge limit (W)
+-- Control registers (HOLDING — Solis Appendix 7 "Storage Control"):
+--   43110  Mode bit-field     0x60 (96) = forced charge/discharge enable (bits 5+6)
+--                             0x21 (33) = self-consumption + time-of-use
+--   43129  Discharge power    U16, 10 W units
+--   43130  Charge limit       U16, W (set at init to rated power)
+--   43131  Discharge limit    U16, W (set at init to rated power)
+--   43135  Mode select        0 = off / 1 = charge / 2 = discharge
+--   43136  Charge power       U16, 10 W units
+--
+-- Solis firmware NACKs back-to-back holding writes; space them ~100 ms.
 
 DRIVER = {
   id           = "solis",
@@ -64,6 +68,8 @@ PROTOCOL = "modbus"
 
 -- Cached state
 local sn_read = false
+local control_initialized = false
+local rated_power_w = 5000  -- default; operator can override via config.rated_w
 
 ----------------------------------------------------------------------------
 -- Initialization
@@ -71,7 +77,10 @@ local sn_read = false
 
 function driver_init(config)
     host.set_make("Ginlong Solis")
-    host.log("info", "Solis: driver_init")
+    if config and type(config) == "table" and tonumber(config.rated_w) then
+        rated_power_w = math.floor(tonumber(config.rated_w))
+    end
+    host.log("info", string.format("Solis: driver_init (rated=%dW)", rated_power_w))
 end
 
 ----------------------------------------------------------------------------
@@ -320,50 +329,111 @@ end
 -- Control
 ----------------------------------------------------------------------------
 
--- Put the inverter back into autonomous self-consumption.
-local function set_self_consumption()
-    host.modbus_write(43049, 0)  -- 0 = auto / self-consumption
-    host.log("debug", "Solis: self-consumption mode")
-    return true
-end
+local REG_MODE_BITS       = 43110
+local REG_DISCHARGE_POWER = 43129
+local REG_CHARGE_LIMIT    = 43130
+local REG_DISCHARGE_LIMIT = 43131
+local REG_MODE            = 43135
+local REG_CHARGE_POWER    = 43136
 
--- Force a charge/discharge power.
--- Site convention: power_w > 0 → charge, power_w < 0 → discharge.
-local function set_battery_power(power_w)
-    if power_w > 0 then
-        local watts = math.floor(power_w)
-        host.modbus_write(43050, watts)  -- charge limit
-        host.modbus_write(43049, 1)      -- forced charge
-        host.log("debug", "Solis: force charge " .. tostring(watts) .. "W")
-    elseif power_w < 0 then
-        local watts = math.floor(math.abs(power_w))
-        host.modbus_write(43051, watts)  -- discharge limit
-        host.modbus_write(43049, 2)      -- forced discharge
-        host.log("debug", "Solis: force discharge " .. tostring(watts) .. "W")
-    else
-        return set_self_consumption()
+local MODE_BITS_FORCED       = 96  -- 0b0110_0000 — bits 5+6: forced charge/discharge
+local MODE_BITS_SELF_CONSUME = 33  -- 0b0010_0001 — self-consumption + TOU
+
+local MODE_OFF       = 0
+local MODE_CHARGE    = 1
+local MODE_DISCHARGE = 2
+
+local WRITE_DELAY_MS = 100
+
+-- Write a single holding register and pace the bus so the next write
+-- doesn't land inside Solis's NACK window.
+local function write_reg(addr, val)
+    local ok, err = pcall(host.modbus_write, addr, val)
+    host.sleep(WRITE_DELAY_MS)
+    if not ok then
+        host.log("warn", string.format("Solis: write %d=%d failed: %s",
+            addr, val, tostring(err)))
+        return false
     end
     return true
 end
 
--- Curtail PV export by throttling charge limit.
--- Matches hugin behaviour: write limit + set forced-charge mode.
-local function set_export_limit(watts)
-    local w = math.floor(math.abs(watts))
-    host.modbus_write(43050, w)
-    host.modbus_write(43049, 1)
-    host.log("debug", "Solis: curtail limit " .. tostring(w) .. "W")
+-- Lazy init: load per-direction power limits (rated power) the first
+-- time we actually need to force the inverter. Cheap to retry after
+-- failure because the flag stays false until all writes succeed.
+local function initialize_control()
+    if not write_reg(REG_CHARGE_LIMIT,    rated_power_w) then return false end
+    if not write_reg(REG_DISCHARGE_LIMIT, rated_power_w) then return false end
+    control_initialized = true
+    host.log("info", string.format("Solis: control initialized (rated=%dW)",
+        rated_power_w))
+    return true
+end
+
+local function clamp_magnitude(power_w)
+    local m = math.abs(power_w)
+    if m > rated_power_w then m = rated_power_w end
+    return m
+end
+
+-- Positive W = charge, negative W = discharge (site convention).
+-- Magnitude is clamped to rated power and encoded in 10 W units for
+-- both the charge and discharge power registers; the mode register
+-- (43135) picks which one the inverter acts on.
+local function set_battery_power(power_w)
+    if not control_initialized and not initialize_control() then
+        host.log("error", "Solis: cannot set power, init failed")
+        return false
+    end
+
+    local mode = MODE_OFF
+    if power_w > 0 then
+        mode = MODE_CHARGE
+    elseif power_w < 0 then
+        mode = MODE_DISCHARGE
+    end
+
+    local magnitude_10w = math.floor(clamp_magnitude(power_w) / 10 + 0.5)
+
+    if not write_reg(REG_MODE_BITS,       MODE_BITS_FORCED) then return false end
+    if not write_reg(REG_DISCHARGE_POWER, magnitude_10w)    then return false end
+    if not write_reg(REG_CHARGE_POWER,    magnitude_10w)    then return false end
+
+    -- For 0 W leave the mode register alone so the inverter stays under
+    -- forced control with both limits at 0, instead of drifting back to
+    -- self-consumption.
+    if mode ~= MODE_OFF then
+        if not write_reg(REG_MODE, mode) then return false end
+    end
+
+    host.log("debug", string.format("Solis: setpoint %dW (mode=%d, mag10W=%d)",
+        power_w, mode, magnitude_10w))
+    return true
+end
+
+-- Return the inverter to its native self-consumption behaviour.
+-- Clears control_initialized so the next forced setpoint re-writes the
+-- per-direction limits.
+local function set_self_consumption()
+    if not write_reg(REG_MODE_BITS, MODE_BITS_SELF_CONSUME) then
+        return false
+    end
+    control_initialized = false
+    host.log("debug", "Solis: self-consumption mode")
     return true
 end
 
 function driver_command(action, power_w, cmd)
     if action == "init" then
-        return true
+        return initialize_control()
     elseif action == "battery" then
         return set_battery_power(power_w or 0)
-    elseif action == "curtail" then
-        return set_export_limit(power_w or 0)
-    elseif action == "curtail_disable" or action == "deinit" then
+    elseif action == "curtail" or action == "curtail_disable" then
+        -- Solar curtailment is not implemented for Solis (no reliable
+        -- export-limit register in Appendix 7); matches Zap reference.
+        host.log("warn", "Solis: curtailment not implemented")
+        return false
+    elseif action == "deinit" then
         return set_self_consumption()
     end
     return false
@@ -379,4 +449,5 @@ function driver_cleanup()
     -- Best-effort: leave the inverter in autonomous mode on shutdown/reload.
     pcall(set_self_consumption)
     sn_read = false
+    control_initialized = false
 end
