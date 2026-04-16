@@ -80,7 +80,10 @@
       <div class="card summary-card" id="card-fuse">
         <div class="card-label">Fuse</div>
         <div class="card-value" id="fuse-use">-- A</div>
+        <!-- Total bar kept for backwards compat / single-phase fallback. -->
         <div class="fuse-bar"><div class="fuse-fill" id="fuse-fill"></div></div>
+        <!-- Per-phase bars, populated dynamically from fuse.phases + phase_amps. -->
+        <div class="fuse-phases" id="fuse-phases"></div>
       </div>
     </section>
 
