@@ -314,38 +314,28 @@
     }
 
     // Fuse gauge — per-phase bars if the server reports phase amperage,
-    // otherwise a single aggregate bar (legacy fallback).
+    // otherwise a single aggregate bar + number (fallback).
     if (fuseUse && fuseFill) {
       var fuseCfg = data.fuse || {};
       var maxAmps = fuseCfg.max_amps || 16;
       var phases  = fuseCfg.phases   || 3;
       var voltage = fuseCfg.voltage  || 230;
 
-      // Headline number: peak of per-phase |I| if we have them, else
-      // derived from total throughput across all phases.
       var phaseI = Array.isArray(data.phase_amps) ? data.phase_amps : [];
-      var peakA;
-      if (phaseI.length > 0) {
-        peakA = 0;
-        for (var i = 0; i < phaseI.length; i++) {
-          var a = Math.abs(phaseI[i]);
-          if (a > peakA) peakA = a;
-        }
-      } else {
+      var hasPhaseData = phaseI.length > 0;
+
+      // Show fallback (single bar + headline amps) only when no per-phase data.
+      var fallbackBar = $("fuse-bar-fallback");
+      if (fallbackBar) fallbackBar.style.display = hasPhaseData ? "none" : "block";
+      fuseUse.style.display = hasPhaseData ? "none" : "block";
+
+      if (!hasPhaseData) {
         var totalDischarge = 0;
         if (data.bat_w < 0) totalDischarge = Math.abs(data.bat_w);
         var pvGen = Math.abs(data.pv_w);
         var throughput = Math.max(Math.abs(data.grid_w), pvGen + totalDischarge);
-        peakA = throughput / voltage / phases;
-      }
-      fuseUse.textContent = peakA.toFixed(1) + " A";
-
-      // Legacy single bar: hide it when per-phase bars are active so the
-      // card isn't visually cluttered. Fall back to showing it when no
-      // phase data is available (e.g. site meter doesn't emit L1/L2/L3).
-      var hasPhaseData = phaseI.length > 0;
-      fuseFill.parentElement.style.display = hasPhaseData ? "none" : "block";
-      if (!hasPhaseData) {
+        var peakA = throughput / voltage / phases;
+        fuseUse.textContent = peakA.toFixed(1) + " A";
         var totalFusePct = Math.min(100, (peakA / maxAmps) * 100);
         fuseFill.style.width = totalFusePct + "%";
         fuseFill.className = "fuse-fill" + (totalFusePct > 85 ? " crit" : totalFusePct > 65 ? " warn" : "");
