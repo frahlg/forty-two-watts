@@ -615,6 +615,9 @@ func selfConsumptionTerminalPrice(prices []state.PricePoint, bonus, fee float64)
 func selectPlannerPVW(forecastPVW, predictedPVW float64) float64 {
 	switch {
 	case math.IsNaN(predictedPVW), math.IsInf(predictedPVW, 0), predictedPVW < 0:
+		if math.IsNaN(forecastPVW) || math.IsInf(forecastPVW, 0) {
+			return 0
+		}
 		return forecastPVW
 	case forecastPVW < plannerMinForecastPVFallbackW:
 		return predictedPVW

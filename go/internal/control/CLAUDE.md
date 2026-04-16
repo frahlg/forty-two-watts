@@ -2,7 +2,7 @@
 
 ## What it does
 
-One cycle of site closed-loop control: reads the site meter from `telemetry`, runs an outer PI toward `GridTargetW`, splits the correction across online batteries by the active mode's distribution rule, applies per-driver slew + SoC + per-command clamps, then a global fuse guard. Returns a slice of `DispatchTarget` — the caller (main.go) is responsible for actually sending them to drivers. Entirely site-signed (see `../../../docs/site-convention.md`); no sign flips happen here.
+One cycle of site closed-loop control: reads the site meter from `telemetry`, runs an outer PI toward `GridTargetW`, splits the correction across online batteries by the active mode's distribution rule, applies per-driver slew + SoC + per-command clamps, then a global fuse guard. Returns a slice of `DispatchTarget` — the caller (main.go) is responsible for actually sending them to drivers. Entirely site-signed (see `../../../docs/site-convention.md`); no sign flips happen here. A holdoff timer (`MinDispatchIntervalS`, default 5 s) suppresses dispatch when the previous cycle ran less than N seconds ago, preventing command-spam when the control interval is shorter than the battery's response time.
 
 ## Key types
 
@@ -12,7 +12,8 @@ One cycle of site closed-loop control: reads the site meter from `telemetry`, ru
 | `Mode` | String enum: `idle`, `self_consumption`, `peak_shaving`, `charge`, `priority`, `weighted`, `planner_{self,cheap,arbitrage}`. |
 | `DispatchTarget` | `{Driver, TargetW, Clamped}` — one command per battery. |
 | `PIController` / `PIOutput` | 2-term controller with anti-windup on the integral. |
-| `PlanTargetFunc` | Callback into `mpc` — injected by main, returns `(grid_target_w, ok)` for the current slot. |
+| `PlanTargetFunc` | Callback into `mpc` — injected by main, returns `(mode_string, grid_target_w, ok)` for the current slot. The `mode_string` maps to a `Mode` constant so the plan can switch the EMS strategy per slot. |
+| `PlanStale` | `bool` field on `State` — set `true` when a planner-mode cycle falls back to self_consumption because the plan was missing or stale (>30 min). Surfaced via the API for the UI. |
 | `batteryInfo` | Internal per-cycle snapshot of a battery (capacity, current W, SoC, online). |
 
 ## Public API surface

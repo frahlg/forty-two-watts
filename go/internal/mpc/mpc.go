@@ -154,7 +154,7 @@ type Plan struct {
 // ~82k evaluations — well under 10ms.
 func Optimize(slots []Slot, p Params) Plan {
 	now := time.Now().UnixMilli()
-	if len(slots) == 0 {
+	if len(slots) == 0 || p.CapacityWh <= 0 {
 		return Plan{GeneratedAtMs: now, Mode: p.Mode}
 	}
 	if p.Mode == "" {
@@ -261,7 +261,7 @@ func Optimize(slots []Slot, p Params) Plan {
 					continue
 				}
 
-				// SoC transition with efficiency.
+				// SoC transition with efficiency (guarded at function entry).
 				var dSoCWh float64
 				if actW >= 0 {
 					dSoCWh = +actW * dtH * p.ChargeEfficiency
@@ -333,6 +333,7 @@ func Optimize(slots []Slot, p Params) Plan {
 		dtH := float64(slot.LenMin) / 60.0
 		j := Policy[t][s]
 		actW := actionAt(j)
+		// SoC transition with efficiency (guarded at function entry).
 		var dSoCWh float64
 		if actW >= 0 {
 			dSoCWh = +actW * dtH * p.ChargeEfficiency

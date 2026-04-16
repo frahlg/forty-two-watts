@@ -76,7 +76,9 @@ func main() {
 		os.Exit(1)
 	}
 	defer st.Close()
-	_ = st.RecordEvent("startup")
+	if err := st.RecordEvent("startup"); err != nil {
+		slog.Warn("failed to persist startup event", "err", err)
+	}
 
 	// ---- Telemetry store ----
 	tel := telemetry.NewStore()
@@ -476,7 +478,9 @@ func main() {
 		select {
 		case <-sigc:
 			slog.Info("shutting down")
-			_ = st.RecordEvent("shutdown")
+			if err := st.RecordEvent("shutdown"); err != nil {
+				slog.Warn("failed to persist shutdown event", "err", err)
+			}
 			return
 		case <-ticker.C:
 			nowMs := time.Now().UnixMilli()
@@ -591,7 +595,9 @@ func main() {
 				modelsMu.Lock()
 				for name, m := range models {
 					if data, err := json.Marshal(m); err == nil {
-						_ = st.SaveBatteryModel(name, string(data))
+						if err := st.SaveBatteryModel(name, string(data)); err != nil {
+						slog.Warn("failed to persist battery model", "battery", name, "err", err)
+					}
 					}
 				}
 				modelsMu.Unlock()
@@ -792,8 +798,10 @@ func recordHistory(st *state.Store, tel *telemetry.Store, ctrl *control.State, n
 		"drivers": perDriver,
 		"targets": targets,
 	})
-	_ = st.RecordHistory(state.HistoryPoint{
+	if err := st.RecordHistory(state.HistoryPoint{
 		TsMs: nowMs, GridW: gridW, PVW: pvW, BatW: batW, LoadW: loadW, BatSoC: avgSoC,
 		JSON: string(jsonBlob),
-	})
+	}); err != nil {
+		slog.Warn("failed to persist history point", "err", err)
+	}
 }
