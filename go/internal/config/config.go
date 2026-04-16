@@ -97,6 +97,11 @@ type Driver struct {
 	// Unset capabilities are explicitly denied.
 	Capabilities Capabilities `yaml:"capabilities,omitempty" json:"capabilities,omitempty"`
 
+	// Driver-specific config: arbitrary key/value map passed to
+	// driver_init(config) in Lua. Used for credentials, device addresses,
+	// thresholds, etc. that don't fit the generic capabilities model.
+	Config map[string]any `yaml:"config,omitempty" json:"config,omitempty"`
+
 	// Legacy protocol fields (equivalent to capabilities, still accepted
 	// for backwards compatibility with master-branch configs).
 	MQTT   *MQTTConfig   `yaml:"mqtt,omitempty" json:"mqtt,omitempty"`
@@ -336,8 +341,8 @@ func (c *Config) Validate() error {
 		if d.WASM == "" && d.Lua == "" {
 			return fmt.Errorf("driver %q: must specify `wasm` or `lua`", d.Name)
 		}
-		if d.EffectiveMQTT() == nil && d.EffectiveModbus() == nil {
-			return fmt.Errorf("driver %q: must have mqtt or modbus capability", d.Name)
+		if d.EffectiveMQTT() == nil && d.EffectiveModbus() == nil && d.Capabilities.HTTP == nil {
+			return fmt.Errorf("driver %q: must have mqtt, modbus, or http capability", d.Name)
 		}
 	}
 	if siteMeters == 0 {
