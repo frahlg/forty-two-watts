@@ -696,46 +696,17 @@
       }
     });
 
-    // ---- Forward-looking forecast (smooth spline PV + load from the plan) ----
-    // Anchor at the actual measurement, then Catmull-Rom spline through
-    // upcoming slot midpoints. The forecast zone extends 15 min into the
-    // future on the 5m view so the transition from actual→predicted is
-    // smooth and realistic (no cliff from 400W to 0W at the boundary).
+    // ---- Forward-looking forecast (dashed lines from plan) ----
+    // Simple linear segments through slot midpoints. Anchored at the
+    // current actual value so the transition is continuous.
     if (chartView === "power" && chartPlan && chartPlan.actions) {
       var lastIdx = chartHistory.timestamps.length - 1;
       var lastActualPV = lastIdx >= 0 ? chartHistory.pv[lastIdx] : null;
       var lastActualLoad = lastIdx >= 0 ? chartHistory.load[lastIdx] : null;
 
-      // Catmull-Rom spline through control points (tension 0.5)
-      var drawSpline = function (pts, ctx) {
-        if (pts.length < 2) return;
-        ctx.beginPath();
-        ctx.moveTo(pts[0].x, pts[0].y);
-        if (pts.length === 2) {
-          ctx.lineTo(pts[1].x, pts[1].y);
-        } else {
-          for (var i = 0; i < pts.length - 1; i++) {
-            var p0 = pts[Math.max(i - 1, 0)];
-            var p1 = pts[i];
-            var p2 = pts[i + 1];
-            var p3 = pts[Math.min(i + 2, pts.length - 1)];
-            // Control points at 1/3 and 2/3
-            var cp1x = p1.x + (p2.x - p0.x) / 6;
-            var cp1y = p1.y + (p2.y - p0.y) / 6;
-            var cp2x = p2.x - (p3.x - p1.x) / 6;
-            var cp2y = p2.y - (p3.y - p1.y) / 6;
-            ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, p2.x, p2.y);
-          }
-        }
-        ctx.stroke();
-      };
-
       var drawForecast = function (field, color, lastActual) {
         var pts = [];
-        // Anchor: add a phantom point 2 min BEFORE now at actual value
-        // so the spline leaves the anchor smoothly (not as a corner).
         if (lastActual != null) {
-          pts.push({ x: tsToX(now - 120000), y: valToY(lastActual) });
           pts.push({ x: tsToX(now), y: valToY(lastActual) });
         }
         for (var i = 0; i < chartPlan.actions.length; i++) {
@@ -750,9 +721,11 @@
         if (pts.length < 2) return;
         ctx.strokeStyle = color;
         ctx.lineWidth = 2;
-        ctx.lineCap = "round";
-        ctx.setLineDash([4, 6]);
-        drawSpline(pts, ctx);
+        ctx.setLineDash([6, 4]);
+        ctx.beginPath();
+        ctx.moveTo(pts[0].x, pts[0].y);
+        for (var j = 1; j < pts.length; j++) ctx.lineTo(pts[j].x, pts[j].y);
+        ctx.stroke();
         ctx.setLineDash([]);
       };
       if (!legendHidden.pv_fc)   drawForecast("pv_w",   "#86efac", lastActualPV);
