@@ -80,6 +80,8 @@
       var path = input.dataset.path;
       var val = input.type === "number" ? parseFloat(input.value) : input.value;
       if (input.type === "number" && isNaN(val)) val = 0;
+      // Don't overwrite a saved password with empty string when user hasn't typed anything
+      if (input.type === "password" && val === "" && getByPath(currentConfig, path, "")) return;
       setByPath(currentConfig, path, val);
     });
   }
@@ -404,6 +406,72 @@
           refresh();
           window._haStatusTimer && clearInterval(window._haStatusTimer);
           window._haStatusTimer = setInterval(refresh, 5000);
+        }, 0);
+        break;
+
+      case "ev":
+        if (!currentConfig.ev_charger) currentConfig.ev_charger = {};
+        var evHasPassword = !!getByPath(currentConfig, "ev_charger.password", "");
+        html = '<div id="ev-status-indicator" class="ha-status-indicator">checking…</div>' +
+          '<fieldset><legend>EV Charger</legend>' +
+          selectField("Provider", "ev_charger.provider", ["easee"], "easee",
+            "Cloud service provider for the EV charger. Currently only Easee is supported.") +
+          field("Email", "ev_charger.email", "text", "",
+            "Account email for the charger cloud service.") +
+          '<label>Password ' + help("Account password for the charger cloud service.") + '</label>' +
+          '<input type="password" data-path="ev_charger.password" value="" placeholder="' + (evHasPassword ? '••••••••' : '') + '">' +
+          field("Charger serial", "ev_charger.serial", "text", "",
+            "Serial number of the charger. Leave empty to auto-detect the first charger on the account.") +
+          '</fieldset>' +
+          '<p style="color:var(--text-dim);font-size:0.8rem;margin-top:8px">' +
+          'Credentials are used to authenticate with the Easee Cloud API. ' +
+          'The charger serial is optional — if left empty the driver will use the first charger found on your account.' +
+          '</p>';
+        setTimeout(function () {
+          var pwInput = bodyEl.querySelector('[data-path="ev_charger.password"]');
+          if (pwInput) {
+            pwInput.addEventListener("focus", function () {
+              pwInput.placeholder = "";
+            });
+            pwInput.addEventListener("blur", function () {
+              if (!pwInput.value && evHasPassword) {
+                pwInput.placeholder = "••••••••";
+              }
+            });
+          }
+
+          var el = document.getElementById("ev-status-indicator");
+          if (!el) return;
+          function refresh() {
+            fetch("/api/status").then(function(r){return r.json();}).then(function(d) {
+              var drivers = d.drivers || [];
+              var easee = null;
+              for (var i = 0; i < drivers.length; i++) {
+                if ((drivers[i].name || "").toLowerCase().indexOf("easee") >= 0) {
+                  easee = drivers[i];
+                  break;
+                }
+              }
+              if (!easee) {
+                el.className = "ha-status-indicator ha-off";
+                el.textContent = "○  no Easee driver configured";
+                return;
+              }
+              if (easee.status === "ok" || easee.status === "online") {
+                el.className = "ha-status-indicator ha-ok";
+                el.textContent = "● charger connected  ·  " + (easee.device_id || easee.name);
+              } else {
+                el.className = "ha-status-indicator ha-warn";
+                el.textContent = "⚠  charger " + (easee.status || "unknown") + "  —  check credentials";
+              }
+            }).catch(function(){
+              el.className = "ha-status-indicator ha-warn";
+              el.textContent = "? status endpoint unreachable";
+            });
+          }
+          refresh();
+          window._evStatusTimer && clearInterval(window._evStatusTimer);
+          window._evStatusTimer = setInterval(refresh, 5000);
         }, 0);
         break;
     }
