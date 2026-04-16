@@ -153,6 +153,10 @@ func main() {
 	reg.ARPLookup = arp.Lookup
 	// Spawn initial drivers
 	for _, d := range cfg.Drivers {
+		if d.Disabled {
+			slog.Info("driver skipped (disabled)", "name", d.Name)
+			continue
+		}
 		// Resolve relative WASM paths against config dir
 		if d.WASM != "" && !filepath.IsAbs(d.WASM) {
 			d.WASM = filepath.Join(filepath.Dir(*configPath), d.WASM)
@@ -394,6 +398,7 @@ func main() {
 		PVModel:    pvSvc,
 		LoadModel:  loadSvc,
 		HA:         haBridge,
+		Registry:   reg,
 		Version:    Version,
 	}
 	srv := api.New(deps)

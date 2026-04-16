@@ -1042,6 +1042,110 @@
     }
   }
 
+  // Easee chargerOpMode → human label
+  function evOpModeLabel(m) {
+    switch (m) {
+      case 1: return "disconnected";
+      case 2: return "awaiting start";
+      case 3: return "charging";
+      case 4: return "completed";
+      case 5: return "error";
+      case 6: return "ready";
+      default: return "unknown";
+    }
+  }
+
+  // Easee reasonForNoCurrent → human label. 0 = no limit (charging ok).
+  // Source: developer.easee.com/docs/enumerations (ReasonForNoCurrent 96).
+  // Returns null for "no reason / charging is fine" so the UI can skip the row.
+  function evReasonLabel(r) {
+    switch (r) {
+      case 0:   return null; // charger OK
+      // 1–6: load balancing / queue
+      case 1:   return "max circuit current too low";
+      case 2:   return "dynamic circuit current too low";
+      case 3:   return "offline fallback circuit current too low";
+      case 4:   return "circuit fuse too low";
+      case 5:   return "waiting in queue";
+      case 6:   return "waiting (other cars fully charged)";
+      // 7–11: grid / phase / equalizer
+      case 7:   return "illegal grid type";
+      case 8:   return "no current request from primary";
+      case 9:   return "max dynamic charger current too low";
+      case 10:  return "phase imbalance";
+      case 11:  return "equalizer communication lost";
+      // 25–30: equalizer / fuse limits
+      case 25:  return "equalizer dynamic limit too low";
+      case 26:  return "equalizer static limit too low";
+      case 27:  return "offline fallback equalizer too low";
+      case 28:  return "fuse limit reached";
+      case 29:  return "current limited by equalizer";
+      case 30:  return "current limited by offline equalizer";
+      // 50–57: secondary unit / charger state
+      case 50:  return "secondary unit not requesting current";
+      case 51:  return "max charger current too low";
+      case 52:  return "max dynamic charger current too low";
+      case 53:  return "charger disabled";
+      case 54:  return "pending scheduled charging";
+      case 55:  return "pending authorization";
+      case 56:  return "charger in error state";
+      case 57:  return "erratic EV";
+      // 75–81: cable / schedule / car
+      case 75:  return "limited by cable rating";
+      case 76:  return "limited by schedule";
+      case 77:  return "limited by charger current";
+      case 78:  return "limited by dynamic charger current";
+      case 79:  return "car not drawing current";
+      case 80:  return "current ramping";
+      case 81:  return "limited by car";
+      case 100: return "undefined error";
+      default:  return "reason " + r;
+    }
+  }
+
+  function driverLifecycleCall(name, action) {
+    return fetch("/api/drivers/" + encodeURIComponent(name) + "/" + action, { method: "POST" })
+      .then(function (res) {
+        if (!res.ok) return res.text().then(function (t) { throw new Error(t || ("HTTP " + res.status)); });
+        return res.json();
+      });
+  }
+
+  function renderDriverActions(name, d) {
+    // Buttons per driver: Restart (if running), Disable (if running),
+    // Enable (if disabled). Small, unobtrusive; rely on the existing
+    // .btn-send style from index.html.
+    var isDisabled = d.disabled === true || d.status === "disabled";
+    var actions = '<div class="driver-actions" style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap">';
+    if (isDisabled) {
+      actions += '<button class="btn-send" data-drv-action="enable" data-drv="' + escHtml(name) + '">Enable</button>';
+    } else {
+      actions += '<button class="btn-send" data-drv-action="restart" data-drv="' + escHtml(name) + '">Restart</button>';
+      actions += '<button class="btn-send" data-drv-action="disable" data-drv="' + escHtml(name) + '" style="opacity:0.75">Disable</button>';
+    }
+    actions += "</div>";
+    return actions;
+  }
+
+  // Event delegation — one listener for all driver-action buttons. Saves
+  // re-binding on every re-render.
+  if (driversGrid) {
+    driversGrid.addEventListener("click", function (ev) {
+      var btn = ev.target.closest("[data-drv-action]");
+      if (!btn) return;
+      var name = btn.getAttribute("data-drv");
+      var action = btn.getAttribute("data-drv-action");
+      if (!name || !action) return;
+      if (action === "disable" && !window.confirm("Disable driver \"" + name + "\"? It will be stopped and won't auto-start until re-enabled.")) return;
+      btn.disabled = true;
+      btn.textContent = action + "ing…";
+      driverLifecycleCall(name, action)
+        .then(function () { fetchStatus(); })
+        .catch(function (err) { alert("Driver " + action + " failed: " + err.message); })
+        .finally(function () { btn.disabled = false; });
+    });
+  }
+
   function renderDrivers(drivers, dispatchByDriver) {
     driversGrid.innerHTML = "";
     var names = Object.keys(drivers).sort();
@@ -1049,27 +1153,94 @@
       var d = drivers[name];
       var card = document.createElement("div");
       card.className = "driver-card";
+      if (d.disabled === true || d.status === "disabled") card.className += " driver-card-disabled";
+      if (d.not_running === true) card.className += " driver-card-warn";
 
-      var meterW = d.meter_w != null ? d.meter_w : 0;
-      var pvWVal = d.pv_w != null ? d.pv_w : 0;
-      var batWVal = d.bat_w != null ? d.bat_w : 0;
-      var batSocVal = d.bat_soc != null ? d.bat_soc : 0;
       var ticks = d.tick_count != null ? d.tick_count : 0;
       var errors = d.consecutive_errors != null ? d.consecutive_errors : 0;
 
-      // Battery target + tracking deviation. Skip if no dispatch (planner
-      // hasn't run) OR this driver has no battery (target meaningless).
-      var batteryRow =
-        '  <span class="stat-label">Battery</span><span class="stat-value">' + formatW(batWVal) + "</span>";
-      var disp = (dispatchByDriver || {})[name];
-      if (disp && d.bat_w != null) {
-        var dev = batWVal - disp.target_w;
-        var devClass = Math.abs(dev) > 200 ? "stat-warn" : "stat-dim";
-        batteryRow =
-          '  <span class="stat-label">Battery</span><span class="stat-value">' + formatW(batWVal) +
-          '    <span class="stat-target">→ ' + formatW(disp.target_w) + '</span>' +
-          '    <span class="' + devClass + '">Δ ' + formatW(dev) + '</span>' +
-          "</span>";
+      // Detect EV driver by presence of any ev_* field. Render a distinct
+      // card body — PV/battery/meter rows are always 0 for EV chargers.
+      var isEV = (d.ev_w != null || d.ev_connected != null || d.ev_charging != null);
+
+      var body;
+      if (isEV) {
+        var evWVal = d.ev_w != null ? d.ev_w : 0;
+        var opLabel = d.ev_op_mode != null ? evOpModeLabel(d.ev_op_mode)
+                     : (d.ev_charging ? "charging"
+                     : (d.ev_connected ? "connected" : "idle"));
+        var stateClass =
+          (d.ev_charging ? "stat-ok"
+          : (d.ev_connected ? "stat-warn" : "stat-dim"));
+        var sessionKwh = d.ev_session_wh != null ? (d.ev_session_wh / 1000).toFixed(2) + " kWh" : "—";
+        var maxA = d.ev_max_a != null ? d.ev_max_a.toFixed(0) + " A" : "—";
+        var reason = d.ev_reason_no_current != null ? evReasonLabel(d.ev_reason_no_current) : null;
+
+        body =
+          '<div class="driver-stats">' +
+          '  <span class="stat-label">State</span><span class="stat-value ' + stateClass + '">' + escHtml(opLabel) + '</span>' +
+          '  <span class="stat-label">Power</span><span class="stat-value">' + formatW(evWVal) + '</span>' +
+          '  <span class="stat-label">Session</span><span class="stat-value">' + sessionKwh + '</span>' +
+          '  <span class="stat-label">Max current</span><span class="stat-value">' + maxA + '</span>' +
+          (reason
+            ? '  <span class="stat-label">Reason</span><span class="stat-value stat-warn">' + escHtml(reason) + '</span>'
+            : '') +
+          (d.ev_cable_locked === false && d.ev_connected
+            ? '  <span class="stat-label">Cable</span><span class="stat-value stat-warn">unlocked</span>'
+            : '') +
+          (d.ev_is_online === false
+            ? '  <span class="stat-label">Cloud</span><span class="stat-value stat-warn">offline</span>'
+            : '') +
+          '  <span class="stat-label">Ticks</span><span class="stat-value">' + ticks + '</span>' +
+          '  <span class="stat-label">Errors</span><span class="stat-value">' + errors + '</span>' +
+          '</div>';
+      } else {
+        var meterW = d.meter_w != null ? d.meter_w : 0;
+        var pvWVal = d.pv_w != null ? d.pv_w : 0;
+        var batWVal = d.bat_w != null ? d.bat_w : 0;
+        var batSocVal = d.bat_soc != null ? d.bat_soc : 0;
+
+        // Battery target + tracking deviation. Skip if no dispatch (planner
+        // hasn't run) OR this driver has no battery (target meaningless).
+        var batteryRow =
+          '  <span class="stat-label">Battery</span><span class="stat-value">' + formatW(batWVal) + "</span>";
+        var disp = (dispatchByDriver || {})[name];
+        if (disp && d.bat_w != null) {
+          var dev = batWVal - disp.target_w;
+          var devClass = Math.abs(dev) > 200 ? "stat-warn" : "stat-dim";
+          batteryRow =
+            '  <span class="stat-label">Battery</span><span class="stat-value">' + formatW(batWVal) +
+            '    <span class="stat-target">→ ' + formatW(disp.target_w) + '</span>' +
+            '    <span class="' + devClass + '">Δ ' + formatW(dev) + '</span>' +
+            "</span>";
+        }
+
+        body =
+          '<div class="driver-stats">' +
+          '  <span class="stat-label">Meter</span><span class="stat-value">' + formatW(meterW) + "</span>" +
+          '  <span class="stat-label">PV</span><span class="stat-value">' + formatW(pvWVal) + "</span>" +
+          batteryRow +
+          '  <span class="stat-label">SoC</span><span class="stat-value">' + formatSoc(batSocVal) + "</span>" +
+          '  <span class="stat-label">Ticks</span><span class="stat-value">' + ticks + "</span>" +
+          '  <span class="stat-label">Errors</span><span class="stat-value">' + errors + "</span>" +
+          "</div>" +
+          '<div class="driver-soc-bar"><div class="driver-soc-fill" style="width:' + Math.round(batSocVal * 100) + '%"></div></div>';
+      }
+
+      // For disabled drivers the body is minimal — just show the label.
+      if (d.disabled === true || d.status === "disabled") {
+        body =
+          '<div class="driver-stats">' +
+          '  <span class="stat-label">State</span><span class="stat-value stat-dim">disabled</span>' +
+          '</div>';
+      } else if (d.not_running === true || (d.status === "offline" && d.tick_count == null)) {
+        // Configured in yaml but never successfully spawned — most often
+        // a cloud auth failure. Offer Restart to retry with fresh creds.
+        body =
+          '<div class="driver-stats">' +
+          '  <span class="stat-label">State</span><span class="stat-value stat-warn">not running (spawn failed)</span>' +
+          '  <span class="stat-label">Hint</span><span class="stat-value stat-dim">check credentials, then restart</span>' +
+          '</div>';
       }
 
       card.innerHTML =
@@ -1077,19 +1248,12 @@
         '  <span class="driver-name">' + escHtml(name) + "</span>" +
         '  <span class="status-dot ' + statusClass(d.status) + '" title="' + escHtml(d.status || "unknown") + '"></span>' +
         "</div>" +
-        '<div class="driver-stats">' +
-        '  <span class="stat-label">Meter</span><span class="stat-value">' + formatW(meterW) + "</span>" +
-        '  <span class="stat-label">PV</span><span class="stat-value">' + formatW(pvWVal) + "</span>" +
-        batteryRow +
-        '  <span class="stat-label">SoC</span><span class="stat-value">' + formatSoc(batSocVal) + "</span>" +
-        '  <span class="stat-label">Ticks</span><span class="stat-value">' + ticks + "</span>" +
-        '  <span class="stat-label">Errors</span><span class="stat-value">' + errors + "</span>" +
-        "</div>" +
-        '<div class="driver-soc-bar"><div class="driver-soc-fill" style="width:' + Math.round(batSocVal * 100) + '%"></div></div>' +
+        body +
+        renderDriverActions(name, d) +
         // Inline battery model — rendered from models.js's cached payload.
         // Drawing it here in the same pass as the driver card avoids the
         // earlier race where two independent polls fought over the slot.
-        (window.renderInlineBatteryModel ? window.renderInlineBatteryModel(name) : "");
+        (!isEV && !(d.disabled === true || d.status === "disabled") && window.renderInlineBatteryModel ? window.renderInlineBatteryModel(name) : "");
 
       driversGrid.appendChild(card);
     });

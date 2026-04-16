@@ -107,6 +107,14 @@ type Driver struct {
 	Lua                string  `yaml:"lua,omitempty" json:"lua,omitempty"`  // legacy, path to .lua file
 	IsSiteMeter        bool    `yaml:"is_site_meter,omitempty" json:"is_site_meter,omitempty"`
 	BatteryCapacityWh  float64 `yaml:"battery_capacity_wh,omitempty" json:"battery_capacity_wh,omitempty"`
+	// Disabled skips this driver at startup / reload. Set via the UI when
+	// you want to temporarily take a driver out without editing yaml.
+	Disabled bool `yaml:"disabled,omitempty" json:"disabled,omitempty"`
+	// HasPassword is a JSON-only signal to the UI that Config["password"]
+	// holds a non-empty value on disk. Populated by MaskSecrets after the
+	// real password is blanked out so the operator can still tell apart
+	// "never entered" from "saved but masked". Never written to yaml.
+	HasPassword bool `yaml:"-" json:"has_password,omitempty"`
 
 	// Capabilities: the resources this driver is allowed to use.
 	// Unset capabilities are explicitly denied.
@@ -284,7 +292,11 @@ func (c Config) MaskSecrets() Config {
 				for k, v := range drivers[i].Config {
 					cp[k] = v
 				}
-				if _, has := cp["password"]; has {
+				if pw, has := cp["password"]; has {
+					// Signal "stored" to the UI before we blank it out.
+					if s, ok := pw.(string); ok && s != "" {
+						drivers[i].HasPassword = true
+					}
 					cp["password"] = ""
 				}
 				drivers[i].Config = cp

@@ -80,6 +80,10 @@ type Deps struct {
 	// Optional: HA MQTT bridge (nil if disabled).
 	HA *ha.Bridge
 
+	// Driver registry — used by lifecycle endpoints (restart/disable/enable).
+	// Nil disables those endpoints (returns 503).
+	Registry *drivers.Registry
+
 	Version string
 }
 
@@ -119,6 +123,9 @@ func (s *Server) routes() {
 	s.handle("POST /api/ev_charging", s.handleSetEVCharging)
 	s.handle("GET  /api/drivers", s.handleDrivers)
 	s.handle("GET  /api/drivers/catalog", s.handleDriversCatalog)
+	s.handle("POST /api/drivers/{name}/restart", s.handleDriverRestart)
+	s.handle("POST /api/drivers/{name}/disable", s.handleDriverDisable)
+	s.handle("POST /api/drivers/{name}/enable", s.handleDriverEnable)
 	s.handle("GET  /api/ha/status", s.handleHAStatus)
 	s.handle("GET  /api/battery_models", s.handleGetModels)
 	s.handle("POST /api/battery_models/reset", s.handleResetModel)
@@ -284,8 +291,60 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 				d["bat_soc"] = *r.SoC
 			}
 		}
+		if r := s.deps.Tel.Get(name, telemetry.DerEV); r != nil {
+			d["ev_w"] = r.SmoothedW
+			// Surface the structured fields the driver put in Data so the
+			// UI can render a proper EV card (plug state, reason, limits).
+			var ev struct {
+				Connected       *bool    `json:"connected"`
+				Charging        *bool    `json:"charging"`
+				SessionWh       *float64 `json:"session_wh"`
+				OpMode          *int     `json:"op_mode"`
+				ReasonNoCurrent *int     `json:"reason_no_current"`
+				IsOnline        *bool    `json:"is_online"`
+				CableLocked     *bool    `json:"cable_locked"`
+				MaxA            *float64 `json:"max_a"`
+				Phases          *int     `json:"phases"`
+			}
+			if r.Data != nil && json.Unmarshal(r.Data, &ev) == nil {
+				if ev.Connected != nil       { d["ev_connected"] = *ev.Connected }
+				if ev.Charging != nil        { d["ev_charging"] = *ev.Charging }
+				if ev.SessionWh != nil       { d["ev_session_wh"] = *ev.SessionWh }
+				if ev.OpMode != nil          { d["ev_op_mode"] = *ev.OpMode }
+				if ev.ReasonNoCurrent != nil { d["ev_reason_no_current"] = *ev.ReasonNoCurrent }
+				if ev.IsOnline != nil        { d["ev_is_online"] = *ev.IsOnline }
+				if ev.CableLocked != nil     { d["ev_cable_locked"] = *ev.CableLocked }
+				if ev.MaxA != nil            { d["ev_max_a"] = *ev.MaxA }
+				if ev.Phases != nil          { d["ev_phases"] = *ev.Phases }
+			}
+		}
 		drivers[name] = d
 	}
+	// Merge config drivers that aren't in the registry so the UI can
+	// render them with a Restart or Enable button. A driver can be absent
+	// from the registry because (a) it's disabled in yaml, or (b) the
+	// initial Add failed (e.g. cloud auth error). Running drivers already
+	// populated above take precedence.
+	s.deps.CfgMu.RLock()
+	for _, dc := range s.deps.Cfg.Drivers {
+		if _, ok := drivers[dc.Name]; ok {
+			continue
+		}
+		if dc.Disabled {
+			drivers[dc.Name] = map[string]any{
+				"status":   "disabled",
+				"disabled": true,
+			}
+		} else {
+			// Configured but not running — spawn probably failed. Show
+			// as offline so the user sees it and can Restart.
+			drivers[dc.Name] = map[string]any{
+				"status":      "offline",
+				"not_running": true,
+			}
+		}
+	}
+	s.deps.CfgMu.RUnlock()
 
 	// Dispatch targets
 	dispatch := make([]map[string]any, 0, len(lastTargets))
@@ -369,6 +428,16 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"grid_target_w":    ctrl.GridTargetW,
 		"peak_limit_w":     ctrl.PeakLimitW,
 		"ev_charging_w":    ctrl.EVChargingW,
+		// True when an EV charger password is persisted in state.db. The
+		// Settings UI uses this to show a "credentials saved" badge so the
+		// operator can tell apart "never entered" from "saved but masked".
+		"ev_credentials_saved": func() bool {
+			if s.deps.State == nil {
+				return false
+			}
+			pw, ok := s.deps.State.LoadConfig(evPasswordKey)
+			return ok && pw != ""
+		}(),
 		"fuse":             fuseCfg,
 		"phase_amps":       phaseAmps,
 		"drivers":          drivers,
@@ -601,6 +670,104 @@ func (s *Server) handleDriversCatalog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{"path": dir, "entries": entries})
+}
+
+// POST /api/drivers/{name}/restart — stop + re-add the driver so it
+// re-runs driver_init. Useful to force a cloud driver to re-authenticate
+// after you've updated credentials without restarting the whole process.
+func (s *Server) handleDriverRestart(w http.ResponseWriter, r *http.Request) {
+	if s.deps.Registry == nil {
+		writeJSON(w, 503, map[string]string{"error": "registry unavailable"})
+		return
+	}
+	name := r.PathValue("name")
+	if name == "" {
+		writeJSON(w, 400, map[string]string{"error": "missing driver name"})
+		return
+	}
+	// Look up the latest config from the in-memory cfg so the restart
+	// picks up anything the UI just changed (e.g. a new EV password
+	// injected from state.db on config POST).
+	s.deps.CfgMu.RLock()
+	var cfg *config.Driver
+	for i := range s.deps.Cfg.Drivers {
+		if s.deps.Cfg.Drivers[i].Name == name {
+			c := s.deps.Cfg.Drivers[i]
+			cfg = &c
+			break
+		}
+	}
+	s.deps.CfgMu.RUnlock()
+	if cfg == nil {
+		// Fall back to whatever the registry has — still lets you restart
+		// a driver that isn't in cfg.yaml (e.g. injected EV charger).
+		if err := s.deps.Registry.RestartByName(r.Context(), name); err != nil {
+			writeJSON(w, 404, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, 200, map[string]string{"status": "restarted", "source": "registry"})
+		return
+	}
+	if err := s.deps.Registry.Restart(r.Context(), *cfg); err != nil {
+		writeJSON(w, 500, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, 200, map[string]string{"status": "restarted", "source": "config"})
+}
+
+// POST /api/drivers/{name}/disable — set the Disabled flag in the
+// config and persist, stopping the running driver. Survives restarts.
+func (s *Server) handleDriverDisable(w http.ResponseWriter, r *http.Request) {
+	s.setDriverDisabled(w, r, true)
+}
+
+// POST /api/drivers/{name}/enable — clear the Disabled flag and spawn
+// the driver (if it's not already running).
+func (s *Server) handleDriverEnable(w http.ResponseWriter, r *http.Request) {
+	s.setDriverDisabled(w, r, false)
+}
+
+func (s *Server) setDriverDisabled(w http.ResponseWriter, r *http.Request, disabled bool) {
+	if s.deps.Registry == nil {
+		writeJSON(w, 503, map[string]string{"error": "registry unavailable"})
+		return
+	}
+	name := r.PathValue("name")
+	if name == "" {
+		writeJSON(w, 400, map[string]string{"error": "missing driver name"})
+		return
+	}
+	s.deps.CfgMu.Lock()
+	found := false
+	for i := range s.deps.Cfg.Drivers {
+		if s.deps.Cfg.Drivers[i].Name == name {
+			s.deps.Cfg.Drivers[i].Disabled = disabled
+			found = true
+			break
+		}
+	}
+	if !found {
+		s.deps.CfgMu.Unlock()
+		writeJSON(w, 404, map[string]string{"error": "driver not found in config"})
+		return
+	}
+	cfgCopy := *s.deps.Cfg
+	s.deps.CfgMu.Unlock()
+
+	// Persist to disk so the change survives restart.
+	if err := s.deps.SaveConfig(s.deps.ConfigPath, &cfgCopy); err != nil {
+		writeJSON(w, 500, map[string]string{"error": "save failed: " + err.Error()})
+		return
+	}
+	// Apply immediately via Reload — it filters disabled drivers and
+	// stops running ones, or re-adds the newly-enabled one.
+	s.deps.Registry.Reload(r.Context(), cfgCopy.Drivers)
+
+	action := "disabled"
+	if !disabled {
+		action = "enabled"
+	}
+	writeJSON(w, 200, map[string]string{"status": action, "driver": name})
 }
 
 // GET /api/ha/status — is the HA MQTT bridge connected?

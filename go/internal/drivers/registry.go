@@ -281,7 +281,19 @@ func (r *Registry) ShutdownAll() {
 
 // Reload diffs a new driver list against running state and applies add/
 // remove/restart. Drivers with changed wasm path / capabilities are restarted.
+// Drivers marked Disabled are treated as "not in the new list" — running
+// ones get stopped, missing ones are not added.
 func (r *Registry) Reload(ctx context.Context, newDrivers []config.Driver) {
+	// Filter out disabled drivers — they behave like removed from the
+	// registry's perspective but remain in config.yaml for re-enable.
+	active := make([]config.Driver, 0, len(newDrivers))
+	for _, d := range newDrivers {
+		if d.Disabled {
+			continue
+		}
+		active = append(active, d)
+	}
+
 	r.mu.Lock()
 	oldNames := make(map[string]bool, len(r.rec))
 	oldCfgs := make(map[string]config.Driver, len(r.rec))
@@ -291,12 +303,12 @@ func (r *Registry) Reload(ctx context.Context, newDrivers []config.Driver) {
 	}
 	r.mu.Unlock()
 
-	newNames := make(map[string]bool, len(newDrivers))
-	for _, d := range newDrivers { newNames[d.Name] = true }
+	newNames := make(map[string]bool, len(active))
+	for _, d := range active { newNames[d.Name] = true }
 
 	// Remove or restart
 	for n, old := range oldCfgs {
-		newCfg, stillThere := findDriver(newDrivers, n)
+		newCfg, stillThere := findDriver(active, n)
 		if !stillThere {
 			r.Remove(n)
 		} else if !sameDriverConfig(old, newCfg) {
@@ -305,7 +317,7 @@ func (r *Registry) Reload(ctx context.Context, newDrivers []config.Driver) {
 		}
 	}
 	// Add new
-	for _, d := range newDrivers {
+	for _, d := range active {
 		r.mu.Lock()
 		_, exists := r.rec[d.Name]
 		r.mu.Unlock()
@@ -316,6 +328,31 @@ func (r *Registry) Reload(ctx context.Context, newDrivers []config.Driver) {
 	}
 }
 
+// Restart stops a driver (if running) and re-adds it with the provided cfg.
+// If cfg.Disabled is true, this is a no-op after the stop. Used by the API
+// restart endpoint so the driver picks up fresh credentials / re-auths.
+func (r *Registry) Restart(ctx context.Context, cfg config.Driver) error {
+	r.Remove(cfg.Name)
+	if cfg.Disabled {
+		return nil
+	}
+	return r.Add(ctx, cfg)
+}
+
+// Restart a driver by name using whatever cfg it was last started with.
+// Returns an error if the driver isn't running (use Restart with a cfg
+// to spawn from scratch).
+func (r *Registry) RestartByName(ctx context.Context, name string) error {
+	r.mu.Lock()
+	rd, ok := r.rec[name]
+	r.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("driver %q not running", name)
+	}
+	cfg := rd.cfg
+	return r.Restart(ctx, cfg)
+}
+
 func findDriver(list []config.Driver, name string) (config.Driver, bool) {
 	for _, d := range list {
 		if d.Name == name { return d, true }
@@ -324,8 +361,10 @@ func findDriver(list []config.Driver, name string) (config.Driver, bool) {
 }
 
 func sameDriverConfig(a, b config.Driver) bool {
-	if a.WASM != b.WASM || a.IsSiteMeter != b.IsSiteMeter ||
-		a.BatteryCapacityWh != b.BatteryCapacityWh {
+	if a.WASM != b.WASM || a.Lua != b.Lua ||
+		a.IsSiteMeter != b.IsSiteMeter ||
+		a.BatteryCapacityWh != b.BatteryCapacityWh ||
+		a.Disabled != b.Disabled {
 		return false
 	}
 	aMq, bMq := a.EffectiveMQTT(), b.EffectiveMQTT()
@@ -339,5 +378,24 @@ func sameDriverConfig(a, b config.Driver) bool {
 	if aMb != nil && (aMb.Host != bMb.Host || aMb.Port != bMb.Port || aMb.UnitID != bMb.UnitID) {
 		return false
 	}
+	// Compare the free-form Config map. Previously omitted, so a changed
+	// cloud-driver password in drivers[i].config.password was silently
+	// ignored by the hot-reload diff — the driver kept running with the
+	// stale credentials. Deep-equal via JSON is coarse but correct for the
+	// stringly-typed config map we actually use.
+	if !sameConfigMap(a.Config, b.Config) {
+		return false
+	}
 	return true
+}
+
+// sameConfigMap compares two driver Config maps. Nil and empty are
+// treated as equal. Uses JSON marshal so order of keys doesn't matter.
+func sameConfigMap(a, b map[string]any) bool {
+	if len(a) == 0 && len(b) == 0 {
+		return true
+	}
+	ja, _ := json.Marshal(a)
+	jb, _ := json.Marshal(b)
+	return string(ja) == string(jb)
 }

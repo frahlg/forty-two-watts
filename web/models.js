@@ -195,6 +195,25 @@
       } else {
         localStorage.setItem(key, "1");
       }
+      // Re-render this panel in place using cached data so the click is
+      // instant. Previously we waited for fetchModels → /api/battery_models
+      // → next /api/status poll (app.js renderDrivers), which added up to
+      // a 3s lag before the section visibly unfolded.
+      var m = lastModels[name];
+      if (m) {
+        var panel = hdr.closest(".driver-model-panel");
+        if (panel) {
+          // renderInlineModel returns the full panel wrapper; strip it so
+          // we replace panel's inner HTML, preserving the outer element
+          // and any click-state the browser has on it.
+          var html = renderInlineModel(name, m);
+          var tmp = document.createElement("div");
+          tmp.innerHTML = html;
+          var newPanel = tmp.firstChild;
+          if (newPanel) panel.innerHTML = newPanel.innerHTML;
+        }
+      }
+      // Still kick off a background refresh so we see the latest numbers.
       fetchModels();
       return;
     }

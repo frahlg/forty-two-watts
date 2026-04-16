@@ -230,7 +230,7 @@
           var cap = d.capabilities || {};
           var mqtt = cap.mqtt || d.mqtt; // legacy fallback
           var modbus = cap.modbus || d.modbus;
-          var protocol = mqtt ? "mqtt" : (modbus ? "modbus" : "?");
+          var protocol = mqtt ? "mqtt" : (modbus ? "modbus" : (cap.http ? "http" : "?"));
           var driverFile = d.wasm || d.lua || "(none)";
           var fmtKind = d.wasm ? "wasm" : (d.lua ? "lua" : "?");
           html += '<div class="device-item">' +
@@ -277,13 +277,21 @@
           var isCloudDriver = (driverFile || '').indexOf('easee_cloud') >= 0 || (cap.http != null);
           if (isCloudDriver) {
             var cfg = d.config || {};
+            // Server sets has_password=true via MaskSecrets when a password
+            // is on disk — lets us show a "saved" badge even though the
+            // value itself is blanked out of the response.
+            var hasPw = d.has_password === true;
+            var pwBadge = hasPw
+              ? '<span class="creds-badge creds-saved">✓ Saved</span>'
+              : '<span class="creds-badge creds-missing">⚠ Not saved</span>';
             html += '<fieldset><legend>Cloud credentials</legend>' +
               '<div class="field-row"><div>' +
               '<label>Email / phone ' + help('Account email or phone number (with country code, e.g. +46...) for the cloud service.') + '</label>' +
               '<input type="text" data-path="drivers.' + idx + '.config.email" value="' + escHtml(cfg.email || '') + '">' +
               '</div><div>' +
-              '<label>Password</label>' +
-              '<input type="password" data-path="drivers.' + idx + '.config.password" value="' + escHtml(cfg.password || '') + '">' +
+              '<label>Password ' + pwBadge + '</label>' +
+              '<input type="password" data-path="drivers.' + idx + '.config.password" value="" ' +
+                'placeholder="' + (hasPw ? '•••••••• (leave empty to keep)' : 'enter password') + '">' +
               '</div></div>' +
               '<label>Device serial ' + help('Serial number of the charger. Leave empty to auto-detect.') + '</label>' +
               '<input type="text" data-path="drivers.' + idx + '.config.serial" value="' + escHtml(cfg.serial || '') + '">' +
@@ -499,6 +507,12 @@
           }
         }
         var evHasPassword = !!getByPath(currentConfig, "ev_charger.password", "");
+        // Authoritative source for credentials-saved is /api/status; the
+        // cfg may show the placeholder but not the actual state.db entry.
+        // We fill this in once the indicator-refresh fetch completes.
+        var credsBadge = evHasPassword
+          ? '<span id="ev-creds-badge" class="creds-badge creds-saved">✓ Credentials saved</span>'
+          : '<span id="ev-creds-badge" class="creds-badge creds-missing">⚠ No credentials saved</span>';
         html = '<div id="ev-status-indicator" class="ha-status-indicator">checking…</div>' +
           '<fieldset><legend>EV Charger</legend>' +
           selectField("Provider", "ev_charger.provider", ["easee"], "easee",
@@ -507,6 +521,7 @@
             "Account email for the charger cloud service.") +
           '<label>Password ' + help("Account password for the charger cloud service.") + '</label>' +
           '<input type="password" data-path="ev_charger.password" value="" placeholder="' + (evHasPassword ? '••••••••' : '') + '">' +
+          '<div style="margin-top:4px">' + credsBadge + '</div>' +
           field("Charger serial", "ev_charger.serial", "text", "",
             "Serial number of the charger. Leave empty to auto-detect the first charger on the account.") +
           '</fieldset>' +
@@ -531,6 +546,18 @@
           if (!el) return;
           function refresh() {
             fetch("/api/status").then(function(r){return r.json();}).then(function(d) {
+              // Update the credentials-saved badge from the authoritative
+              // server flag (based on state.db, not the masked cfg value).
+              var badge = document.getElementById("ev-creds-badge");
+              if (badge) {
+                if (d.ev_credentials_saved) {
+                  badge.textContent = "✓ Credentials saved";
+                  badge.className = "creds-badge creds-saved";
+                } else {
+                  badge.textContent = "⚠ No credentials saved";
+                  badge.className = "creds-badge creds-missing";
+                }
+              }
               // drivers may be an object keyed by name or an array — normalize.
               var rawDrivers = d.drivers || {};
               var drivers = [];

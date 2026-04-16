@@ -185,10 +185,16 @@ function driver_poll()
     local charging = (op_mode == 3)
 
     host.emit("ev", {
-        w          = power_w,
-        connected  = connected,
-        charging   = charging,
-        session_wh = session_wh,
+        w                 = power_w,
+        connected         = connected,
+        charging          = charging,
+        session_wh        = session_wh,
+        op_mode           = op_mode,                     -- 1=disc,2=awaiting,3=charging,4=completed,5=error,6=ready
+        reason_no_current = state.reasonForNoCurrent,    -- int: 0=ok; why NOT drawing current
+        is_online         = state.isOnline,              -- Easee cloud considers charger online
+        cable_locked      = state.cableLocked,
+        max_a             = state.dynamicChargerCurrent, -- current dynamic limit (A)
+        phases            = 3,                           -- Easee defaults 3-phase
     })
 
     -- Diagnostic metrics
@@ -200,6 +206,12 @@ function driver_poll()
     end
     if state.lifetimeEnergy then
         host.emit_metric("ev_lifetime_kwh", state.lifetimeEnergy)
+    end
+    if state.dynamicChargerCurrent then
+        host.emit_metric("ev_dynamic_current_a", state.dynamicChargerCurrent)
+    end
+    if state.temperature then
+        host.emit_metric("ev_temp_c", state.temperature)
     end
 
     return 5000
