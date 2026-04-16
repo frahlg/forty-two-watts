@@ -121,7 +121,7 @@ func serveStatic(w http.ResponseWriter, r *http.Request, webDir string) {
 	clean := filepath.Clean(filepath.Join(webDir, r.URL.Path))
 	absWeb, _ := filepath.Abs(webDir)
 	absPath, _ := filepath.Abs(clean)
-	if !strings.HasPrefix(absPath, absWeb) {
+	if !strings.HasPrefix(absPath, absWeb+string(filepath.Separator)) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}

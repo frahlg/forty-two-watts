@@ -431,6 +431,14 @@
   // --- Save config ---
 
   window.saveConfig = function () {
+    if (configuredDrivers.length === 0) {
+      var errEl = document.getElementById('save-error');
+      errEl.className = 'error-msg';
+      errEl.textContent = 'At least one device must be configured.';
+      errEl.style.display = 'block';
+      return;
+    }
+
     var btn = document.getElementById('save-btn');
     btn.disabled = true;
     btn.textContent = 'Saving...';

@@ -1057,11 +1057,14 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 	if path == "/" {
 		path = "/index.html"
 	}
+	if path == "/setup" {
+		path = "/setup.html"
+	}
 	// Prevent path traversal
 	clean := filepath.Clean(filepath.Join(s.deps.WebDir, path))
 	absWeb, _ := filepath.Abs(s.deps.WebDir)
 	absPath, _ := filepath.Abs(clean)
-	if !strings.HasPrefix(absPath, absWeb) {
+	if !strings.HasPrefix(absPath, absWeb+string(filepath.Separator)) {
 		writeJSON(w, 403, map[string]string{"error": "forbidden"})
 		return
 	}
