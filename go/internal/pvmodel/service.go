@@ -36,8 +36,9 @@ type Service struct {
 	SampleInterval time.Duration
 	PersistEvery   int64 // samples between SQLite writes
 
-	mu    sync.RWMutex
-	model *Model
+	mu        sync.RWMutex
+	model     *Model
+	persistMu sync.Mutex // serialises SQLite writes so a stale persist can't clobber a Reset
 
 	stop chan struct{}
 	done chan struct{}
@@ -193,6 +194,11 @@ func (s *Service) persist() {
 	if s.Store == nil {
 		return
 	}
+	// Serialise the entire marshal+save so a sample-loop persist that
+	// started before a Reset cannot finish after Reset's persist and
+	// clobber the clean state with stale coefficients.
+	s.persistMu.Lock()
+	defer s.persistMu.Unlock()
 	s.mu.RLock()
 	js, err := json.Marshal(s.model)
 	s.mu.RUnlock()
