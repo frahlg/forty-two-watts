@@ -444,7 +444,20 @@
           if (!el) return;
           function refresh() {
             fetch("/api/status").then(function(r){return r.json();}).then(function(d) {
-              var drivers = d.drivers || [];
+              // drivers may be an object keyed by name or an array — normalize.
+              var rawDrivers = d.drivers || {};
+              var drivers = [];
+              if (Array.isArray(rawDrivers)) {
+                drivers = rawDrivers;
+              } else {
+                Object.keys(rawDrivers).forEach(function(k) {
+                  var entry = rawDrivers[k];
+                  if (typeof entry === "object" && entry !== null) {
+                    if (!entry.name) entry.name = k;
+                    drivers.push(entry);
+                  }
+                });
+              }
               var easee = null;
               for (var i = 0; i < drivers.length; i++) {
                 if ((drivers[i].name || "").toLowerCase().indexOf("easee") >= 0) {

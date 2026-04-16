@@ -55,10 +55,10 @@ top-of-funnel overview.
 
 ## Supported devices
 
-17 Lua drivers covering 15 manufacturers — Ferroamp, Sungrow, Solis,
+19 Lua drivers covering 16 manufacturers — Ferroamp, Sungrow, Solis,
 Huawei, Deye, SMA, Fronius, SolarEdge, Eastron SDM, Pixii, Kostal,
-GoodWe, Growatt, Sofar, Victron. Six drivers participate in EMS
-dispatch control; the rest are read-only telemetry.
+GoodWe, Growatt, Sofar, Victron, Easee. Seven drivers participate in
+EMS dispatch control; the rest are read-only telemetry.
 
 See [`docs/driver-catalog.md`](docs/driver-catalog.md) for the full
 table (protocols, capabilities, control, tested models) and
@@ -126,9 +126,8 @@ Historical migration rationale: [`MIGRATION_PLAN.md`](MIGRATION_PLAN.md)
 
 ## Quick start
 
-Prereqs: Go 1.22+, `make`. Rust + `wasm32-wasip1` only needed if you
-want to build legacy WASM drivers — the default Lua drivers need
-nothing more.
+Prereqs: Go 1.22+, `make`. That's it — the default Lua drivers need
+no additional toolchain.
 
 ```bash
 # Build Go binaries + (if present) WASM drivers, run the full local stack with simulators
@@ -196,9 +195,6 @@ build step.
 ## Deploy to a Raspberry Pi
 
 ```bash
-# One-time (only needed if you ship WASM drivers): wasm32-wasip1 toolchain
-rustup target add wasm32-wasip1
-
 # Build the release tarballs (arm64 + amd64)
 make release
 

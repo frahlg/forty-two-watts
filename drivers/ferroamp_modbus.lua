@@ -225,7 +225,7 @@ function driver_poll()
 
     -- Battery SoC: input 6016, float32, percent → 0-1 fraction
     local ok_soc, soc_regs = pcall(host.modbus_read, 6016, 2, "input")
-    local bat_soc = 0
+    local bat_soc = nil
     if ok_soc and soc_regs then bat_soc = decode_f32_ws_at(soc_regs, 1) / 100 end
 
     -- Battery energy: discharge at 6064, charge at 6068, float32, kWh (8 regs)
@@ -236,12 +236,15 @@ function driver_poll()
         bat_charge_wh    = decode_f32_ws_at(be_regs, 5) * 1000   -- 6068-6069
     end
 
-    host.emit("battery", {
+    -- Omit soc from the emit table when the read failed — emitting 0
+    -- would cause the control loop to think the battery is empty.
+    local bat_data = {
         w            = bat_w,
-        soc          = bat_soc,
         charge_wh    = bat_charge_wh,
         discharge_wh = bat_discharge_wh,
-    })
+    }
+    if bat_soc ~= nil then bat_data.soc = bat_soc end
+    host.emit("battery", bat_data)
 
     return 5000
 end

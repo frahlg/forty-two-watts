@@ -174,7 +174,9 @@ func ComputeDispatch(
 			state.SetGridTarget(gridW)
 			state.PlanStale = false
 		} else {
-			slog.Warn("mpc plan stale — falling back to self_consumption")
+			if !state.PlanStale {
+				slog.Warn("mpc plan stale — falling back to self_consumption")
+			}
 			effectiveMode = ModeSelfConsumption
 			state.SetGridTarget(0)
 			state.PlanStale = true

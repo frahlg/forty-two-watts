@@ -76,18 +76,11 @@ place of the Modbus helpers.
 As soon as the file exists, tell Claude Code to verify it parses:
 
 ```
-Now run `cd go && go test -count=1 -run TestCatalog ./internal/drivers/`
-and fix anything the catalog loader rejects.
-```
-
-Then the Lua lifecycle harness:
-
-```
-Now run `cd go && go test -count=1 -run TestLuaDriver
+Now run `cd go && go test -count=1 -run TestLuaDriverLifecycle
 ./internal/drivers/` and fix any load/runtime errors.
 ```
 
-Both tests are fast (<2 s). They catch the most common mistakes: the
+This test is fast (<2 s). It catches the most common mistakes: the
 DRIVER regex failing, missing lifecycle functions, and syntax errors
 in the Lua source.
 

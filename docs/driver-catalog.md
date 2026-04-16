@@ -6,10 +6,10 @@ in `drivers/` that follows the v2.1 host API (see
 
 ## At a glance
 
-18 drivers covering 15 manufacturers across 2 protocols. Read-only: 12.
-With control: 6.
+19 drivers covering 16 manufacturers across 3 protocols (Modbus TCP,
+MQTT, HTTP/REST). Read-only: 12. With control: 7.
 
-Protocols in use: Modbus TCP, MQTT.
+Protocols in use: Modbus TCP, MQTT, HTTP/REST.
 
 ## Drivers
 
@@ -20,6 +20,7 @@ back to the device; read-only drivers only emit telemetry.
 | Driver | Manufacturer | Protocol | Capabilities | Control | Tested models | File |
 |---|---|---|---|---|---|---|
 | Deye hybrid inverter | Deye | Modbus | battery, meter, pv | yes | SUN-5K-SG03LP1-EU, SUN-8K-SG04LP3-EU, SUN-12K-SG04LP3-EU | `drivers/deye.lua` |
+| Easee Cloud | Easee | HTTP | ev | yes | Home, Charge | `drivers/easee_cloud.lua` |
 | Eastron SDM630 / SDM72D-M | Eastron | Modbus | meter | no | SDM630-Modbus, SDM72D-M | `drivers/sdm630.lua` |
 | Ferroamp EnergyHub (MQTT) | Ferroamp | MQTT | battery, meter, pv | yes | EnergyHub XL, EnergyHub Wall | `drivers/ferroamp.lua` |
 | Ferroamp EnergyHub (Modbus) | Ferroamp | Modbus | battery, meter, pv | yes | EnergyHub XL, EnergyHub Wall | `drivers/ferroamp_modbus.lua` |

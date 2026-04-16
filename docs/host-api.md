@@ -1,12 +1,16 @@
 # Host API Reference
 
-> Complete reference for the `host` capability interface exposed to both
-> **Lua** and **WASM** driver runtimes. For a tutorial-style introduction
-> to writing Lua drivers, see [writing-a-driver.md](writing-a-driver.md).
-> The authoritative Lua-specific source is the top-of-file comment in
+> Complete reference for the `host` capability interface exposed to
+> **Lua** driver runtimes. For a tutorial-style introduction to writing
+> Lua drivers, see [writing-a-driver.md](writing-a-driver.md). The
+> authoritative Lua-specific source is the top-of-file comment in
 > `go/internal/drivers/lua.go`.
+>
+> **Note:** The legacy WASM driver runtime has been removed from the
+> codebase. This document covers the Lua host API only. For historical
+> WASM ABI details, see the git history of `go/internal/drivers/runtime.go`.
 
-The `host` table is available to all Lua drivers (and an equivalent set of host imports is available to legacy WASM drivers under the `"host"` namespace). It provides functions for logging, device communication, data decoding, JSON handling, and telemetry emission. These are the same APIs available on the Sourceful Zap gateway, so drivers are portable between forty-two-watts and the Zap.
+The `host` table is available to all Lua drivers. It provides functions for logging, device communication, data decoding, JSON handling, and telemetry emission. These are the same APIs available on the Sourceful Zap gateway, so drivers are portable between forty-two-watts and the Zap.
 
 ## Core
 

@@ -662,6 +662,9 @@ func lookupCloud(forecasts []state.ForecastPoint, ts int64) float64 {
 
 // lookupPV finds the forecast row whose slot covers ts and returns its PV
 // estimate (W, non-negative). Returns 0 if no forecast or no estimate.
+// Strictly respects slot boundaries: does NOT carry forward beyond the last
+// forecast slot, because doing so would project stale PV into nighttime or
+// far-future slots where the forecast didn't cover.
 func lookupPV(forecasts []state.ForecastPoint, ts int64) float64 {
 	if len(forecasts) == 0 {
 		return 0
@@ -679,17 +682,15 @@ func lookupPV(forecasts []state.ForecastPoint, ts int64) float64 {
 			}
 			return 0
 		}
-		// Fall back: if before first, or between rows, use the preceding row.
+		// Fall back: if between rows, use the preceding row (interpolation
+		// within the forecast range only).
 		if ts < f.SlotTsMs && i > 0 {
 			if prev := forecasts[i-1]; prev.PVWEstimated != nil {
 				return *prev.PVWEstimated
 			}
 		}
 	}
-	// After last row — use last known
-	if last := forecasts[len(forecasts)-1]; last.PVWEstimated != nil {
-		return *last.PVWEstimated
-	}
+	// After last row — return 0 (no forecast coverage).
 	return 0
 }
 
