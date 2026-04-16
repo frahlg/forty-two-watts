@@ -1171,12 +1171,8 @@
     setPeakLimit(Number(peakLimitSlider.value));
   });
 
-  evSlider.addEventListener("input", function () {
-    evValue.textContent = formatW(Number(evSlider.value));
-  });
-  evSend.addEventListener("click", function () {
-    setEvCharging(Number(evSlider.value));
-  });
+  // EV slider removed — ev_charging_w now comes from the Easee driver.
+  // Manual override still available via /api/ev_charging (debug only).
 
   // Click-to-toggle legend items. Each item has data-toggle with a
   // key; clicking toggles visibility of the matching series and
