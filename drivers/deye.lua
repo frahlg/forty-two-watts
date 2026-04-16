@@ -15,6 +15,10 @@ DRIVER = {
   homepage     = "https://www.deyeinverter.com",
   authors      = { "forty-two-watts contributors" },
   tested_models = { "SUN-SG03LP1", "SUN-SG04LP3" },
+  connection_defaults = {
+    port    = 502,
+    unit_id = 1,
+  },
 }
 --
 -- Register conventions (all holding, FC 0x03/0x06):

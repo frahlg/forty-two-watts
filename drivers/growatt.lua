@@ -26,6 +26,10 @@ DRIVER = {
   homepage     = "https://www.growatt.com",
   authors      = { "forty-two-watts contributors" },
   tested_models = { "SPH", "MOD" },
+  connection_defaults = {
+    port    = 502,
+    unit_id = 1,
+  },
 }
 
 PROTOCOL = "modbus"

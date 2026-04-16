@@ -54,6 +54,10 @@ DRIVER = {
   homepage     = "https://www.ginlong.com",
   authors      = { "forty-two-watts contributors" },
   tested_models = { "S6-EH", "S5-GR", "S6-GR" },
+  connection_defaults = {
+    port    = 502,
+    unit_id = 1,
+  },
 }
 
 PROTOCOL = "modbus"

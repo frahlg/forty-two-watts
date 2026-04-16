@@ -273,6 +273,7 @@
           html += '</div>';
         });
         html += '</div>' +
+          '<a href="/setup?step=3" class="btn-add" style="display:block;text-align:center;text-decoration:none">Add new device&hellip;</a>' +
           '<button class="btn-add" id="add-mqtt">+ Add MQTT device</button>' +
           '<button class="btn-add" id="add-modbus">+ Add Modbus device</button>';
         break;

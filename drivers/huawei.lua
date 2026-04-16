@@ -28,6 +28,10 @@ DRIVER = {
   homepage     = "https://solar.huawei.com",
   authors      = { "forty-two-watts contributors" },
   tested_models = { "SUN2000L1", "SUN2000-LUNA2000" },
+  connection_defaults = {
+    port    = 502,
+    unit_id = 1,
+  },
 }
 
 PROTOCOL = "modbus"

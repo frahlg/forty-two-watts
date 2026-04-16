@@ -1,0 +1,24 @@
+# Minimal forty-two-watts config — just enough to start.
+# Run the setup wizard at http://localhost:8080/setup for guided configuration.
+
+site:
+  name: "My Home"
+
+fuse:
+  max_amps: 16
+  phases: 3
+  voltage: 230
+
+drivers:
+  - name: my-inverter
+    lua: drivers/sungrow.lua
+    is_site_meter: true
+    battery_capacity_wh: 9600
+    capabilities:
+      modbus:
+        host: 192.168.1.10
+        port: 502
+        unit_id: 1
+
+api:
+  port: 8080

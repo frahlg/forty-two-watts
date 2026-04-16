@@ -14,6 +14,10 @@ DRIVER = {
   homepage     = "https://www.eastrongroup.com",
   authors      = { "forty-two-watts contributors" },
   tested_models = { "SDM630 Modbus", "SDM72D-M" },
+  connection_defaults = {
+    port    = 502,
+    unit_id = 1,
+  },
 }
 --
 -- Register conventions:

@@ -14,6 +14,10 @@ DRIVER = {
   homepage     = "https://en.sungrowpower.com",
   authors      = { "forty-two-watts contributors" },
   tested_models = { "SH5.0RT", "SH6.0RT", "SH8.0RT", "SH10RT" },
+  connection_defaults = {
+    port    = 502,
+    unit_id = 1,
+  },
 }
 --
 -- Register conventions:

@@ -18,6 +18,10 @@ DRIVER = {
   homepage     = "https://www.solaredge.com",
   authors      = { "forty-two-watts contributors" },
   tested_models = { "HD-Wave", "StorEdge" },
+  connection_defaults = {
+    port    = 502,
+    unit_id = 1,
+  },
 }
 --
 -- SunSpec register map. This SolarEdge gateway serves FC 0x03 (holding)

@@ -19,6 +19,10 @@ DRIVER = {
   homepage     = "https://www.fronius.com",
   authors      = { "forty-two-watts contributors" },
   tested_models = { "Smart Meter 50kA-3", "Smart Meter 63A-3", "Smart Meter TS 65A-3" },
+  connection_defaults = {
+    port    = 502,
+    unit_id = 1,
+  },
 }
 --
 -- Register map (all HOLDING, all SunSpec F32 BE pairs — hi word first):

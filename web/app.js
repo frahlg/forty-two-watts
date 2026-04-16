@@ -1122,6 +1122,8 @@
   }
 
   // ---- API ----
+  var firstLoad = true;
+  var setupBannerShown = false;
   function fetchStatus() {
     fetch("/api/status")
       .then(function (res) {
@@ -1130,16 +1132,56 @@
       })
       .then(function (data) {
         setConnected(true);
+        if (firstLoad) { firstLoad = false; }
+        if (setupBannerShown) { hideSetupBanner(); }
         // Always refresh timestamp on successful fetch
         lastUpdate.textContent = "Last update: " + new Date().toLocaleTimeString();
         // Isolate render errors from connection state / timestamp
         try { render(data); }
         catch (e) { console.error("render error:", e); }
+        // Show a subtle prompt when no drivers are configured
+        try { updateNoDevicesPrompt(data.drivers); }
+        catch (e2) { /* silent */ }
       })
       .catch(function (e) {
         console.warn("status fetch failed:", e);
         setConnected(false);
+        if (firstLoad) { showSetupBanner(); }
       });
+  }
+
+  // ---- Setup banner (bootstrap mode — no config yet) ----
+  function showSetupBanner() {
+    if (setupBannerShown) return;
+    var banner = document.createElement("div");
+    banner.id = "setup-banner";
+    banner.className = "setup-banner";
+    banner.innerHTML = 'No devices configured yet. <a href="/setup">Run the setup wizard &rarr;</a>';
+    var main = document.querySelector("main");
+    if (main) main.parentNode.insertBefore(banner, main);
+    setupBannerShown = true;
+  }
+  function hideSetupBanner() {
+    var el = document.getElementById("setup-banner");
+    if (el) el.remove();
+    setupBannerShown = false;
+  }
+
+  // ---- "Add a device" prompt when drivers object is empty ----
+  function updateNoDevicesPrompt(drivers) {
+    var existing = document.getElementById("no-devices-prompt");
+    var hasDrivers = drivers && typeof drivers === "object" && Object.keys(drivers).length > 0;
+    if (hasDrivers) {
+      if (existing) existing.remove();
+      return;
+    }
+    if (existing) return; // already showing
+    var prompt = document.createElement("div");
+    prompt.id = "no-devices-prompt";
+    prompt.className = "no-devices-prompt";
+    prompt.innerHTML = 'No devices connected. <a href="/setup?step=3">Add a device</a>';
+    var cards = document.querySelector(".summary-cards");
+    if (cards) cards.parentNode.insertBefore(prompt, cards.nextSibling);
   }
 
   function setMode(mode) {

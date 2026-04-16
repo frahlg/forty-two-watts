@@ -29,6 +29,10 @@ DRIVER = {
   homepage     = "https://ferroamp.com",
   authors      = { "forty-two-watts contributors" },
   tested_models = { "EnergyHub XL" },
+  connection_defaults = {
+    port    = 502,
+    unit_id = 1,
+  },
 }
 
 PROTOCOL = "modbus"

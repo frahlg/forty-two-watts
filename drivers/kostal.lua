@@ -15,6 +15,10 @@ DRIVER = {
   homepage     = "https://www.kostal-solar-electric.com",
   authors      = { "forty-two-watts contributors" },
   tested_models = { "Plenticore Plus", "Piko IQ" },
+  connection_defaults = {
+    port    = 502,
+    unit_id = 1,
+  },
 }
 
 PROTOCOL = "modbus"

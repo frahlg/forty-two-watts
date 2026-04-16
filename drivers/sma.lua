@@ -18,6 +18,10 @@ DRIVER = {
   homepage     = "https://www.sma.de",
   authors      = { "forty-two-watts contributors" },
   tested_models = { "Sunny Tripower", "Sunny Boy Storage" },
+  connection_defaults = {
+    port    = 502,
+    unit_id = 1,
+  },
 }
 
 PROTOCOL = "modbus"

@@ -31,6 +31,10 @@ DRIVER = {
   homepage     = "https://www.sofarsolar.com",
   authors      = { "forty-two-watts contributors" },
   tested_models = { "HYD-ES", "HYD-EP" },
+  connection_defaults = {
+    port    = 502,
+    unit_id = 1,
+  },
 }
 
 PROTOCOL = "modbus"

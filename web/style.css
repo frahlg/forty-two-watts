@@ -76,6 +76,42 @@ header h1 {
   color: var(--red);
 }
 
+/* ---- Setup banner (bootstrap / no-config) ---- */
+.setup-banner {
+  background: rgba(245, 158, 11, 0.15);
+  border-bottom: 1px solid rgba(245, 158, 11, 0.4);
+  color: #fbbf24;
+  text-align: center;
+  padding: 10px 16px;
+  font-size: 0.9rem;
+}
+.setup-banner a {
+  color: #f59e0b;
+  font-weight: 600;
+  text-decoration: underline;
+}
+.setup-banner a:hover {
+  color: #fbbf24;
+}
+
+/* ---- "Add a device" prompt ---- */
+.no-devices-prompt {
+  text-align: center;
+  padding: 12px 16px;
+  font-size: 0.85rem;
+  color: var(--text-dim);
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+}
+.no-devices-prompt a {
+  color: var(--accent);
+  text-decoration: underline;
+}
+.no-devices-prompt a:hover {
+  color: #7788ff;
+}
+
 /* ---- Main ---- */
 main {
   max-width: 960px;

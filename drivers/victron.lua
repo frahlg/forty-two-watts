@@ -13,6 +13,10 @@ DRIVER = {
   homepage     = "https://www.victronenergy.com",
   authors      = { "forty-two-watts contributors" },
   tested_models = { "Cerbo GX", "Venus GX" },
+  connection_defaults = {
+    port    = 502,
+    unit_id = 1,
+  },
 }
 --
 -- Register conventions:

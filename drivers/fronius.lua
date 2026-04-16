@@ -20,6 +20,10 @@ DRIVER = {
   homepage     = "https://www.fronius.com",
   authors      = { "forty-two-watts contributors" },
   tested_models = { "Symo GEN24", "Primo GEN24" },
+  connection_defaults = {
+    port    = 502,
+    unit_id = 1,
+  },
 }
 --
 -- Register conventions:

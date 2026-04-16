@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -13,16 +14,17 @@ import (
 // directory. Populated from the DRIVER={…} table each .lua file declares
 // at the top. Missing fields are left empty.
 type CatalogEntry struct {
-	Path         string   `json:"path"`          // relative to config dir
-	Filename     string   `json:"filename"`      // e.g. "ferroamp.lua"
-	ID           string   `json:"id"`
-	Name         string   `json:"name"`
-	Manufacturer string   `json:"manufacturer,omitempty"`
-	Version      string   `json:"version,omitempty"`
-	Protocols    []string `json:"protocols,omitempty"`    // mqtt / modbus / http
-	Capabilities []string `json:"capabilities,omitempty"` // meter / pv / battery
-	Description  string   `json:"description,omitempty"`
-	Homepage     string   `json:"homepage,omitempty"`
+	Path               string         `json:"path"`          // relative to config dir
+	Filename           string         `json:"filename"`      // e.g. "ferroamp.lua"
+	ID                 string         `json:"id"`
+	Name               string         `json:"name"`
+	Manufacturer       string         `json:"manufacturer,omitempty"`
+	Version            string         `json:"version,omitempty"`
+	Protocols          []string       `json:"protocols,omitempty"`            // mqtt / modbus / http
+	Capabilities       []string       `json:"capabilities,omitempty"`         // meter / pv / battery
+	Description        string         `json:"description,omitempty"`
+	Homepage           string         `json:"homepage,omitempty"`
+	ConnectionDefaults map[string]any `json:"connection_defaults,omitempty"`
 }
 
 // LoadCatalog scans dir (and any direct sub-directories) for .lua driver
@@ -89,6 +91,7 @@ func parseCatalogEntry(path string) (CatalogEntry, error) {
 	e.Homepage = pickString(block, "homepage")
 	e.Protocols = pickList(block, "protocols")
 	e.Capabilities = pickList(block, "capabilities")
+	e.ConnectionDefaults = pickKVBlock(block, "connection_defaults")
 	return e, nil
 }
 
@@ -123,6 +126,40 @@ func pickList(block, name string) []string {
 	out := make([]string, 0, len(items))
 	for _, it := range items {
 		out = append(out, it[1])
+	}
+	return out
+}
+
+// kvPairRe matches `key = "string"` or `key = 123` inside a Lua table body.
+var kvPairRe = regexp.MustCompile(`(\w+)\s*=\s*(?:"([^"]*)"|([^\s,]+))`)
+
+// pickKVBlock matches a nested Lua table `name = { key = val, ... }`
+// and returns key-value pairs as a map. Values can be numbers or quoted
+// strings. Returns nil when the block is absent.
+func pickKVBlock(block, name string) map[string]any {
+	re := regexp.MustCompile(`(?s)` + regexp.QuoteMeta(name) + `\s*=\s*\{([^}]*)\}`)
+	m := re.FindStringSubmatch(block)
+	if len(m) < 2 {
+		return nil
+	}
+	pairs := kvPairRe.FindAllStringSubmatch(m[1], -1)
+	if len(pairs) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(pairs))
+	for _, p := range pairs {
+		key := p[1]
+		if p[2] != "" {
+			out[key] = p[2]
+		} else if f, err := strconv.ParseFloat(p[3], 64); err == nil {
+			if f == float64(int64(f)) {
+				out[key] = int64(f)
+			} else {
+				out[key] = f
+			}
+		} else {
+			out[key] = p[3]
+		}
 	}
 	return out
 }

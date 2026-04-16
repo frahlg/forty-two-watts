@@ -12,6 +12,11 @@ DRIVER = {
   description  = "Ferroamp EnergyHub with ESO battery + SSO solar strings (3-phase).",
   homepage     = "https://ferroamp.com",
   authors      = { "forty-two-watts contributors" },
+  connection_defaults = {
+    port     = 1883,
+    username = "extapi",
+    password = "ferroampExtApi",
+  },
 }
 --
 -- Subscribes to:

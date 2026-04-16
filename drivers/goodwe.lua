@@ -18,6 +18,10 @@ DRIVER = {
   homepage     = "https://en.goodwe.com",
   authors      = { "forty-two-watts contributors" },
   tested_models = { "ET-Plus", "EH series" },
+  connection_defaults = {
+    port    = 502,
+    unit_id = 1,
+  },
 }
 
 PROTOCOL = "modbus"

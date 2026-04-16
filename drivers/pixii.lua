@@ -31,6 +31,10 @@ DRIVER = {
   homepage     = "https://pixii.com",
   authors      = { "forty-two-watts contributors" },
   tested_models = { "PowerShaper" },
+  connection_defaults = {
+    port    = 502,
+    unit_id = 1,
+  },
 }
 --
 -- Sign convention (SITE = positive W flows INTO the site):
