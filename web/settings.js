@@ -202,6 +202,7 @@
               opt.textContent = (e.name || e.filename) + "  —  " + (e.manufacturer || "?") + "  [" + protoLabel + "]" + (e.version ? "  v" + e.version : "");
               opt.dataset.protocols = protoLabel;
               opt.dataset.id = e.id || "";
+              opt.dataset.httpHosts = (e.http_hosts || []).join(",");
               sel.appendChild(opt);
             });
           });
@@ -217,9 +218,11 @@
             driver.capabilities = {};
             if (protocols.indexOf("mqtt") >= 0) driver.capabilities.mqtt = { host: "", port: 1883 };
             if (protocols.indexOf("modbus") >= 0) driver.capabilities.modbus = { host: "", port: 502, unit_id: 1 };
-            if (protocols.indexOf("http") >= 0) driver.capabilities.http = { allowed_hosts: ["api.easee.com"] };
-            // Cloud drivers need a config block for credentials
-            if (protocols.indexOf("http") >= 0) driver.config = { email: "", password: "", serial: "" };
+            if (protocols.indexOf("http") >= 0) {
+              var hosts = (chosen.dataset.httpHosts || "").split(",").filter(Boolean);
+              driver.capabilities.http = { allowed_hosts: hosts };
+              driver.config = { email: "", password: "", serial: "" };
+            }
             currentConfig.drivers.push(driver);
             renderTab("devices");
           });
@@ -312,7 +315,8 @@
           selectField("Zone", "price.zone", ["SE1","SE2","SE3","SE4","NO1","NO2","NO3","NO4","DK1","DK2","FI","DE"], "SE3") +
           selectField("Currency", "price.currency", ["SEK", "NOK", "DKK", "EUR"], "SEK") +
           '<div class="field-row"><div>' +
-          field("Grid tariff (öre/kWh)", "price.grid_tariff_ore_kwh", "number", 60) +
+          field("Grid tariff excl. VAT (öre/kWh)", "price.grid_tariff_ore_kwh", "number", 60,
+            "Per-kWh network/distribution fee from your DSO (elnätsavgift), excluding VAT. This is the cost of moving electricity over the wire, independent of the spot price.") +
           '</div><div>' +
           field("VAT (%)", "price.vat_percent", "number", 25) +
           '</div></div>' +
