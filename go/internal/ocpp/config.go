@@ -6,6 +6,10 @@ package ocpp
 // Charge points connect via ws://<bind>:<port>/<chargerId>; the chargerId
 // segment becomes the driver name in telemetry.Store and shows up in
 // /api/devices and /api/status.drivers.
+//
+// NOTE: Bind is advisory-only — the ocpp-go library does not expose a
+// bind-address parameter, so the listener currently binds to 0.0.0.0
+// regardless of this field. See the TODO in server.go.
 type Config struct {
 	Enabled            bool   `yaml:"enabled"`
 	Bind               string `yaml:"bind"`

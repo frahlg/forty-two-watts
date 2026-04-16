@@ -155,7 +155,7 @@ func (s *Service) SlotAt(now time.Time) (string, float64, bool) {
 // The mapping from planner-mode + action to EMS mode:
 //   - self_consumption → always self_consumption with grid_target=0
 //   - cheap_charge → "charge" when the plan says charge, otherwise self_consumption
-//   - arbitrage → "charge" / "peak_shaving" (for export) / self_consumption
+//   - arbitrage → "charge" / "self_consumption" (with negative grid target for export) / self_consumption
 func actionToSlot(a Action, plannerMode Mode) (string, float64, bool) {
 	switch plannerMode {
 	case ModeSelfConsumption:
@@ -170,7 +170,12 @@ func actionToSlot(a Action, plannerMode Mode) (string, float64, bool) {
 			return "charge", 0, true
 		}
 		if a.BatteryW < -100 {
-			return "peak_shaving", a.GridW, true
+			// Planned discharge-to-export: use self_consumption with a
+			// negative grid target so the PI actively drives grid negative
+			// (i.e. discharges batteries to export). peak_shaving doesn't
+			// work here because it only reacts to over-peak import and
+			// won't push the grid into export territory.
+			return "self_consumption", a.GridW, true
 		}
 		return "self_consumption", 0, true
 	default:
