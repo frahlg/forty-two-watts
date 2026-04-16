@@ -420,6 +420,16 @@ func (s *Service) replan(_ context.Context) *Plan {
 		}
 	}
 
+	slog.Info("mpc: optimize params",
+		"mode", p.Mode,
+		"terminal_ore", p.TerminalSoCPrice,
+		"max_charge_w", p.MaxChargeW,
+		"max_discharge_w", p.MaxDischargeW,
+		"capacity_wh", p.CapacityWh,
+		"soc_levels", p.SoCLevels,
+		"action_levels", p.ActionLevels,
+		"soc_start", p.InitialSoCPct,
+	)
 	plan := Optimize(slots, p)
 
 	// Tag each action with the effective EMS mode so the UI can render
