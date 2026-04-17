@@ -339,7 +339,11 @@ func (s *Service) checkDivergence(ctx context.Context) {
 			for _, r := range s.Tele.ReadingsByType(telemetry.DerBattery) {
 				batW += r.SmoothedW
 			}
-			loadW = m.SmoothedW - pvW - batW
+			evW := s.Tele.SumOnlineEVW()
+			// House-only load: subtract EV so the divergence detector
+			// compares actual house consumption against the plan's
+			// house-load forecast, not a moving "house + EV" target.
+			loadW = m.SmoothedW - pvW - batW - evW
 			if loadW < 0 {
 				loadW = 0
 			}
@@ -598,7 +602,8 @@ func buildSlots(prices []state.PricePoint, forecasts []state.ForecastPoint, base
 		forecastPVW := lookupPV(forecasts, pr.SlotTsMs)
 		if pv != nil {
 			cloud := lookupCloud(forecasts, pr.SlotTsMs)
-			pvW = selectPlannerPVW(forecastPVW, pv(slotT, cloud))
+			radiationBacked := lookupHasRadiation(forecasts, pr.SlotTsMs)
+			pvW = selectPlannerPVW(forecastPVW, pv(slotT, cloud), radiationBacked)
 		} else {
 			pvW = forecastPVW
 		}
@@ -668,14 +673,44 @@ func selfConsumptionTerminalPrice(prices []state.PricePoint, bonus, fee float64)
 	return spread
 }
 
-func selectPlannerPVW(forecastPVW, predictedPVW float64) float64 {
+// PlannerRadiationWeight is how much the RLS twin's prediction
+// contributes when the forecast is backed by a measured-radiation
+// (or direct-PV) signal. The rest comes from the forecast itself.
+//
+// The twin's job in that regime is per-site calibration: orientation,
+// soiling, inverter derate — a multiplicative correction on top of an
+// already physically-grounded prediction. Letting it contribute more
+// than ~30 % re-introduces the very brittleness we switched off
+// cloud-only forecasts to escape (an under-trained twin can produce
+// wild predictions from the time-of-day features alone when fed
+// non-representative training data).
+const PlannerRadiationWeight = 0.3
+
+func selectPlannerPVW(forecastPVW, predictedPVW float64, radiationBacked bool) float64 {
+	// Invalid predicted → fall back to forecast (unchanged).
 	switch {
 	case math.IsNaN(predictedPVW), math.IsInf(predictedPVW, 0), predictedPVW < 0:
 		if math.IsNaN(forecastPVW) || math.IsInf(forecastPVW, 0) {
 			return 0
 		}
 		return forecastPVW
-	case forecastPVW < plannerMinForecastPVFallbackW:
+	}
+
+	// Radiation-backed forecasts (open_meteo, forecast_solar) have the
+	// correct diurnal shape and cloud response already. Blend the twin's
+	// prediction in as a thin per-site calibration instead of letting it
+	// override the forecast. Typical picture on homelab-rpi after the
+	// switch: forecast shows smooth bell curve 0–8 kW, an under-trained
+	// twin still spits random spikes from overfit feature vectors — and
+	// we want the smooth curve.
+	if radiationBacked && forecastPVW > 0 {
+		return (1-PlannerRadiationWeight)*forecastPVW + PlannerRadiationWeight*predictedPVW
+	}
+
+	// Cloud-only legacy path: prefer the twin when forecast is near zero
+	// (forecast probably missing), fall back to forecast when the twin
+	// collapsed to ~0 (twin probably broken).
+	if forecastPVW < plannerMinForecastPVFallbackW {
 		return predictedPVW
 	}
 	collapseCeil := math.Max(plannerMaxCollapsedPVW, forecastPVW*plannerMaxCollapsedPVFrac)
@@ -683,6 +718,25 @@ func selectPlannerPVW(forecastPVW, predictedPVW float64) float64 {
 		return forecastPVW
 	}
 	return predictedPVW
+}
+
+// lookupHasRadiation reports whether the forecast row covering `ts` has
+// a measured-radiation or direct-PV signal from the provider (as
+// opposed to a cloud-derated naive estimate). Used by the planner to
+// decide how much to trust the forecast vs the RLS twin. Anchors on
+// the same slot-boundary rules as lookupPV.
+func lookupHasRadiation(forecasts []state.ForecastPoint, ts int64) bool {
+	for _, f := range forecasts {
+		slotLen := f.SlotLenMin
+		if slotLen <= 0 {
+			slotLen = 60
+		}
+		end := f.SlotTsMs + int64(slotLen)*60*1000
+		if ts >= f.SlotTsMs && ts < end {
+			return f.SolarWm2 != nil
+		}
+	}
+	return false
 }
 
 // lookupCloud returns the cloud cover (%) for the forecast row covering
