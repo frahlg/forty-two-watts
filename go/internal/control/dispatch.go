@@ -370,9 +370,13 @@ func ComputeDispatch(
 			targetTotalW = remainingWh * 3600.0 / remainingS
 		}
 		// Grid target is a pure observation on this path — useful for UI
-		// + legacy API, not driving PI. Reset PI so switching back to the
-		// legacy path doesn't carry stale integral state.
-		state.GridTargetW = 0
+		// + legacy API, not driving PI. Use SetGridTarget so both
+		// GridTargetW *and* PI.Setpoint move to 0 in lockstep: if the
+		// operator later switches out of a planner mode, the legacy
+		// path's PI.Update would otherwise compute error against a
+		// stale setpoint while deadband/error checks use the synced
+		// GridTargetW, producing wrong corrections.
+		state.SetGridTarget(0)
 		state.PI.Reset()
 		totalCorrection = targetTotalW - currentTotal
 	} else {

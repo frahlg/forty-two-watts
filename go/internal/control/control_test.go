@@ -600,6 +600,39 @@ func TestEnergyDispatchResetsOnSlotRollover(t *testing.T) {
 	}
 }
 
+// Energy-dispatch must keep GridTargetW and PI.Setpoint in lockstep so
+// the legacy path doesn't inherit a stale PI setpoint when the operator
+// later switches out of a planner mode. Regression test for a P1
+// raised on PR #79 (Codex).
+func TestEnergyDispatchSyncsPISetpointWithGridTarget(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: 200,
+	}
+	store := seedStore(0, []struct {
+		name    string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	st := newStateWithEnergyDispatch(dir, "ferroamp")
+	// Pre-poison the setpoint as if a manual mode had set it earlier —
+	// this is what SetGridTarget needs to overwrite atomically.
+	st.PI.Setpoint = 3000
+	st.GridTargetW = 3000
+
+	_ = ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+
+	if st.PI.Setpoint != 0 {
+		t.Errorf("PI.Setpoint = %f, want 0 after energy-dispatch cycle (stale setpoint would produce wrong corrections after mode switch)", st.PI.Setpoint)
+	}
+	if st.GridTargetW != 0 {
+		t.Errorf("GridTargetW = %f, want 0", st.GridTargetW)
+	}
+}
+
 // When the energy path is enabled but the plan is stale, the legacy path
 // runs (PI on grid_target=0, self_consumption distribution). Verifies the
 // fallback doesn't leave the path flag mis-set.
