@@ -43,7 +43,7 @@ func TestForecastSolar_BucketsToHours(t *testing.T) {
 
 	fs := &ForecastSolarProvider{
 		Client: srv.Client(), BaseURL: srv.URL,
-		TiltDeg: 35, AzimuthDeg: 180, KWp: 10,
+		Arrays: []Array{{TiltDeg: 35, AzimuthDeg: 180, KWp: 10}},
 	}
 	rows, err := fs.Fetch(context.Background(), 56.7, 16.3)
 	if err != nil {
@@ -89,7 +89,7 @@ func TestForecastSolar_RateLimitedError(t *testing.T) {
 		fmt.Fprint(w, `{"message":{"code":429,"type":"error","text":"rate limit"}}`)
 	}))
 	defer srv.Close()
-	fs := &ForecastSolarProvider{Client: srv.Client(), BaseURL: srv.URL, KWp: 10}
+	fs := &ForecastSolarProvider{Client: srv.Client(), BaseURL: srv.URL, Arrays: []Array{{TiltDeg: 35, AzimuthDeg: 180, KWp: 10}}}
 	_, err := fs.Fetch(context.Background(), 0, 0)
 	if err == nil || !strings.Contains(err.Error(), "rate") {
 		t.Errorf("want rate-limit error, got %v", err)
@@ -102,6 +102,35 @@ func TestForecastSolar_RejectsZeroKWp(t *testing.T) {
 	fs := NewForecastSolar(35, 180, 0)
 	if _, err := fs.Fetch(context.Background(), 0, 0); err == nil {
 		t.Error("expected error for kWp=0, got nil")
+	}
+}
+
+// Multi-plane URL: two arrays → URL has two (tilt/azimuth/kwp)
+// triplets back-to-back, same syntax forecast.solar documents. Verifies
+// the URL path is constructed correctly when the site has more than
+// one roof plane (e.g. south + east).
+func TestForecastSolar_MultiPlaneURL(t *testing.T) {
+	var seen string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = r.URL.Path
+		fmt.Fprint(w, `{"result":{"watts":{}},"message":{"code":0}}`)
+	}))
+	defer srv.Close()
+	fs := &ForecastSolarProvider{
+		Client: srv.Client(), BaseURL: srv.URL,
+		Arrays: []Array{
+			{TiltDeg: 35, AzimuthDeg: 180, KWp: 6.0}, // south roof
+			{TiltDeg: 30, AzimuthDeg: 90, KWp: 4.0},  // east roof
+		},
+	}
+	if _, err := fs.Fetch(context.Background(), 56.7, 16.3); err != nil {
+		t.Fatal(err)
+	}
+	// Expect path to contain all six geometry components in order.
+	for _, frag := range []string{"/35.0/180.0/6.00", "/30.0/90.0/4.00"} {
+		if !strings.Contains(seen, frag) {
+			t.Errorf("URL missing %q; got %q", frag, seen)
+		}
 	}
 }
 

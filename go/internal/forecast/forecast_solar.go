@@ -23,6 +23,10 @@ import (
 // The RLS twin becomes a thin correction on top of an already-good
 // prediction, not the sole calibration mechanism.
 //
+// Supports multi-plane installs (e.g. panels on south and east roofs)
+// by passing multiple Arrays — forecast.solar returns the SUM across
+// all planes, which is exactly what the MPC + UI want.
+//
 // Limitations:
 //   - Doesn't return cloud cover or temperature; we set both nil so
 //     downstream code falls back to whatever it uses when these are
@@ -35,23 +39,38 @@ type ForecastSolarProvider struct {
 	Client  *http.Client
 	BaseURL string
 
-	// Site geometry. Tilt is the panels' angle from horizontal (0 = flat
-	// roof, 90 = wall). Azimuth is compass heading the panels face in
-	// degrees (180 = south). kWp is nameplate DC capacity.
+	// Arrays is the list of physically-distinct panel groups. Each has
+	// its own tilt (0 = flat, 90 = wall), azimuth (compass heading,
+	// 180 = south), and kWp (nameplate DC). One entry means single-array.
+	Arrays []Array
+}
+
+// Array is one panel plane passed to forecast.solar.
+type Array struct {
 	TiltDeg    float64
 	AzimuthDeg float64
 	KWp        float64
 }
 
-// NewForecastSolar returns a configured provider. Pass the site's
-// roof geometry + total installed capacity. Free tier requires no key.
+// NewForecastSolar returns a configured provider with a single panel
+// array. For multi-plane installs, append additional entries to the
+// Arrays field after construction.
 func NewForecastSolar(tiltDeg, azimuthDeg, kWp float64) *ForecastSolarProvider {
 	return &ForecastSolarProvider{
-		Client:     &http.Client{Timeout: 15 * time.Second},
-		BaseURL:    "https://api.forecast.solar",
-		TiltDeg:    tiltDeg,
-		AzimuthDeg: azimuthDeg,
-		KWp:        kWp,
+		Client:  &http.Client{Timeout: 15 * time.Second},
+		BaseURL: "https://api.forecast.solar",
+		Arrays:  []Array{{TiltDeg: tiltDeg, AzimuthDeg: azimuthDeg, KWp: kWp}},
+	}
+}
+
+// NewForecastSolarMulti returns a provider configured for a multi-plane
+// install (e.g. south + east roofs). The order of arrays determines the
+// order in the URL path — forecast.solar sums their outputs regardless.
+func NewForecastSolarMulti(arrays []Array) *ForecastSolarProvider {
+	return &ForecastSolarProvider{
+		Client:  &http.Client{Timeout: 15 * time.Second},
+		BaseURL: "https://api.forecast.solar",
+		Arrays:  arrays,
 	}
 }
 
@@ -61,15 +80,23 @@ func (f *ForecastSolarProvider) Name() string { return "forecast_solar" }
 // Fetch implements Provider. Returns one RawForecast per UTC hour with
 // PVWEstimated populated; cloud/temperature stay nil.
 func (f *ForecastSolarProvider) Fetch(ctx context.Context, lat, lon float64) ([]RawForecast, error) {
-	if f.KWp <= 0 {
-		return nil, fmt.Errorf("forecast.solar: kWp must be > 0 (got %f)", f.KWp)
+	if len(f.Arrays) == 0 {
+		return nil, fmt.Errorf("forecast.solar: at least one array required")
 	}
-	// /estimate/lat/lon/tilt/azimuth/kwp. ?time=utc forces UTC timestamps
-	// in the response so we don't have to guess the server's locale.
-	url := fmt.Sprintf(
-		"%s/estimate/%.4f/%.4f/%.1f/%.1f/%.2f?time=utc",
-		f.BaseURL, lat, lon, f.TiltDeg, f.AzimuthDeg, f.KWp,
-	)
+	for i, a := range f.Arrays {
+		if a.KWp <= 0 {
+			return nil, fmt.Errorf("forecast.solar: array %d kWp must be > 0 (got %f)", i, a.KWp)
+		}
+	}
+	// Multi-plane URL syntax: /estimate/lat/lon/tilt1/az1/kwp1/tilt2/az2/kwp2/...
+	// Single-plane collapses to the standard /estimate/lat/lon/tilt/az/kwp
+	// with no behavior difference. ?time=utc forces UTC timestamps in
+	// the response so we don't have to guess the server's locale.
+	var planes string
+	for _, a := range f.Arrays {
+		planes += fmt.Sprintf("/%.1f/%.1f/%.2f", a.TiltDeg, a.AzimuthDeg, a.KWp)
+	}
+	url := fmt.Sprintf("%s/estimate/%.4f/%.4f%s?time=utc", f.BaseURL, lat, lon, planes)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err

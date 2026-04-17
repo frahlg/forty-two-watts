@@ -267,8 +267,22 @@ func FromConfig(cfg *config.Weather, ratedPVW float64, st *state.Store, userAgen
 	case "open_meteo":
 		p = NewOpenMeteo()
 	case "forecast_solar":
-		kWp := ratedPVW / 1000.0
-		p = NewForecastSolar(cfg.PVTiltDeg, cfg.PVAzimuthDeg, kWp)
+		// Prefer the multi-array config when set. Falls back to a
+		// single synthesized array from the legacy flat fields so
+		// existing deploys on forecast_solar don't need to re-enter
+		// their geometry just because the config model grew.
+		var arrays []Array
+		for _, a := range cfg.PVArrays {
+			arrays = append(arrays, Array{
+				TiltDeg: a.TiltDeg, AzimuthDeg: a.AzimuthDeg, KWp: a.KWp,
+			})
+		}
+		if len(arrays) == 0 {
+			arrays = append(arrays, Array{
+				TiltDeg: cfg.PVTiltDeg, AzimuthDeg: cfg.PVAzimuthDeg, KWp: ratedPVW / 1000.0,
+			})
+		}
+		p = NewForecastSolarMulti(arrays)
 	default:
 		return nil
 	}

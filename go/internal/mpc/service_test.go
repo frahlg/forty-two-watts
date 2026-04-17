@@ -243,7 +243,11 @@ func TestOptimizeSelfConsumptionDoesNotDischargeWithOldTerminalPrice(t *testing.
 // slot length, that stale plans return ok=false, and that out-of-window
 // queries return ok=false.
 func TestSlotDirectiveAt(t *testing.T) {
-	now := time.Date(2026, 4, 17, 12, 0, 0, 0, time.UTC)
+	// Anchor on real wall clock — SlotDirectiveAt rejects plans older
+	// than MaxPlanAge (30 min) via time.Since(GeneratedAtMs), so a
+	// hardcoded past timestamp would make this test flaky as soon as
+	// the wall clock drifts past the plan's age ceiling.
+	now := time.Now().UTC().Truncate(time.Second)
 	slotStart := now.Add(-3 * time.Minute) // we're 3 min into a 15-min slot
 	slotLenMin := 15
 

@@ -241,19 +241,40 @@ type Weather struct {
 	// sized together. Set explicitly for accurate day-1 forecasts.
 	PVRatedW float64 `yaml:"pv_rated_w,omitempty" json:"pv_rated_w,omitempty"`
 
-	// PVTiltDeg / PVAzimuthDeg describe the physical orientation of the
-	// panels. Only used by providers that need site geometry
-	// (forecast_solar). Tilt is angle from horizontal (0 = flat, 90 =
-	// wall). Azimuth is compass heading (180 = south). Safe to omit
-	// when using met_no / open_meteo.
+	// PVTiltDeg / PVAzimuthDeg describe the physical orientation of a
+	// single panel group. Legacy single-array config — when PVArrays
+	// below is empty, the forecast_solar provider synthesizes one
+	// array from these + PVRatedW. Kept for backwards compatibility.
 	PVTiltDeg    float64 `yaml:"pv_tilt_deg,omitempty" json:"pv_tilt_deg,omitempty"`
 	PVAzimuthDeg float64 `yaml:"pv_azimuth_deg,omitempty" json:"pv_azimuth_deg,omitempty"`
+
+	// PVArrays is the list of physically-distinct panel groups at the
+	// site. Homes often have more than one roof plane (e.g. south and
+	// east), and the forecast_solar provider gives noticeably better
+	// predictions when each plane is described separately than when
+	// everything is averaged into a single tilt/azimuth.
+	//
+	// When set, PVArrays overrides the legacy single-array fields.
+	// Providers that can't use site geometry (met_no, open_meteo)
+	// ignore this entirely and just use PVRatedW.
+	PVArrays []PVArray `yaml:"pv_arrays,omitempty" json:"pv_arrays,omitempty"`
 
 	// HeatingWPerDegC adds load proportional to max(18°C − outdoor_temp, 0).
 	// A rough-but-useful way to teach the planner that cold nights cost
 	// more than mild ones without running a full ML temperature fit.
 	// Typical Swedish single-family values: 200–500 W/°C. 0 disables.
 	HeatingWPerDegC float64 `yaml:"heating_w_per_degc,omitempty" json:"heating_w_per_degc,omitempty"`
+}
+
+// PVArray is one physically-distinct panel group. Multi-plane
+// residential installs typically have two or three (e.g. south roof
+// + east roof + garage) with different tilt/azimuth. The sum of all
+// KWp values should match the total PV nameplate at the site.
+type PVArray struct {
+	Name       string  `yaml:"name,omitempty" json:"name,omitempty"`
+	KWp        float64 `yaml:"kwp" json:"kwp"`
+	TiltDeg    float64 `yaml:"tilt_deg" json:"tilt_deg"`
+	AzimuthDeg float64 `yaml:"azimuth_deg" json:"azimuth_deg"`
 }
 
 // Battery is per-battery overrides (keyed by driver name in the top-level map).
