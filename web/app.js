@@ -1304,16 +1304,21 @@
       });
   }
 
+  // Fire-and-forget wrappers around postJson. postJson itself rethrows
+  // so callers that chain .then/.finally (evCommand) behave correctly;
+  // here we explicitly mark the rejection handled so the browser
+  // doesn't log "Uncaught (in promise)" on every network hiccup.
+  // postJson has already console.warn'd the failure.
   function setTarget(w) {
-    postJson("/api/target", { grid_target_w: w });
+    postJson("/api/target", { grid_target_w: w }).catch(function () {});
   }
 
   function setPeakLimit(w) {
-    postJson("/api/peak_limit", { peak_limit_w: w });
+    postJson("/api/peak_limit", { peak_limit_w: w }).catch(function () {});
   }
 
   function setEvCharging(w) {
-    postJson("/api/ev_charging", { power_w: w, active: w > 0 });
+    postJson("/api/ev_charging", { power_w: w, active: w > 0 }).catch(function () {});
   }
 
   function postJson(url, body) {
