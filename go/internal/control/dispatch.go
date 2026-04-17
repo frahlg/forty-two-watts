@@ -45,7 +45,28 @@ func (m Mode) IsPlannerMode() bool {
 // Returns (mode_string, grid_target_w, ok). mode_string maps to a Mode
 // constant; the dispatch uses its existing mode logic for HOW batteries
 // respond. The plan is a scheduler, not a regulator.
+//
+// Legacy — the new contract (energy-allocation per slot, EMS converts to
+// power) uses SlotDirectiveFunc. See docs/plan-ems-contract.md.
 type PlanTargetFunc func(now time.Time) (string, float64, bool)
+
+// SlotDirective mirrors mpc.SlotDirective — we redefine here to keep the
+// control package import-cycle free. Populated by main.go's injected
+// SlotDirectiveFunc adapter.
+type SlotDirective struct {
+	SlotStart       time.Time
+	SlotEnd         time.Time
+	BatteryEnergyWh float64 // site-signed: + = charge, − = discharge
+	SoCTargetPct    float64
+	Strategy        string // echoed for logging / API; mirrors mpc.Mode
+}
+
+// SlotDirectiveFunc returns the plan's energy-allocation directive for
+// the slot containing `now`. When ok=false the plan is stale or missing
+// and the control loop falls back to auto_fallback (local self-consumption
+// rule with no forward-planning) — same behavior as PlanTargetFunc's
+// stale-plan branch.
+type SlotDirectiveFunc func(now time.Time) (SlotDirective, bool)
 
 // MaxCommandW is the hard per-command power cap (±5 kW). Used by both
 // clampWithSoC (distribution) and the post-slew re-clamp.
@@ -96,7 +117,28 @@ type State struct {
 	// PlanTarget is consulted at the top of each control cycle when
 	// Mode is a planner mode. Nil outside planner modes. Injected from
 	// main.go — the control package doesn't need to know about mpc.
+	//
+	// Legacy (grid-target driven). The new path uses SlotDirective.
 	PlanTarget PlanTargetFunc
+
+	// SlotDirective is the new plan→EMS callback (energy-allocation
+	// contract). When set AND UseEnergyDispatch is true, ComputeDispatch
+	// uses the energy-driven code path instead of the PI-on-grid-target
+	// path. Injected from main.go like PlanTarget. See
+	// docs/plan-ems-contract.md.
+	SlotDirective SlotDirectiveFunc
+
+	// UseEnergyDispatch toggles between the legacy PI-on-grid path and
+	// the new energy-allocation path. False until validated in production
+	// and flipped via config. Default off preserves today's behavior.
+	UseEnergyDispatch bool
+
+	// currentDirective + slotDelivered track the active slot's energy
+	// accounting. Reset when the slot rolls over (by SlotStart equality).
+	// Zero-valued until UseEnergyDispatch fires its first cycle.
+	currentDirective SlotDirective
+	slotDelivered    float64   // Wh delivered to batteries since slot start
+	lastTickTs       time.Time // for ∫ battery_w dt
 
 	// PlanStale tracks whether the last cycle fell back to self_consumption
 	// because the plan was missing. Surfaced via the API for the UI.
@@ -157,29 +199,58 @@ func ComputeDispatch(
 	// charge at 02:00, export at 17:00). The EMS's existing mode logic
 	// decides HOW batteries respond every 5 s based on the live meter.
 	//
-	// The planner's PlanSlot.Mode replaces the effective mode for this
-	// cycle. PlanSlot.GridW overrides the grid target when the slot's
-	// mode needs it (e.g. charge → target = +max_charge). For self-
-	// consumption slots, grid_target is always 0.
+	// Two dispatch paths are supported during the rollout:
+	//
+	//   1. Legacy (UseEnergyDispatch=false): plan returns grid_target_w,
+	//      PI chases it, batteries absorb anything that differs — the
+	//      behavior this package has shipped since the port.
+	//
+	//   2. Energy-allocation (UseEnergyDispatch=true, SlotDirective set):
+	//      plan returns battery energy for the slot; EMS converts to
+	//      instantaneous power from (remaining_wh / remaining_s); grid
+	//      flow is the residual. See docs/plan-ems-contract.md.
+	//
+	// The two paths share all of gather-batteries → distribute → slew →
+	// fuse. They differ only in how `totalCorrection` is computed below.
 	effectiveMode := state.Mode
+	useEnergyPath := false
+	var currentDirective SlotDirective
 	if state.Mode.IsPlannerMode() {
-		var modeStr string
-		var gridW float64
-		ok := false
-		if state.PlanTarget != nil {
-			modeStr, gridW, ok = state.PlanTarget(time.Now())
-		}
-		if ok {
-			effectiveMode = Mode(modeStr)
-			state.SetGridTarget(gridW)
-			state.PlanStale = false
-		} else {
-			if !state.PlanStale {
-				slog.Warn("mpc plan stale — falling back to self_consumption")
+		// Try the energy-allocation path first when enabled.
+		if state.UseEnergyDispatch && state.SlotDirective != nil {
+			if dir, ok := state.SlotDirective(time.Now()); ok {
+				currentDirective = dir
+				useEnergyPath = true
+				// Distribution mode is decoupled from planner strategy in
+				// the energy path — the operator-selected strategy drives
+				// the plan's DP, distribution is always proportional across
+				// online batteries. If the operator wants priority or
+				// weighted, they use the manual modes, not a planner mode.
+				effectiveMode = ModeSelfConsumption
+				state.PlanStale = false
 			}
-			effectiveMode = ModeSelfConsumption
-			state.SetGridTarget(0)
-			state.PlanStale = true
+		}
+		// Fall through to legacy path if energy path is off or its plan
+		// is stale.
+		if !useEnergyPath {
+			var modeStr string
+			var gridW float64
+			ok := false
+			if state.PlanTarget != nil {
+				modeStr, gridW, ok = state.PlanTarget(time.Now())
+			}
+			if ok {
+				effectiveMode = Mode(modeStr)
+				state.SetGridTarget(gridW)
+				state.PlanStale = false
+			} else {
+				if !state.PlanStale {
+					slog.Warn("mpc plan stale — falling back to self_consumption")
+				}
+				effectiveMode = ModeSelfConsumption
+				state.SetGridTarget(0)
+				state.PlanStale = true
+			}
 		}
 	}
 
@@ -260,44 +331,88 @@ func ComputeDispatch(
 		return nil
 	}
 
-	// ---- Compute error based on mode ----
-	var errW float64
-	switch effectiveMode {
-	case ModePeakShaving:
-		// Only act when grid import exceeds peak_limit. Allow any amount of
-		// export, allow import up to peak_limit.
-		if gridW > state.PeakLimitW {
-			errW = gridW - state.PeakLimitW
-		} else if gridW < 0 {
-			errW = gridW // exporting → charge with surplus
+	// ---- Sum of battery current power (site-signed) ----
+	// Used by both paths: legacy distributors take (currentTotal + correction);
+	// energy path computes correction as (desired_total - currentTotal).
+	var currentTotal float64
+	for _, b := range onlineBats {
+		currentTotal += b.currentW
+	}
+
+	// ---- Compute totalCorrection — two paths diverge here ----
+	var totalCorrection float64
+	if useEnergyPath {
+		// Energy-allocation path: plan's slot directive says "this many Wh
+		// over this slot". Derive the instantaneous power needed to hit the
+		// remaining energy in the remaining time, then pass (target - currentTotal)
+		// as the correction the existing distributors expect.
+		now := time.Now()
+		// Slot rollover: new slot → reset the delivered accumulator.
+		if !currentDirective.SlotStart.Equal(state.currentDirective.SlotStart) {
+			state.currentDirective = currentDirective
+			state.slotDelivered = 0
+			state.lastTickTs = now
 		} else {
-			errW = 0
+			// Accumulate energy delivered since the last tick, using live
+			// battery telemetry (the truth about what the fleet is doing
+			// right now). This lets the formula course-correct when the
+			// commanded setpoint couldn't be met.
+			dt := now.Sub(state.lastTickTs).Seconds()
+			if dt > 0 && dt < 300 { // cap dt at 5min so a long pause doesn't poison accumulator
+				state.slotDelivered += currentTotal * dt / 3600.0
+			}
+			state.lastTickTs = now
 		}
-	default:
-		errW = gridW - state.GridTargetW
-	}
-
-	// ---- Deadband ----
-	if math.Abs(errW) < state.GridToleranceW {
-		return nil
-	}
-
-	// ---- Outer PI — drives total correction we want across all batteries ----
-	// Site convention: gridW positive = too much import → we want to discharge
-	// batteries (site-signed correction should be negative).
-	// PI setpoint = GridTargetW, measurement = gridW. error = setpoint - measurement.
-	// When gridW > target, error < 0, PI output < 0 → total_correction < 0 → bat targets shift
-	// toward more discharge (more negative). That's exactly what we want.
-	//
-	// For PeakShaving we feed a slightly different measurement so the same PI works.
-	var piMeasurement float64
-	if effectiveMode == ModePeakShaving {
-		piMeasurement = state.GridTargetW + errW // puts the bias into the setpoint-error
+		remainingWh := currentDirective.BatteryEnergyWh - state.slotDelivered
+		remainingS := currentDirective.SlotEnd.Sub(now).Seconds()
+		var targetTotalW float64
+		if remainingS > 0.5 {
+			targetTotalW = remainingWh * 3600.0 / remainingS
+		}
+		// Grid target is a pure observation on this path — useful for UI
+		// + legacy API, not driving PI. Reset PI so switching back to the
+		// legacy path doesn't carry stale integral state.
+		state.GridTargetW = 0
+		state.PI.Reset()
+		totalCorrection = targetTotalW - currentTotal
 	} else {
-		piMeasurement = gridW
+		// Legacy path: PI on grid target.
+		var errW float64
+		switch effectiveMode {
+		case ModePeakShaving:
+			// Only act when grid import exceeds peak_limit. Allow any amount of
+			// export, allow import up to peak_limit.
+			if gridW > state.PeakLimitW {
+				errW = gridW - state.PeakLimitW
+			} else if gridW < 0 {
+				errW = gridW // exporting → charge with surplus
+			} else {
+				errW = 0
+			}
+		default:
+			errW = gridW - state.GridTargetW
+		}
+
+		// Deadband only applies to the legacy path — the energy formula
+		// produces small corrections naturally when close to target.
+		if math.Abs(errW) < state.GridToleranceW {
+			return nil
+		}
+
+		// Outer PI — drives total correction we want across all batteries.
+		// Site convention: gridW positive = too much import → we want to discharge
+		// batteries (site-signed correction should be negative).
+		// PI setpoint = GridTargetW, measurement = gridW.
+		// For PeakShaving we feed a slightly different measurement so the same PI works.
+		var piMeasurement float64
+		if effectiveMode == ModePeakShaving {
+			piMeasurement = state.GridTargetW + errW
+		} else {
+			piMeasurement = gridW
+		}
+		out := state.PI.Update(piMeasurement)
+		totalCorrection = out.Output
 	}
-	out := state.PI.Update(piMeasurement)
-	totalCorrection := out.Output
 
 	// ---- Distribute across batteries ----
 	var raw []DispatchTarget
