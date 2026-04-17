@@ -196,3 +196,114 @@ func TestOptimizeSelfConsumptionDoesNotDischargeWithOldTerminalPrice(t *testing.
 		}
 	}
 }
+
+// SlotDirectiveAt returns energy-allocation directive for the slot
+// containing now. Verifies that power is converted to energy via the
+// slot length, that stale plans return ok=false, and that out-of-window
+// queries return ok=false.
+func TestSlotDirectiveAt(t *testing.T) {
+	now := time.Date(2026, 4, 17, 12, 0, 0, 0, time.UTC)
+	slotStart := now.Add(-3 * time.Minute) // we're 3 min into a 15-min slot
+	slotLenMin := 15
+
+	s := &Service{
+		Defaults: Params{Mode: ModeArbitrage},
+		last: &Plan{
+			GeneratedAtMs: now.Add(-time.Minute).UnixMilli(),
+			Actions: []Action{{
+				SlotStartMs: slotStart.UnixMilli(),
+				SlotLenMin:  slotLenMin,
+				BatteryW:    800, // 800 W × 15/60 h = 200 Wh for the slot
+				SoCPct:      45.5,
+			}},
+		},
+	}
+
+	d, ok := s.SlotDirectiveAt(now)
+	if !ok {
+		t.Fatal("SlotDirectiveAt returned ok=false, want true")
+	}
+	if want := 200.0; math.Abs(d.BatteryEnergyWh-want) > 0.01 {
+		t.Errorf("BatteryEnergyWh = %f, want %f", d.BatteryEnergyWh, want)
+	}
+	if !d.SlotStart.Equal(slotStart) {
+		t.Errorf("SlotStart = %v, want %v", d.SlotStart, slotStart)
+	}
+	if want := slotStart.Add(15 * time.Minute); !d.SlotEnd.Equal(want) {
+		t.Errorf("SlotEnd = %v, want %v", d.SlotEnd, want)
+	}
+	if d.SoCTargetPct != 45.5 {
+		t.Errorf("SoCTargetPct = %f, want 45.5", d.SoCTargetPct)
+	}
+	if d.Strategy != ModeArbitrage {
+		t.Errorf("Strategy = %v, want arbitrage", d.Strategy)
+	}
+}
+
+// Discharge intent (negative BatteryW) surfaces as negative energy.
+func TestSlotDirectiveAtDischarge(t *testing.T) {
+	now := time.Date(2026, 4, 17, 17, 0, 0, 0, time.UTC)
+	s := &Service{
+		last: &Plan{
+			GeneratedAtMs: now.UnixMilli(),
+			Actions: []Action{{
+				SlotStartMs: now.UnixMilli(),
+				SlotLenMin:  15,
+				BatteryW:    -2400, // discharge 600 Wh over 15 min
+			}},
+		},
+	}
+	d, ok := s.SlotDirectiveAt(now)
+	if !ok {
+		t.Fatal("ok=false")
+	}
+	if want := -600.0; math.Abs(d.BatteryEnergyWh-want) > 0.01 {
+		t.Errorf("BatteryEnergyWh = %f, want %f", d.BatteryEnergyWh, want)
+	}
+}
+
+// A plan older than MaxPlanAge should not surface any directive — the
+// control loop falls back to auto_fallback.
+func TestSlotDirectiveAtStalePlan(t *testing.T) {
+	now := time.Now()
+	s := &Service{
+		last: &Plan{
+			GeneratedAtMs: now.Add(-MaxPlanAge - time.Minute).UnixMilli(),
+			Actions: []Action{{
+				SlotStartMs: now.UnixMilli(),
+				SlotLenMin:  15,
+				BatteryW:    800,
+			}},
+		},
+	}
+	if _, ok := s.SlotDirectiveAt(now); ok {
+		t.Error("SlotDirectiveAt returned ok=true for stale plan, want false")
+	}
+}
+
+// A query outside any slot's time window should return ok=false.
+func TestSlotDirectiveAtOutOfWindow(t *testing.T) {
+	slotStart := time.Date(2026, 4, 17, 12, 0, 0, 0, time.UTC)
+	s := &Service{
+		last: &Plan{
+			GeneratedAtMs: slotStart.UnixMilli(),
+			Actions: []Action{{
+				SlotStartMs: slotStart.UnixMilli(),
+				SlotLenMin:  15,
+				BatteryW:    800,
+			}},
+		},
+	}
+	future := slotStart.Add(30 * time.Minute) // 15 min past slot end
+	if _, ok := s.SlotDirectiveAt(future); ok {
+		t.Error("SlotDirectiveAt returned ok=true for out-of-window time")
+	}
+}
+
+// Nil service must not panic.
+func TestSlotDirectiveAtNilService(t *testing.T) {
+	var s *Service
+	if _, ok := s.SlotDirectiveAt(time.Now()); ok {
+		t.Error("nil Service returned ok=true")
+	}
+}
