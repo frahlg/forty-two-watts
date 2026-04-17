@@ -339,7 +339,11 @@ func (s *Service) checkDivergence(ctx context.Context) {
 			for _, r := range s.Tele.ReadingsByType(telemetry.DerBattery) {
 				batW += r.SmoothedW
 			}
-			loadW = m.SmoothedW - pvW - batW
+			evW := s.Tele.SumOnlineEVW()
+			// House-only load: subtract EV so the divergence detector
+			// compares actual house consumption against the plan's
+			// house-load forecast, not a moving "house + EV" target.
+			loadW = m.SmoothedW - pvW - batW - evW
 			if loadW < 0 {
 				loadW = 0
 			}

@@ -123,9 +123,12 @@ func (s *Service) loop(ctx context.Context) {
 	}
 }
 
-// sample computes measured load = grid_w − pv_w − bat_w and feeds
-// it to the model. Skips when drivers haven't settled yet (no site meter
-// reading).
+// sample computes measured house load = grid_w − pv_w − bat_w − ev_w
+// and feeds it to the model. Skips when drivers haven't settled yet
+// (no site meter reading). EV is subtracted so the weekly-pattern
+// learner tracks house consumption, not "house + occasional 10 kWh
+// car session" — otherwise every Monday-evening bucket inflates when
+// the driver happens to plug in after work.
 func (s *Service) sample() {
 	now := time.Now()
 	meter := s.Tele.Get(s.SiteMeter, telemetry.DerMeter)
@@ -141,12 +144,13 @@ func (s *Service) sample() {
 	for _, r := range s.Tele.ReadingsByType(telemetry.DerBattery) {
 		batW += r.SmoothedW // site-sign: positive = charging
 	}
-	loadW := gridW - pvW - batW
+	evW := s.Tele.SumOnlineEVW() // online-only so stale readings don't poison load
+	loadW := gridW - pvW - batW - evW
 	if loadW < 0 {
 		// Almost always a transient — during a PI step the measured
 		// flow can briefly appear negative. Skip rather than train
 		// on a physically impossible value.
-		slog.Debug("loadmodel: skip (neg load)", "grid_w", gridW, "pv_w", pvW, "bat_w", batW)
+		slog.Debug("loadmodel: skip (neg load)", "grid_w", gridW, "pv_w", pvW, "bat_w", batW, "ev_w", evW)
 		return
 	}
 

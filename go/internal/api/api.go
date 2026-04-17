@@ -244,11 +244,15 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		batW += r.SmoothedW
 	}
 
-	// Load = grid + bat + pv?  Under site convention (+ into site):
-	//   grid = load - (bat discharge) - pv_gen ... signs work out to:
-	//   load = grid - bat - pv (all in site convention signs)
-	//   but load is always positive. If calc goes negative it's a sign issue.
-	rawLoad := gridW - batW - pvW
+	// Load = house-only consumption in site convention (+ into site):
+	//   meter    = load + ev + (bat charge - bat discharge) - pv_gen
+	//   so load  = grid - bat - pv - ev
+	// Subtracting EV keeps the load signal (and the loadmodel trained on
+	// it) reflecting the house, not "house + car" — otherwise a 10 kWh
+	// overnight EV session would inflate every Monday-evening bucket of
+	// the weekly-pattern learner.
+	evW := s.deps.Tel.SumOnlineEVW()
+	rawLoad := gridW - batW - pvW - evW
 	loadW := s.deps.Tel.UpdateLoad(rawLoad)
 	if loadW < 0 {
 		loadW = 0
@@ -434,6 +438,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"pv_w":             pvW,
 		"pv_w_predicted":   pvPredictW,
 		"bat_w":            batW,
+		"ev_w":             evW,
 		"load_w":           loadW,
 		"load_w_predicted": loadPredictW,
 		"bat_soc":          avgSoC,
