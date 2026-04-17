@@ -1,7 +1,6 @@
-// Lua driver host — a pure-Go alternative to the WASM host.
+// Lua driver host.
 //
-// Drivers are plain .lua files that implement the same lifecycle as the
-// WASM ones:
+// Drivers are plain .lua files that implement the driver lifecycle:
 //
 //	driver_init()          — subscribe MQTT topics, read Modbus SN, etc.
 //	driver_poll()          — called every N seconds; emit telemetry
@@ -9,8 +8,8 @@
 //	driver_cleanup()       — optional, called on shutdown
 //	driver_default_mode()  — optional, called when driver goes offline
 //
-// The host exposes the same capability-gated helpers as the WASM ABI,
-// surfaced as a `host` global in the Lua VM:
+// The host exposes a capability-gated API surfaced as a `host` global in
+// the Lua VM:
 //
 //	host.log(level, msg)            -- level: "debug"|"info"|"warn"|"error"
 //	host.emit(type, table)          -- type: "meter"|"pv"|"battery"|"ev"
@@ -31,8 +30,7 @@
 //	host.http_post(url, body, headers) -- HTTP POST, returns (body, nil) or (nil, err)
 //
 // Lua 5.1 via yuin/gopher-lua — pure Go, zero CGo, one allocation-aware
-// interpreter per driver. The whole thing is ~350 LOC vs ~850 for the
-// WASM runtime + its Rust driver scaffolding.
+// interpreter per driver.
 package drivers
 
 import (
@@ -187,7 +185,7 @@ func registerHost(L *lua.LState, env *HostEnv) {
 
 	// host.emit("meter"|"pv"|"battery"|"ev", { w=…, soc=…, connected=…, charging=… })
 	// The type string is prepended to the table as a `type` field and
-	// the whole thing serialized as the JSON the WASM host expects.
+	// the whole thing is serialized as JSON before hitting the telemetry store.
 	// Allowed fields per type:
 	//   meter   -> w, l1_w, l2_w, l3_w, l1_v, l2_v, l3_v, l1_a, l2_a, l3_a, freq_hz
 	//   pv      -> w, mppt1_v, mppt1_a, mppt2_v, mppt2_a, dc_v

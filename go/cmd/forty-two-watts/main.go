@@ -1,5 +1,4 @@
 // forty-two-watts — Home Energy Management System.
-// Go + WASM driver port. See /MIGRATION_PLAN.md.
 //
 // Don't Panic 🐬
 package main
@@ -140,7 +139,7 @@ func main() {
 	// ---- Self-tune coordinator ----
 	selfTune := selftune.NewCoordinator()
 
-	// ---- WASM driver registry ----
+	// ---- Driver registry ----
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	reg := drivers.NewRegistry(tel)
@@ -151,15 +150,12 @@ func main() {
 		return modbuscli.Dial(c.Host, c.Port, c.UnitID)
 	}
 	reg.ARPLookup = arp.Lookup
-	// Spawn initial drivers
+	// Spawn initial drivers. config.Load has already joined relative Lua
+	// paths with the config directory — nothing to resolve here.
 	for _, d := range cfg.Drivers {
 		if d.Disabled {
 			slog.Info("driver skipped (disabled)", "name", d.Name)
 			continue
-		}
-		// Resolve relative WASM paths against config dir
-		if d.WASM != "" && !filepath.IsAbs(d.WASM) {
-			d.WASM = filepath.Join(filepath.Dir(*configPath), d.WASM)
 		}
 		if err := reg.Add(ctx, d); err != nil {
 			slog.Warn("failed to spawn driver", "name", d.Name, "err", err)
@@ -198,13 +194,8 @@ func main() {
 					newCfg.EVCharger.Password = pw
 				}
 			}
-			// Regenerate the synthetic EV charger driver entry from the
-			// Resolve relative paths
-			for i := range newCfg.Drivers {
-				if newCfg.Drivers[i].WASM != "" && !filepath.IsAbs(newCfg.Drivers[i].WASM) {
-					newCfg.Drivers[i].WASM = filepath.Join(filepath.Dir(*configPath), newCfg.Drivers[i].WASM)
-				}
-			}
+			// Driver paths are already resolved by config.Load; no extra
+			// work needed here.
 			reg.Reload(ctx, newCfg.Drivers)
 			// Refresh capacities — mutate the existing map in place so
 			// Deps.Capacities (a map header captured at init) sees the

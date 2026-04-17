@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Deploy the Go port to a remote host. Drop-in replacement for the Rust-era
-# scripts/deploy.sh but points at the Go binary + WASM driver tarball.
+# Deploy forty-two-watts to a remote host — ships the Go binary + Lua
+# drivers + web assets.
 #
 # Usage:
 #   ./scripts/deploy-go.sh homelab-rpi [version]
@@ -56,12 +56,12 @@ ssh "$HOST" "
     # Backup current binary
     [ -f forty-two-watts ] && cp forty-two-watts forty-two-watts.bak
 
-    # Swap binary + web + drivers-wasm (config.yaml + *.db untouched)
+    # Swap binary + web + drivers (config.yaml + *.db untouched)
     cp .deploy-staging/$BINARY forty-two-watts
     chmod +x forty-two-watts
-    rm -rf web drivers-wasm
+    rm -rf web drivers
     cp -r .deploy-staging/web web
-    cp -r .deploy-staging/drivers-wasm drivers-wasm
+    cp -r .deploy-staging/drivers drivers
     rm -rf .deploy-staging
 
     echo 'Binary updated to $VERSION'

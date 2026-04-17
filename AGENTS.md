@@ -1,8 +1,7 @@
 # forty-two-watts — project orientation
 
-Unified Home Energy Management System. The Go port is now mainline on
-`master`; the historical Rust implementation lives alongside in `src/` +
-`Cargo.toml` and is frozen (see `MIGRATION_PLAN.md` for context).
+Unified Home Energy Management System, written in Go with Lua drivers.
+See `MIGRATION_PLAN.md` for the historical Rust→Go migration context.
 
 ## Mental model
 
@@ -13,16 +12,12 @@ place sign conversion happens — above it, every layer uses the site
 convention. Read `docs/site-convention.md` before touching any power-math
 code.
 
-**Lua-first drivers**: `drivers/*.lua` loaded by `gopher-lua` are the
-primary driver path. Each driver file implements the lifecycle
-(`driver_init`, `driver_poll`, `driver_command`, `driver_default_mode`,
+**Lua drivers**: `drivers/*.lua` loaded by `gopher-lua` are the only
+driver path. Each driver file implements the lifecycle (`driver_init`,
+`driver_poll`, `driver_command`, `driver_default_mode`,
 `driver_cleanup`) and talks to hardware through the `host.*` capabilities
-exposed by `go/internal/drivers/lua.go`. WASM drivers (`wasm-drivers/*/`
-compiled into `drivers-wasm/*.wasm`) are still supported via the same
-Registry and capability interface — dispatch lives in
-`go/internal/drivers/registry.go` — but Lua is recommended for new
-drivers because it's hot-editable on the Pi and doesn't need a Rust
-toolchain.
+exposed by `go/internal/drivers/lua.go`. Drivers are hot-editable on the
+Pi and need no build step.
 
 **Clamping discipline**: every clamp must protect against a *quantifiable
 risk*. Read `docs/clamping.md` for the seven current clamps and the
@@ -46,7 +41,7 @@ in YAML or re-adding it doesn't orphan a trained model. See
 | `go/internal/control` | PI + dispatch modes + slew + fuse guard |
 | `go/internal/battery` | ARX(1) model + RLS + cascade + saturation curves |
 | `go/internal/selftune` | Step-response state machine + fitter |
-| `go/internal/drivers` | Lua host (`lua.go`) + wazero host (`runtime.go`) + shared Registry + capability ABI |
+| `go/internal/drivers` | Lua host (`lua.go`) + Registry + capability interfaces |
 | `go/internal/api` | HTTP endpoints (Go 1.22+ method mux) |
 | `go/internal/configreload` | fsnotify watcher + reload dispatch |
 | `go/internal/ha` | Home Assistant MQTT autodiscovery + bridge |
@@ -59,14 +54,11 @@ in YAML or re-adding it doesn't orphan a trained model. See
 | `go/internal/pvmodel` | PV twin (RLS over sunpos / cloud prior) |
 | `go/internal/mpc` | MPC planner — DP over SoC grid, 48 h horizon |
 | `drivers/` | Lua drivers (`ferroamp.lua`, `sungrow.lua`, …) |
-| `wasm-drivers/ferroamp` | Legacy Rust → wasm32-wasip1 Ferroamp driver |
-| `wasm-drivers/sungrow` | Legacy Rust → wasm32-wasip1 Sungrow driver |
 | `go/test/e2e` | Full-stack test: sims + main + drivers + HTTP |
 
 ## Building & testing
 
 ```bash
-make wasm         # compile legacy .wasm drivers (needs wasm32-wasip1 Rust target)
 make test         # unit + integration tests
 make e2e          # full-stack end-to-end test
 make dev          # start sims + main app locally
@@ -75,11 +67,10 @@ make release      # tarballs for deploy
 ```
 
 Lua drivers need no build step — `drivers/*.lua` ships verbatim with the
-release tarball and is loaded on startup. `make wasm` is only needed when
-you're actually shipping a `.wasm` module.
+release tarball and is loaded on startup.
 
-No CGo anywhere — pure Go + embedded Lua 5.1 (gopher-lua) + optional
-Rust→WASM. `go build` produces a static single-binary distribution.
+No CGo anywhere — pure Go + embedded Lua 5.1 (gopher-lua). `go build`
+produces a static single-binary distribution.
 
 ## Adding a new driver
 
@@ -113,27 +104,8 @@ global exposes:
 - `host.decode_u32_le/be`, `host.decode_i32_le/be`, `host.decode_i16`
 - `host.json_encode/decode`
 
-MQTT / Modbus calls return an error string if the driver wasn't granted
-the capability in config.
-
-## WASM ABI (legacy)
-
-Still supported for any `.wasm` driver built against v2.0 of the host —
-`go/internal/drivers/runtime.go` + `abi.go` are unchanged. New drivers
-should prefer Lua.
-
-- Driver EXPORTS: `wasm_alloc`, `wasm_dealloc`, `driver_init`,
-  `driver_poll`, `driver_command`, `driver_default`, `driver_cleanup`
-- Host IMPORTS (under `"host"` namespace): `log`, `millis`,
-  `set_poll_interval`, `emit_telemetry`, `set_sn`, `set_make`,
-  `mqtt_{subscribe,publish,poll_messages}`,
-  `modbus_{read,write_single,write_multi}`
-- All string / byte-slice parameters use `(ptr: i32, len: i32)` pairs
-  into driver memory. Driver allocates its own memory via `wasm_alloc`
-  so the host can copy strings into it.
-
-MQTT / Modbus functions return `ErrNoCapability` via status codes if
-the driver wasn't granted the relevant capability in config.
+MQTT / Modbus / HTTP calls return an error string if the driver wasn't
+granted the capability in config.
 
 ## Time-series DB (long-format)
 
@@ -170,8 +142,7 @@ charge another.
 - `slog` for all logging
 - Explicit mutexes — no atomic tricks unless measurably needed
 - SQLite queries in `internal/state/*.go`, nothing embedded elsewhere
-- Driver code in Lua (preferred) or Rust→WASM (legacy); the Go side
-  only owns capabilities, not protocol logic
+- Driver code in Lua; the Go side only owns capabilities, not protocol logic
 - Tests colocated with code, `_test.go` files
 - Integration tests in `go/test/e2e/` (separate package to keep public
   and internal concerns cleanly split)
@@ -184,8 +155,6 @@ charge another.
   cascade bypasses the inverse model (gates on confidence intentionally).
 - **History queries slow**: check `idx_hot_ts` is there; SQL uses range
   scans. `Prune()` should be running periodically to age data to warm/cold.
-- **Tests fail with `drivers-wasm/*.wasm not found`**: run `make wasm`
-  first. CI should always do `make wasm` before `make test`.
 - **Driver hung (tick_count not advancing)**: restart the service and
   check `WatchdogScan` transitions in the logs — the loop should have
   already flipped it offline and sent `DefaultMode`. If it didn't,
@@ -217,6 +186,5 @@ charge another.
 - `docs/mpc-planner.md` — MPC strategies, confidence blending
 - `docs/ml-twins.md` — older twin notes (superseded by ml-models.md)
 - `docs/ha-integration.md` — Home Assistant MQTT bridge
-- `docs/host-api.md` — legacy WASM driver ABI
 - `docs/lua-drivers.md` — earlier Lua driver notes (superseded by writing-a-driver.md)
-- `MIGRATION_PLAN.md` — historical: why Go + WASM (Rust→Go migration is complete)
+- `MIGRATION_PLAN.md` — historical: Rust→Go migration context (migration is complete)

@@ -13,7 +13,7 @@ fuse:
   max_amps: 16
 drivers:
   - name: ferroamp
-    wasm: drivers/ferroamp.wasm
+    lua: drivers/ferroamp.lua
     is_site_meter: true
     capabilities:
       mqtt:
@@ -53,9 +53,9 @@ func TestRelativeDriverPathResolved(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := filepath.Join("/base/dir", "drivers/ferroamp.wasm")
-	if c.Drivers[0].WASM != want {
-		t.Errorf("wasm path: got %s want %s", c.Drivers[0].WASM, want)
+	want := filepath.Join("/base/dir", "drivers/ferroamp.lua")
+	if c.Drivers[0].Lua != want {
+		t.Errorf("lua path: got %s want %s", c.Drivers[0].Lua, want)
 	}
 }
 
@@ -77,7 +77,7 @@ site: { name: x }
 fuse: { max_amps: 16 }
 drivers:
   - name: a
-    wasm: a.wasm
+    lua: a.lua
     capabilities:
       mqtt: { host: 1.1.1.1 }
 api: { port: 8080 }
@@ -94,11 +94,11 @@ site: { name: x }
 fuse: { max_amps: 16 }
 drivers:
   - name: a
-    wasm: a.wasm
+    lua: a.lua
     is_site_meter: true
     capabilities: { mqtt: { host: 1.1.1.1 } }
   - name: a
-    wasm: b.wasm
+    lua: b.lua
     capabilities: { mqtt: { host: 2.2.2.2 } }
 api: { port: 8080 }
 `
@@ -113,7 +113,7 @@ site: { name: x }
 fuse: { max_amps: 16 }
 drivers:
   - name: a
-    wasm: a.wasm
+    lua: a.lua
     is_site_meter: true
 api: { port: 8080 }
 `
@@ -122,7 +122,7 @@ api: { port: 8080 }
 	}
 }
 
-func TestRejectsDriverWithoutWasmOrLua(t *testing.T) {
+func TestRejectsDriverWithoutLua(t *testing.T) {
 	yaml := `
 site: { name: x }
 fuse: { max_amps: 16 }
@@ -133,7 +133,7 @@ drivers:
 api: { port: 8080 }
 `
 	if _, err := Parse([]byte(yaml), "."); err == nil {
-		t.Fatal("expected error for driver without wasm/lua")
+		t.Fatal("expected error for driver without lua")
 	}
 }
 
@@ -143,7 +143,7 @@ site: { name: x }
 fuse: { max_amps: 16 }
 drivers:
   - name: a
-    wasm: a.wasm
+    lua: a.lua
     is_site_meter: true
     mqtt: { host: 192.168.1.100, username: ext }
 api: { port: 8080 }
@@ -174,7 +174,7 @@ site: { name: x, smoothing_alpha: ` + pretty(bad) + ` }
 fuse: { max_amps: 16 }
 drivers:
   - name: a
-    wasm: a.wasm
+    lua: a.lua
     is_site_meter: true
     capabilities: { mqtt: { host: 1.1.1.1 } }
 api: { port: 8080 }
@@ -191,7 +191,7 @@ site: { name: Full }
 fuse: { max_amps: 16 }
 drivers:
   - name: f
-    wasm: f.wasm
+    lua: f.lua
     is_site_meter: true
     capabilities: { mqtt: { host: 1.1.1.1 } }
 api: { port: 8080 }

@@ -283,7 +283,12 @@ function driver_poll()
                 -- offline (i16 32768, u32 huge values); anything above
                 -- 10× rated or otherwise clearly bogus → treat as 0.
                 local rated = tonumber(pv.rated_power_W) or 0
-                local cap = rated > 0 and (rated * 10) or 1e6
+                -- When the inverter doesn't report a rated power, fall back
+                -- to 16 A × 3 φ × 230 V ≈ 11 kW — a residential upper bound.
+                -- A looser cap (e.g. 1 MW) would let a single bogus reading
+                -- from an offline inverter propagate into site PV and swing
+                -- the control loop into aggressive charge.
+                local cap = rated > 0 and (rated * 10) or 11040
                 local w = sane(pv.W, cap) or 0
                 total_w = total_w + w
                 local gen = sane(pv.total_generation_Wh, 1e12) or 0

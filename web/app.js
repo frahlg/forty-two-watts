@@ -1317,7 +1317,7 @@
   }
 
   function postJson(url, body) {
-    fetch(url, {
+    return fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -1325,11 +1325,13 @@
       .then(function (res) {
         if (!res.ok) throw new Error("HTTP " + res.status);
         fetchStatus();
+        return res;
       })
       .catch(function (e) {
         console.warn("POST failed:", url, e);
         // Don't flip connection state on POST failures —
         // connection state reflects read polling, not write commands
+        throw e;
       });
   }
 
@@ -1448,14 +1450,37 @@
 
   var evRefreshTimer = null;
   if (cardEv && evModal) {
+    var evBtnStart = document.getElementById("ev-btn-start");
+    var evBtnPause = document.getElementById("ev-btn-pause");
+    var evBtnResume = document.getElementById("ev-btn-resume");
+    var evActionBtns = [evBtnStart, evBtnPause, evBtnResume];
+    // Focus-trap bounds — first and last focusable controls in the modal.
+    // Tab from the last wraps to the first and vice versa.
+    var evFocusable = [evModalClose, evBtnStart, evBtnPause, evBtnResume];
+    var evLastFocused = null;
+
     function openEvModal() {
+      evLastFocused = document.activeElement;
       evModal.classList.remove("hidden");
+      evModal.setAttribute("aria-hidden", "false");
       refreshEvModal();
       // Guard against stacked timers if the card is clicked while the
       // modal is still open (e.g. background click that didn't close).
       if (evRefreshTimer) { clearInterval(evRefreshTimer); }
       evRefreshTimer = setInterval(refreshEvModal, 5000);
+      // Focus lands on the close button so ESC/Enter work immediately.
+      setTimeout(function () { evModalClose.focus(); }, 0);
     }
+    function closeEvModal() {
+      evModal.classList.add("hidden");
+      evModal.setAttribute("aria-hidden", "true");
+      if (evRefreshTimer) { clearInterval(evRefreshTimer); evRefreshTimer = null; }
+      if (evLastFocused && typeof evLastFocused.focus === "function") {
+        evLastFocused.focus();
+      }
+    }
+    function isEvModalOpen() { return !evModal.classList.contains("hidden"); }
+
     cardEv.addEventListener("click", openEvModal);
     // The card has role="button" + tabindex="0" so it's keyboard-focusable;
     // WAI-ARIA requires Enter + Space to activate a role="button" element.
@@ -1465,26 +1490,48 @@
         openEvModal();
       }
     });
-    function closeEvModal() {
-      evModal.classList.add("hidden");
-      if (evRefreshTimer) { clearInterval(evRefreshTimer); evRefreshTimer = null; }
-    }
     evModalClose.addEventListener("click", closeEvModal);
     evModal.addEventListener("click", function (e) {
       if (e.target === evModal) closeEvModal();
     });
+    // ESC-to-close + Tab focus trap. Attached to the modal itself so the
+    // listener is only live while one of its descendants has focus.
+    evModal.addEventListener("keydown", function (e) {
+      if (!isEvModalOpen()) return;
+      if (e.key === "Escape") {
+        e.preventDefault();
+        closeEvModal();
+        return;
+      }
+      if (e.key !== "Tab") return;
+      var enabled = evFocusable.filter(function (b) { return b && !b.disabled; });
+      if (enabled.length === 0) return;
+      var first = enabled[0];
+      var last = enabled[enabled.length - 1];
+      if (e.shiftKey && document.activeElement === first) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault();
+        first.focus();
+      }
+    });
 
-    function evCommand(action, btn) {
-      btn.disabled = true;
-      postJson("/api/ev/command", { action: action });
-      setTimeout(function () { refreshEvModal(); btn.disabled = false; }, 3000);
+    function evCommand(action) {
+      // Disable all three action buttons while any command is inflight so
+      // a Pause→Resume double-click can't send both. The close button
+      // stays enabled so the user can always dismiss the modal.
+      evActionBtns.forEach(function (b) { b.disabled = true; });
+      postJson("/api/ev/command", { action: action })
+        .catch(function () { /* postJson already logs */ })
+        .finally(function () {
+          refreshEvModal();
+          evActionBtns.forEach(function (b) { b.disabled = false; });
+        });
     }
-    var evBtnStart = document.getElementById("ev-btn-start");
-    var evBtnPause = document.getElementById("ev-btn-pause");
-    var evBtnResume = document.getElementById("ev-btn-resume");
-    evBtnStart.addEventListener("click", function () { evCommand("ev_start", evBtnStart); });
-    evBtnPause.addEventListener("click", function () { evCommand("ev_pause", evBtnPause); });
-    evBtnResume.addEventListener("click", function () { evCommand("ev_resume", evBtnResume); });
+    evBtnStart.addEventListener("click", function () { evCommand("ev_start"); });
+    evBtnPause.addEventListener("click", function () { evCommand("ev_pause"); });
+    evBtnResume.addEventListener("click", function () { evCommand("ev_resume"); });
   }
 
   // Click-to-toggle legend items. Each item has data-toggle with a

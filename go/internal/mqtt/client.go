@@ -1,5 +1,4 @@
-// Package mqtt provides an MQTT capability wrapper suitable for binding
-// per-driver in the WASM runtime.
+// Package mqtt provides an MQTT capability wrapper for per-driver binding.
 package mqtt
 
 import (

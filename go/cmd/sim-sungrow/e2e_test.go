@@ -285,7 +285,7 @@ func TestE2E_ReadPVTopology(t *testing.T) {
 	}
 }
 
-// Sanity: the sample register dump in test log shows exactly what the Lua/WASM
+// Sanity: the sample register dump in test log shows exactly what the Lua
 // driver is about to read. If it looks wrong to a human, it's probably wrong.
 func TestE2E_SampleRegisterDump(t *testing.T) {
 	cfg := sungrow.Default()

@@ -1,4 +1,4 @@
-# forty-two-watts config example (Go + WASM port)
+# forty-two-watts config example
 # Copy to config.yaml and edit for your site.
 
 site:
@@ -17,13 +17,13 @@ fuse:
   voltage: 230
 
 # ----------------------------------------------------------------------
-# Drivers — WASM modules with per-driver capabilities.
+# Drivers — Lua scripts with per-driver capabilities.
 # Capabilities are the ONLY way the sandbox talks to the outside world.
 # A driver with only mqtt capability can't touch modbus, and vice versa.
 # ----------------------------------------------------------------------
 drivers:
   - name: ferroamp
-    wasm: drivers-wasm/ferroamp.wasm
+    lua: drivers/ferroamp.lua
     is_site_meter: true              # exactly one driver must have this
     battery_capacity_wh: 15200
     capabilities:
@@ -34,7 +34,7 @@ drivers:
         password: ferroampExtApi
 
   - name: sungrow
-    wasm: drivers-wasm/sungrow.wasm
+    lua: drivers/sungrow.lua
     battery_capacity_wh: 9600
     capabilities:
       modbus:

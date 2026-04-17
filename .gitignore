@@ -10,10 +10,6 @@ data/
 *.test
 *.out
 
-# WASM build artifacts
-/wasm-drivers/**/target/
-*.wasm.gz
-
 # Local config for simulators
 config.local.yaml
 

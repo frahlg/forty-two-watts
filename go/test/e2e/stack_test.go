@@ -4,8 +4,7 @@
 // self-tune runs, battery models learn.
 //
 // Run with:  go test ./go/test/e2e -timeout 120s -v
-// Skipped unless drivers-wasm/ferroamp.wasm and sungrow.wasm are present
-// (build them first with `make wasm`).
+// Uses the repo's drivers/ferroamp.lua + drivers/sungrow.lua scripts.
 package e2e
 
 import (
@@ -60,11 +59,11 @@ func findRepoRoot(t *testing.T) string {
 	return ""
 }
 
-func findWASM(t *testing.T, name string) string {
+func findLuaDriver(t *testing.T, name string) string {
 	root := findRepoRoot(t)
-	p := filepath.Join(root, "drivers-wasm", name+".wasm")
+	p := filepath.Join(root, "drivers", name+".lua")
 	if _, err := os.Stat(p); err != nil {
-		t.Skipf("drivers-wasm/%s.wasm not found — run `make wasm` first", name)
+		t.Skipf("drivers/%s.lua not found", name)
 	}
 	return p
 }
@@ -204,21 +203,21 @@ func setupStack(t *testing.T) *stack {
 
 	time.Sleep(200 * time.Millisecond)
 
-	// ---- Build cfg + open state + start wazero + drivers ----
+	// ---- Build cfg + open state + start drivers ----
 	s.cfg = &config.Config{
 		Site:  config.Site{Name: "e2e", ControlIntervalS: 1, GridTargetW: 0, GridToleranceW: 42, SmoothingAlpha: 0.3, SlewRateW: 2000, MinDispatchIntervalS: 1},
 		Fuse:  config.Fuse{MaxAmps: 16, Phases: 3, Voltage: 230},
 		API:   config.API{Port: s.apiPort},
 		Drivers: []config.Driver{
 			{
-				Name: "ferroamp", WASM: findWASM(t, "ferroamp"),
+				Name: "ferroamp", Lua: findLuaDriver(t, "ferroamp"),
 				IsSiteMeter: true, BatteryCapacityWh: 15200,
 				Capabilities: config.Capabilities{
 					MQTT: &config.MQTTConfig{Host: "127.0.0.1", Port: s.mqttPort},
 				},
 			},
 			{
-				Name: "sungrow", WASM: findWASM(t, "sungrow"),
+				Name: "sungrow", Lua: findLuaDriver(t, "sungrow"),
 				BatteryCapacityWh: 9600,
 				Capabilities: config.Capabilities{
 					Modbus: &config.ModbusConfig{Host: "127.0.0.1", Port: s.modbusPort, UnitID: 1},

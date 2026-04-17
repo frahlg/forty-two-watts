@@ -316,22 +316,20 @@
         }, 0);
         html += '<div class="devices-list">';
         currentConfig.drivers.forEach(function (d, idx) {
-          // Go-port config: d.wasm (or legacy d.lua), capabilities.mqtt/modbus
           var cap = d.capabilities || {};
           var mqtt = cap.mqtt || d.mqtt; // legacy fallback
           var modbus = cap.modbus || d.modbus;
           var protocol = mqtt ? "mqtt" : (modbus ? "modbus" : (cap.http ? "http" : "?"));
-          var driverFile = d.wasm || d.lua || "(none)";
-          var fmtKind = d.wasm ? "wasm" : (d.lua ? "lua" : "?");
+          var driverFile = d.lua || "(none)";
           html += '<div class="device-item">' +
             '<div class="device-item-header">' +
             '<strong>' + escHtml(d.name) + '</strong>' +
-            '<span style="color:var(--text-dim);font-size:0.75rem">' + fmtKind + ' · ' + protocol + ' · ' + escHtml(driverFile) + '</span>' +
+            '<span style="color:var(--text-dim);font-size:0.75rem">lua · ' + protocol + ' · ' + escHtml(driverFile) + '</span>' +
             '<button class="btn-remove" data-remove-idx="' + idx + '">Remove</button>' +
             '</div>' +
             '<div class="field-row"><div>' +
-            '<label>Driver file ' + help('Path to the .wasm (or legacy .lua) driver. Absolute or relative to the config file directory.') + '</label>' +
-            '<input type="text" data-path="drivers.' + idx + '.' + fmtKind + '" value="' + escHtml(driverFile) + '">' +
+            '<label>Driver file ' + help('Path to the .lua driver. Absolute or relative to the config file directory.') + '</label>' +
+            '<input type="text" data-path="drivers.' + idx + '.lua" value="' + escHtml(driverFile) + '">' +
             '</div><div>' +
             '<label>Battery capacity (kWh) ' + help('Nameplate storage capacity in kilowatt-hours. Stored internally as Wh.') + '</label>' +
             '<input type="number" step="0.1" data-path="drivers.' + idx + '.battery_capacity_wh" data-unit-scale="1000" value="' + ((d.battery_capacity_wh || 0) / 1000) + '">' +

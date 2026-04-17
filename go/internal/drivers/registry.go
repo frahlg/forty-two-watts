@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"reflect"
 	"sync"
 	"time"
 
@@ -82,7 +83,7 @@ type driverCmd struct {
 }
 
 // Add spawns a driver. Returns error if the driver config is invalid or
-// the WASM module can't be loaded.
+// the Lua script can't be loaded.
 func (r *Registry) Add(ctx context.Context, cfg config.Driver) error {
 	r.mu.Lock()
 	if _, exists := r.rec[cfg.Name]; exists {
@@ -152,12 +153,7 @@ func (r *Registry) Add(ctx context.Context, cfg config.Driver) error {
 	r.rec[cfg.Name] = rd
 	r.mu.Unlock()
 	go r.runLoop(rd)
-	kind := "lua"
-	path := cfg.Lua
-	if cfg.WASM != "" {
-		kind, path = "wasm", cfg.WASM
-	}
-	slog.Info("driver added", "name", cfg.Name, "kind", kind, "path", path)
+	slog.Info("driver added", "name", cfg.Name, "path", cfg.Lua)
 	return nil
 }
 
@@ -280,9 +276,9 @@ func (r *Registry) ShutdownAll() {
 }
 
 // Reload diffs a new driver list against running state and applies add/
-// remove/restart. Drivers with changed wasm path / capabilities are restarted.
-// Drivers marked Disabled are treated as "not in the new list" — running
-// ones get stopped, missing ones are not added.
+// remove/restart. Drivers with changed lua path, capabilities, or config
+// map are restarted. Drivers marked Disabled are treated as "not in the
+// new list" — running ones get stopped, missing ones are not added.
 func (r *Registry) Reload(ctx context.Context, newDrivers []config.Driver) {
 	// Filter out disabled drivers — they behave like removed from the
 	// registry's perspective but remain in config.yaml for re-enable.
@@ -361,7 +357,7 @@ func findDriver(list []config.Driver, name string) (config.Driver, bool) {
 }
 
 func sameDriverConfig(a, b config.Driver) bool {
-	if a.WASM != b.WASM || a.Lua != b.Lua ||
+	if a.Lua != b.Lua ||
 		a.IsSiteMeter != b.IsSiteMeter ||
 		a.BatteryCapacityWh != b.BatteryCapacityWh ||
 		a.Disabled != b.Disabled {
@@ -381,21 +377,9 @@ func sameDriverConfig(a, b config.Driver) bool {
 	// Compare the free-form Config map. Previously omitted, so a changed
 	// cloud-driver password in drivers[i].config.password was silently
 	// ignored by the hot-reload diff — the driver kept running with the
-	// stale credentials. Deep-equal via JSON is coarse but correct for the
-	// stringly-typed config map we actually use.
-	if !sameConfigMap(a.Config, b.Config) {
-		return false
-	}
-	return true
-}
-
-// sameConfigMap compares two driver Config maps. Nil and empty are
-// treated as equal. Uses JSON marshal so order of keys doesn't matter.
-func sameConfigMap(a, b map[string]any) bool {
-	if len(a) == 0 && len(b) == 0 {
+	// stale credentials. DeepEqual also treats nil and empty maps as equal.
+	if len(a.Config) == 0 && len(b.Config) == 0 {
 		return true
 	}
-	ja, _ := json.Marshal(a)
-	jb, _ := json.Marshal(b)
-	return string(ja) == string(jb)
+	return reflect.DeepEqual(a.Config, b.Config)
 }

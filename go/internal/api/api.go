@@ -525,9 +525,8 @@ func (s *Server) handlePostConfig(w http.ResponseWriter, r *http.Request) {
 				slog.Warn("failed to persist ev_charger_password", "err", err)
 			}
 		}
-		// Restore the real password into the in-memory config so
-		// InjectEVChargerDriver (called by the config-reload watcher)
-		// sees it.
+		// Restore the real password into the in-memory config so the
+		// config-reload watcher sees it on the next apply.
 		if stored, ok := s.deps.State.LoadConfig(evPasswordKey); ok {
 			newCfg.EVCharger.Password = stored
 		}

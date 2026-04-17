@@ -47,7 +47,11 @@ local function login(email, password)
     local body = host.json_encode({userName = email, password = password})
     local resp, err = host.http_post(BASE_URL .. "/accounts/login", body)
     if err then
-        host.log("error", "Easee login failed: " .. tostring(err))
+        -- Easee validation errors have been observed to echo submitted form
+        -- data in the response body. Log only the status prefix so the
+        -- password can't leak into disk logs.
+        local status_only = tostring(err):match("^(HTTP %d+)") or "request failed"
+        host.log("error", "Easee login failed: " .. status_only)
         return false
     end
     local data = host.json_decode(resp)
@@ -112,14 +116,17 @@ local function get_chargers()
 end
 
 -- Observation IDs (from developer.easee.com/docs/charger-observation-ids)
-local OBS_OP_MODE        = 109
-local OBS_TOTAL_POWER    = 120
-local OBS_SESSION_ENERGY = 121
+local OBS_DYN_CURRENT     = 48
+local OBS_REASON_NO_CUR   = 96
+local OBS_CABLE_LOCKED    = 103
+local OBS_OP_MODE         = 109
+local OBS_TOTAL_POWER     = 120
+local OBS_SESSION_ENERGY  = 121
 local OBS_LIFETIME_ENERGY = 124
-local OBS_VOLTAGE        = 194
-local OBS_CURRENT        = 183
+local OBS_CURRENT         = 183
+local OBS_VOLTAGE         = 194
 
-local OBS_IDS = "109,120,121,124,194,183"
+local OBS_IDS = "48,96,103,109,120,121,124,183,194"
 
 local function get_observations(serial)
     local url = "https://api.easee.com/state/" .. serial .. "/observations?ids=" .. OBS_IDS
@@ -255,8 +262,16 @@ function driver_poll()
     local session_wh = (obs[OBS_SESSION_ENERGY] or 0) * 1000  -- kWh → Wh
     local connected = (op_mode >= 2 and op_mode <= 6)
     local charging = (op_mode == 3)
+    -- op_mode 0 is the sentinel Easee emits when the cloud hasn't heard
+    -- from the unit recently. Anything else means the charger itself is
+    -- responsive even when no car is plugged in.
+    local is_online = (op_mode ~= 0)
 
-    local reason_code = state.reasonForNoCurrent
+    local reason_code = obs[OBS_REASON_NO_CUR]
+    local cable_locked = obs[OBS_CABLE_LOCKED]
+    if cable_locked ~= nil then cable_locked = (cable_locked == 1 or cable_locked == true) end
+    local dyn_current = obs[OBS_DYN_CURRENT]
+
     host.emit("ev", {
         w                       = power_w,
         connected               = connected,
@@ -266,9 +281,9 @@ function driver_poll()
         state_label             = OP_MODE_LABELS[op_mode] or "unknown",
         reason_no_current       = reason_code,                 -- int: 0=ok; why NOT drawing current
         reason_no_current_label = reason_code and REASON_LABELS[reason_code], -- nil if 0/ok, string otherwise
-        is_online               = state.isOnline,              -- Easee cloud considers charger online
-        cable_locked            = state.cableLocked,
-        max_a                   = state.dynamicChargerCurrent, -- current dynamic limit (A)
+        is_online               = is_online,
+        cable_locked            = cable_locked,
+        max_a                   = dyn_current,                 -- current dynamic limit (A)
         phases                  = 3,                           -- Easee defaults 3-phase
     })
 
@@ -281,11 +296,8 @@ function driver_poll()
     if obs[OBS_LIFETIME_ENERGY] then
         host.emit_metric("ev_lifetime_kwh", obs[OBS_LIFETIME_ENERGY])
     end
-    if state.dynamicChargerCurrent then
-        host.emit_metric("ev_dynamic_current_a", state.dynamicChargerCurrent)
-    end
-    if state.temperature then
-        host.emit_metric("ev_temp_c", state.temperature)
+    if dyn_current then
+        host.emit_metric("ev_dynamic_current_a", dyn_current)
     end
 
     return 5000

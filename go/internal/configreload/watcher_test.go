@@ -21,7 +21,7 @@ fuse:
   max_amps: 16
 drivers:
   - name: ferroamp
-    wasm: drivers/ferroamp.wasm
+    lua: drivers/ferroamp.lua
     is_site_meter: true
     capabilities:
       mqtt:
@@ -85,7 +85,7 @@ fuse:
   max_amps: 16
 drivers:
   - name: ferroamp
-    wasm: drivers/ferroamp.wasm
+    lua: drivers/ferroamp.lua
     is_site_meter: true
     capabilities:
       mqtt:

@@ -20,7 +20,7 @@ Wraps one `paho.Client` per driver so each driver has its own broker connection,
 
 ## How it talks to neighbors
 
-The `../drivers` registry holds an `MQTTFactory` function wired in `cmd/forty-two-watts/main.go:132-134` that calls `Dial(host, port, user, pass, "ftw-"+driverName)` for each driver that has an MQTT config. The returned `*Capability` is bound to the driver's `HostEnv` via `env.WithMQTT(cap)`; from then on the driver's Lua/WASM code calls `host.mqtt_subscribe` / `host.mqtt_publish` / `host.mqtt_messages`, which route through `drivers.MQTTCap`. The HA bridge (`../ha`) creates its own paho client — it does NOT go through this package.
+The `../drivers` registry holds an `MQTTFactory` function wired in `cmd/forty-two-watts/main.go` that calls `Dial(host, port, user, pass, "ftw-"+driverName)` for each driver that has an MQTT config. The returned `*Capability` is bound to the driver's `HostEnv` via `env.WithMQTT(cap)`; from then on the driver's Lua code calls `host.mqtt_subscribe` / `host.mqtt_publish` / `host.mqtt_messages`, which route through `drivers.MQTTCap`. The HA bridge (`../ha`) creates its own paho client — it does NOT go through this package.
 
 ## What to read first
 
