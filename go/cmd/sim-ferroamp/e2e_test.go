@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
 	"net"
 	"strconv"
 	"strings"
@@ -333,5 +332,4 @@ func printSamplePayload(t *testing.T, sim *ferroamp.Simulator, s *mqttserver.Ser
 		t.Logf("sample ehub payload: %s", p)
 	case <-time.After(1 * time.Second):
 	}
-	fmt.Sprintf("") // silence import
 }

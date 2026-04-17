@@ -1,0 +1,47 @@
+name: test
+
+# Runs the Go test suite on every PR targeting master and on pushes to
+# master. The release workflow is separate and only runs on master
+# pushes — keeping test as its own job means PR authors get fast,
+# focused feedback without waiting for docker builds / semantic-release.
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: go test + vet
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache-dependency-path: go/go.sum
+
+      - name: Go vet
+        working-directory: go
+        run: go vet ./...
+
+      - name: Go test
+        working-directory: go
+        # -count=1 disables the test cache so CI always re-runs, avoiding
+        # cached-pass-on-broken-cache surprises.
+        #
+        # -race was tried and surfaced pre-existing concurrent writes to
+        # telemetry.DriverHealth from the OCPP handler path (the charge-
+        # point library fires OnConnect and OnBootNotification on separate
+        # goroutines for the same charger). CLAUDE.md already documents
+        # DriverHealth as single-writer — the fix is to lock or serialize
+        # the OCPP path, which is a separate piece of work. Until then,
+        # omit -race here so CI doesn't punish unrelated PRs for a known
+        # pre-existing race. Re-add once OCPP is hardened.
+        run: go test -count=1 ./...
