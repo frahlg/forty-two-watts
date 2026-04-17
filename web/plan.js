@@ -237,17 +237,34 @@
     ctx.textAlign = 'left';
     ctx.fillText('Price', pad.l + 4, priceY0 + 12);
 
-    // ---- Forecast PV line (negative = generation, site sign) ----
+    // ---- PV line (negative = generation, site sign) ----
+    // Prefer the plan's own per-slot pv_w when the optimiser is running
+    // — that's the number that drove the charge/idle/discharge
+    // decisions, and it's what you want to compare against reality when
+    // the battery behaves unexpectedly (e.g. plan says 0.8 kW PV,
+    // reality is 4.6 kW, so the battery absorbs the unforecast surplus).
+    // Fall back to the raw weather forecast when there's no plan.
     ctx.strokeStyle = 'rgba(34,197,94,0.9)';
     ctx.lineWidth = 2;
     ctx.beginPath();
     let first = true;
-    for (const f of state.forecast || []) {
-      if (f.slot_ts_ms > tMax || !f.pv_w_estimated) continue;
-      const x = xScale(f.slot_ts_ms);
-      const y = powerY(-f.pv_w_estimated); // site sign
-      if (first) { ctx.moveTo(x, y); first = false; }
-      else ctx.lineTo(x, y);
+    if (plan && plan.actions && plan.actions.length) {
+      for (const a of plan.actions) {
+        if (a.slot_start_ms > tMax) break;
+        if (a.pv_w == null) continue;
+        const x = xScale(a.slot_start_ms);
+        const y = powerY(a.pv_w); // plan.pv_w is already site-signed
+        if (first) { ctx.moveTo(x, y); first = false; }
+        else ctx.lineTo(x, y);
+      }
+    } else {
+      for (const f of state.forecast || []) {
+        if (f.slot_ts_ms > tMax || !f.pv_w_estimated) continue;
+        const x = xScale(f.slot_ts_ms);
+        const y = powerY(-f.pv_w_estimated); // flip forecast → site sign
+        if (first) { ctx.moveTo(x, y); first = false; }
+        else ctx.lineTo(x, y);
+      }
     }
     ctx.stroke();
 
