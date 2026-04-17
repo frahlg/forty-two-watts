@@ -35,9 +35,13 @@
 --
 -- Sign convention (SITE = positive W flows INTO the site):
 --   meter.w: positive = importing from grid, negative = exporting
---   pv.w   : negative = generating (source).  Zap reports generation as
---            positive W, so the driver negates at the boundary.
--- The Zap P1 meter already reports import-positive, so no meter flip.
+--   pv.w   : negative = generating (source).
+-- The Zap already reports both in site convention directly:
+--   P1 meter.W is positive when importing (verified against a house
+--   drawing +208 W on L1, -62 W on L2, -179 W on L3 ⇒ net -33 W export).
+--   Inverter pv.W is negative when generating (SolarEdge SE at 2745 W
+--   of generation reports pv.W = -2745). So we pass both through
+--   unchanged — no boundary sign flip.
 
 DRIVER = {
   id           = "sourceful-zap",
@@ -315,9 +319,10 @@ function driver_poll()
             end
         end
         if any then
-            -- Site convention: PV generation is a source → negative W.
-            host.emit("pv", { w = -total_w, lifetime_wh = total_gen_wh })
-            host.emit_metric("pv_w", -total_w)
+            -- The Zap already reports pv.W as negative when the inverter
+            -- is generating — matches site convention. Pass through as-is.
+            host.emit("pv", { w = total_w, lifetime_wh = total_gen_wh })
+            host.emit_metric("pv_w", total_w)
         end
     end
 
