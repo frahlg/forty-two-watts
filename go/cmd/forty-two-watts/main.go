@@ -375,8 +375,26 @@ func main() {
 		}
 		mpcSvc.Start(ctx)
 		defer mpcSvc.Stop()
-		// Inject plan → control.State so planner modes can override grid_target.
+		// Inject plan → control.State. Both callbacks are wired:
+		//   PlanTarget — legacy grid-target path (grid_target_w, mode str)
+		//   SlotDirective — new energy-allocation path (Wh per slot)
+		// State.UseEnergyDispatch picks which one is actually used when a
+		// planner mode is active; see docs/plan-ems-contract.md.
 		ctrl.PlanTarget = mpcSvc.SlotAt
+		ctrl.SlotDirective = func(now time.Time) (control.SlotDirective, bool) {
+			d, ok := mpcSvc.SlotDirectiveAt(now)
+			if !ok {
+				return control.SlotDirective{}, false
+			}
+			return control.SlotDirective{
+				SlotStart:       d.SlotStart,
+				SlotEnd:         d.SlotEnd,
+				BatteryEnergyWh: d.BatteryEnergyWh,
+				SoCTargetPct:    d.SoCTargetPct,
+				Strategy:        string(d.Strategy),
+			}, true
+		}
+		ctrl.UseEnergyDispatch = cfg.Planner != nil && cfg.Planner.UseEnergyDispatch
 		// If the restored control mode is a planner variant, push the
 		// corresponding mpc.Mode so the plan is built with the strategy
 		// the user actually picked — not whatever cfg.planner.mode says.

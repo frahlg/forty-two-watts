@@ -73,6 +73,12 @@ type Planner struct {
 	ChargeEfficiency    float64 `yaml:"charge_efficiency,omitempty" json:"charge_efficiency,omitempty"`
 	DischargeEfficiency float64 `yaml:"discharge_efficiency,omitempty" json:"discharge_efficiency,omitempty"`
 	ExportOrePerKWh     float64 `yaml:"export_ore_per_kwh,omitempty" json:"export_ore_per_kwh,omitempty"` // 0 = use mean spot
+	// UseEnergyDispatch switches the control loop from the legacy
+	// PI-on-grid-target path to the energy-allocation path where the
+	// plan directs total battery Wh per slot and the EMS converts to
+	// power in real time. See docs/plan-ems-contract.md. Defaults off
+	// until validated in production.
+	UseEnergyDispatch bool `yaml:"use_energy_dispatch,omitempty" json:"use_energy_dispatch,omitempty"`
 }
 
 // Site is the top-level control loop config.
