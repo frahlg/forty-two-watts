@@ -40,8 +40,11 @@ jobs:
           # semantic-release walks every commit since the last tag, so
           # it needs the full history. fetch-depth: 0 is the standard.
           fetch-depth: 0
-          # Use the default GITHUB_TOKEN; persist-credentials lets the
-          # @semantic-release/git plugin push the changelog commit.
+          # @semantic-release/github now creates the tag + release via
+          # the API — no local branch push happens anymore. The @…/git
+          # plugin was removed because its changelog-commit push was
+          # rejected by master's branch protection (the fresh commit
+          # had no status check attached).
           persist-credentials: true
 
       - name: Setup Node
@@ -64,8 +67,6 @@ jobs:
           # never import it directly).
           semantic_version: 24
           extra_plugins: |
-            @semantic-release/changelog@6
-            @semantic-release/git@10
             conventional-changelog-conventionalcommits@8
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
