@@ -94,7 +94,12 @@
     // glance without reading per-slot tooltips.
     const modeBandY0 = priceY0 + priceH + 2;
 
-    // Power band in middle — covers battery + grid
+    // Power band in middle — covers battery + grid.
+    // Several later sections ("Plan battery bars", "Load forecast",
+    // predicted-zone shade, etc.) reference `plan` directly. Keep this
+    // alias — removing it leaves those `plan` references undefined and
+    // the whole render throws, wiping the chart.
+    const plan = state.plan;
     const powerY0 = modeBandY0 + modeBandH + 4;
     const powerH = plotH * 0.42;
     // Scale off the fuse (what the site can *physically* deliver) plus a
