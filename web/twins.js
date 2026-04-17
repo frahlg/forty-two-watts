@@ -25,7 +25,18 @@
     return Math.round(s / 3600) + 'h ago';
   }
 
-  function twinCard(title, d) {
+  // Matches the battery-model reset button in models.js — same look, same
+  // inline style so advanced operators have one consistent affordance
+  // for "wipe and re-learn" across all models.
+  function resetButton(endpoint, label) {
+    return `<button class="btn-reset-model" data-reset-twin="${endpoint}" ` +
+      'style="margin-top:6px;padding:4px 10px;font-size:0.7rem;background:var(--surface2);' +
+      'border:1px solid var(--border);color:var(--text-dim);border-radius:3px;cursor:pointer;width:100%">' +
+      `↻ Reset ${label}` +
+      '</button>';
+  }
+
+  function twinCard(title, d, resetEndpoint, resetLabel) {
     if (!d || !d.enabled) return `<div class="twin-card"><h3>${title}</h3><div class="twin-row"><span>disabled</span></div></div>`;
     const q = Math.max(0, Math.min(1, d.quality || 0));
     const qPct = (q * 100).toFixed(0);
@@ -42,20 +53,42 @@
     rows.push(`<div class="twin-row"><span>last update</span><b>${fmtAge(d.last_ms)}</b></div>`);
     rows.push(`<div class="twin-row"><span>quality</span><b>${qPct}%</b></div>`);
     rows.push(`<div class="twin-quality"><div class="twin-quality-fill" style="width:${qPct}%;background:${qColor}"></div></div>`);
-    return `<div class="twin-card"><h3>${title}</h3>${rows.join('')}</div>`;
+    const btn = resetEndpoint ? resetButton(resetEndpoint, resetLabel) : '';
+    return `<div class="twin-card"><h3>${title}</h3>${rows.join('')}${btn}</div>`;
   }
 
   function render(pv, load) {
     const grid = document.getElementById('twins-grid');
     if (!grid) return;
-    grid.innerHTML = twinCard('PV twin', pv) + twinCard('Load twin', load);
+    grid.innerHTML = twinCard('PV twin', pv, '/api/pvmodel/reset', 'PV twin')
+      + twinCard('Load twin', load, '/api/loadmodel/reset', 'load twin');
     const sub = document.getElementById('twins-subtitle');
     if (sub) sub.textContent = 'self-learning digital twins — feed MPC + UI forecasts';
+  }
+
+  // Wired once on init — delegation off the grid so dynamically-rendered
+  // buttons pick up the handler without rebinding each refresh.
+  function onResetClick(e) {
+    const endpoint = e.target && e.target.dataset && e.target.dataset.resetTwin;
+    if (!endpoint) return;
+    const twinName = endpoint.indexOf('pv') >= 0 ? 'PV twin' : 'load twin';
+    if (!confirm(`Reset ${twinName} to fresh defaults?\n\n` +
+      'All learned samples will be wiped. The model re-trains from the ' +
+      'physics / bucket prior; expect ~50 minutes of lower-quality ' +
+      'predictions while it collects samples again.')) {
+      return;
+    }
+    fetch(endpoint, { method: 'POST' })
+      .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+      .then(() => fetchAll())
+      .catch(err => alert('Reset failed: ' + err.message));
   }
 
   function init() {
     fetchAll();
     setInterval(fetchAll, REFRESH_MS);
+    const grid = document.getElementById('twins-grid');
+    if (grid) grid.addEventListener('click', onResetClick);
   }
 
   if (document.readyState === 'loading') {
