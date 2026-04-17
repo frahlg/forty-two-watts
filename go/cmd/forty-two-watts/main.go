@@ -69,6 +69,11 @@ func main() {
 	slog.SetDefault(logger)
 	slog.Info("forty-two-watts starting", "version", Version, "config", *configPath)
 
+	// Route "drivers/<name>.lua" path resolution through the drivers dir
+	// (from -drivers). Picked up by both the initial Load below and every
+	// subsequent reload via the file watcher.
+	config.DriversDirOverride = resolveDriverDir()
+
 	// ---- Load config ----
 	cfg, err := config.Load(*configPath)
 	if err != nil {

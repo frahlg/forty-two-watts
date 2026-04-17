@@ -393,13 +393,28 @@ func Parse(data []byte, baseDir string) (*Config, error) {
 	return &c, nil
 }
 
-// ResolveDriverPaths joins relative Lua driver paths with baseDir.
+// DriversDirOverride redirects resolution of relative "drivers/<name>.lua"
+// Lua paths to this directory instead of the config sibling. main.go sets
+// it once at startup from the -drivers flag so Docker images — where
+// drivers live in the immutable image layer (/app/drivers) rather than
+// next to the user's config (/app/data) — can still load driver scripts.
+// Empty string preserves the historical "sibling-of-config" behaviour.
+var DriversDirOverride string
+
+// ResolveDriverPaths joins relative Lua driver paths with baseDir, or
+// with DriversDirOverride when the relative path starts with "drivers/".
 func (c *Config) ResolveDriverPaths(baseDir string) {
 	for i := range c.Drivers {
 		c.Drivers[i].Lua = stripLeadingDotDot(c.Drivers[i].Lua)
-		if c.Drivers[i].Lua != "" && !filepath.IsAbs(c.Drivers[i].Lua) {
-			c.Drivers[i].Lua = filepath.Join(baseDir, c.Drivers[i].Lua)
+		p := c.Drivers[i].Lua
+		if p == "" || filepath.IsAbs(p) {
+			continue
 		}
+		if DriversDirOverride != "" && strings.HasPrefix(p, "drivers/") {
+			c.Drivers[i].Lua = filepath.Join(DriversDirOverride, strings.TrimPrefix(p, "drivers/"))
+			continue
+		}
+		c.Drivers[i].Lua = filepath.Join(baseDir, p)
 	}
 }
 
@@ -415,10 +430,20 @@ func stripLeadingDotDot(p string) string {
 // Paths that are outside baseDir (filepath.Rel would yield a ../-prefixed
 // result) are left absolute — otherwise the next ResolveDriverPaths would
 // strip the leading ../ via stripLeadingDotDot and silently re-anchor the
-// driver under baseDir.
+// driver under baseDir. When DriversDirOverride is set, paths resolved
+// through it are rewritten back to "drivers/<basename>" so the YAML + UI
+// round-trip stays portable (no /app/drivers/... baked into config.yaml).
 func (c *Config) UnresolveDriverPaths(baseDir string) {
 	for i := range c.Drivers {
-		c.Drivers[i].Lua = relToBaseDir(baseDir, c.Drivers[i].Lua)
+		p := c.Drivers[i].Lua
+		if DriversDirOverride != "" && p != "" {
+			rel, err := filepath.Rel(DriversDirOverride, p)
+			if err == nil && !strings.HasPrefix(rel, "..") {
+				c.Drivers[i].Lua = filepath.ToSlash(filepath.Join("drivers", rel))
+				continue
+			}
+		}
+		c.Drivers[i].Lua = relToBaseDir(baseDir, p)
 	}
 }
 
@@ -574,6 +599,16 @@ func SaveAtomic(path string, c *Config) error {
 func relDriverPath(baseDir, p string) string {
 	if p == "" {
 		return ""
+	}
+	// Paths resolved through DriversDirOverride land outside baseDir, so a
+	// straight Rel would emit "../drivers/<name>.lua" — preserved across
+	// saves via stripLeadingDotDot but ugly. Rewrite them as a clean
+	// "drivers/<basename>" to keep YAML portable between hosts.
+	if DriversDirOverride != "" {
+		rel, err := filepath.Rel(DriversDirOverride, p)
+		if err == nil && !strings.HasPrefix(rel, "..") {
+			return filepath.ToSlash(filepath.Join("drivers", rel))
+		}
 	}
 	rel, err := filepath.Rel(baseDir, p)
 	if err != nil {
