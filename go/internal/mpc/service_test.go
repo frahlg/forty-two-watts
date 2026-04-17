@@ -287,7 +287,9 @@ func TestSlotDirectiveAt(t *testing.T) {
 
 // Discharge intent (negative BatteryW) surfaces as negative energy.
 func TestSlotDirectiveAtDischarge(t *testing.T) {
-	now := time.Date(2026, 4, 17, 17, 0, 0, 0, time.UTC)
+	// Use real wall clock — MaxPlanAge (30 min) would reject a hardcoded
+	// past timestamp. Same flake as TestSlotDirectiveAt earlier.
+	now := time.Now().UTC().Truncate(time.Second)
 	s := &Service{
 		last: &Plan{
 			GeneratedAtMs: now.UnixMilli(),

@@ -794,27 +794,38 @@ func buildMPC(cfg *config.Config, st *state.Store, tel *telemetry.Store, capacit
 			continue
 		}
 		totalCap += cap
-		// Default max (de)charge = 0.5C unless overridden. Only honor
-		// a strictly-positive override — zero or negative overrides
-		// would leave the planner with no actions to explore and
-		// every slot would plan battery_w=0. That looks like "MPC
-		// disabled" in the UI even though the service is running.
-		// Much more likely to be a config mistake than intent.
+		// Default max (de)charge = 0.5C unless overridden. Zero is a
+		// legitimate one-sided constraint — `max_charge_w: 0` means
+		// "forbid charging, allow discharge only" and mpc.Optimize's
+		// action grid (`-MaxDischargeW…+MaxChargeW`) supports it.
+		// Negative is always a config mistake.
+		//
+		// Only the *both-zero* case is treated as a config error (and
+		// almost certainly is — it kills the planner's entire action
+		// space while leaving the service running). We fall back to
+		// default in that case and log a warning.
 		defaultP := cap / 2
 		chg := defaultP
 		dis := defaultP
 		if b, ok := cfg.Batteries[d.Name]; ok {
-			if b.MaxChargeW != nil && *b.MaxChargeW > 0 {
-				chg = *b.MaxChargeW
-			} else if b.MaxChargeW != nil {
-				slog.Warn("mpc: ignoring non-positive batteries.max_charge_w; using default 0.5C",
-					"driver", d.Name, "value", *b.MaxChargeW, "default_w", defaultP)
-			}
-			if b.MaxDischargeW != nil && *b.MaxDischargeW > 0 {
-				dis = *b.MaxDischargeW
-			} else if b.MaxDischargeW != nil {
-				slog.Warn("mpc: ignoring non-positive batteries.max_discharge_w; using default 0.5C",
-					"driver", d.Name, "value", *b.MaxDischargeW, "default_w", defaultP)
+			bothZero := b.MaxChargeW != nil && *b.MaxChargeW == 0 &&
+				b.MaxDischargeW != nil && *b.MaxDischargeW == 0
+			if bothZero {
+				slog.Warn("mpc: batteries.max_{charge,discharge}_w both 0 — treating as config error, using default 0.5C",
+					"driver", d.Name, "default_w", defaultP)
+			} else {
+				if b.MaxChargeW != nil && *b.MaxChargeW >= 0 {
+					chg = *b.MaxChargeW
+				} else if b.MaxChargeW != nil {
+					slog.Warn("mpc: ignoring negative batteries.max_charge_w; using default 0.5C",
+						"driver", d.Name, "value", *b.MaxChargeW, "default_w", defaultP)
+				}
+				if b.MaxDischargeW != nil && *b.MaxDischargeW >= 0 {
+					dis = *b.MaxDischargeW
+				} else if b.MaxDischargeW != nil {
+					slog.Warn("mpc: ignoring negative batteries.max_discharge_w; using default 0.5C",
+						"driver", d.Name, "value", *b.MaxDischargeW, "default_w", defaultP)
+				}
 			}
 		}
 		maxChg += chg
