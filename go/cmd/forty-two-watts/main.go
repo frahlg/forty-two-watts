@@ -716,6 +716,26 @@ func buildMPC(cfg *config.Config, st *state.Store, tel *telemetry.Store, capacit
 		slog.Warn("mpc: no battery capacity — skipping")
 		return nil
 	}
+	// Clamp aggregate charge/discharge to the grid fuse capacity. The
+	// control loop's fuse guard enforces this per-tick anyway, but a
+	// planner that schedules 45 kW of charge through a 16 A fuse (11 kW)
+	// produces SoC projections that can never be realised — the optimiser
+	// "charges" to 100% in the plan while the battery barely budges in
+	// reality, and every downstream decision (when to discharge, when to
+	// idle, what the total cost looks like) is based on that fantasy.
+	// Cheaper to keep the plan feasible up-front.
+	if fuseMaxW := cfg.Fuse.MaxPowerW(); fuseMaxW > 0 {
+		if maxChg > fuseMaxW {
+			slog.Info("mpc: clamping MaxChargeW to fuse capacity",
+				"requested_w", maxChg, "fuse_w", fuseMaxW)
+			maxChg = fuseMaxW
+		}
+		if maxDis > fuseMaxW {
+			slog.Info("mpc: clamping MaxDischargeW to fuse capacity",
+				"requested_w", maxDis, "fuse_w", fuseMaxW)
+			maxDis = fuseMaxW
+		}
+	}
 	pl := cfg.Planner
 	zone := "SE3"
 	if cfg.Price != nil && cfg.Price.Zone != "" {
