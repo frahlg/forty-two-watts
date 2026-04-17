@@ -82,6 +82,15 @@ if ! $SUDO docker compose version >/dev/null 2>&1; then
   $SUDO apt-get install -y -qq docker-compose-plugin
 fi
 
+# uidmap (newuidmap/newgidmap) is required if the user later wants to
+# switch to rootless Docker via `dockerd-rootless-setuptool.sh install`.
+# Tiny package, harmless to have, saves a confusing second-step detour.
+if ! command -v newuidmap >/dev/null 2>&1; then
+  echo "    Installing uidmap (needed for rootless Docker)..."
+  $SUDO apt-get update -qq
+  $SUDO apt-get install -y -qq uidmap
+fi
+
 # ---- 2. Docker group ----
 echo ""
 echo "==[2/5]== Adding $USER to the docker group"
@@ -110,11 +119,21 @@ echo "==[4/5]== Fetching docker-compose.yml from $BRANCH"
 curl -fsSL "$COMPOSE_URL" -o "$INSTALL_DIR/docker-compose.yml"
 
 # ---- 5. Pull + start ----
+# Run docker as the invoking user, not via sudo. If they were just added
+# to the docker group in step 2, their current shell hasn't picked it up
+# yet — `sg docker -c ...` executes under the new primary group without
+# requiring a re-login.
+if [ "$(id -u)" -eq 0 ] || id -nG "$USER" 2>/dev/null | grep -qw docker; then
+  run_docker() { docker "$@"; }
+else
+  run_docker() { sg docker -c "docker $*"; }
+fi
+
 echo ""
 echo "==[5/5]== Pulling image + starting container"
 cd "$INSTALL_DIR"
-$SUDO docker compose pull
-$SUDO docker compose up -d
+run_docker compose pull
+run_docker compose up -d
 
 # ---- Summary ----
 HOST_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
