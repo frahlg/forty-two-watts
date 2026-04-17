@@ -10,7 +10,7 @@
 # host and only `go build` is cross-compiled.
 
 # --- Builder ---------------------------------------------------------------
-FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS builder
 
 # git is needed by `go build` to resolve VCS info baked into the binary
 # via -X main.Version. Everything else is in the base image.
