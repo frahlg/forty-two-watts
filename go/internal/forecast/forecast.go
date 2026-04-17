@@ -38,12 +38,16 @@ type Provider interface {
 }
 
 // RawForecast is one hour's parsed forecast. Fields may be nil if the
-// provider didn't return them.
+// provider didn't return them. Providers populate whichever fields they
+// natively expose — the downstream fetchAndStore selects the most
+// direct PV-power signal available (PVWEstimated > SolarWm2 → derived
+// > CloudCoverPct → derived).
 type RawForecast struct {
-	HourStart      time.Time
-	CloudCoverPct  *float64 // 0..100
-	TempC          *float64
-	SolarWm2       *float64 // direct shortwave radiation W/m² (if provider gives it)
+	HourStart     time.Time
+	CloudCoverPct *float64 // 0..100
+	TempC         *float64
+	SolarWm2      *float64 // direct shortwave radiation W/m² (if provider gives it)
+	PVWEstimated  *float64 // provider-native site PV output (if provider gives it, e.g. Forecast.Solar)
 }
 
 // ---- met.no provider ----
@@ -260,6 +264,11 @@ func FromConfig(cfg *config.Weather, ratedPVW float64, st *state.Store, userAgen
 		p = NewMetNo(userAgent)
 	case "openweather":
 		p = NewOpenWeather(cfg.APIKey)
+	case "open_meteo":
+		p = NewOpenMeteo()
+	case "forecast_solar":
+		kWp := ratedPVW / 1000.0
+		p = NewForecastSolar(cfg.PVTiltDeg, cfg.PVAzimuthDeg, kWp)
 	default:
 		return nil
 	}
@@ -310,7 +319,19 @@ func (s *Service) fetchAndStore(ctx context.Context) {
 	nowMs := time.Now().UnixMilli()
 	points := make([]state.ForecastPoint, 0, len(rows))
 	for _, r := range rows {
-		pvW := EstimatePVW(s.Lat, s.Lon, r.HourStart, r.CloudCoverPct, s.RatedPVW)
+		// Pick the most direct PV signal the provider gave us. Forecast.Solar
+		// returns site-calibrated watts directly; Open-Meteo returns shortwave
+		// radiation we turn into watts via rated × W/m²/1000; met.no only has
+		// cloud fraction, so we fall through to the naive cloud-derated prior.
+		var pvW float64
+		switch {
+		case r.PVWEstimated != nil:
+			pvW = *r.PVWEstimated
+		case r.SolarWm2 != nil && s.RatedPVW > 0:
+			pvW = s.RatedPVW * (*r.SolarWm2) / 1000.0
+		default:
+			pvW = EstimatePVW(s.Lat, s.Lon, r.HourStart, r.CloudCoverPct, s.RatedPVW)
+		}
 		pvPtr := &pvW
 		points = append(points, state.ForecastPoint{
 			SlotTsMs:      r.HourStart.UnixMilli(),

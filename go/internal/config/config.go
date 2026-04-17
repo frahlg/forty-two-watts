@@ -229,7 +229,7 @@ type Price struct {
 
 // Weather is the weather-forecast source config.
 type Weather struct {
-	Provider  string  `yaml:"provider" json:"provider"` // met_no | openweather | none
+	Provider  string  `yaml:"provider" json:"provider"` // met_no | openweather | open_meteo | forecast_solar | none
 	Latitude  float64 `yaml:"latitude" json:"latitude"`
 	Longitude float64 `yaml:"longitude" json:"longitude"`
 	APIKey    string  `yaml:"api_key,omitempty" json:"api_key,omitempty"`
@@ -240,6 +240,14 @@ type Weather struct {
 	// which is only roughly right for homes where PV and storage were
 	// sized together. Set explicitly for accurate day-1 forecasts.
 	PVRatedW float64 `yaml:"pv_rated_w,omitempty" json:"pv_rated_w,omitempty"`
+
+	// PVTiltDeg / PVAzimuthDeg describe the physical orientation of the
+	// panels. Only used by providers that need site geometry
+	// (forecast_solar). Tilt is angle from horizontal (0 = flat, 90 =
+	// wall). Azimuth is compass heading (180 = south). Safe to omit
+	// when using met_no / open_meteo.
+	PVTiltDeg    float64 `yaml:"pv_tilt_deg,omitempty" json:"pv_tilt_deg,omitempty"`
+	PVAzimuthDeg float64 `yaml:"pv_azimuth_deg,omitempty" json:"pv_azimuth_deg,omitempty"`
 
 	// HeatingWPerDegC adds load proportional to max(18°C − outdoor_temp, 0).
 	// A rough-but-useful way to teach the planner that cold nights cost
