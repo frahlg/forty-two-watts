@@ -101,14 +101,145 @@ func (s *Service) SetRated(w float64) {
 
 // Predict is the main integration point: MPC + UI call this to get the
 // twin's prediction for any future instant.
+//
+// Near-future predictions are anchored to live telemetry: if the model's
+// "what PV should be doing right now" disagrees with what PV IS doing
+// right now, a multiplicative correction is applied to the base
+// prediction and decayed linearly over NowAnchorHorizon so the
+// correction fades as the prediction reaches further into the future
+// (weather shifts blur the correction). See applyNowAnchor for the math.
+//
+// This guards against systematically-wrong forecasts (met.no predicts
+// cloudy, sky is clear) that the RLS would need ~50 samples to learn
+// away — the twin should react to reality *now*, not in an hour.
 func (s *Service) Predict(t time.Time, cloudPct float64) float64 {
 	if s == nil {
 		return 0
 	}
 	cs := s.ClearSky(t)
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.model.Predict(cs, cloudPct, t)
+	basePred := s.model.Predict(cs, cloudPct, t)
+	rated := s.model.RatedW
+	s.mu.RUnlock()
+
+	actualNow, ok := s.liveActualPV()
+	if !ok {
+		return basePred
+	}
+	now := time.Now()
+	cloudNow := 50.0
+	if s.Cloud != nil {
+		if v, ok := s.Cloud(now); ok {
+			cloudNow = v
+		}
+	}
+	csNow := s.ClearSky(now)
+	s.mu.RLock()
+	priorNow := s.model.Predict(csNow, cloudNow, now)
+	s.mu.RUnlock()
+
+	anchored := applyNowAnchor(basePred, priorNow, actualNow, t.Sub(now))
+	if rated > 0 && anchored > rated {
+		anchored = rated
+	}
+	return anchored
+}
+
+// NowAnchorHorizon is how far into the future the "reality vs model"
+// correction from applyNowAnchor is trusted. At t=now the correction
+// is applied in full; at t=now+NowAnchorHorizon it fades to zero so
+// the base model (which reflects what we've learned about this site's
+// diurnal + cloud pattern) takes over for longer-horizon decisions.
+//
+// 2 hours is a compromise: long enough to cover the MPC's near-term
+// dispatch decisions (the current + next slot), short enough that a
+// weather front rolling in at t=now doesn't distort the full-day plan.
+const NowAnchorHorizon = 2 * time.Hour
+
+// NowAnchorClamp bounds the multiplicative correction to [1/x, x] so
+// a momentary inverter restart (actualNow ~ 0) or sensor spike can't
+// slash or explode the prediction. The asymmetric tolerance comes from
+// the outlier rejection in model.Update — the upward cap (5×) matches
+// the rated-power sanity envelope, the downward floor (1/5 = 0.2) keeps
+// predictions sane when a fleeting 0 W reading sneaks through.
+const NowAnchorClamp = 5.0
+
+// applyNowAnchor returns basePred multiplied by a decayed (actual/prior)
+// correction. Pure function — no I/O. All guards live here so the
+// caller stays simple and tests can exercise every edge case without
+// wiring a telemetry store.
+//
+//   basePred : model.Predict(t, cloudPct_t)           — in W
+//   priorNow : model.Predict(now, cloudPct_now)       — in W
+//   actualNow: summed live PV telemetry right now     — in W (≥ 0)
+//   dt       : t − now (signed)
+//
+// Rules:
+//   - dt > NowAnchorHorizon → no correction (return basePred).
+//   - dt < 0 → treated as 0 (slot already started; full correction).
+//     This also tolerates the microsecond drift between the caller's
+//     time.Now() and the one we read inside Predict.
+//   - priorNow < 50 W → no correction (night / near-night, ratio meaningless).
+//   - actualNow < 50 W → no correction (driver outage or near-night).
+//   - correction = actualNow / priorNow, clamped to [1/NowAnchorClamp, NowAnchorClamp].
+//   - decay = 1 − dt/NowAnchorHorizon, clamped to [0, 1].
+//   - result = basePred × (1 + (correction − 1) × decay), floored at 0.
+func applyNowAnchor(basePred, priorNow, actualNow float64, dt time.Duration) float64 {
+	if basePred < 0 {
+		basePred = 0
+	}
+	dtS := dt.Seconds()
+	horS := NowAnchorHorizon.Seconds()
+	if dtS > horS {
+		return basePred
+	}
+	if dtS < 0 {
+		dtS = 0
+	}
+	if priorNow < 50 || actualNow < 50 {
+		return basePred
+	}
+	correction := actualNow / priorNow
+	if correction > NowAnchorClamp {
+		correction = NowAnchorClamp
+	}
+	if correction < 1.0/NowAnchorClamp {
+		correction = 1.0 / NowAnchorClamp
+	}
+	decay := 1.0 - dtS/horS
+	if decay < 0 {
+		decay = 0
+	}
+	if decay > 1 {
+		decay = 1
+	}
+	anchored := basePred * (1 + (correction-1)*decay)
+	if anchored < 0 {
+		anchored = 0
+	}
+	return anchored
+}
+
+// liveActualPV sums SmoothedW across every PV reading, flipping site-
+// sign to produce a non-negative generation value. Mirrors sample().
+// Returns (value, false) when nothing's reporting — so Predict falls
+// back to pure-model behavior instead of pretending we saw 0 W.
+func (s *Service) liveActualPV() (float64, bool) {
+	if s.Tele == nil {
+		return 0, false
+	}
+	var pvW float64
+	count := 0
+	for _, r := range s.Tele.ReadingsByType(telemetry.DerPV) {
+		if r.SmoothedW < 0 {
+			pvW += -r.SmoothedW
+			count++
+		}
+	}
+	if count == 0 || pvW < 1 {
+		return 0, false
+	}
+	return pvW, true
 }
 
 // PredictNow returns the twin's prediction for right now using the
