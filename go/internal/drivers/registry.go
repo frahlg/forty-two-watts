@@ -193,7 +193,9 @@ func (r *Registry) runLoop(rd *runningDriver) {
 	}
 }
 
-// Remove stops and cleans up a driver. Idempotent.
+// Remove stops and cleans up a driver. Idempotent. Also wipes the
+// driver's entry from the telemetry store so the API status + UI stop
+// showing a stale card for a driver that's no longer in config.
 func (r *Registry) Remove(name string) {
 	r.mu.Lock()
 	rd, ok := r.rec[name]
@@ -205,6 +207,9 @@ func (r *Registry) Remove(name string) {
 	r.mu.Unlock()
 	close(rd.stop)
 	<-rd.done
+	if r.tel != nil {
+		r.tel.Remove(name)
+	}
 	slog.Info("driver removed", "name", name)
 }
 

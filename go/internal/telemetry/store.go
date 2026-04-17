@@ -296,6 +296,22 @@ func (s *Store) DriverHealthMut(name string) *DriverHealth {
 	return h
 }
 
+// Remove drops all in-memory state for a driver: readings, Kalman
+// filters, and the health entry. Called from the driver Registry when
+// a driver is removed from config (or restarted — the next Update will
+// repopulate) so the API status + UI stop rendering the stale card.
+// Historical TS-DB samples are NOT touched; they stay queryable.
+func (s *Store) Remove(driver string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, t := range []DerType{DerMeter, DerPV, DerBattery, DerEV} {
+		k := key(driver, t)
+		delete(s.readings, k)
+		delete(s.filters, k)
+	}
+	delete(s.health, driver)
+}
+
 // AllHealth returns a snapshot of all driver health entries.
 func (s *Store) AllHealth() map[string]DriverHealth {
 	s.mu.RLock(); defer s.mu.RUnlock()
