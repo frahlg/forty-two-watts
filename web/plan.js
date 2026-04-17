@@ -11,19 +11,22 @@
     prices: null,
     forecast: null,
     plan: null,
+    fuse: null,         // { max_amps, phases, voltage } — drives the power y-axis
     lastUpdate: null,
   };
 
   async function fetchAll() {
-    const [p, f, m] = await Promise.all([
+    const [p, f, m, c] = await Promise.all([
       fetch('/api/prices').then(r => r.json()).catch(() => ({})),
       fetch('/api/forecast').then(r => r.json()).catch(() => ({})),
       fetch('/api/mpc/plan').then(r => r.json()).catch(() => ({})),
+      fetch('/api/config').then(r => r.json()).catch(() => ({})),
     ]);
     state.prices = (p && p.items) || [];
     state.forecast = (f && f.items) || [];
     state.plan = (m && m.plan) || null;
     state.planMeta = (m && m.meta) || null;
+    state.fuse = (c && c.fuse) || null;
     state.enabled = {
       prices: p && p.enabled,
       forecast: f && f.enabled,
@@ -94,18 +97,14 @@
     // Power band in middle — covers battery + grid
     const powerY0 = modeBandY0 + modeBandH + 4;
     const powerH = plotH * 0.42;
-    // Scale based on plan battery + PV magnitudes
-    const plan = state.plan;
-    let pMagMax = 1000;
-    if (plan && plan.actions) {
-      for (const a of plan.actions) {
-        pMagMax = Math.max(pMagMax, Math.abs(a.battery_w), Math.abs(a.grid_w), Math.abs(a.pv_w));
-      }
-    } else {
-      for (const f of state.forecast || []) {
-        if (f.pv_w_estimated) pMagMax = Math.max(pMagMax, f.pv_w_estimated);
-      }
-    }
+    // Scale off the fuse (what the site can *physically* deliver) plus a
+    // 15% headroom so peak transients don't clip. e.g. 16 A × 3 φ × 230 V
+    // ≈ 11 kW → y-axis spans ±12.7 kW. A fixed scale makes it easier to
+    // eyeball plan magnitudes across runs instead of re-interpreting the
+    // axis every time the max sample changes.
+    const fuse = state.fuse || {};
+    const fuseMaxW = (fuse.max_amps || 16) * (fuse.phases || 3) * (fuse.voltage || 230);
+    let pMagMax = fuseMaxW * 1.15;
     const powerYCenter = powerY0 + powerH / 2;
     const powerY = w => powerYCenter - (w / pMagMax) * (powerH / 2);
 
