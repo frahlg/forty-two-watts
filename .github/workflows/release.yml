@@ -61,6 +61,89 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  binaries:
+    name: build + upload release binaries
+    runs-on: ubuntu-latest
+    needs: release
+    # Skip when semantic-release didn't cut a new version — nothing to
+    # attach to. Parallel with the docker job (both gated on the same
+    # output) so a failing binary build doesn't block the image push.
+    if: needs.release.outputs.new_release_published == 'true'
+    permissions:
+      contents: write  # upload assets to the release
+    strategy:
+      # fail-fast off: if one platform breaks, still get assets for the
+      # others uploaded so users aren't blocked by a single bad target.
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            ext: ""
+            archive: tar.gz
+          - goos: linux
+            goarch: arm64
+            ext: ""
+            archive: tar.gz
+          - goos: windows
+            goarch: amd64
+            ext: ".exe"
+            archive: zip
+    steps:
+      - name: Checkout tag
+        uses: actions/checkout@v5
+        with:
+          # semantic-release pushed v${version} (tag) + a changelog commit.
+          # Check out the tag so -X main.Version matches what users install.
+          ref: v${{ needs.release.outputs.new_release_version }}
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache-dependency-path: go/go.sum
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+          VERSION: v${{ needs.release.outputs.new_release_version }}
+        working-directory: go
+        run: |
+          mkdir -p ../bin
+          go build -trimpath -ldflags "-s -w -X main.Version=${VERSION}" \
+            -o "../bin/forty-two-watts-${GOOS}-${GOARCH}${{ matrix.ext }}" \
+            ./cmd/forty-two-watts
+          ls -la "../bin/forty-two-watts-${GOOS}-${GOARCH}${{ matrix.ext }}"
+
+      - name: Package
+        env:
+          PLATFORM: ${{ matrix.goos }}-${{ matrix.goarch }}
+          BINARY: forty-two-watts-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}
+          ARCHIVE: ${{ matrix.archive }}
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          if [[ "${ARCHIVE}" == "zip" ]]; then
+            (cd bin && zip -q "../release/forty-two-watts-${PLATFORM}.zip" "${BINARY}")
+            zip -qr "release/forty-two-watts-${PLATFORM}.zip" drivers web config.example.yaml
+          else
+            tar czf "release/forty-two-watts-${PLATFORM}.tar.gz" \
+              -C bin "${BINARY}" \
+              -C .. drivers web config.example.yaml
+          fi
+          ls -la release/
+
+      - name: Upload to release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: v${{ needs.release.outputs.new_release_version }}
+          ASSET: release/forty-two-watts-${{ matrix.goos }}-${{ matrix.goarch }}.${{ matrix.archive }}
+        # --clobber lets a workflow re-run replace a prior upload without
+        # failing — useful when semantic-release is re-triggered manually.
+        run: gh release upload "${TAG}" "${ASSET}" --clobber
+
   docker:
     name: docker build + push
     runs-on: ubuntu-latest

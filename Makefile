@@ -1,15 +1,17 @@
 # Top-level build for forty-two-watts (pure Go + Lua drivers).
 #
 # Common targets:
-#   make test         — full test suite
-#   make build        — native binaries for this machine
-#   make build-arm64  — cross-compile for linux/arm64 (RPi)
-#   make release      — arm64 + amd64 tarballs in release/
-#   make run-sim      — start both simulators locally
-#   make dev          — start sims + main app (hot-reload workflow)
-#   make clean        — remove all build artifacts
+#   make test                 — full test suite
+#   make build                — native binaries for this machine
+#   make build-arm64          — cross-compile for linux/arm64 (RPi)
+#   make build-amd64          — cross-compile for linux/amd64 (x86_64 server)
+#   make build-windows-amd64  — cross-compile for windows/amd64 (.exe)
+#   make release              — linux arm64/amd64 tarballs + windows zip
+#   make run-sim              — start both simulators locally
+#   make dev                  — start sims + main app (hot-reload workflow)
+#   make clean                — remove all build artifacts
 
-.PHONY: help test build build-arm64 build-amd64 release \
+.PHONY: help test build build-arm64 build-amd64 build-windows-amd64 release \
         run-sim dev fmt vet clean e2e docs
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
@@ -19,15 +21,17 @@ help:
 	@echo "forty-two-watts — Go + Lua EMS"
 	@echo ""
 	@echo "Targets:"
-	@echo "  test         run full test suite"
-	@echo "  build        native binaries into bin/"
-	@echo "  build-arm64  cross-compile for linux/arm64"
-	@echo "  release      arm64 + amd64 tarballs"
-	@echo "  run-sim      start Ferroamp + Sungrow simulators"
-	@echo "  dev          start sims + main app against config.local.yaml"
-	@echo "  e2e          run the full-stack e2e test"
-	@echo "  fmt vet      Go format + static checks"
-	@echo "  clean        nuke build artifacts"
+	@echo "  test                 run full test suite"
+	@echo "  build                native binaries into bin/"
+	@echo "  build-arm64          cross-compile for linux/arm64"
+	@echo "  build-amd64          cross-compile for linux/amd64"
+	@echo "  build-windows-amd64  cross-compile for windows/amd64 (.exe)"
+	@echo "  release              linux tarballs + windows zip in release/"
+	@echo "  run-sim              start Ferroamp + Sungrow simulators"
+	@echo "  dev                  start sims + main app against config.local.yaml"
+	@echo "  e2e                  run the full-stack e2e test"
+	@echo "  fmt vet              Go format + static checks"
+	@echo "  clean                nuke build artifacts"
 
 # ---- Testing ----
 
@@ -58,9 +62,15 @@ build-amd64:
 		go build -ldflags="$(LDFLAGS)" -o ../bin/forty-two-watts-linux-amd64 ./cmd/forty-two-watts
 	@ls -la bin/forty-two-watts-linux-amd64
 
-# ---- Release tarballs ----
+build-windows-amd64:
+	@mkdir -p bin
+	cd go && GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \
+		go build -ldflags="$(LDFLAGS)" -o ../bin/forty-two-watts-windows-amd64.exe ./cmd/forty-two-watts
+	@ls -la bin/forty-two-watts-windows-amd64.exe
 
-release: build-arm64 build-amd64
+# ---- Release archives ----
+
+release: build-arm64 build-amd64 build-windows-amd64
 	@mkdir -p release
 	@for arch in arm64 amd64; do \
 		tar czf release/forty-two-watts-linux-$$arch.tar.gz \
@@ -69,6 +79,14 @@ release: build-arm64 build-amd64
 		printf "built release/forty-two-watts-linux-%s.tar.gz (%s bytes)\n" "$$arch" \
 			"$$(wc -c <release/forty-two-watts-linux-$$arch.tar.gz)"; \
 	done
+	@# Windows: .zip (native format on the platform) — binary from bin/ plus
+	@# bundled drivers/web/config.example.yaml from repo root. Delete first
+	@# so rerunning release doesn't keep appending to a stale archive.
+	@rm -f release/forty-two-watts-windows-amd64.zip
+	@cd bin && zip -q ../release/forty-two-watts-windows-amd64.zip forty-two-watts-windows-amd64.exe
+	@zip -qr release/forty-two-watts-windows-amd64.zip drivers web config.example.yaml
+	@printf "built release/forty-two-watts-windows-amd64.zip (%s bytes)\n" \
+		"$$(wc -c <release/forty-two-watts-windows-amd64.zip)"
 
 # ---- Dev workflow ----
 
