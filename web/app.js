@@ -1448,13 +1448,22 @@
 
   var evRefreshTimer = null;
   if (cardEv && evModal) {
-    cardEv.addEventListener("click", function () {
+    function openEvModal() {
       evModal.classList.remove("hidden");
       refreshEvModal();
       // Guard against stacked timers if the card is clicked while the
       // modal is still open (e.g. background click that didn't close).
       if (evRefreshTimer) { clearInterval(evRefreshTimer); }
       evRefreshTimer = setInterval(refreshEvModal, 5000);
+    }
+    cardEv.addEventListener("click", openEvModal);
+    // The card has role="button" + tabindex="0" so it's keyboard-focusable;
+    // WAI-ARIA requires Enter + Space to activate a role="button" element.
+    cardEv.addEventListener("keydown", function (e) {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        openEvModal();
+      }
     });
     function closeEvModal() {
       evModal.classList.add("hidden");

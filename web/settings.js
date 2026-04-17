@@ -255,10 +255,27 @@
               if (!email) { if (statusEl) statusEl.textContent = "Enter email first"; return; }
               if (statusEl) statusEl.textContent = "Connecting...";
               btn.disabled = true;
+              // Derive the provider name from the driver's lua path so a new
+              // cloud driver can slot in without touching this button — e.g.
+              // "drivers/easee_cloud.lua" → "easee". Strip any directory
+              // prefix, the trailing "_cloud" tag, and the ".lua" extension;
+              // fall back to "easee" when nothing matches (preserves current
+              // behavior for oddly-named files and for the case where the
+              // driver config itself is missing a lua path).
+              var dCfg = currentConfig && currentConfig.drivers
+                ? currentConfig.drivers[dIdx] : null;
+              var provider = "easee";
+              if (dCfg && typeof dCfg.lua === "string" && dCfg.lua !== "") {
+                provider = dCfg.lua
+                  .replace(/^.*[\\/]/, "")   // strip dirs
+                  .replace(/\.lua$/i, "")
+                  .replace(/_cloud$/i, "");
+                if (!provider) provider = "easee";
+              }
               fetch("/api/ev/chargers", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ provider: "easee", email: email, password: pw })
+                body: JSON.stringify({ provider: provider, email: email, password: pw })
               }).then(function (r) {
                 if (!r.ok) return r.json().then(function (j) { throw new Error(j.error || "HTTP " + r.status); });
                 return r.json();
