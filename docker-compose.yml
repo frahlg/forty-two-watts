@@ -1,11 +1,36 @@
+# forty-two-watts — Home Energy Management System
+#
+# Pulls the pre-built multi-arch image (linux/amd64 + linux/arm64) from
+# GitHub Container Registry. No local build needed.
+#
+#   Start:    docker compose up -d
+#   Logs:     docker compose logs -f
+#   Upgrade:  docker compose pull && docker compose up -d
+#   Stop:     docker compose down
+#
+# Persistent state — config.yaml, state.db, battery models, cold/
+# Parquet files — lives in ./data and survives image upgrades. The
+# directory must be owned by uid 100 / gid 101 so the container's ftw
+# user can write to it. If you set this up manually (instead of via
+# scripts/install.sh), run:
+#
+#   mkdir -p ./data && sudo chown -R 100:101 ./data
+
 services:
-  home-ems:
-    build: .
-    image: home-ems:latest
-    container_name: home-ems
+  forty-two-watts:
+    image: ghcr.io/frahlg/forty-two-watts:latest
+    container_name: forty-two-watts
     restart: unless-stopped
-    network_mode: host  # needed for MQTT/Modbus access to local devices
+
+    # Host networking is required for:
+    #   - Modbus TCP to inverters / meters on the LAN
+    #   - MQTT brokers on the LAN (no port forwarding)
+    #   - mDNS-based drivers (e.g. Sourceful Zap at zap.local)
+    #
+    # If you don't have any local hardware (e.g. you're just evaluating
+    # the UI) you can drop this line and add `ports: ["8080:8080"]`
+    # instead, at the cost of losing mDNS/broadcast driver discovery.
+    network_mode: host
+
     volumes:
       - ./data:/app/data
-    environment:
-      - RUST_LOG=home_ems=info
