@@ -474,3 +474,159 @@ func TestSlewRespectsRateWhenTracking(t *testing.T) {
 		t.Errorf("expected slewed target = -1500 W (anchor -1000 + step -500), got %f W", got)
 	}
 }
+
+// ---- Energy-allocation dispatch path (UseEnergyDispatch) ----
+
+// newStateWithEnergyDispatch sets up a fresh State in planner_arbitrage mode
+// with the energy-allocation path enabled. Slew + holdoff are relaxed so the
+// test exercises the formula, not the rate limiter.
+func newStateWithEnergyDispatch(dir SlotDirective, siteMeter string) *State {
+	st := NewState(0, 0, siteMeter) // tolerance=0 so no deadband noise
+	st.Mode = ModePlannerArbitrage
+	st.UseEnergyDispatch = true
+	st.SlewRateW = 100000 // effectively unbounded for the formula test
+	st.MinDispatchIntervalS = 0
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) { return dir, true }
+	return st
+}
+
+// Core conversion: 200 Wh allocated, whole 15-min slot remaining,
+// no energy delivered yet → target = 200 × 3600 / 900 = 800 W.
+func TestEnergyDispatchConvertsWhToW(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: 200,
+		Strategy:        "arbitrage",
+	}
+	store := seedStore(0, []struct {
+		name    string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	st := newStateWithEnergyDispatch(dir, "ferroamp")
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	// 200 Wh × 3600 s/h / 900 s ≈ 800 W. Small tolerance for time drift.
+	if got := targets[0].TargetW; math.Abs(got-800) > 5 {
+		t.Errorf("TargetW = %f, want ≈800 (200 Wh / 15 min)", got)
+	}
+}
+
+// The motivating scenario (operator report 2026-04-17): forecast PV 700 W,
+// actual 4800 W, plan wants to charge 200 Wh this slot. Under the legacy
+// path the PI drives battery to ~3.9 kW charge (absorb everything) to hit
+// grid_target. Under energy dispatch the battery stays at ~800 W and the
+// 4 kW surplus flows to the grid.
+func TestEnergyDispatchDoesNotAbsorbPVSurprise(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: 200, // plan: charge 200 Wh
+		Strategy:        "arbitrage",
+	}
+	// Grid exporting 4 kW (because PV 4.8 kW, load 0.8 kW, battery 0 W).
+	// Under legacy PI with grid_target=−51 the controller would pull the
+	// battery into aggressive charging to pin grid to −51.
+	store := seedStore(-4000, []struct {
+		name    string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	// PV telemetry so applyFuseGuard has something to count.
+	store.Update("pv-1", telemetry.DerPV, -4800, nil, nil)
+	store.DriverHealthMut("pv-1").RecordSuccess()
+
+	st := newStateWithEnergyDispatch(dir, "ferroamp")
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	// Expect ~800 W charge, NOT multi-kW absorption. Flag anything beyond
+	// 1.5 kW — that's 7× the plan's intent and signals the old bug.
+	got := targets[0].TargetW
+	if got > 1500 {
+		t.Errorf("TargetW = %f W — battery is absorbing the PV surprise (regression). plan wanted ~800 W charge.", got)
+	}
+	if got < 100 {
+		t.Errorf("TargetW = %f W — battery should still be charging per plan intent.", got)
+	}
+}
+
+// Slot rollover: when SlotDirective returns a new SlotStart, the delivered
+// accumulator must reset so the next slot starts from zero.
+func TestEnergyDispatchResetsOnSlotRollover(t *testing.T) {
+	now := time.Now()
+	// First slot: mid-slot, accumulator should build up.
+	dir1 := SlotDirective{
+		SlotStart:       now.Add(-10 * time.Minute),
+		SlotEnd:         now.Add(5 * time.Minute),
+		BatteryEnergyWh: 200,
+	}
+	store := seedStore(0, []struct {
+		name    string
+		currentW, soc float64
+	}{
+		{"ferroamp", 800, 0.5}, // battery already charging 800 W
+	})
+	st := newStateWithEnergyDispatch(dir1, "ferroamp")
+
+	// First call establishes the slot.
+	_ = ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+
+	// New slot — different SlotStart. Should reset slotDelivered.
+	dir2 := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: 300,
+	}
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) { return dir2, true }
+
+	_ = ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+
+	if st.slotDelivered != 0 {
+		t.Errorf("slotDelivered = %f after slot rollover, want 0", st.slotDelivered)
+	}
+	if !st.currentDirective.SlotStart.Equal(dir2.SlotStart) {
+		t.Errorf("currentDirective.SlotStart = %v, want %v", st.currentDirective.SlotStart, dir2.SlotStart)
+	}
+}
+
+// When the energy path is enabled but the plan is stale, the legacy path
+// runs (PI on grid_target=0, self_consumption distribution). Verifies the
+// fallback doesn't leave the path flag mis-set.
+func TestEnergyDispatchFallsBackToLegacyWhenDirectiveUnavailable(t *testing.T) {
+	store := seedStore(1000, []struct {
+		name    string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	st := NewState(0, 50, "ferroamp")
+	st.Mode = ModePlannerArbitrage
+	st.UseEnergyDispatch = true
+	// Directive returns ok=false — plan stale.
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) { return SlotDirective{}, false }
+	// Legacy fallback hook: return ok=false too, should route to the
+	// "plan stale" self-consumption-with-grid-target=0 branch.
+	st.PlanTarget = func(time.Time) (string, float64, bool) { return "", 0, false }
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if !st.PlanStale {
+		t.Error("expected PlanStale=true when both energy + legacy paths lack a plan")
+	}
+	// With grid = +1000 and target = 0, PI should command some charge-absorption
+	// (negative correction if batteries > 0, toward discharge). Just assert the
+	// path dispatched something.
+	if len(targets) == 0 {
+		t.Error("expected some dispatch under legacy fallback, got nothing")
+	}
+}

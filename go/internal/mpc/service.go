@@ -124,10 +124,66 @@ func (s *Service) Latest() *Plan {
 // single missed replan doesn't flip us into fallback.
 const MaxPlanAge = 30 * time.Minute
 
+// SlotDirective is the plan's per-slot instruction to the EMS under the
+// energy-allocation contract (see docs/plan-ems-contract.md). The plan
+// allocates total battery energy (Wh, site-signed) for the slot; the
+// EMS converts to instantaneous power each tick from remaining energy
+// and remaining time. Grid flow is the residual — no PI target on it.
+//
+// Signed convention matches Action.BatteryW: positive = charge, negative
+// = discharge. Magnitude is the total energy expected to move into (or
+// out of) the battery fleet across the slot.
+type SlotDirective struct {
+	SlotStart       time.Time
+	SlotEnd         time.Time
+	BatteryEnergyWh float64 // total energy for the slot (site-signed)
+	SoCTargetPct    float64 // plan's SoC at SlotEnd — used by divergence detector
+	Strategy        Mode    // echoed for logging + API
+}
+
+// SlotDirectiveAt returns the energy-allocation directive for the slot
+// containing `now`. Non-breaking companion to SlotAt — the control loop
+// switches to this when the new dispatch path is enabled; SlotAt stays
+// for the legacy grid-target path until that's retired.
+func (s *Service) SlotDirectiveAt(now time.Time) (SlotDirective, bool) {
+	if s == nil {
+		return SlotDirective{}, false
+	}
+	s.mu.RLock()
+	p := s.last
+	s.mu.RUnlock()
+	if p == nil {
+		return SlotDirective{}, false
+	}
+	if time.Since(time.UnixMilli(p.GeneratedAtMs)) > MaxPlanAge {
+		return SlotDirective{}, false
+	}
+	nowMs := now.UnixMilli()
+	for _, a := range p.Actions {
+		slotLenMs := int64(a.SlotLenMin) * 60 * 1000
+		endMs := a.SlotStartMs + slotLenMs
+		if nowMs < a.SlotStartMs || nowMs >= endMs {
+			continue
+		}
+		// energy_wh = power_w * hours. a.SlotLenMin/60 gives hours.
+		energyWh := a.BatteryW * float64(a.SlotLenMin) / 60.0
+		return SlotDirective{
+			SlotStart:       time.UnixMilli(a.SlotStartMs),
+			SlotEnd:         time.UnixMilli(endMs),
+			BatteryEnergyWh: energyWh,
+			SoCTargetPct:    a.SoCPct,
+			Strategy:        s.Defaults.Mode,
+		}, true
+	}
+	return SlotDirective{}, false
+}
+
 // SlotAt returns the plan's directive for the slot containing `now`.
 // Returns (mode, grid_target_w, ok). Dispatch uses `mode` to select
 // the EMS strategy and `grid_target_w` as the PI setpoint. The plan is
 // a scheduler (decides WHEN); the EMS is the regulator (decides HOW).
+//
+// Legacy — the new path uses SlotDirectiveAt. See docs/plan-ems-contract.md.
 func (s *Service) SlotAt(now time.Time) (string, float64, bool) {
 	if s == nil {
 		return "", 0, false
