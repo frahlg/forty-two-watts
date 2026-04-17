@@ -1086,17 +1086,13 @@ footer {
   align-items: baseline;
 }
 
-/* Stack live + plan vertically by default — both charts read better
-   full-width. Only split on very wide screens (desktops) to save
-   vertical scrolling; most users get the stacked layout. */
+/* Always stack live + plan vertically — both charts are easier to read
+   full-width than squeezed into 50% even on wide desktops. */
 .live-plan-row {
   display: grid;
   grid-template-columns: 1fr;
   gap: 16px;
   margin-top: 14px;
-}
-@media (min-width: 1800px) {
-  .live-plan-row { grid-template-columns: 1fr 1fr; }
 }
 .live-plan-row > section { min-width: 0; }
 .live-plan-row .chart-container canvas { width: 100%; display: block; }
