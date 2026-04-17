@@ -86,4 +86,4 @@ EXPOSE 8080
 # open database file" because SQLite can't create state.db inside
 # a directory it doesn't own.
 ENTRYPOINT ["/app/forty-two-watts"]
-CMD ["-config", "/app/data/config.yaml", "-web", "/app/web"]
+CMD ["-config", "/app/data/config.yaml", "-web", "/app/web", "-drivers", "/app/drivers"]

@@ -58,6 +58,7 @@ type Deps struct {
 	CfgMu      *sync.RWMutex
 	Cfg        *config.Config
 	ConfigPath string
+	DriverDir  string // where to scan for Lua drivers (default: <config-dir>/drivers)
 	Models     map[string]*battery.Model
 	ModelsMu   *sync.Mutex
 	SelfTune   *selftune.Coordinator
@@ -675,8 +676,12 @@ func (s *Server) handleDrivers(w http.ResponseWriter, r *http.Request) {
 // drivers/ directory, parsed from each .lua file's DRIVER metadata.
 // Used by the Settings UI to offer an "Add from catalog" dropdown.
 func (s *Server) handleDriversCatalog(w http.ResponseWriter, r *http.Request) {
-	// Catalog lives next to the config file by convention.
-	dir := filepath.Join(filepath.Dir(s.deps.ConfigPath), "drivers")
+	// Default is next to the config file; overridable via -drivers for
+	// deployments (Docker) where drivers live in the image, not the data volume.
+	dir := s.deps.DriverDir
+	if dir == "" {
+		dir = filepath.Join(filepath.Dir(s.deps.ConfigPath), "drivers")
+	}
 	entries, err := drivers.LoadCatalog(dir)
 	if err != nil {
 		writeJSON(w, 200, map[string]any{"path": dir, "entries": []any{}, "error": err.Error()})

@@ -50,7 +50,20 @@ var Version = "dev"
 func main() {
 	configPath := flag.String("config", "config.yaml", "Path to config.yaml")
 	webDir := flag.String("web", "web", "Path to static web UI directory")
+	driverDirFlag := flag.String("drivers", "", "Path to drivers directory (default: <config-dir>/drivers)")
 	flag.Parse()
+
+	// Drivers default to a sibling of the config file (historical layout:
+	// config.yaml + drivers/ + seed/ + state.db all under one dir). Docker
+	// breaks that convention because /app/data is a host bind mount while
+	// drivers are baked into the image at /app/drivers — the flag lets the
+	// CMD point at the immutable image location.
+	resolveDriverDir := func() string {
+		if *driverDirFlag != "" {
+			return *driverDirFlag
+		}
+		return filepath.Join(filepath.Dir(*configPath), "drivers")
+	}
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(logger)
@@ -60,8 +73,7 @@ func main() {
 	cfg, err := config.Load(*configPath)
 	if err != nil {
 		if isConfigMissing(err) {
-			driverDir := filepath.Join(filepath.Dir(*configPath), "drivers")
-			runBootstrap(*configPath, *webDir, driverDir)
+			runBootstrap(*configPath, *webDir, resolveDriverDir())
 			return
 		}
 		slog.Error("load config", "err", err)
@@ -378,6 +390,7 @@ func main() {
 		State: st,
 		CapMu: capMu, Capacities: capacities,
 		CfgMu: cfgMu, Cfg: cfg, ConfigPath: *configPath,
+		DriverDir: resolveDriverDir(),
 		Models: models, ModelsMu: modelsMu,
 		SelfTune: selfTune,
 		DtS:        float64(cfg.Site.ControlIntervalS),
