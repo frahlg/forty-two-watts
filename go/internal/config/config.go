@@ -566,10 +566,14 @@ func applyDefaults(c *Config) {
 }
 
 // Validate ensures the config is internally consistent and safe to run with.
+//
+// A config with zero drivers is accepted — the setup wizard lets the
+// operator finish onboarding before adding hardware, and /settings can
+// add drivers afterwards. Everything per-driver still validates the
+// same way (name, lua path, at least one capability, no dupes). The
+// "at least one site meter" invariant is enforced only when drivers
+// are present; with zero drivers there's nothing to be the meter.
 func (c *Config) Validate() error {
-	if len(c.Drivers) == 0 {
-		return errors.New("at least one driver must be configured")
-	}
 	siteMeters := 0
 	names := make(map[string]bool, len(c.Drivers))
 	for _, d := range c.Drivers {
@@ -591,7 +595,7 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("driver %q: must have mqtt, modbus, or http capability", d.Name)
 		}
 	}
-	if siteMeters == 0 {
+	if len(c.Drivers) > 0 && siteMeters == 0 {
 		return errors.New("at least one driver must be is_site_meter: true")
 	}
 

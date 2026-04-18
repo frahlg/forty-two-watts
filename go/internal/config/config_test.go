@@ -59,15 +59,18 @@ func TestRelativeDriverPathResolved(t *testing.T) {
 	}
 }
 
-func TestRejectsNoDrivers(t *testing.T) {
+func TestAcceptsEmptyDrivers(t *testing.T) {
+	// The setup wizard lets operators finish onboarding without any
+	// hardware configured; drivers come later via /settings. Validate
+	// should accept an empty list rather than refuse the whole config.
 	yaml := `
-site: { name: x }
-fuse: { max_amps: 16 }
+site: { name: x, smoothing_alpha: 0.3 }
+fuse: { max_amps: 16, phases: 3, voltage: 230 }
 drivers: []
 api: { port: 8080 }
 `
-	if _, err := Parse([]byte(yaml), "."); err == nil {
-		t.Fatal("expected error for empty drivers")
+	if _, err := Parse([]byte(yaml), "."); err != nil {
+		t.Fatalf("empty drivers should parse cleanly, got: %v", err)
 	}
 }
 
