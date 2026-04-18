@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -38,6 +39,7 @@ import (
 	"github.com/frahlg/forty-two-watts/go/internal/ocpp"
 	"github.com/frahlg/forty-two-watts/go/internal/priceforecast"
 	"github.com/frahlg/forty-two-watts/go/internal/prices"
+	"github.com/frahlg/forty-two-watts/go/internal/proxy"
 	"github.com/frahlg/forty-two-watts/go/internal/pvmodel"
 	"github.com/frahlg/forty-two-watts/go/internal/selftune"
 	"github.com/frahlg/forty-two-watts/go/internal/selfupdate"
@@ -592,9 +594,35 @@ func main() {
 		Version:    Version,
 	}
 	srv := api.New(deps)
+	// Dev-mode proxy: when FTW_PROXY_UPSTREAM is set (e.g.
+	// http://192.168.1.139:8080), /api/* is forwarded to that instance so
+	// the local UI renders live data without owning the control loop.
+	// Unset / empty = proxy disabled, /api/* served locally as normal.
+	// Read-only by default — writes (POST/PUT/…) come back as 403 so a
+	// stray Save in the dev UI can't mutate the real instance. Set
+	// FTW_PROXY_READONLY=0 if you explicitly need to exercise write paths.
+	handler := srv.Handler()
+	if up := os.Getenv("FTW_PROXY_UPSTREAM"); up != "" {
+		u, err := url.Parse(up)
+		if err != nil || u.Scheme == "" || u.Host == "" {
+			slog.Error("FTW_PROXY_UPSTREAM invalid — must be like http://host:port", "value", up, "err", err)
+			return
+		}
+		readOnly := true
+		if v, ok := os.LookupEnv("FTW_PROXY_READONLY"); ok {
+			switch strings.ToLower(v) {
+			case "0", "false", "no", "off":
+				readOnly = false
+			}
+		}
+		handler = proxy.Wrap(handler, proxy.Config{Upstream: u, ReadOnly: readOnly})
+		slog.Warn("proxy enabled — /api/* forwards upstream",
+			"upstream", u.String(),
+			"read_only", readOnly)
+	}
 	httpSrv := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.API.Port),
-		Handler:           srv.Handler(),
+		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	go func() {
