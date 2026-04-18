@@ -85,7 +85,8 @@
       <div class="card summary-card" id="card-soc">
         <div class="card-label">SoC</div>
         <div class="card-value" id="bat-soc">-- %</div>
-        <div class="soc-bar"><div class="soc-fill" id="soc-fill"></div></div>
+        <ftw-progress-bar id="soc-fill" mode="gradient" value="0" max="100"
+                          style="margin-top:0.5rem; --ftw-progress-height:10px"></ftw-progress-bar>
       </div>
       <div class="card summary-card" id="card-fuse">
         <div class="card-label">Fuse</div>
@@ -321,22 +322,17 @@
   </footer>
 
   <!-- EV detail popup -->
-  <div id="ev-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="ev-modal-title" aria-hidden="true">
-    <div class="modal-content" style="max-width:380px">
-      <div class="modal-header">
-        <h2 id="ev-modal-title">EV Charger</h2>
-        <button id="ev-modal-close" class="modal-close" aria-label="Close">&times;</button>
-      </div>
-      <div class="modal-body" id="ev-modal-body" style="padding:1rem">
-        <p style="color:var(--text-dim)">Loading...</p>
-      </div>
-      <div style="display:flex;gap:0.5rem;padding:0 1rem 1rem">
-        <button class="btn-add" id="ev-btn-start" style="flex:1">Start</button>
-        <button class="btn-add" id="ev-btn-pause" style="flex:1">Pause</button>
-        <button class="btn-add" id="ev-btn-resume" style="flex:1">Resume</button>
-      </div>
+  <ftw-modal id="ev-modal" style="--ftw-modal-max-width:380px">
+    <span slot="title">EV Charger</span>
+    <div id="ev-modal-body">
+      <p style="color:var(--text-dim)">Loading...</p>
     </div>
-  </div>
+    <div slot="footer" style="display:flex;gap:0.5rem;width:100%">
+      <button class="btn-add" id="ev-btn-start" style="flex:1">Start</button>
+      <button class="btn-add" id="ev-btn-pause" style="flex:1">Pause</button>
+      <button class="btn-add" id="ev-btn-resume" style="flex:1">Resume</button>
+    </div>
+  </ftw-modal>
 
   <script src="/app.js?v=diag1"></script>
   <script src="/settings.js?v=diag1"></script>
