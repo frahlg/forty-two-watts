@@ -31,6 +31,10 @@ DRIVER = {
   http_hosts   = { "api.easee.com" },
   authors      = { "forty-two-watts contributors" },
   tested_models = { "Home", "Charge" },
+  verification_status = "production",
+  verified_by = { "frahlg@homelab-rpi:2d", "erikarenhill@fortytwo:1d" },
+  verified_at = "2026-04-18",
+  verification_notes = "Observations API + lifecycle commands exercised against an Easee Home charger. Session state, op_mode labels, charge/pause/resume all verified.",
 }
 
 PROTOCOL = "http"

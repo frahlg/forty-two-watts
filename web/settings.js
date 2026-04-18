@@ -184,6 +184,12 @@
           '<label>Friendly name</label><input type="text" id="driver-catalog-name" placeholder="e.g. ferroamp-house">' +
           '</div></div>' +
           '<button class="btn-add" id="driver-catalog-add">+ Add selected</button>' +
+          '<p style="color:var(--text-dim);font-size:0.75rem;margin:8px 0 0">' +
+          '🟢 production — verified on real hardware at ≥1 site · ' +
+          '🟡 beta — working on a single site, awaiting a second · ' +
+          '🔴 experimental — ported from reference, not yet proven against live hardware. ' +
+          'Hover a driver for site + date notes.' +
+          '</p>' +
           '</fieldset>';
         setTimeout(function () {
           fetch("/api/drivers/catalog").then(function (r) { return r.json(); }).then(function (data) {
@@ -199,7 +205,15 @@
               var opt = document.createElement("option");
               opt.value = e.path;
               var protoLabel = (e.protocols || []).join("+");
-              opt.textContent = (e.name || e.filename) + "  —  " + (e.manufacturer || "?") + "  [" + protoLabel + "]" + (e.version ? "  v" + e.version : "");
+              // Prefix with a verification badge so operators scanning
+              // the dropdown can immediately see which drivers are
+              // battle-tested vs just ported from a reference.
+              //   🟢 production, 🟡 beta, 🔴 experimental
+              var badge =
+                e.verification_status === "production" ? "🟢 " :
+                e.verification_status === "beta"       ? "🟡 " :
+                                                         "🔴 ";
+              opt.textContent = badge + (e.name || e.filename) + "  —  " + (e.manufacturer || "?") + "  [" + protoLabel + "]" + (e.version ? "  v" + e.version : "");
               opt.dataset.protocols = protoLabel;
               opt.dataset.id = e.id || "";
               opt.dataset.httpHosts = (e.http_hosts || []).join(",");
@@ -207,6 +221,8 @@
               // http_hosts is declared by cloud drivers too (Easee uses it
               // for allowed-hosts), so it can't be used on its own.
               opt.dataset.connectionHost = (e.connection_defaults && e.connection_defaults.host) || "";
+              opt.dataset.verificationStatus = e.verification_status || "experimental";
+              if (e.verification_notes) opt.title = e.verification_notes;
               sel.appendChild(opt);
             });
           });

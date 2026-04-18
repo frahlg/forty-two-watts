@@ -54,6 +54,10 @@ DRIVER = {
   homepage     = "https://sourceful.energy",
   authors      = { "forty-two-watts contributors" },
   http_hosts   = { "zap.local" },
+  verification_status = "beta",
+  verified_by = { "erikarenhill@fortytwo:3d" },
+  verified_at = "2026-04-17",
+  verification_notes = "P1 + PV aggregation verified against a live Sourceful Zap. Awaiting a second site to promote to production.",
   connection_defaults = {
     host = "zap.local",
   },
