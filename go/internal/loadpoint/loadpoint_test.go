@@ -128,6 +128,65 @@ func TestObserveNewSessionAnchor(t *testing.T) {
 	}
 }
 
+// TestSetCurrentSoCReAnchors — operator corrects the inferred SoC
+// mid-session. After SetCurrentSoC, current_soc equals the provided
+// value, and any further delivered Wh advance from that anchor.
+// Chargers can't read vehicle BMS, so this is the only way the
+// operator can correct drift.
+func TestSetCurrentSoCReAnchors(t *testing.T) {
+	m := NewManager()
+	m.Load([]Config{{ID: "a", VehicleCapacityWh: 60000, PluginSoCPct: 25}})
+	// Plug in, deliver 9 kWh → naive estimate = 25 + 9000/60000*100 = 40 %.
+	m.Observe("a", true, 7400, 9000)
+	if st, _ := m.State("a"); st.CurrentSoCPct < 39 || st.CurrentSoCPct > 41 {
+		t.Fatalf("pre-correction SoC: got %.2f want ~40", st.CurrentSoCPct)
+	}
+	// Operator looks at their dashboard: car is actually 60 %.
+	if !m.SetCurrentSoC("a", 60) {
+		t.Fatal("SetCurrentSoC returned false on plugged-in loadpoint")
+	}
+	st, _ := m.State("a")
+	if st.CurrentSoCPct < 59 || st.CurrentSoCPct > 61 {
+		t.Errorf("post-correction SoC: got %.2f want ~60", st.CurrentSoCPct)
+	}
+	// Deliver another 3 kWh → should be ~65 % (60 + 3000/60000*100).
+	m.Observe("a", true, 7400, 12000)
+	st, _ = m.State("a")
+	if st.CurrentSoCPct < 64 || st.CurrentSoCPct > 66 {
+		t.Errorf("after more delivery SoC: got %.2f want ~65", st.CurrentSoCPct)
+	}
+}
+
+// TestSetCurrentSoCRejectsUnplugged — SoC is meaningless without an
+// active session. Chargers may cling to the last known vehicle state
+// briefly after unplug; blocking this avoids anchoring against noise.
+func TestSetCurrentSoCRejectsUnplugged(t *testing.T) {
+	m := NewManager()
+	m.Load([]Config{{ID: "a", VehicleCapacityWh: 60000}})
+	if m.SetCurrentSoC("a", 55) {
+		t.Error("should reject SetCurrentSoC on never-plugged loadpoint")
+	}
+	m.Observe("a", true, 0, 0)
+	m.Observe("a", false, 0, 0)
+	if m.SetCurrentSoC("a", 55) {
+		t.Error("should reject SetCurrentSoC after unplug")
+	}
+}
+
+func TestSetCurrentSoCClampsRange(t *testing.T) {
+	m := NewManager()
+	m.Load([]Config{{ID: "a", VehicleCapacityWh: 60000}})
+	m.Observe("a", true, 0, 0)
+	m.SetCurrentSoC("a", 150)
+	if st, _ := m.State("a"); st.CurrentSoCPct != 100 {
+		t.Errorf("clamp high: got %.2f", st.CurrentSoCPct)
+	}
+	m.SetCurrentSoC("a", -10)
+	if st, _ := m.State("a"); st.CurrentSoCPct != 0 {
+		t.Errorf("clamp low: got %.2f", st.CurrentSoCPct)
+	}
+}
+
 func TestStatesReturnsAllInOrder(t *testing.T) {
 	m := NewManager()
 	m.Load([]Config{
