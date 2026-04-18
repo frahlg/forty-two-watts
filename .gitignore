@@ -13,6 +13,9 @@ data/
 # Local config for simulators
 config.local.yaml
 
+# Local dev env overrides (proxy upstream, dev toggles) — not shipped.
+.env.local
+
 # State DB
 *.db
 *.db-journal

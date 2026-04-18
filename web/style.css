@@ -8,20 +8,9 @@
   padding: 0;
 }
 
-:root {
-  --bg: #0f0f1a;
-  --surface: #1a1a2e;
-  --surface2: #22223a;
-  --border: #2a2a44;
-  --text: #e0e0e0;
-  --text-dim: #888;
-  --green: #00cc66;
-  --red: #ee4444;
-  --yellow: #eeaa22;
-  --blue: #3388ff;
-  --accent: #5566ff;
-  --radius: 8px;
-}
+/* Design tokens live in /components/theme.css (loaded before this file).
+ * Keep them there — not here — so the whole app (light DOM + every
+ * <ftw-*> shadow root) reads from one file. */
 
 html {
   font-size: 16px;

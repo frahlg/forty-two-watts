@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>forty-two-watts</title>
+  <title>forty-two-watts — next</title>
   <link rel="icon" type="image/jpeg" href="/logo.jpg">
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
         integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
@@ -11,23 +11,47 @@
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
           integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
           crossorigin=""></script>
-  <!-- Design tokens (--bg/--surface/etc) live in /components/theme.css;
-       style.css references them, so theme.css must load first. This page
-       is the legacy layout — /components/index.js is intentionally NOT
-       loaded here so the refactor work lives entirely in next.html until
-       we're ready to swap. (The existing <ftw-update-badge> predates the
-       refactor and has its own script, independent of /components/.) -->
+  <!-- Type: Inter for UI, JetBrains Mono for tabular numerics. Preconnect
+       first so the /next first-paint isn't held up by DNS + handshake. -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <!-- Apply the saved theme BEFORE any stylesheet resolves so light-mode
+       users don't see a dark-to-light flash on reload. The full toggle
+       handler is at the bottom of <body>; this stub just sets the attr. -->
+  <script>
+    (function () {
+      var saved = null;
+      try { saved = localStorage.getItem('ftw-theme'); } catch (e) {}
+      var osLight = window.matchMedia &&
+                    window.matchMedia('(prefers-color-scheme: light)').matches;
+      document.documentElement.setAttribute(
+        'data-theme', saved || (osLight ? 'light' : 'dark'));
+    })();
+  </script>
+  <!-- Design tokens FIRST — every sheet and every <ftw-*> shadow root reads
+       from :root declared in /components/theme.css. -->
   <link rel="stylesheet" href="/components/theme.css">
   <link rel="stylesheet" href="/style.css">
+  <!-- /next-only visual redesign — layered on top of style.css and scoped
+       to body.ftw-next so legacy /index.html is untouched. -->
+  <link rel="stylesheet" href="/next.css?v=next2">
+  <script type="module" src="/components/index.js"></script>
 </head>
-<body>
+<body class="ftw-next">
   <header>
     <img src="/logo.jpg" alt="42W" class="header-logo"><h1>42W</h1>
     <nav class="app-tabs" id="app-tabs" role="tablist">
       <button data-view="live" class="tab-btn active" role="tab">Live</button>
       <button data-view="diagnose" class="tab-btn" role="tab" title="Time-travel through past planner decisions">Diagnose</button>
     </nav>
+    <!-- Hamburger — visible only on narrow viewports. Opens the header
+         drawer (tabs + toggles + settings + version) via CSS class flip
+         handled in the init block at the bottom of this file. -->
+    <button id="mobile-menu-btn" class="mobile-menu-btn" aria-label="Open menu" aria-expanded="false" title="Menu">&#9776;</button>
     <div class="header-right">
+      <button id="hero-toggle" class="icon-btn" title="Switch between hero diagram and numeric tiles">&#9638;</button>
+      <button id="theme-toggle" class="icon-btn" title="Toggle light / dark theme">&#9790;</button>
       <button id="ui-mode-toggle" class="btn-link" title="Show advanced controls + diagnostics">Advanced</button>
       <button id="settings-btn" class="settings-btn" title="Settings">⚙</button>
       <ftw-update-badge></ftw-update-badge>
@@ -63,24 +87,33 @@
   </div>
 
   <main id="view-live">
+    <!-- Energy-flow hero — central house, PV top, Grid left, Battery right,
+         EV bottom. next-app.js calls el.setReadings(...) each status tick. -->
+    <section class="flow-hero">
+      <ftw-energy-flow id="energy-flow" pv="0" grid="0" battery="0" load="0" ev="0" soc="0"></ftw-energy-flow>
+    </section>
+
     <!-- Summary Cards — compact 5-in-a-row -->
     <section class="summary-cards">
-      <div class="card summary-card" id="card-grid">
+      <!-- The four "big numbers" that duplicate what the energy-flow
+           hero shows. Hidden when body.mode-hero is active — the mode
+           toggle in the header flips between hero and numeric tiles. -->
+      <div class="card summary-card ftw-hide-in-hero" id="card-grid">
         <div class="card-label">Grid <span class="card-target" id="grid-target-display"></span></div>
         <div class="card-value" id="grid-w">-- W</div>
         <div class="card-sub" id="grid-dir">--</div>
       </div>
-      <div class="card summary-card" id="card-pv">
+      <div class="card summary-card ftw-hide-in-hero" id="card-pv">
         <div class="card-label">PV</div>
         <div class="card-value" id="pv-w">-- W</div>
         <div class="card-sub">gen</div>
       </div>
-      <div class="card summary-card" id="card-bat">
+      <div class="card summary-card ftw-hide-in-hero" id="card-bat">
         <div class="card-label">Battery</div>
         <div class="card-value" id="bat-w">-- W</div>
         <div class="card-sub" id="bat-dir">--</div>
       </div>
-      <div class="card summary-card" id="card-load">
+      <div class="card summary-card ftw-hide-in-hero" id="card-load">
         <div class="card-label">Load</div>
         <div class="card-value val-neutral" id="load-w">-- W</div>
         <div class="card-sub">house</div>
@@ -88,7 +121,8 @@
       <div class="card summary-card" id="card-soc">
         <div class="card-label">SoC</div>
         <div class="card-value" id="bat-soc">-- %</div>
-        <div class="soc-bar"><div class="soc-fill" id="soc-fill"></div></div>
+        <ftw-progress-bar id="soc-fill" mode="gradient" value="0" max="100"
+                          style="margin-top:0.5rem; --ftw-progress-height:10px"></ftw-progress-bar>
       </div>
       <div class="card summary-card" id="card-fuse">
         <div class="card-label">Fuse</div>
@@ -324,30 +358,25 @@
   </footer>
 
   <!-- EV detail popup -->
-  <div id="ev-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="ev-modal-title" aria-hidden="true">
-    <div class="modal-content" style="max-width:380px">
-      <div class="modal-header">
-        <h2 id="ev-modal-title">EV Charger</h2>
-        <button id="ev-modal-close" class="modal-close" aria-label="Close">&times;</button>
-      </div>
-      <div class="modal-body" id="ev-modal-body" style="padding:1rem">
-        <p style="color:var(--text-dim)">Loading...</p>
-      </div>
-      <div style="display:flex;gap:0.5rem;padding:0 1rem 1rem">
-        <button class="btn-add" id="ev-btn-start" style="flex:1">Start</button>
-        <button class="btn-add" id="ev-btn-pause" style="flex:1">Pause</button>
-        <button class="btn-add" id="ev-btn-resume" style="flex:1">Resume</button>
-      </div>
+  <ftw-modal id="ev-modal" style="--ftw-modal-max-width:380px">
+    <span slot="title">EV Charger</span>
+    <div id="ev-modal-body">
+      <p style="color:var(--text-dim)">Loading...</p>
     </div>
-  </div>
+    <div slot="footer" style="display:flex;gap:0.5rem;width:100%">
+      <button class="btn-add" id="ev-btn-start" style="flex:1">Start</button>
+      <button class="btn-add" id="ev-btn-pause" style="flex:1">Pause</button>
+      <button class="btn-add" id="ev-btn-resume" style="flex:1">Resume</button>
+    </div>
+  </ftw-modal>
 
-  <script src="/app.js?v=soc1"></script>
-  <script src="/settings.js?v=soc1"></script>
-  <script src="/models.js?v=soc1"></script>
-  <script src="/plan.js?v=soc1"></script>
-  <script src="/twins.js?v=soc1"></script>
-  <script src="/diagnose.js?v=soc1"></script>
-  <script src="/update-badge.js?v=soc1" defer></script>
+  <script src="/next-app.js?v=next1"></script>
+  <script src="/settings.js?v=diag1"></script>
+  <script src="/models.js?v=diag1"></script>
+  <script src="/plan.js?v=diag1"></script>
+  <script src="/twins.js?v=diag1"></script>
+  <script src="/diagnose.js?v=diag1"></script>
+  <script src="/update-badge.js?v=diag1" defer></script>
   <script>
     // Bridge: clicking the plain-text version span opens the update modal
     // (the <ftw-update-badge> dot is tiny and easy to miss). Kept inline so
@@ -370,31 +399,116 @@
       });
     });
   </script>
-  <script>
-    <!-- Status bar — always visible at bottom -->
-    <footer class="status-bar" id="status-bar">
-      <span class="status-bar-item" id="sb-drivers">--</span>
-      <span class="status-bar-spacer"></span>
-      <span class="status-bar-item" id="sb-version">--</span>
-    </footer>
+  <!-- Status bar — always visible at bottom. Previously nested inside a
+       <script> tag, which made the HTML parser treat it as text and the
+       bar never rendered. Lifted out so next-app.js can actually find
+       the sb-drivers / sb-version spans. -->
+  <footer class="status-bar" id="status-bar">
+    <span class="status-bar-item" id="sb-drivers">--</span>
+    <span class="status-bar-spacer"></span>
+    <span class="status-bar-item" id="sb-version">--</span>
+  </footer>
 
-    <script>
-    // UI-mode toggle (simple / advanced). Persisted to localStorage.
+  <script>
+    // -------- UI-mode toggle (simple / advanced). Persisted. --------
     (function () {
-      const KEY = 'ui-mode';
-      const btn = document.getElementById('ui-mode-toggle');
+      var KEY = 'ui-mode';
+      var btn = document.getElementById('ui-mode-toggle');
       function apply(mode) {
         document.body.classList.remove('simple', 'advanced');
         document.body.classList.add(mode);
-        if (btn) btn.textContent = mode === 'advanced' ? '★ Advanced' : 'Advanced';
-        if (btn) btn.title = mode === 'advanced' ? 'Switch to simple view' : 'Show advanced controls + diagnostics';
+        if (!btn) return;
+        btn.textContent = mode === 'advanced' ? '★ Advanced' : 'Advanced';
+        btn.title = mode === 'advanced' ? 'Switch to simple view' : 'Show advanced controls + diagnostics';
       }
-      const initial = localStorage.getItem(KEY) || 'simple';
-      apply(initial);
+      apply(localStorage.getItem(KEY) || 'simple');
       if (btn) btn.addEventListener('click', function () {
-        const next = document.body.classList.contains('advanced') ? 'simple' : 'advanced';
+        var next = document.body.classList.contains('advanced') ? 'simple' : 'advanced';
         localStorage.setItem(KEY, next);
         apply(next);
+      });
+    })();
+
+    // -------- Theme toggle (light / dark). --------
+    // Attribute lives on <html> so it applies before <body> styles
+    // resolve — avoids a dark-to-light flash on reload in light mode.
+    // Default resolution: saved preference → OS preference → dark.
+    (function () {
+      var KEY = 'ftw-theme';
+      var root = document.documentElement;
+      var btn = document.getElementById('theme-toggle');
+      function iconFor(t) { return t === 'light' ? '\u263E' /* ☾ */ : '\u2600' /* ☀ */; }
+      function apply(theme) {
+        root.setAttribute('data-theme', theme);
+        if (btn) {
+          btn.textContent = iconFor(theme);
+          btn.title = 'Switch to ' + (theme === 'light' ? 'dark' : 'light') + ' theme';
+        }
+      }
+      var saved = localStorage.getItem(KEY);
+      var osLight = window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches;
+      apply(saved || (osLight ? 'light' : 'dark'));
+      if (btn) btn.addEventListener('click', function () {
+        var next = root.getAttribute('data-theme') === 'light' ? 'dark' : 'light';
+        localStorage.setItem(KEY, next);
+        apply(next);
+      });
+    })();
+
+    // -------- Hero / numbers toggle. --------
+    // mode-hero: show the energy-flow diagram, hide the big numeric
+    //   tiles for Grid/PV/Battery/Load (they're in the hero already).
+    // mode-numbers: hide the hero, show all tiles. Both paths leave
+    //   SoC, Fuse, EV, energy totals, controls + charts visible.
+    (function () {
+      var KEY = 'ftw-hero-mode';
+      var btn = document.getElementById('hero-toggle');
+      function iconFor(m) { return m === 'hero' ? '\u25A6' /* ▦ */ : '\u2638' /* ☸ */; }
+      function apply(mode) {
+        document.body.classList.remove('mode-hero', 'mode-numbers');
+        document.body.classList.add('mode-' + mode);
+        if (btn) {
+          btn.textContent = iconFor(mode);
+          btn.title = mode === 'hero' ? 'Show numeric tiles' : 'Show energy-flow hero';
+          btn.setAttribute('aria-pressed', mode === 'hero' ? 'true' : 'false');
+        }
+      }
+      apply(localStorage.getItem(KEY) || 'hero');
+      if (btn) btn.addEventListener('click', function () {
+        var next = document.body.classList.contains('mode-numbers') ? 'hero' : 'numbers';
+        localStorage.setItem(KEY, next);
+        apply(next);
+      });
+    })();
+
+    // -------- Mobile menu drawer. --------
+    // On narrow viewports the header right-cluster (tabs + toggles +
+    // settings + version) collapses behind a hamburger. Clicking the
+    // hamburger flips `header.menu-open`; CSS does the rest. An
+    // outside-click listener closes the drawer so it doesn't get
+    // stuck open when the user taps past it.
+    (function () {
+      var btn = document.getElementById('mobile-menu-btn');
+      var hdr = document.querySelector('body.ftw-next > header');
+      if (!btn || !hdr) return;
+      function close() {
+        hdr.classList.remove('menu-open');
+        btn.setAttribute('aria-expanded', 'false');
+      }
+      btn.addEventListener('click', function (e) {
+        e.stopPropagation();
+        var open = hdr.classList.toggle('menu-open');
+        btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+      });
+      document.addEventListener('click', function (e) {
+        if (!hdr.classList.contains('menu-open')) return;
+        if (!hdr.contains(e.target)) close();
+      });
+      window.addEventListener('resize', function () {
+        // If the viewport grows past the mobile breakpoint, the drawer
+        // CSS stops applying — close explicitly so a resize-then-resize
+        // doesn't leave the drawer class dangling.
+        if (window.matchMedia('(min-width: 721px)').matches) close();
       });
     })();
   </script>
