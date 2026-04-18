@@ -138,6 +138,7 @@ when the operator has chosen one.
 
 - `GET  /api/mpc/plan` — latest cached plan (mode, horizon, per-slot actions with reasons)
 - `POST /api/mpc/replan` — force an immediate replan
+- `GET  /api/mpc/diagnose` — per-slot audit view: what the DP saw (price, spot, confidence, PV, load) joined with what it decided (battery, grid, SoC, cost, reason) plus the full `Params` the optimize was parameterized with. Meant for debugging "why did the planner decide X at this slot?" without shelling into the host
 - `POST /api/mode {"mode":"planner_arbitrage"}` — activates a strategy AND forces an MPC replan so targets take effect within one control cycle
 - `GET  /api/loadpoints` — list configured EV loadpoints + observable state (plug, SoC, power, session Wh)
 - `POST /api/loadpoints/{id}/target` — set user intent `{soc_pct: 80, target_time_ms: …}`; triggers an MPC replan
@@ -220,6 +221,36 @@ Signal to read from the table:
 
 Total annual savings depend heavily on market volatility; a stable
 market year narrows the gap between the three modes.
+
+---
+
+## Time-zone convention — UTC everywhere
+
+All time-of-day and day-of-week indexing inside the planner and its
+digital twins is done in **UTC**. The price-forecast's hour-of-week
+buckets, the load-model's hour-of-week buckets, the PV-twin's
+time-of-day harmonic features, and every `time.UnixMilli(...)`
+conversion that feeds a predictor all coerce to UTC before the
+`.Hour()` / `.Weekday()` / `.Month()` access.
+
+Why: a wall-clock 19:00 in Stockholm lands on a *different* UTC hour
+in summer (CEST, UTC+2) than in winter (CET, UTC+1). Indexing buckets
+by local-zone hour silently slides the learned EMA by one bucket
+twice a year, and a single `Predict` call could resolve a different
+bucket for the same instant depending on which `time.Location` the
+`time.Time` carried. Both bugs produce "planner chose to charge from
+an expensive hour" symptoms around DST transitions.
+
+Source-of-truth timestamps in the state store are unix-milli (absolute,
+timezone-agnostic); the UTC coercion is only at the leaf points where
+we access calendar fields. Operator-facing UI formatting still uses
+the site's local zone — that's a display concern, not a model
+concern.
+
+If you add a new predictor or new time-field access inside the
+planner, coerce `t` with `t.UTC()` first. Tests
+(`TestPredictStableAcrossDST`, `TestHourOfWeekStableAcrossDST`,
+`TestFeaturesStableAcrossDST`) enforce the invariant per package.
 
 ---
 

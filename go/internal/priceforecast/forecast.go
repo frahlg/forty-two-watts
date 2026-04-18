@@ -134,9 +134,14 @@ func NewZoneModel(zone string) *ZoneModel {
 // Predict returns the expected spot öre/kWh at t for zone. The bucket
 // value is already prior-blended via FitFromHistory, so we just apply
 // the monthly seasonality.
+//
+// Coerces t to UTC so hour-of-week + month indexing is stable across
+// DST transitions. FitFromHistory does the same (see line 183), so Fit
+// and Predict agree on bucket addressing.
 func (m ZoneModel) Predict(t time.Time) float64 {
-	idx := hourOfWeek(t)
-	return m.Bucket[idx] * m.Month[int(t.Month())-1]
+	u := t.UTC()
+	idx := hourOfWeek(u)
+	return m.Bucket[idx] * m.Month[int(u.Month())-1]
 }
 
 // overallMean across buckets weighted by counts.
@@ -232,10 +237,14 @@ func (m *ZoneModel) FitFromHistory(pts []state.PricePoint) {
 	m.FittedAt = time.Now().UnixMilli()
 }
 
-// hourOfWeek: Mon=0..Sun=6 × 24. Works in UTC for determinism.
+// hourOfWeek: Mon=0..Sun=6 × 24. Coerces to UTC so the bucket index is
+// deterministic across DST transitions — without this, a wall-clock
+// 19:00 call returns a different bucket in summer than in winter,
+// silently misaligning the learned EMA against Fit's UTC-indexed data.
 func hourOfWeek(t time.Time) int {
-	wd := (int(t.Weekday()) + 6) % 7
-	return wd*24 + t.Hour()
+	u := t.UTC()
+	wd := (int(u.Weekday()) + 6) % 7
+	return wd*24 + u.Hour()
 }
 
 // ---- Service ----

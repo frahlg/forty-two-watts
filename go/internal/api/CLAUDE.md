@@ -32,7 +32,7 @@ Endpoint groups (route table is `api.go:95-130`):
 | self_tune | `POST /api/self_tune/start`, `GET /api/self_tune/status`, `POST /api/self_tune/cancel` |
 | history / series | `GET /api/history`, `GET /api/series`, `GET /api/series/catalog` |
 | prices / forecast | `GET /api/prices`, `GET /api/forecast` |
-| mpc | `GET /api/mpc/plan`, `POST /api/mpc/replan` |
+| mpc | `GET /api/mpc/plan`, `POST /api/mpc/replan`, `GET /api/mpc/diagnose` |
 | loadpoints | `GET /api/loadpoints`, `POST /api/loadpoints/{id}/target` |
 | twins | `GET /api/pvmodel`, `POST /api/pvmodel/reset`, `GET /api/loadmodel`, `POST /api/loadmodel/reset` |
 | ha | `GET /api/ha/status` |

@@ -144,6 +144,7 @@ func (s *Server) routes() {
 	s.handle("GET  /api/forecast", s.handleForecast)
 	s.handle("GET  /api/mpc/plan", s.handleMPCPlan)
 	s.handle("POST /api/mpc/replan", s.handleMPCReplan)
+	s.handle("GET  /api/mpc/diagnose", s.handleMPCDiagnose)
 	s.handle("GET  /api/pvmodel", s.handlePVModel)
 	s.handle("POST /api/pvmodel/reset", s.handlePVModelReset)
 	s.handle("GET  /api/loadmodel", s.handleLoadModel)
@@ -1080,6 +1081,24 @@ func (s *Server) handleMPCReplan(w http.ResponseWriter, r *http.Request) {
 	}
 	plan := s.deps.MPC.Replan(r.Context())
 	writeJSON(w, 200, map[string]any{"enabled": true, "plan": plan})
+}
+
+// handleMPCDiagnose exposes the full per-slot context of the most
+// recent Optimize call: inputs (price, PV, load, confidence) joined
+// with outputs (battery, grid, SoC, cost, reason) plus the Params the
+// DP was parameterized with. Lets operators answer "why did the
+// planner decide X at 21:00?" without shelling into the host.
+func (s *Server) handleMPCDiagnose(w http.ResponseWriter, r *http.Request) {
+	if s.deps.MPC == nil {
+		writeJSON(w, 200, map[string]any{"enabled": false})
+		return
+	}
+	diag := s.deps.MPC.Diagnose()
+	if diag == nil {
+		writeJSON(w, 200, map[string]any{"enabled": true, "diagnostic": nil})
+		return
+	}
+	writeJSON(w, 200, map[string]any{"enabled": true, "diagnostic": diag})
 }
 
 // ---- Long-format time-series ----
