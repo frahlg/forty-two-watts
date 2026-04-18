@@ -7,6 +7,31 @@ import (
 	"time"
 )
 
+// TestFeaturesStableAcrossDST — the time-of-day harmonic phase must
+// not shift when the same instant is passed in a different timezone.
+// Otherwise DST transitions silently re-score the learned β coefficients.
+func TestFeaturesStableAcrossDST(t *testing.T) {
+	stockholm, err := time.LoadLocation("Europe/Stockholm")
+	if err != nil {
+		t.Skipf("Europe/Stockholm tzdata unavailable: %v", err)
+	}
+	instants := []time.Time{
+		time.Date(2026, 3, 29, 1, 0, 0, 0, time.UTC),
+		time.Date(2026, 10, 25, 1, 0, 0, 0, time.UTC),
+		time.Date(2026, 7, 15, 10, 30, 0, 0, time.UTC),
+	}
+	for _, inst := range instants {
+		fUTC := Features(500, 30, inst)
+		fLocal := Features(500, 30, inst.In(stockholm))
+		for i := range fUTC {
+			if fUTC[i] != fLocal[i] {
+				t.Errorf("Features[%d] diverges: utc=%.4f local=%.4f (inst=%v)",
+					i, fUTC[i], fLocal[i], inst)
+			}
+		}
+	}
+}
+
 // synthetic simulates a real rooftop: rated 10 kW south-facing with a
 // morning shading lobe (soft -30% around 08:00, tapering to 1.0 by 11:00),
 // a 92% of rated peak (module aging), and a slightly stronger cloud

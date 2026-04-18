@@ -148,6 +148,80 @@ SE4,1735689600000,60,90.0
 	}
 }
 
+// TestPredictStableAcrossDST ensures Predict returns the same value for
+// the same absolute instant regardless of the timezone the caller has
+// attached to the time.Time struct. Before the UTC coercion in
+// hourOfWeek + Predict, passing a local-zone time around DST boundaries
+// produced a different bucket (and thus price) than passing the UTC
+// equivalent — Erik's 21:00 bug was on this exact code path.
+func TestPredictStableAcrossDST(t *testing.T) {
+	stockholm, err := time.LoadLocation("Europe/Stockholm")
+	if err != nil {
+		t.Skipf("Europe/Stockholm tzdata unavailable: %v", err)
+	}
+	m := NewZoneModel("SE3")
+	// Several points over the year — including both DST transitions.
+	cases := []struct {
+		name string
+		inst time.Time
+	}{
+		// Winter (CET = UTC+1): 19:00 local = 18:00 UTC
+		{"winter evening", time.Date(2026, 1, 15, 18, 0, 0, 0, time.UTC)},
+		// Spring-forward day: 2026-03-29 01:00 UTC = 03:00 CEST (02:00 local skipped)
+		{"spring forward 01UTC", time.Date(2026, 3, 29, 1, 0, 0, 0, time.UTC)},
+		{"spring forward 10UTC", time.Date(2026, 3, 29, 10, 0, 0, 0, time.UTC)},
+		// Summer (CEST = UTC+2): 19:00 local = 17:00 UTC
+		{"summer evening", time.Date(2026, 7, 15, 17, 0, 0, 0, time.UTC)},
+		// Fall-back day: 2026-10-25 00:00 UTC = 02:00 CEST; 01:00 UTC = 02:00 CET (second time)
+		{"fall back 00UTC", time.Date(2026, 10, 25, 0, 0, 0, 0, time.UTC)},
+		{"fall back 01UTC", time.Date(2026, 10, 25, 1, 0, 0, 0, time.UTC)},
+		// Erik's scenario: ~21:00 local (19:00-20:00 UTC depending on season)
+		{"winter 21 local", time.Date(2026, 12, 10, 20, 0, 0, 0, time.UTC)},
+		{"summer 21 local", time.Date(2026, 7, 10, 19, 0, 0, 0, time.UTC)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			utc := tc.inst
+			local := utc.In(stockholm)
+			if !utc.Equal(local) {
+				t.Fatalf("instants must be equal — test bug")
+			}
+			pUTC := m.Predict(utc)
+			pLocal := m.Predict(local)
+			if pUTC != pLocal {
+				t.Errorf("Predict diverged across timezones for same instant: "+
+					"utc=%v -> %.4f, local=%v -> %.4f",
+					utc, pUTC, local, pLocal)
+			}
+		})
+	}
+}
+
+// TestHourOfWeekStableAcrossDST is the lower-level regression: the
+// bucket index itself must not change when the same instant is
+// represented in a different timezone.
+func TestHourOfWeekStableAcrossDST(t *testing.T) {
+	stockholm, err := time.LoadLocation("Europe/Stockholm")
+	if err != nil {
+		t.Skipf("Europe/Stockholm tzdata unavailable: %v", err)
+	}
+	// Pick a few instants across DST boundaries.
+	instants := []time.Time{
+		time.Date(2026, 3, 29, 1, 0, 0, 0, time.UTC), // spring forward
+		time.Date(2026, 10, 25, 1, 0, 0, 0, time.UTC), // fall back
+		time.Date(2026, 7, 15, 17, 0, 0, 0, time.UTC), // summer
+		time.Date(2026, 12, 15, 20, 0, 0, 0, time.UTC), // winter
+	}
+	for _, inst := range instants {
+		utc := inst
+		local := inst.In(stockholm)
+		if hourOfWeek(utc) != hourOfWeek(local) {
+			t.Errorf("hourOfWeek differs: utc=%d local=%d (inst=%v)",
+				hourOfWeek(utc), hourOfWeek(local), inst)
+		}
+	}
+}
+
 func TestSeedFromCSVRejectsMissingColumns(t *testing.T) {
 	st, _ := state.Open(filepath.Join(t.TempDir(), "t.db"))
 	defer st.Close()

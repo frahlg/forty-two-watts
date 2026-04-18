@@ -218,3 +218,33 @@ Signal to read from the table:
 
 Total annual savings depend heavily on market volatility; a stable
 market year narrows the gap between the three modes.
+
+---
+
+## Time-zone convention — UTC everywhere
+
+All time-of-day and day-of-week indexing inside the planner and its
+digital twins is done in **UTC**. The price-forecast's hour-of-week
+buckets, the load-model's hour-of-week buckets, the PV-twin's
+time-of-day harmonic features, and every `time.UnixMilli(...)`
+conversion that feeds a predictor all coerce to UTC before the
+`.Hour()` / `.Weekday()` / `.Month()` access.
+
+Why: a wall-clock 19:00 in Stockholm lands on a *different* UTC hour
+in summer (CEST, UTC+2) than in winter (CET, UTC+1). Indexing buckets
+by local-zone hour silently slides the learned EMA by one bucket
+twice a year, and a single `Predict` call could resolve a different
+bucket for the same instant depending on which `time.Location` the
+`time.Time` carried. Both bugs produce "planner chose to charge from
+an expensive hour" symptoms around DST transitions.
+
+Source-of-truth timestamps in the state store are unix-milli (absolute,
+timezone-agnostic); the UTC coercion is only at the leaf points where
+we access calendar fields. Operator-facing UI formatting still uses
+the site's local zone — that's a display concern, not a model
+concern.
+
+If you add a new predictor or new time-field access inside the
+planner, coerce `t` with `t.UTC()` first. Tests
+(`TestPredictStableAcrossDST`, `TestHourOfWeekStableAcrossDST`,
+`TestFeaturesStableAcrossDST`) enforce the invariant per package.

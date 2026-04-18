@@ -72,6 +72,9 @@ func NewModel(ratedW float64) *Model {
 }
 
 // Features returns the feature vector for a given forecast sample.
+//
+// Hour-of-day uses UTC so the harmonic phase is stable across DST
+// transitions and matches sunpos's UTC convention (see sunpos.go).
 func Features(clearSkyW, cloudPct float64, t time.Time) [NFeat]float64 {
 	cloudFrac := cloudPct / 100.0
 	if cloudFrac < 0 {
@@ -81,7 +84,8 @@ func Features(clearSkyW, cloudPct float64, t time.Time) [NFeat]float64 {
 		cloudFrac = 1
 	}
 	cf := math.Pow(1-cloudFrac, 1.5)
-	hour := float64(t.Hour()) + float64(t.Minute())/60.0
+	u := t.UTC()
+	hour := float64(u.Hour()) + float64(u.Minute())/60.0
 	h := 2 * math.Pi * hour / 24.0
 	return [NFeat]float64{
 		1.0,
