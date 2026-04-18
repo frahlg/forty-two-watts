@@ -126,6 +126,25 @@
       });
   }
 
+  function driverLabel(entry) {
+    // Prepend the manufacturer only when the driver's own name doesn't
+    // already start with it — avoids "CTEK CTEK Chargestorm (…)" when
+    // the driver metadata already sets the manufacturer into the name.
+    var base = entry.name || entry.filename || '';
+    var mfr  = entry.manufacturer || '';
+    if (mfr && base.toLowerCase().indexOf(mfr.toLowerCase()) !== 0) {
+      base = mfr + ' ' + base;
+    }
+    if (entry.protocols && entry.protocols.length > 0) {
+      base += ' (' + entry.protocols.join(', ');
+      if (entry.capabilities && entry.capabilities.length > 0) {
+        base += ', ' + entry.capabilities.join('+');
+      }
+      base += ')';
+    }
+    return base;
+  }
+
   function populateDriverDropdown() {
     var sel = document.getElementById('driver-select');
     sel.innerHTML = '<option value="">-- Select a driver --</option>';
@@ -134,6 +153,10 @@
     // scan (we know its protocol). Manual entry shows the full catalog.
     var proto = selectedDevice ? selectedDevice.protocol : null;
 
+    // Decorate each entry with its rendered label + original index so
+    // the sort-by-label stays stable and we can still recover the
+    // catalog index when the user picks one.
+    var rows = [];
     driverCatalog.forEach(function (entry, idx) {
       if (proto && entry.protocols && entry.protocols.length > 0) {
         var match = entry.protocols.some(function (p) {
@@ -141,21 +164,16 @@
         });
         if (!match) return;
       }
+      rows.push({ idx: idx, label: driverLabel(entry) });
+    });
+    rows.sort(function (a, b) {
+      return a.label.localeCompare(b.label, undefined, { sensitivity: 'base' });
+    });
 
-      var label = '';
-      if (entry.manufacturer) label += entry.manufacturer + ' ';
-      label += entry.name || entry.filename;
-      if (entry.protocols && entry.protocols.length > 0) {
-        label += ' (' + entry.protocols.join(', ');
-        if (entry.capabilities && entry.capabilities.length > 0) {
-          label += ', ' + entry.capabilities.join('+');
-        }
-        label += ')';
-      }
-
+    rows.forEach(function (r) {
       var opt = document.createElement('option');
-      opt.value = String(idx);
-      opt.textContent = label;
+      opt.value = String(r.idx);
+      opt.textContent = r.label;
       sel.appendChild(opt);
     });
   }
