@@ -334,8 +334,8 @@ class FtwEnergyFlow extends FtwElement {
           vbX: 0, vbW: W,
           leftX: 240, rightX: 760,
           topY: 130, botY: 400,
-          baseR: 105, hubR: 110,
-          hubIconY: CY - 56, hubValueY: CY + 10, hubLabelY: CY + 40,
+          baseR: 84, hubR: 99,
+          hubIconY: CY - 50, hubValueY: CY + 10, hubLabelY: CY + 36,
         };
 
     // Multi-device cluster in the PV (top-left) quadrant. Bounds run
