@@ -26,6 +26,18 @@ type CatalogEntry struct {
 	Description        string         `json:"description,omitempty"`
 	Homepage           string         `json:"homepage,omitempty"`
 	ConnectionDefaults map[string]any `json:"connection_defaults,omitempty"`
+
+	// Verification: who's actually run this driver against real
+	// hardware and how long. Populated from the DRIVER block's optional
+	// fields. The UI surfaces this as a badge next to each driver in
+	// the catalog picker so operators can distinguish "ported from
+	// reference, never proven against hardware" from "running for
+	// weeks at multiple sites".
+	VerificationStatus string   `json:"verification_status,omitempty"` // experimental | beta | production
+	VerifiedBy         []string `json:"verified_by,omitempty"`         // e.g. "frahlg@homelab-rpi:14d"
+	VerifiedAt         string   `json:"verified_at,omitempty"`         // ISO date of most recent entry
+	VerificationNotes  string   `json:"verification_notes,omitempty"`
+	TestedModels       []string `json:"tested_models,omitempty"` // e.g. ["Home", "Charge"]
 }
 
 // LoadCatalog scans dir (and any direct sub-directories) for .lua driver
@@ -94,7 +106,29 @@ func parseCatalogEntry(path string) (CatalogEntry, error) {
 	e.Capabilities = pickList(block, "capabilities")
 	e.HTTPHosts = pickList(block, "http_hosts")
 	e.ConnectionDefaults = pickKVBlock(block, "connection_defaults")
+	e.VerificationStatus = normalizeVerificationStatus(pickString(block, "verification_status"))
+	e.VerifiedBy = pickList(block, "verified_by")
+	e.VerifiedAt = pickString(block, "verified_at")
+	e.VerificationNotes = pickString(block, "verification_notes")
+	e.TestedModels = pickList(block, "tested_models")
 	return e, nil
+}
+
+// normalizeVerificationStatus coerces the Lua string into one of the
+// three canonical values the UI renders badges for. Anything else
+// (blank, typo, unknown) falls back to "experimental" — the safest
+// default for a driver with no declared provenance.
+func normalizeVerificationStatus(s string) string {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "production":
+		return "production"
+	case "beta":
+		return "beta"
+	case "experimental", "":
+		return "experimental"
+	default:
+		return "experimental"
+	}
 }
 
 var driverBlockRe = regexp.MustCompile(`(?s)DRIVER\s*=\s*\{(.*?)\n\}`)
