@@ -54,6 +54,15 @@ type Service struct {
 	Price     PricePredictor // optional — fills in future slots when day-ahead isn't published yet
 	Loadpoint LoadpointProbe // optional — when non-nil, the DP extends its state with EV dimensions
 
+	// SaveDiag is called synchronously after every successful replan
+	// with the same Diagnostic the /api/mpc/diagnose endpoint would
+	// return + the trigger reason ("scheduled" / "reactive-pv" /
+	// "reactive-load" / "manual"). Nil disables persistence — the
+	// in-memory diagnose still works. Wired in main.go against
+	// state.Store.SaveDiagnostic so operators can time-travel past
+	// decisions; see docs/mpc-planner.md.
+	SaveDiag func(d *Diagnostic, reason string) error
+
 	// Reactive replan: when the integrated energy gap between actual
 	// and the plan's current-slot prediction exceeds a threshold over
 	// a rolling ~15-minute window, trigger an off-schedule replan so
@@ -578,6 +587,19 @@ func (s *Service) replan(_ context.Context) *Plan {
 		"soc_start", p.InitialSoCPct,
 		"cost_ore", plan.TotalCostOre,
 		"reason", reason)
+
+	// Persist a diagnostic snapshot so operators can time-travel to
+	// this replan later. Best-effort: errors log and continue so a
+	// flaky disk never blocks planning. Runs outside the lock — the
+	// plan pointer is already swapped in, so Diagnose() reads
+	// consistent state without needing us to hold anything.
+	if s.SaveDiag != nil {
+		if d := s.Diagnose(); d != nil {
+			if err := s.SaveDiag(d, reason); err != nil {
+				slog.Warn("mpc: persist diagnostic failed", "err", err)
+			}
+		}
+	}
 	return &plan
 }
 

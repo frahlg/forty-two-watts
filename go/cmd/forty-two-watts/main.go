@@ -486,6 +486,17 @@ func main() {
 			mpcSvc.GridTariffOreKwh = cfg.Price.GridTariffOreKwh
 			mpcSvc.VATPercent = cfg.Price.VATPercent
 		}
+		// Persist every replan's Diagnostic so operators can time-
+		// travel. See docs/mpc-planner.md + planner_diagnostics
+		// table in state/store.go.
+		mpcSvc.SaveDiag = func(d *mpc.Diagnostic, reason string) error {
+			js, err := json.Marshal(d)
+			if err != nil {
+				return err
+			}
+			return st.SaveDiagnostic(d.ComputedAtMs, reason, d.Zone,
+				d.TotalCostOre, d.Horizon, string(js))
+		}
 		mpcSvc.Start(ctx)
 		defer mpcSvc.Stop()
 		// Inject plan → control.State. Both callbacks are wired:
@@ -546,6 +557,7 @@ func main() {
 		DtS:        float64(cfg.Site.ControlIntervalS),
 		SaveConfig: config.SaveAtomic,
 		WebDir:     *webDir,
+		ColdDir:    coldDir,
 		Prices:     priceSvc,
 		Forecast:   forecastSvc,
 		MPC:        mpcSvc,
@@ -870,10 +882,22 @@ func doRolloff(ctx context.Context, st *state.Store, coldDir string) {
 	rows, files, err := st.RolloffToParquet(ctx, coldDir)
 	if err != nil {
 		slog.Warn("parquet rolloff failed", "err", err)
+	} else if rows > 0 {
+		slog.Info("parquet rolloff", "rows", rows, "files", len(files))
+	}
+	// Planner diagnostics roll off on the same cadence but keep a
+	// longer hot tier (30 d vs. the 14 d of ts_samples) — they're
+	// sparse enough (~100/day) that the extra month in SQLite
+	// costs < 60 MB and makes the time-travel UI snappy for
+	// recent-incident debugging.
+	dRows, dFiles, err := st.RolloffDiagnosticsToParquet(ctx, coldDir)
+	if err != nil {
+		slog.Warn("diagnostics parquet rolloff failed", "err", err)
 		return
 	}
-	if rows > 0 {
-		slog.Info("parquet rolloff", "rows", rows, "files", len(files))
+	if dRows > 0 {
+		slog.Info("diagnostics parquet rolloff",
+			"rows", dRows, "files", len(dFiles))
 	}
 }
 

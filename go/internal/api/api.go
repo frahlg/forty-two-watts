@@ -66,6 +66,7 @@ type Deps struct {
 	DtS        float64                                   // control interval seconds (for model τ / age displays)
 	SaveConfig func(path string, c *config.Config) error // injection for testability
 	WebDir     string                                    // static assets root (default "web")
+	ColdDir    string                                    // cold-storage root for parquet rolloff; empty disables cold fallback
 
 	// Optional: spot prices + weather forecast services. Nil if disabled.
 	Prices   *prices.Service
@@ -145,6 +146,8 @@ func (s *Server) routes() {
 	s.handle("GET  /api/mpc/plan", s.handleMPCPlan)
 	s.handle("POST /api/mpc/replan", s.handleMPCReplan)
 	s.handle("GET  /api/mpc/diagnose", s.handleMPCDiagnose)
+	s.handle("GET  /api/mpc/diagnose/history", s.handleMPCDiagnoseHistory)
+	s.handle("GET  /api/mpc/diagnose/at", s.handleMPCDiagnoseAt)
 	s.handle("GET  /api/pvmodel", s.handlePVModel)
 	s.handle("POST /api/pvmodel/reset", s.handlePVModelReset)
 	s.handle("GET  /api/loadmodel", s.handleLoadModel)
@@ -1099,6 +1102,119 @@ func (s *Server) handleMPCDiagnose(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{"enabled": true, "diagnostic": diag})
+}
+
+// handleMPCDiagnoseHistory lists persisted replan snapshots as
+// lightweight summaries for the timeline UI. The full per-slot JSON
+// blob isn't included — call /api/mpc/diagnose/at?ts=<ms> for that.
+//
+// Query params:
+//
+//	since  unix-ms; default "now − 7d"
+//	until  unix-ms; default now
+//	limit  max rows returned; default 500, cap 5000
+//
+// Falls back to the cold-storage parquet files when the requested
+// window extends beyond DiagnosticsRecentRetention — keeps the UI
+// working for year-old incidents without a separate code path.
+func (s *Server) handleMPCDiagnoseHistory(w http.ResponseWriter, r *http.Request) {
+	if s.deps.State == nil {
+		writeJSON(w, 200, map[string]any{"enabled": false})
+		return
+	}
+	now := time.Now().UnixMilli()
+	since := now - 7*24*3600*1000
+	until := now
+	if v := r.URL.Query().Get("since"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+			since = n
+		}
+	}
+	if v := r.URL.Query().Get("until"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+			until = n
+		}
+	}
+	limit := 500
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+			if limit > 5000 {
+				limit = 5000
+			}
+		}
+	}
+	summaries, err := s.deps.State.LoadDiagnosticsInRange(since, until, limit)
+	if err != nil {
+		writeJSON(w, 500, map[string]string{"error": err.Error()})
+		return
+	}
+	// If the query window extends before the SQLite retention and we
+	// have a cold-storage root configured, top up with Parquet.
+	coldDir := s.deps.ColdDir
+	if coldDir != "" {
+		hotCutoff := now - int64(state.DiagnosticsRecentRetention/time.Millisecond)
+		if since < hotCutoff {
+			coldUntil := hotCutoff
+			if until < coldUntil {
+				coldUntil = until
+			}
+			cold, cerr := s.deps.State.LoadDiagnosticsFromParquet(coldDir, since, coldUntil)
+			if cerr == nil {
+				summaries = append(summaries, cold...)
+			}
+		}
+	}
+	writeJSON(w, 200, map[string]any{
+		"enabled":   true,
+		"snapshots": summaries,
+	})
+}
+
+// handleMPCDiagnoseAt returns the snapshot active at ?ts=<ms> — the
+// replan whose ts_ms is the largest one ≤ ts. That's the "plan that
+// was driving the EMS at that moment" semantics, so a query at 02:07
+// returns the 02:00 replan (not the 02:15 one that ran afterward).
+// Falls through to Parquet when the hit isn't in the hot table.
+func (s *Server) handleMPCDiagnoseAt(w http.ResponseWriter, r *http.Request) {
+	if s.deps.State == nil {
+		writeJSON(w, 200, map[string]any{"enabled": false})
+		return
+	}
+	ts, err := strconv.ParseInt(r.URL.Query().Get("ts"), 10, 64)
+	if err != nil || ts <= 0 {
+		writeJSON(w, 400, map[string]string{"error": "ts (unix ms) required"})
+		return
+	}
+	row, err := s.deps.State.LoadDiagnosticAt(ts)
+	if err != nil {
+		writeJSON(w, 500, map[string]string{"error": err.Error()})
+		return
+	}
+	if row == nil && s.deps.ColdDir != "" {
+		row, err = s.deps.State.LoadDiagnosticFullFromParquet(s.deps.ColdDir, ts)
+		if err != nil {
+			writeJSON(w, 500, map[string]string{"error": err.Error()})
+			return
+		}
+	}
+	if row == nil {
+		writeJSON(w, 200, map[string]any{"enabled": true, "snapshot": nil})
+		return
+	}
+	// Pass the stored JSON through raw so the client sees the exact
+	// mpc.Diagnostic shape it would have gotten from /api/mpc/diagnose.
+	// Wrapping in a typed struct would force an unmarshal + remarshal
+	// that adds ~1 ms on a 2880-slot snapshot for no benefit.
+	payload := map[string]any{
+		"ts_ms":          row.TsMs,
+		"reason":         row.Reason,
+		"zone":           row.Zone,
+		"total_cost_ore": row.TotalCostOre,
+		"horizon_slots":  row.HorizonSlots,
+		"diagnostic":     json.RawMessage(row.JSON),
+	}
+	writeJSON(w, 200, map[string]any{"enabled": true, "snapshot": payload})
 }
 
 // ---- Long-format time-series ----
