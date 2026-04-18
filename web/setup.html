@@ -418,6 +418,13 @@
       <h2>Welcome to forty-two-watts</h2>
       <p>Let's set up your home energy system in a few steps.</p>
       <button class="btn-primary" onclick="goStep(2)">Get started</button>
+      <!-- Skip-straight-to-app button for returning operators / Pi
+           redeploys who already know their way around and would rather
+           configure everything from /settings. Saves a minimal config
+           (site defaults, no drivers) and exits to the main UI. -->
+      <button class="btn-skip" onclick="skipSetup()" style="margin-top:1rem">
+        Skip setup — I'll configure later
+      </button>
     </div>
   </div>
 

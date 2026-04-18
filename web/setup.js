@@ -754,6 +754,43 @@
     return d.innerHTML;
   }
 
+  // Skip the whole wizard — write a minimal default config so the
+  // backend restarts out of bootstrap mode, then land the browser in
+  // the main app. Operators finish the work in /settings.
+  window.skipSetup = function () {
+    var cfg = {
+      site: {
+        name: 'My Home',
+        control_interval_s: 5,
+        grid_target_w: 0,
+        grid_tolerance_w: 42,
+        watchdog_timeout_s: 60,
+        smoothing_alpha: 0.3,
+        gain: 0.5,
+        slew_rate_w: 500,
+        min_dispatch_interval_s: 5
+      },
+      fuse:    { max_amps: 16, phases: 3, voltage: 230 },
+      drivers: [],
+      api:     { port: 8080 }
+    };
+    fetch('/api/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(cfg)
+    }).then(function (r) {
+      if (!r.ok) return r.json().then(function (d) {
+        throw new Error(d.error || 'Skip failed');
+      });
+      // Give the bootstrap a moment to write the config and restart
+      // the process. If it's back up quickly the redirect will hit
+      // the real UI; if not the browser will retry.
+      setTimeout(function () { window.location.href = '/'; }, 2000);
+    }).catch(function (err) {
+      alert('Could not skip setup: ' + err.message);
+    });
+  };
+
   // --- Init ---
   renderDots();
   goStep(1);
