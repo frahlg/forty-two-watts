@@ -344,22 +344,25 @@ class FtwEnergyFlow extends FtwElement {
       ? this._readings.batteries
       : [{ name: "", kw: 0, soc: null, placeholder: true }];
 
-    // Compact mode pulls the four cardinal anchors toward the hub so the
-    // beams are roughly half-length — leaves the box cluster tight and
-    // gives the enlarged text on narrow viewports room to breathe
-    // without overflowing the viewBox. We also crop the viewBox to the
-    // middle 600 units (instead of the full 1000) so the remaining
-    // content renders ~1.67× larger at the same container width — a
-    // uniform zoom across boxes, icons, beams, and text.
-    const topY    = this._compact ? 110      : TOP_Y;
-    const botY    = this._compact ? H - 110  : BOT_Y;
+    // Compact mode tightens the four cardinal anchors and crops the
+    // viewBox so the whole diagram renders larger at the same container
+    // width. Box dimensions grow too — otherwise the enlarged text
+    // overflows the node chrome and adjacent lines overlap. Text
+    // y-offsets are respread inside renderNode to match the taller box.
+    const topY    = this._compact ? 85       : TOP_Y;
+    const botY    = this._compact ? H - 85   : BOT_Y;
     const leftX   = this._compact ? 290      : LEFT_X;
     const rightX  = this._compact ? W - 290  : RIGHT_X;
-    const vbX     = this._compact ? 200      : 0;
-    const vbW     = this._compact ? 600      : W;
+    const vbX     = this._compact ? 180      : 0;
+    const vbW     = this._compact ? 640      : W;
+    const boxW    = this._compact ? 210      : BOX_W;
+    const boxH    = this._compact ? 110      : BOX_H;
+    const textY   = this._compact
+      ? { title: 26, value: 62, sub: 90, soc: 100 }
+      : { title: 20, value: 46, sub: 64, soc: 70  };
 
-    const pvPositions  = clusterH(pvList.length,  CX,      topY,  BOX_W, GAP_H);
-    const batPositions = clusterV(batList.length, rightX,  CY,    BOX_H, GAP_V);
+    const pvPositions  = clusterH(pvList.length,  CX,      topY,  boxW, GAP_H);
+    const batPositions = clusterV(batList.length, rightX,  CY,    boxH, GAP_V);
     const gridPos = { x: leftX, y: CY };
     const evPos   = { x: CX,    y: botY };
 
@@ -374,6 +377,7 @@ class FtwEnergyFlow extends FtwElement {
         magnitude,
         "var(--amber)",
         !pv.placeholder && magnitude > 0.05,
+        boxW, boxH,
       ));
     });
     edges.push(edge(
@@ -384,6 +388,7 @@ class FtwEnergyFlow extends FtwElement {
       Math.abs(grid),
       grid >= 0 ? "var(--red-e)" : "var(--green-e)",
       Math.abs(grid) > 0.05,
+      boxW, boxH,
     ));
     batList.forEach((bat, i) => {
       edges.push(edge(
@@ -394,6 +399,7 @@ class FtwEnergyFlow extends FtwElement {
         Math.abs(bat.kw),
         "var(--cyan)",
         !bat.placeholder && Math.abs(bat.kw) > 0.05,
+        boxW, boxH,
       ));
     });
     edges.push(edge(
@@ -403,6 +409,7 @@ class FtwEnergyFlow extends FtwElement {
       Math.max(0, ev),
       "var(--white-s)",
       ev > 0.05,
+      boxW, boxH,
     ));
 
     const maxKw = Math.max(0.5, ...edges.map(e => e.kw));
@@ -423,6 +430,7 @@ class FtwEnergyFlow extends FtwElement {
         sub: pv.placeholder ? "no data" : (pv.kw < -0.05 ? "generating" : "idle"),
         color: !pv.placeholder && pv.kw < -0.05 ? "var(--amber)" : "var(--fg-muted)",
         side: "top", icon: "sun",
+        boxW, boxH, textY,
       })
     ).join("");
 
@@ -434,6 +442,7 @@ class FtwEnergyFlow extends FtwElement {
       color: Math.abs(grid) < 0.05 ? "var(--fg-muted)" :
              (grid >= 0 ? "var(--red-e)" : "var(--green-e)"),
       side: "left", icon: "grid",
+      boxW, boxH, textY,
     });
 
     const batNodes = batList.map((bat, i) =>
@@ -450,6 +459,7 @@ class FtwEnergyFlow extends FtwElement {
         color: bat.placeholder ? "var(--fg-muted)" : "var(--cyan)",
         side: "right", icon: "bat",
         soc: bat.placeholder ? null : bat.soc,
+        boxW, boxH, textY,
       })
     ).join("");
 
@@ -460,6 +470,7 @@ class FtwEnergyFlow extends FtwElement {
       sub: ev > 0.05 ? "charging" : "idle",
       color: ev > 0.05 ? "var(--green-e)" : "var(--white-s)",
       side: "bottom", icon: "ev",
+      boxW, boxH, textY,
     });
 
     return `
@@ -558,20 +569,20 @@ function clusterV(n, fixedX, anchorY, boxH, gap) {
 // side of the hub it lives on. `dir > 0` means energy flows INTO the hub
 // (displayed as particles moving from box → hub). dir < 0 reverses the
 // endpoints so animateMotion runs box-ward.
-function edge(id, pos, _unused, side, dir, kw, color, active) {
+function edge(id, pos, _unused, side, dir, kw, color, active, boxW = BOX_W, boxH = BOX_H) {
   let from, to;
   if (side === "top") {
-    from = { x: pos.x, y: pos.y + BOX_H / 2 };
+    from = { x: pos.x, y: pos.y + boxH / 2 };
     to   = { x: CX,    y: CY - HUB_R };
   } else if (side === "bottom") {
     from = { x: CX,    y: CY + HUB_R };
-    to   = { x: pos.x, y: pos.y - BOX_H / 2 };
+    to   = { x: pos.x, y: pos.y - boxH / 2 };
   } else if (side === "left") {
-    from = { x: pos.x + BOX_W / 2, y: pos.y };
-    to   = { x: CX - HUB_R,        y: CY };
+    from = { x: pos.x + boxW / 2, y: pos.y };
+    to   = { x: CX - HUB_R,       y: CY };
   } else { // right
-    from = { x: CX + HUB_R,        y: CY };
-    to   = { x: pos.x - BOX_W / 2, y: pos.y };
+    from = { x: CX + HUB_R,       y: CY };
+    to   = { x: pos.x - boxW / 2, y: pos.y };
   }
   // Swap when energy flows the "unusual" way for that side (grid export,
   // battery discharge). animateMotion always walks the path start→end,
@@ -736,39 +747,43 @@ function hashStr(s) {
 
 // ---------- nodes ----------
 
-function renderNode({ pos, title, value, sub, color, side, icon, soc }) {
-  const x = pos.x - BOX_W / 2;
-  const y = pos.y - BOX_H / 2;
+function renderNode({
+  pos, title, value, sub, color, side, icon, soc,
+  boxW = BOX_W, boxH = BOX_H,
+  textY = { title: 20, value: 46, sub: 64, soc: 70 },
+}) {
+  const x = pos.x - boxW / 2;
+  const y = pos.y - boxH / 2;
   // Accent stripe sits on the OUTER edge of each box (away from hub) so
   // the eye follows the colored line back toward the house.
   const stripe =
-    side === "left"   ? { x,                 y,                 w: 3,     h: BOX_H } :
-    side === "right"  ? { x: x + BOX_W - 3,  y,                 w: 3,     h: BOX_H } :
-    side === "top"    ? { x,                 y,                 w: BOX_W, h: 3 }     :
-                        { x,                 y: y + BOX_H - 3,  w: BOX_W, h: 3 };
+    side === "left"   ? { x,                 y,                 w: 3,    h: boxH } :
+    side === "right"  ? { x: x + boxW - 3,   y,                 w: 3,    h: boxH } :
+    side === "top"    ? { x,                 y,                 w: boxW, h: 3 }    :
+                        { x,                 y: y + boxH - 3,   w: boxW, h: 3 };
   const socBar = soc != null ? `
-    <rect x="${x + 14}" y="${y + 70}" width="${BOX_W - 28}" height="2.5" rx="1.25"
+    <rect x="${x + 14}" y="${y + textY.soc}" width="${boxW - 28}" height="2.5" rx="1.25"
           fill="var(--hero-soc-track)"/>
-    <rect x="${x + 14}" y="${y + 70}" width="${((BOX_W - 28) * (soc / 100)).toFixed(1)}" height="2.5" rx="1.25"
+    <rect x="${x + 14}" y="${y + textY.soc}" width="${((boxW - 28) * (soc / 100)).toFixed(1)}" height="2.5" rx="1.25"
           fill="var(--cyan)"/>` : "";
   return `
     <g>
-      <rect x="${x}" y="${y}" width="${BOX_W}" height="${BOX_H}" rx="12"
+      <rect x="${x}" y="${y}" width="${boxW}" height="${boxH}" rx="12"
             fill="var(--hero-box-fill)" stroke="var(--hero-box-border)" stroke-width="1"/>
       <rect x="${stripe.x}" y="${stripe.y}" width="${stripe.w}" height="${stripe.h}" rx="1.5"
             fill="${color}"/>
-      <text x="${x + 14}" y="${y + 20}"
+      <text x="${x + 14}" y="${y + textY.title}"
             fill="var(--hero-label-text)" class="sv-node-title">
         ${escapeXml(title)}
       </text>
-      <text x="${x + 14}" y="${y + 46}" fill="${color}" class="sv-node-value">
+      <text x="${x + 14}" y="${y + textY.value}" fill="${color}" class="sv-node-value">
         ${value}
       </text>
-      <text x="${x + 14}" y="${y + 64}"
+      <text x="${x + 14}" y="${y + textY.sub}"
             fill="var(--hero-sub-text)" class="sv-node-sub">
         ${escapeXml(sub)}
       </text>
-      <g transform="translate(${x + BOX_W - 30}, ${y + 12})" opacity="0.55">
+      <g transform="translate(${x + boxW - 30}, ${y + 12})" opacity="0.55">
         ${iconGlyph(icon, color)}
       </g>
       ${socBar}
