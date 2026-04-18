@@ -262,7 +262,7 @@
     // SoC
     var socPct = Math.round(data.bat_soc * 100);
     batSoc.textContent = socPct + "%";
-    socFill.style.width = socPct + "%";
+    socFill.setAttribute("value", socPct);
 
     // Mode buttons — primary (strategy) + advanced (manual)
     currentMode = data.mode;
@@ -1392,10 +1392,10 @@
     setPeakLimit(Number(peakLimitSlider.value));
   });
 
-  // EV detail modal
+  // EV detail modal — <ftw-modal> handles ESC / backdrop / close button;
+  // we only drive open()/close() and refresh the body on a timer.
   var evModal = document.getElementById("ev-modal");
   var evModalBody = document.getElementById("ev-modal-body");
-  var evModalClose = document.getElementById("ev-modal-close");
   var cardEv = document.getElementById("card-ev");
 
   // Render the EV modal by building DOM nodes (textContent) rather than
@@ -1459,32 +1459,19 @@
     var evBtnPause = document.getElementById("ev-btn-pause");
     var evBtnResume = document.getElementById("ev-btn-resume");
     var evActionBtns = [evBtnStart, evBtnPause, evBtnResume];
-    // Focus-trap bounds — first and last focusable controls in the modal.
-    // Tab from the last wraps to the first and vice versa.
-    var evFocusable = [evModalClose, evBtnStart, evBtnPause, evBtnResume];
-    var evLastFocused = null;
 
     function openEvModal() {
-      evLastFocused = document.activeElement;
-      evModal.classList.remove("hidden");
-      evModal.setAttribute("aria-hidden", "false");
+      evModal.open();
       refreshEvModal();
       // Guard against stacked timers if the card is clicked while the
       // modal is still open (e.g. background click that didn't close).
       if (evRefreshTimer) { clearInterval(evRefreshTimer); }
       evRefreshTimer = setInterval(refreshEvModal, 5000);
-      // Focus lands on the close button so ESC/Enter work immediately.
-      setTimeout(function () { evModalClose.focus(); }, 0);
     }
-    function closeEvModal() {
-      evModal.classList.add("hidden");
-      evModal.setAttribute("aria-hidden", "true");
+    // Fires when the user closes via ESC, backdrop, or the × button.
+    evModal.addEventListener("ftw-modal-close", function () {
       if (evRefreshTimer) { clearInterval(evRefreshTimer); evRefreshTimer = null; }
-      if (evLastFocused && typeof evLastFocused.focus === "function") {
-        evLastFocused.focus();
-      }
-    }
-    function isEvModalOpen() { return !evModal.classList.contains("hidden"); }
+    });
 
     cardEv.addEventListener("click", openEvModal);
     // The card has role="button" + tabindex="0" so it's keyboard-focusable;
@@ -1493,32 +1480,6 @@
       if (e.key === "Enter" || e.key === " ") {
         e.preventDefault();
         openEvModal();
-      }
-    });
-    evModalClose.addEventListener("click", closeEvModal);
-    evModal.addEventListener("click", function (e) {
-      if (e.target === evModal) closeEvModal();
-    });
-    // ESC-to-close + Tab focus trap. Attached to the modal itself so the
-    // listener is only live while one of its descendants has focus.
-    evModal.addEventListener("keydown", function (e) {
-      if (!isEvModalOpen()) return;
-      if (e.key === "Escape") {
-        e.preventDefault();
-        closeEvModal();
-        return;
-      }
-      if (e.key !== "Tab") return;
-      var enabled = evFocusable.filter(function (b) { return b && !b.disabled; });
-      if (enabled.length === 0) return;
-      var first = enabled[0];
-      var last = enabled[enabled.length - 1];
-      if (e.shiftKey && document.activeElement === first) {
-        e.preventDefault();
-        last.focus();
-      } else if (!e.shiftKey && document.activeElement === last) {
-        e.preventDefault();
-        first.focus();
       }
     });
 

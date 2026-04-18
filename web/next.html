@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>forty-two-watts</title>
+  <title>forty-two-watts — next</title>
   <link rel="icon" type="image/jpeg" href="/logo.jpg">
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
         integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
@@ -11,14 +11,11 @@
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
           integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
           crossorigin=""></script>
-  <!-- Design tokens (--bg/--surface/etc) live in /components/theme.css;
-       style.css references them, so theme.css must load first. This page
-       is the legacy layout — /components/index.js is intentionally NOT
-       loaded here so the refactor work lives entirely in next.html until
-       we're ready to swap. (The existing <ftw-update-badge> predates the
-       refactor and has its own script, independent of /components/.) -->
+  <!-- Design tokens FIRST — every sheet and every <ftw-*> shadow root reads
+       from :root declared in /components/theme.css. -->
   <link rel="stylesheet" href="/components/theme.css">
   <link rel="stylesheet" href="/style.css">
+  <script type="module" src="/components/index.js"></script>
 </head>
 <body>
   <header>
@@ -88,7 +85,8 @@
       <div class="card summary-card" id="card-soc">
         <div class="card-label">SoC</div>
         <div class="card-value" id="bat-soc">-- %</div>
-        <div class="soc-bar"><div class="soc-fill" id="soc-fill"></div></div>
+        <ftw-progress-bar id="soc-fill" mode="gradient" value="0" max="100"
+                          style="margin-top:0.5rem; --ftw-progress-height:10px"></ftw-progress-bar>
       </div>
       <div class="card summary-card" id="card-fuse">
         <div class="card-label">Fuse</div>
@@ -324,24 +322,19 @@
   </footer>
 
   <!-- EV detail popup -->
-  <div id="ev-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="ev-modal-title" aria-hidden="true">
-    <div class="modal-content" style="max-width:380px">
-      <div class="modal-header">
-        <h2 id="ev-modal-title">EV Charger</h2>
-        <button id="ev-modal-close" class="modal-close" aria-label="Close">&times;</button>
-      </div>
-      <div class="modal-body" id="ev-modal-body" style="padding:1rem">
-        <p style="color:var(--text-dim)">Loading...</p>
-      </div>
-      <div style="display:flex;gap:0.5rem;padding:0 1rem 1rem">
-        <button class="btn-add" id="ev-btn-start" style="flex:1">Start</button>
-        <button class="btn-add" id="ev-btn-pause" style="flex:1">Pause</button>
-        <button class="btn-add" id="ev-btn-resume" style="flex:1">Resume</button>
-      </div>
+  <ftw-modal id="ev-modal" style="--ftw-modal-max-width:380px">
+    <span slot="title">EV Charger</span>
+    <div id="ev-modal-body">
+      <p style="color:var(--text-dim)">Loading...</p>
     </div>
-  </div>
+    <div slot="footer" style="display:flex;gap:0.5rem;width:100%">
+      <button class="btn-add" id="ev-btn-start" style="flex:1">Start</button>
+      <button class="btn-add" id="ev-btn-pause" style="flex:1">Pause</button>
+      <button class="btn-add" id="ev-btn-resume" style="flex:1">Resume</button>
+    </div>
+  </ftw-modal>
 
-  <script src="/app.js?v=diag1"></script>
+  <script src="/next-app.js?v=next1"></script>
   <script src="/settings.js?v=diag1"></script>
   <script src="/models.js?v=diag1"></script>
   <script src="/plan.js?v=diag1"></script>

@@ -1414,6 +1414,9 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 	if path == "/setup" {
 		path = "/setup.html"
 	}
+	if path == "/next" {
+		path = "/next.html"
+	}
 	// Prevent path traversal
 	clean := filepath.Clean(filepath.Join(s.deps.WebDir, path))
 	absWeb, _ := filepath.Abs(s.deps.WebDir)
