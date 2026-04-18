@@ -74,6 +74,11 @@ type Slot struct {
 	// the planner doesn't over-commit to uncertain spikes. Defaults to
 	// 1.0 when callers leave it zero.
 	Confidence float64
+
+	// Limits caps grid flow for this slot. Zero value = unlimited.
+	// See power_limits.go for use cases (peak-tariff capacity, DSO
+	// curtailment, service-entrance current limit).
+	Limits PowerLimits
 }
 
 // Params bounds the optimization. All fields are required.
@@ -112,6 +117,11 @@ type Params struct {
 	ExportOrePerKWh    float64
 	ExportBonusOreKwh  float64
 	ExportFeeOreKwh    float64
+
+	// Loadpoint extends the DP state space with one EV charge point.
+	// Nil (default) keeps the battery-only optimization path. See
+	// LoadpointSpec for the state/action shape.
+	Loadpoint *LoadpointSpec
 }
 
 // Action is one scheduled battery target.
@@ -134,6 +144,16 @@ type Action struct {
 	// cost money (negative export revenue after fees). Consumed by the
 	// control loop only when the driver advertises `supports_pv_curtail`.
 	PVLimitW float64 `json:"pv_limit_w,omitempty"`
+
+	// LoadpointW is the EV charger power (W, positive = charging) the
+	// DP picked for this slot. Zero when no loadpoint was in Params
+	// or the DP chose "don't charge" this slot. Per-loadpoint in a
+	// multi-LP future; single-value for now.
+	LoadpointW float64 `json:"loadpoint_w,omitempty"`
+
+	// LoadpointSoCPct is the EV SoC at END of slot, following the
+	// same convention as SoCPct for the home battery.
+	LoadpointSoCPct float64 `json:"loadpoint_soc_pct,omitempty"`
 }
 
 // Plan is the output.
@@ -225,87 +245,232 @@ func Optimize(slots []Slot, p Params) Plan {
 		return -p.MaxDischargeW + frac*(p.MaxChargeW+p.MaxDischargeW)
 	}
 
-	// V[t][s] = minimum expected cost from slot t onward, starting from
-	// SoC index s. V is filled backwards.
-	V := make([][]float64, N+1)
-	Policy := make([][]int, N)
+	// EV dimensions. When no loadpoint is active, EL=EA=1 and the
+	// EV loops degenerate to a single pass that adds zero power /
+	// zero SoC — functionally identical to the legacy battery-only
+	// DP. Keeps one code path.
+	lp := p.Loadpoint
+	evActive := lp.active()
+	EL := 1
+	EA := 1
+	var evSteps []float64
+	var evSocStep float64
+	var evChargeEff float64 = 0.9
+	if evActive {
+		EL = lp.Levels
+		evSteps = lp.normalizedSteps()
+		EA = len(evSteps)
+		if lp.MaxPct <= lp.MinPct {
+			lp.MaxPct = 100
+			lp.MinPct = 0
+		}
+		evSocStep = (lp.MaxPct - lp.MinPct) / float64(EL-1)
+		if lp.ChargeEfficiency > 0 {
+			evChargeEff = lp.ChargeEfficiency
+		}
+	}
+	evSocAt := func(e int) float64 {
+		if !evActive {
+			return 0
+		}
+		return lp.MinPct + float64(e)*evSocStep
+	}
+	evActionW := func(ea int) float64 {
+		if !evActive {
+			return 0
+		}
+		return evSteps[ea]
+	}
+
+	// V[t][s][e] = minimum expected cost from slot t onward, starting
+	// from battery SoC index s and EV SoC index e. Backward-filled.
+	V := make([][][]float64, N+1)
+	Policy := make([][][]int, N) // encodes (battActionIdx * EA + evActionIdx)
 	for t := 0; t <= N; t++ {
-		V[t] = make([]float64, S)
+		V[t] = make([][]float64, S)
+		for si := 0; si < S; si++ {
+			V[t][si] = make([]float64, EL)
+		}
 		if t < N {
-			Policy[t] = make([]int, S)
+			Policy[t] = make([][]int, S)
+			for si := 0; si < S; si++ {
+				Policy[t][si] = make([]int, EL)
+			}
 		}
 	}
 
-	// Terminal value: credit stored energy at TerminalSoCPrice (öre/kWh).
-	// Cost is negative (=credit), so we subtract.
-	for s := 0; s < S; s++ {
-		kwh := p.CapacityWh * socAt(s) / 100.0 / 1000.0
-		V[N][s] = -p.TerminalSoCPrice * kwh
+	// Deadline slot index for the mid-horizon EV target penalty. A
+	// target beyond horizon end gets clamped to the last slot so
+	// the DP still "sees" it (rather than silently ignoring). A
+	// target of -1 means no deadline — opportunistic charging only.
+	deadlineSlot := -1
+	if evActive && lp.TargetSoCPct > 0 {
+		deadlineSlot = lp.TargetSlotIdx
+		if deadlineSlot < 0 {
+			deadlineSlot = -1
+		} else if deadlineSlot >= N {
+			deadlineSlot = N - 1
+		}
+	}
+
+	// Terminal values. Battery SoC credits stored energy. EV SoC
+	// carries no terminal cost — the deadline-slot penalty below
+	// handles target enforcement and avoids double-counting.
+	for si := 0; si < S; si++ {
+		battKwh := p.CapacityWh * socAt(si) / 100.0 / 1000.0
+		battCredit := -p.TerminalSoCPrice * battKwh
+		for ei := 0; ei < EL; ei++ {
+			V[N][si][ei] = battCredit
+		}
 	}
 
 	// Backwards induction.
 	for t := N - 1; t >= 0; t-- {
 		slot := slots[t]
 		dtH := float64(slot.LenMin) / 60.0
-		baselineGridW := slot.LoadW + slot.PVW // grid if battery did nothing
-		for s := 0; s < S; s++ {
-			soc := socAt(s)
-			bestV := math.Inf(1)
-			bestA := 0
-			for j := 0; j < A; j++ {
-				actW := actionAt(j)
-				gridW := baselineGridW + actW
+		for si := 0; si < S; si++ {
+			soc := socAt(si)
+			for ei := 0; ei < EL; ei++ {
+				evSoc := evSocAt(ei)
+				bestV := math.Inf(1)
+				bestPolicy := 0
+				for ba := 0; ba < A; ba++ {
+					battW := actionAt(ba)
 
-				// Mode-based feasibility.
-				if !modeAllows(p.Mode, baselineGridW, gridW, actW) {
-					continue
-				}
+					// Battery SoC transition (independent of EV).
+					var dBattWh float64
+					if battW >= 0 {
+						dBattWh = +battW * dtH * p.ChargeEfficiency
+					} else {
+						dBattWh = +battW * dtH / p.DischargeEfficiency
+					}
+					battSoc2 := soc + dBattWh/p.CapacityWh*100.0
+					if battSoc2 < p.SoCMinPct-1e-9 || battSoc2 > p.SoCMaxPct+1e-9 {
+						continue
+					}
 
-				// SoC transition with efficiency (guarded at function entry).
-				var dSoCWh float64
-				if actW >= 0 {
-					dSoCWh = +actW * dtH * p.ChargeEfficiency
-				} else {
-					dSoCWh = +actW * dtH / p.DischargeEfficiency
-				}
-				dSoCPct := dSoCWh / p.CapacityWh * 100.0
-				soc2 := soc + dSoCPct
-				if soc2 < p.SoCMinPct-1e-9 || soc2 > p.SoCMaxPct+1e-9 {
-					continue
-				}
+					for ea := 0; ea < EA; ea++ {
+						evW := evActionW(ea)
+						// EV SoC transition: only charging, so non-
+						// negative by construction. Skip actions
+						// that would overshoot max (realistic
+						// chargers taper, but we approximate).
+						var evSoc2 float64
+						if evActive {
+							dEvWh := evW * dtH * evChargeEff
+							evSoc2 = evSoc + dEvWh/lp.CapacityWh*100.0
+							if evSoc2 > lp.MaxPct+1e-9 {
+								continue
+							}
+						}
+						// EV appears as a site load (+ site-signed).
+						// GridW = load + PV + battery + EV.
+						gridW := slot.LoadW + slot.PVW + battW + evW
 
-				// Per-slot cost in öre. Import cost at consumer price;
-				// export revenue at the slot's spot + bonus − fee.
-				// Both sides are confidence-blended so ML-forecasted
-				// slots nudge the DP less aggressively.
-				gridKWh := gridW * dtH / 1000.0
-				var cost float64
-				if gridKWh > 0 {
-					cost = effPrice(slot) * gridKWh
-				} else {
-					cost = -slotExportOre(slot) * (-gridKWh)
-				}
+						// Mode-based feasibility. Baseline includes
+						// EV so the mode check asks "is the extra
+						// battery action pulling the grid further
+						// into import/export than baseline?".
+						baseGridW := slot.LoadW + slot.PVW + evW
+						if !modeAllows(p.Mode, baseGridW, gridW, battW) {
+							continue
+						}
 
-				// Next SoC index: linear interpolation between floor/ceil.
-				fIdx := (soc2 - p.SoCMinPct) / socStep
-				lo := int(math.Floor(fIdx))
-				hi := lo + 1
-				if lo < 0 {
-					lo, hi = 0, 0
+						// Per-slot power limits.
+						if !slot.Limits.allowsImport(gridW) || !slot.Limits.allowsExport(gridW) {
+							continue
+						}
+
+						gridKWh := gridW * dtH / 1000.0
+						var cost float64
+						if gridKWh > 0 {
+							cost = effPrice(slot) * gridKWh
+						} else {
+							cost = -slotExportOre(slot) * (-gridKWh)
+						}
+
+						// Deadline slot: if this slot is the EV's
+						// deadline AND target isn't met with this
+						// action's evSoc2, add a shortfall penalty.
+						// Penalty factor 4×meanPrice makes missing
+						// the target more expensive than the
+						// aggressive-slot charge cost a DP might
+						// otherwise prefer, so it commits when
+						// feasible. Lexicographic behaviour:
+						// infeasible targets degrade gracefully —
+						// DP maximizes delivered energy since less
+						// shortfall = less penalty.
+						if deadlineSlot == t {
+							short := lp.TargetSoCPct - evSoc2
+							if short > 0 {
+								missedKwh := lp.CapacityWh * short / 100.0 / 1000.0
+								cost += missedKwh * meanPrice * 4.0
+							}
+						}
+
+						// Battery SoC interpolation indices.
+						fIdx := (battSoc2 - p.SoCMinPct) / socStep
+						lo := int(math.Floor(fIdx))
+						hi := lo + 1
+						if lo < 0 {
+							lo, hi = 0, 0
+						}
+						if hi >= S {
+							lo, hi = S-1, S-1
+						}
+						frac := fIdx - float64(lo)
+
+						// EV SoC interpolation indices. Discrete
+						// charger steps often produce fractional
+						// bucket advances (e.g. 11 kW for 15 min →
+						// 4.1 % at 10 % resolution). Rounding to
+						// nearest kills incremental progress and
+						// makes the DP blind to "almost-a-full-
+						// bucket" moves. Bilinear lookup preserves
+						// fractional progress.
+						eLo, eHi := 0, 0
+						eFrac := 0.0
+						if evActive {
+							f := (evSoc2 - lp.MinPct) / evSocStep
+							eLo = int(math.Floor(f))
+							eHi = eLo + 1
+							if eLo < 0 {
+								eLo, eHi = 0, 0
+							}
+							if eHi >= EL {
+								eLo, eHi = EL-1, EL-1
+							}
+							eFrac = f - float64(eLo)
+						}
+						vNext := (1-frac)*(1-eFrac)*V[t+1][lo][eLo] +
+							(1-frac)*eFrac*V[t+1][lo][eHi] +
+							frac*(1-eFrac)*V[t+1][hi][eLo] +
+							frac*eFrac*V[t+1][hi][eHi]
+						total := cost + vNext
+						if total < bestV {
+							bestV = total
+							bestPolicy = ba*EA + ea
+						}
+					}
 				}
-				if hi >= S {
-					lo, hi = S-1, S-1
+				// If every action at this (slot, soc, ev_soc) state
+				// was rejected (mode + PowerLimits combined out of
+				// feasibility), bestV stays +Inf and bestPolicy
+				// defaults to 0 — which encodes (battery action 0,
+				// EV action 0) = "full discharge, EV off", NOT
+				// "idle". A forward-sim that reaches this state
+				// would pick the worst possible action. Fall back
+				// to closest-to-idle: battery action at the middle
+				// of the grid (≈0 W when ActionLevels is odd) and
+				// EV off. The +Inf V propagates upstream so the
+				// DP avoids routing through this infeasible region
+				// when a legal path exists.
+				if math.IsInf(bestV, 1) {
+					bestPolicy = ((A - 1) / 2) * EA
 				}
-				frac := fIdx - float64(lo)
-				vNext := (1-frac)*V[t+1][lo] + frac*V[t+1][hi]
-				total := cost + vNext
-				if total < bestV {
-					bestV = total
-					bestA = j
-				}
+				V[t][si][ei] = bestV
+				Policy[t][si][ei] = bestPolicy
 			}
-			V[t][s] = bestV
-			Policy[t][s] = bestA
 		}
 	}
 
@@ -319,21 +484,38 @@ func Optimize(slots []Slot, p Params) Plan {
 		Actions:       make([]Action, 0, N),
 	}
 	fIdx := (p.InitialSoCPct - p.SoCMinPct) / socStep
-	s := int(math.Round(fIdx))
-	if s < 0 {
-		s = 0
+	si := int(math.Round(fIdx))
+	if si < 0 {
+		si = 0
 	}
-	if s >= S {
-		s = S - 1
+	if si >= S {
+		si = S - 1
 	}
-	soc := socAt(s)
+	soc := socAt(si)
+	// Initial EV SoC index.
+	ei := 0
+	var evSoc float64
+	if evActive {
+		f := (lp.InitialSoCPct - lp.MinPct) / evSocStep
+		ei = int(math.Round(f))
+		if ei < 0 {
+			ei = 0
+		}
+		if ei >= EL {
+			ei = EL - 1
+		}
+		evSoc = evSocAt(ei)
+	}
 	var totalCost float64
 	for t := 0; t < N; t++ {
 		slot := slots[t]
 		dtH := float64(slot.LenMin) / 60.0
-		j := Policy[t][s]
-		actW := actionAt(j)
-		// SoC transition with efficiency (guarded at function entry).
+		pol := Policy[t][si][ei]
+		ba := pol / EA
+		ea := pol % EA
+		actW := actionAt(ba)
+		evW := evActionW(ea)
+		// Battery SoC transition.
 		var dSoCWh float64
 		if actW >= 0 {
 			dSoCWh = +actW * dtH * p.ChargeEfficiency
@@ -347,7 +529,16 @@ func Optimize(slots []Slot, p Params) Plan {
 		if soc2 > p.SoCMaxPct {
 			soc2 = p.SoCMaxPct
 		}
-		gridW := slot.LoadW + slot.PVW + actW
+		// EV SoC transition (no-op when !evActive since evW = 0).
+		var evSoc2 float64
+		if evActive {
+			dEvWh := evW * dtH * evChargeEff
+			evSoc2 = evSoc + dEvWh/lp.CapacityWh*100.0
+			if evSoc2 > lp.MaxPct {
+				evSoc2 = lp.MaxPct
+			}
+		}
+		gridW := slot.LoadW + slot.PVW + actW + evW
 		gridKWh := gridW * dtH / 1000.0
 		// Report the ACTUAL expected cost using the raw (un-blended)
 		// prices so the UI summary reflects "what we'd actually pay
@@ -366,7 +557,7 @@ func Optimize(slots []Slot, p Params) Plan {
 			cost = -rawExport * (-gridKWh)
 		}
 		totalCost += cost
-		plan.Actions = append(plan.Actions, Action{
+		a := Action{
 			SlotStartMs: slot.StartMs,
 			SlotLenMin:  slot.LenMin,
 			PriceOre:    slot.PriceOre,
@@ -378,15 +569,31 @@ func Optimize(slots []Slot, p Params) Plan {
 			SoCPct:      soc2,
 			CostOre:     cost,
 			Reason:      reasonFor(slot, actW, meanPrice),
-		})
+		}
+		if evActive {
+			a.LoadpointW = evW
+			a.LoadpointSoCPct = evSoc2
+		}
+		plan.Actions = append(plan.Actions, a)
 		soc = soc2
 		fIdx = (soc - p.SoCMinPct) / socStep
-		s = int(math.Round(fIdx))
-		if s < 0 {
-			s = 0
+		si = int(math.Round(fIdx))
+		if si < 0 {
+			si = 0
 		}
-		if s >= S {
-			s = S - 1
+		if si >= S {
+			si = S - 1
+		}
+		if evActive {
+			evSoc = evSoc2
+			f := (evSoc - lp.MinPct) / evSocStep
+			ei = int(math.Round(f))
+			if ei < 0 {
+				ei = 0
+			}
+			if ei >= EL {
+				ei = EL - 1
+			}
 		}
 	}
 	plan.TotalCostOre = totalCost

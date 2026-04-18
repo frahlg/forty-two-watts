@@ -97,12 +97,14 @@ func NewModel(peakW float64) *Model {
 }
 
 // HourOfWeek computes 0..167 for a time. Monday = 0 through Sunday.
-// Works in UTC to keep results deterministic — callers pass t in
-// local time when they want local-time behaviour.
+// Coerces to UTC so the bucket index stays stable across DST
+// transitions (wall-clock 19:00 maps to a different bucket in summer
+// vs. winter otherwise, silently misaligning the EMA).
 func HourOfWeek(t time.Time) int {
+	u := t.UTC()
 	// time.Weekday: Sunday=0, Saturday=6. We shift so Monday=0.
-	wd := (int(t.Weekday()) + 6) % 7
-	return wd*24 + t.Hour()
+	wd := (int(u.Weekday()) + 6) % 7
+	return wd*24 + u.Hour()
 }
 
 // Predict returns the expected load (W, non-negative) at time t with

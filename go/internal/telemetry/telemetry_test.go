@@ -242,3 +242,54 @@ func TestLoadFilterSmoothsNoisy(t *testing.T) {
 		t.Errorf("load filter should converge to middle, got %f", last)
 	}
 }
+
+// Happy path: two online EV drivers charging at 3.6 kW each → sum = 7200.
+func TestSumOnlineEVWSumsAllOnline(t *testing.T) {
+	s := NewStore()
+	s.Update("easee-1", DerEV, 3600, nil, nil)
+	s.Update("easee-2", DerEV, 3600, nil, nil)
+	s.DriverHealthMut("easee-1").RecordSuccess()
+	s.DriverHealthMut("easee-2").RecordSuccess()
+	if got := s.SumOnlineEVW(); got != 7200 {
+		t.Errorf("want 7200, got %f", got)
+	}
+}
+
+// Offline drivers are excluded. Without this, a driver whose watchdog
+// tripped would leak a stale last-known reading into load / grid math
+// indefinitely after it stopped actually reporting.
+func TestSumOnlineEVWSkipsOfflineDrivers(t *testing.T) {
+	s := NewStore()
+	s.Update("easee-online", DerEV, 3600, nil, nil)
+	s.Update("easee-offline", DerEV, 5000, nil, nil)
+	s.DriverHealthMut("easee-online").RecordSuccess()
+	// Simulate the watchdog flipping easee-offline to offline after a
+	// stale telemetry window — its last reading is still in the store
+	// but shouldn't count.
+	s.DriverHealthMut("easee-offline").SetOffline()
+	if got := s.SumOnlineEVW(); got != 3600 {
+		t.Errorf("want 3600 (only online), got %f", got)
+	}
+}
+
+// Non-EV readings (meter, pv, battery) must never leak into the sum —
+// otherwise swapping the type enum order would silently change behaviour.
+func TestSumOnlineEVWIgnoresOtherDerTypes(t *testing.T) {
+	s := NewStore()
+	s.Update("meter", DerMeter, 2000, nil, nil)
+	s.Update("pv-1", DerPV, -5000, nil, nil)
+	s.Update("bat-1", DerBattery, 1000, nil, nil)
+	s.DriverHealthMut("meter").RecordSuccess()
+	s.DriverHealthMut("pv-1").RecordSuccess()
+	s.DriverHealthMut("bat-1").RecordSuccess()
+	if got := s.SumOnlineEVW(); got != 0 {
+		t.Errorf("no EV readings, want 0, got %f", got)
+	}
+}
+
+// Empty store → 0, no panic.
+func TestSumOnlineEVWEmptyStore(t *testing.T) {
+	if got := NewStore().SumOnlineEVW(); got != 0 {
+		t.Errorf("want 0, got %f", got)
+	}
+}

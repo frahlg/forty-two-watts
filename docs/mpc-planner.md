@@ -138,7 +138,10 @@ when the operator has chosen one.
 
 - `GET  /api/mpc/plan` — latest cached plan (mode, horizon, per-slot actions with reasons)
 - `POST /api/mpc/replan` — force an immediate replan
+- `GET  /api/mpc/diagnose` — per-slot audit view: what the DP saw (price, spot, confidence, PV, load) joined with what it decided (battery, grid, SoC, cost, reason) plus the full `Params` the optimize was parameterized with. Meant for debugging "why did the planner decide X at this slot?" without shelling into the host
 - `POST /api/mode {"mode":"planner_arbitrage"}` — activates a strategy AND forces an MPC replan so targets take effect within one control cycle
+- `GET  /api/loadpoints` — list configured EV loadpoints + observable state (plug, SoC, power, session Wh)
+- `POST /api/loadpoints/{id}/target` — set user intent `{soc_pct: 80, target_time_ms: …}`; triggers an MPC replan
 
 ---
 
@@ -218,3 +221,102 @@ Signal to read from the table:
 
 Total annual savings depend heavily on market volatility; a stable
 market year narrows the gap between the three modes.
+
+---
+
+## Time-zone convention — UTC everywhere
+
+All time-of-day and day-of-week indexing inside the planner and its
+digital twins is done in **UTC**. The price-forecast's hour-of-week
+buckets, the load-model's hour-of-week buckets, the PV-twin's
+time-of-day harmonic features, and every `time.UnixMilli(...)`
+conversion that feeds a predictor all coerce to UTC before the
+`.Hour()` / `.Weekday()` / `.Month()` access.
+
+Why: a wall-clock 19:00 in Stockholm lands on a *different* UTC hour
+in summer (CEST, UTC+2) than in winter (CET, UTC+1). Indexing buckets
+by local-zone hour silently slides the learned EMA by one bucket
+twice a year, and a single `Predict` call could resolve a different
+bucket for the same instant depending on which `time.Location` the
+`time.Time` carried. Both bugs produce "planner chose to charge from
+an expensive hour" symptoms around DST transitions.
+
+Source-of-truth timestamps in the state store are unix-milli (absolute,
+timezone-agnostic); the UTC coercion is only at the leaf points where
+we access calendar fields. Operator-facing UI formatting still uses
+the site's local zone — that's a display concern, not a model
+concern.
+
+If you add a new predictor or new time-field access inside the
+planner, coerce `t` with `t.UTC()` first. Tests
+(`TestPredictStableAcrossDST`, `TestHourOfWeekStableAcrossDST`,
+`TestFeaturesStableAcrossDST`) enforce the invariant per package.
+
+---
+
+## Unified EV charging (Phase 4)
+
+When one or more loadpoints are configured and the MPC's `LoadpointProbe`
+sees a plugged-in EV, the DP extends its state space with a per-vehicle
+SoC dimension. The optimization then schedules **battery AND EV actions
+jointly** rather than treating the EV as uncontrolled load — avoiding
+the "two planners fighting" problem that happens when an external EVCC-
+style scheduler runs alongside our MPC.
+
+Per-slot decision space expands from `(battery_soc, battery_action)` to
+`(battery_soc, ev_soc, battery_action, ev_action)`. The EV action set is
+discrete (the charger's allowed W levels), which lets us handle the
+disjunctive 1-phase↔3-phase gap without MILP.
+
+### Target + deadline
+
+User intent (`POST /api/loadpoints/{id}/target`) sets `target_soc_pct` +
+`target_time_ms`. The planner maps the time to a horizon slot index
+and adds a shortfall penalty at that slot: missing the target costs
+`missed_kwh × horizon_mean_price × 4`. Factor 4 is tuned so meeting the
+target dominates any single-slot charging cost, with lexicographic
+degradation when infeasible — if the vehicle can't reach target by
+deadline, the DP maximizes delivered energy instead of returning no plan.
+
+### No deadline
+
+`target_soc_pct == 0` or `target_time_ms == 0` means "charge
+opportunistically". No penalty, no push — the DP will only charge when
+a slot is cheap enough to be worth it relative to battery alternatives
+and terminal credit.
+
+### Output
+
+`Action.LoadpointW` per slot (W, positive = charging) and
+`Action.LoadpointSoCPct` (post-slot EV SoC). The SlotDirective the EMS
+consumes carries `LoadpointEnergyWh[id]` and `LoadpointSoCTargetPct[id]`
+for the dispatch layer.
+
+### Dispatch
+
+Per control tick (5 s) the main loop:
+
+1. Reads each loadpoint's driver telemetry (`tel.Get(driver, DerEV)` →
+   `{connected, session_wh}`).
+2. Calls `lpMgr.Observe(id, connected, powerW, sessionWh)`. The
+   manager infers vehicle SoC as `plugin_soc_pct + session_wh /
+   vehicle_capacity * 100` (chargers like Easee don't expose the
+   BMS).
+3. Fetches `SlotDirectiveAt(now).LoadpointEnergyWh[id]` from the
+   MPC.
+4. Computes `remainingWh / remainingSeconds → W` (same
+   energy-allocation contract as the battery), snaps to
+   `AllowedStepsW`, and sends
+   `{"action":"ev_set_current","power_w": W}` to the loadpoint's
+   driver.
+
+The Easee driver divides `power_w` by configured phases,
+clamps to 6-32 A, and sets `dynamicChargerCurrent` via the cloud
+API. 0 W cleanly pauses the session.
+
+### What's still outstanding
+
+- Per-loadpoint divergence check for reactive replan
+- UI for setting target + target-time (API is ready; web-form follows)
+- Phase-switching heuristic inside the Easee driver for sub-3 kW
+  surplus windows

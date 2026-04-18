@@ -31,6 +31,7 @@ import (
 	"github.com/frahlg/forty-two-watts/go/internal/forecast"
 	"github.com/frahlg/forty-two-watts/go/internal/ha"
 	"github.com/frahlg/forty-two-watts/go/internal/loadmodel"
+	"github.com/frahlg/forty-two-watts/go/internal/loadpoint"
 	mqttcli "github.com/frahlg/forty-two-watts/go/internal/mqtt"
 	modbuscli "github.com/frahlg/forty-two-watts/go/internal/modbus"
 	"github.com/frahlg/forty-two-watts/go/internal/mpc"
@@ -214,6 +215,17 @@ func main() {
 	var pvSvc *pvmodel.Service
 	var forecastSvc *forecast.Service
 
+	// ---- EV loadpoints ----
+	// Manager is created early so the config hot-reload closure can
+	// reference it; actual Load() runs against initial cfg below.
+	// Phase 4 wires the first plugged-in loadpoint's state into the
+	// MPC's DP so battery + EV are co-optimized in one DP.
+	lpMgr := loadpoint.NewManager()
+	if len(cfg.Loadpoints) > 0 {
+		lpMgr.Load(buildLoadpointConfigs(cfg.Loadpoints))
+		slog.Info("loadpoints configured", "count", len(cfg.Loadpoints))
+	}
+
 	// ---- Config hot-reload watcher ----
 	watcher, err := configreload.New(*configPath, cfgMu, cfg, ctrlMu, ctrl,
 		func(newCfg, oldCfg *config.Config) {
@@ -236,6 +248,12 @@ func main() {
 				capacities[k] = v
 			}
 			capMu.Unlock()
+
+			// Hot-reload EV loadpoints so operators can add / remove /
+			// retune them without restarting. Manager preserves
+			// observed state across reloads (plug status, session
+			// anchor, current SoC estimate) — see loadpoint.Manager.Load.
+			lpMgr.Load(buildLoadpointConfigs(newCfg.Loadpoints))
 
 			// Weather diff → push live into the PV twin + forecast
 			// fetcher without a process restart. Users adjust rated PV
@@ -414,11 +432,70 @@ func main() {
 		mpcSvc.Load = loadSvc.Predict
 		mpcSvc.Price = priceFc.Predict
 		mpcSvc.SiteMeter = cfg.SiteMeterDriver()
+		// Wire the loadpoint probe so the DP extends its state space
+		// when an EV is plugged in. Single-loadpoint for now: picks
+		// the first plugged-in one.
+		mpcSvc.Loadpoint = func(slotLenMin int) *mpc.LoadpointSpec {
+			for _, st := range lpMgr.States() {
+				if !st.PluggedIn {
+					continue
+				}
+				// Pull capacity off the configured loadpoint.
+				var capWh float64 = 60000 // 60 kWh fallback
+				for _, c := range cfg.Loadpoints {
+					if c.ID == st.ID && c.VehicleCapacityWh > 0 {
+						capWh = c.VehicleCapacityWh
+						break
+					}
+				}
+				// Map target time → slot index using the DP's
+				// actual slot length (hour-of-prices vs. 15-min
+				// quarters vary by market). Anything past horizon
+				// gets clamped by the DP itself; negative means
+				// "no deadline".
+				if slotLenMin <= 0 {
+					slotLenMin = 60
+				}
+				targetSlot := -1
+				if !st.TargetTime.IsZero() {
+					delta := time.Until(st.TargetTime)
+					if delta > 0 {
+						targetSlot = int(delta / (time.Duration(slotLenMin) * time.Minute))
+					}
+				}
+				return &mpc.LoadpointSpec{
+					ID:              st.ID,
+					CapacityWh:      capWh,
+					Levels:          11,
+					MinPct:          0,
+					MaxPct:          100,
+					InitialSoCPct:   st.CurrentSoCPct,
+					PluggedIn:       true,
+					TargetSoCPct:    st.TargetSoCPct,
+					TargetSlotIdx:   targetSlot,
+					MaxChargeW:      st.MaxChargeW,
+					AllowedStepsW:   st.AllowedStepsW,
+					ChargeEfficiency: 0.9,
+				}
+			}
+			return nil
+		}
 		if cfg.Price != nil {
 			mpcSvc.ExportBonusOreKwh = cfg.Price.ExportBonusOreKwh
 			mpcSvc.ExportFeeOreKwh = cfg.Price.ExportFeeOreKwh
 			mpcSvc.GridTariffOreKwh = cfg.Price.GridTariffOreKwh
 			mpcSvc.VATPercent = cfg.Price.VATPercent
+		}
+		// Persist every replan's Diagnostic so operators can time-
+		// travel. See docs/mpc-planner.md + planner_diagnostics
+		// table in state/store.go.
+		mpcSvc.SaveDiag = func(d *mpc.Diagnostic, reason string) error {
+			js, err := json.Marshal(d)
+			if err != nil {
+				return err
+			}
+			return st.SaveDiagnostic(d.ComputedAtMs, reason, d.Zone,
+				d.TotalCostOre, d.Horizon, string(js))
 		}
 		mpcSvc.Start(ctx)
 		defer mpcSvc.Stop()
@@ -480,11 +557,13 @@ func main() {
 		DtS:        float64(cfg.Site.ControlIntervalS),
 		SaveConfig: config.SaveAtomic,
 		WebDir:     *webDir,
+		ColdDir:    coldDir,
 		Prices:     priceSvc,
 		Forecast:   forecastSvc,
 		MPC:        mpcSvc,
 		PVModel:    pvSvc,
 		LoadModel:  loadSvc,
+		Loadpoints: lpMgr,
 		HA:         haBridge,
 		Registry:   reg,
 		Version:    Version,
@@ -687,6 +766,71 @@ func main() {
 				}
 			}
 
+			// ---- EV dispatch: observe + command per loadpoint ----
+			// For each configured loadpoint we first read the
+			// charger driver's latest telemetry and feed it to the
+			// manager (plug state + session Wh → inferred SoC). Then
+			// we ask the MPC for the current slot's energy budget
+			// and translate it to an instantaneous W command. No
+			// PI — energy-allocation contract: remaining Wh /
+			// remaining s → W, snap to the charger's allowed steps.
+			if len(cfg.Loadpoints) > 0 && mpcSvc != nil {
+				for _, lpCfg := range cfg.Loadpoints {
+					evr := tel.Get(lpCfg.DriverName, telemetry.DerEV)
+					plugged := false
+					var sessionWh, powerW float64
+					if evr != nil {
+						powerW = evr.SmoothedW
+						var d struct {
+							Connected bool    `json:"connected"`
+							SessionWh float64 `json:"session_wh"`
+						}
+						if err := json.Unmarshal(evr.Data, &d); err == nil {
+							plugged = d.Connected
+							sessionWh = d.SessionWh
+						}
+					}
+					lpMgr.Observe(lpCfg.ID, plugged, powerW, sessionWh)
+					if !plugged {
+						continue
+					}
+					// Resolve this tick's EV setpoint. Default 0 W so
+					// the charger is explicitly told to stand down
+					// whenever the MPC has no allocation for this
+					// slot — without an explicit command, the
+					// charger silently keeps drawing at its last
+					// setpoint from a previous slot.
+					var cmdW float64
+					d, ok := mpcSvc.SlotDirectiveAt(time.Now())
+					if ok {
+						if budgetWh, hasBudget := d.LoadpointEnergyWh[lpCfg.ID]; hasBudget {
+							remainingS := d.SlotEnd.Sub(time.Now()).Seconds()
+							// Subtract what's already been delivered
+							// so a mid-slot dispatch doesn't
+							// overshoot. Approximated from current
+							// power × fraction of slot elapsed.
+							elapsed := d.SlotEnd.Sub(d.SlotStart).Seconds() - remainingS
+							if elapsed < 0 {
+								elapsed = 0
+							}
+							alreadyWh := powerW * elapsed / 3600.0
+							remainingWh := budgetWh - alreadyWh
+							wantW := control.EnergyBudgetToPowerW(remainingWh, remainingS)
+							cmdW = control.SnapChargeW(wantW, lpCfg.MinChargeW,
+								lpCfg.MaxChargeW, lpCfg.AllowedStepsW)
+						}
+					}
+					payload, _ := json.Marshal(map[string]any{
+						"action":  "ev_set_current",
+						"power_w": cmdW,
+					})
+					if err := reg.Send(ctx, lpCfg.DriverName, payload); err != nil {
+						slog.Warn("loadpoint dispatch", "lp", lpCfg.ID,
+							"driver", lpCfg.DriverName, "err", err)
+					}
+				}
+			}
+
 			// ---- Record history snapshot ----
 			recordHistory(st, tel, ctrl, nowMs)
 
@@ -738,10 +882,22 @@ func doRolloff(ctx context.Context, st *state.Store, coldDir string) {
 	rows, files, err := st.RolloffToParquet(ctx, coldDir)
 	if err != nil {
 		slog.Warn("parquet rolloff failed", "err", err)
+	} else if rows > 0 {
+		slog.Info("parquet rolloff", "rows", rows, "files", len(files))
+	}
+	// Planner diagnostics roll off on the same cadence but keep a
+	// longer hot tier (30 d vs. the 14 d of ts_samples) — they're
+	// sparse enough (~100/day) that the extra month in SQLite
+	// costs < 60 MB and makes the time-travel UI snappy for
+	// recent-incident debugging.
+	dRows, dFiles, err := st.RolloffDiagnosticsToParquet(ctx, coldDir)
+	if err != nil {
+		slog.Warn("diagnostics parquet rolloff failed", "err", err)
 		return
 	}
-	if rows > 0 {
-		slog.Info("parquet rolloff", "rows", rows, "files", len(files))
+	if dRows > 0 {
+		slog.Info("diagnostics parquet rolloff",
+			"rows", dRows, "files", len(dFiles))
 	}
 }
 
@@ -777,6 +933,25 @@ func driverCapacitiesFrom(drivers []config.Driver) map[string]float64 {
 	return out
 }
 
+// buildLoadpointConfigs adapts YAML-facing config.Loadpoint entries
+// into the internal loadpoint.Config shape. Shared between initial
+// boot and the hot-reload watcher so the two paths can't drift.
+func buildLoadpointConfigs(src []config.Loadpoint) []loadpoint.Config {
+	out := make([]loadpoint.Config, 0, len(src))
+	for _, lp := range src {
+		out = append(out, loadpoint.Config{
+			ID:                lp.ID,
+			DriverName:        lp.DriverName,
+			MinChargeW:        lp.MinChargeW,
+			MaxChargeW:        lp.MaxChargeW,
+			AllowedStepsW:     lp.AllowedStepsW,
+			VehicleCapacityWh: lp.VehicleCapacityWh,
+			PluginSoCPct:      lp.PluginSoCPct,
+		})
+	}
+	return out
+}
+
 // buildMPC constructs a planner from config. Returns nil if disabled,
 // if prices aren't configured, or if there are no batteries with capacity.
 func buildMPC(cfg *config.Config, st *state.Store, tel *telemetry.Store, capacities map[string]float64) *mpc.Service {
@@ -794,16 +969,38 @@ func buildMPC(cfg *config.Config, st *state.Store, tel *telemetry.Store, capacit
 			continue
 		}
 		totalCap += cap
-		// Default max (de)charge = 0.5C unless overridden
+		// Default max (de)charge = 0.5C unless overridden. Zero is a
+		// legitimate one-sided constraint — `max_charge_w: 0` means
+		// "forbid charging, allow discharge only" and mpc.Optimize's
+		// action grid (`-MaxDischargeW…+MaxChargeW`) supports it.
+		// Negative is always a config mistake.
+		//
+		// Only the *both-zero* case is treated as a config error (and
+		// almost certainly is — it kills the planner's entire action
+		// space while leaving the service running). We fall back to
+		// default in that case and log a warning.
 		defaultP := cap / 2
 		chg := defaultP
 		dis := defaultP
 		if b, ok := cfg.Batteries[d.Name]; ok {
-			if b.MaxChargeW != nil {
-				chg = *b.MaxChargeW
-			}
-			if b.MaxDischargeW != nil {
-				dis = *b.MaxDischargeW
+			bothZero := b.MaxChargeW != nil && *b.MaxChargeW == 0 &&
+				b.MaxDischargeW != nil && *b.MaxDischargeW == 0
+			if bothZero {
+				slog.Warn("mpc: batteries.max_{charge,discharge}_w both 0 — treating as config error, using default 0.5C",
+					"driver", d.Name, "default_w", defaultP)
+			} else {
+				if b.MaxChargeW != nil && *b.MaxChargeW >= 0 {
+					chg = *b.MaxChargeW
+				} else if b.MaxChargeW != nil {
+					slog.Warn("mpc: ignoring negative batteries.max_charge_w; using default 0.5C",
+						"driver", d.Name, "value", *b.MaxChargeW, "default_w", defaultP)
+				}
+				if b.MaxDischargeW != nil && *b.MaxDischargeW >= 0 {
+					dis = *b.MaxDischargeW
+				} else if b.MaxDischargeW != nil {
+					slog.Warn("mpc: ignoring negative batteries.max_discharge_w; using default 0.5C",
+						"driver", d.Name, "value", *b.MaxDischargeW, "default_w", defaultP)
+				}
 			}
 		}
 		maxChg += chg

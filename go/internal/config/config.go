@@ -29,6 +29,21 @@ type Config struct {
 	Batteries     map[string]Battery `yaml:"batteries,omitempty" json:"batteries,omitempty"`
 	OCPP          *OCPP              `yaml:"ocpp,omitempty" json:"ocpp,omitempty"`
 	EVCharger     *EVCharger         `yaml:"ev_charger,omitempty" json:"ev_charger,omitempty"`
+	Loadpoints    []Loadpoint        `yaml:"loadpoints,omitempty" json:"loadpoints,omitempty"`
+}
+
+// Loadpoint is one EV charge point the planner can reason about.
+// Phase 3 introduces the schema + observable surface; Phase 4 wires
+// it into the DP state space so the MPC optimizes battery + EV jointly.
+// See docs/plan-ems-contract.md + go/internal/loadpoint.
+type Loadpoint struct {
+	ID                string    `yaml:"id" json:"id"`
+	DriverName        string    `yaml:"driver_name" json:"driver_name"`
+	MinChargeW        float64   `yaml:"min_charge_w,omitempty" json:"min_charge_w,omitempty"`
+	MaxChargeW        float64   `yaml:"max_charge_w,omitempty" json:"max_charge_w,omitempty"`
+	AllowedStepsW     []float64 `yaml:"allowed_steps_w,omitempty" json:"allowed_steps_w,omitempty"`
+	VehicleCapacityWh float64   `yaml:"vehicle_capacity_wh,omitempty" json:"vehicle_capacity_wh,omitempty"`
+	PluginSoCPct      float64   `yaml:"plugin_soc_pct,omitempty" json:"plugin_soc_pct,omitempty"`
 }
 
 // OCPP configures the embedded OCPP 1.6J Central System for EV chargers.
@@ -229,7 +244,7 @@ type Price struct {
 
 // Weather is the weather-forecast source config.
 type Weather struct {
-	Provider  string  `yaml:"provider" json:"provider"` // met_no | openweather | none
+	Provider  string  `yaml:"provider" json:"provider"` // met_no | openweather | open_meteo | forecast_solar | none
 	Latitude  float64 `yaml:"latitude" json:"latitude"`
 	Longitude float64 `yaml:"longitude" json:"longitude"`
 	APIKey    string  `yaml:"api_key,omitempty" json:"api_key,omitempty"`
@@ -241,11 +256,40 @@ type Weather struct {
 	// sized together. Set explicitly for accurate day-1 forecasts.
 	PVRatedW float64 `yaml:"pv_rated_w,omitempty" json:"pv_rated_w,omitempty"`
 
+	// PVTiltDeg / PVAzimuthDeg describe the physical orientation of a
+	// single panel group. Legacy single-array config — when PVArrays
+	// below is empty, the forecast_solar provider synthesizes one
+	// array from these + PVRatedW. Kept for backwards compatibility.
+	PVTiltDeg    float64 `yaml:"pv_tilt_deg,omitempty" json:"pv_tilt_deg,omitempty"`
+	PVAzimuthDeg float64 `yaml:"pv_azimuth_deg,omitempty" json:"pv_azimuth_deg,omitempty"`
+
+	// PVArrays is the list of physically-distinct panel groups at the
+	// site. Homes often have more than one roof plane (e.g. south and
+	// east), and the forecast_solar provider gives noticeably better
+	// predictions when each plane is described separately than when
+	// everything is averaged into a single tilt/azimuth.
+	//
+	// When set, PVArrays overrides the legacy single-array fields.
+	// Providers that can't use site geometry (met_no, open_meteo)
+	// ignore this entirely and just use PVRatedW.
+	PVArrays []PVArray `yaml:"pv_arrays,omitempty" json:"pv_arrays,omitempty"`
+
 	// HeatingWPerDegC adds load proportional to max(18°C − outdoor_temp, 0).
 	// A rough-but-useful way to teach the planner that cold nights cost
 	// more than mild ones without running a full ML temperature fit.
 	// Typical Swedish single-family values: 200–500 W/°C. 0 disables.
 	HeatingWPerDegC float64 `yaml:"heating_w_per_degc,omitempty" json:"heating_w_per_degc,omitempty"`
+}
+
+// PVArray is one physically-distinct panel group. Multi-plane
+// residential installs typically have two or three (e.g. south roof
+// + east roof + garage) with different tilt/azimuth. The sum of all
+// KWp values should match the total PV nameplate at the site.
+type PVArray struct {
+	Name       string  `yaml:"name,omitempty" json:"name,omitempty"`
+	KWp        float64 `yaml:"kwp" json:"kwp"`
+	TiltDeg    float64 `yaml:"tilt_deg" json:"tilt_deg"`
+	AzimuthDeg float64 `yaml:"azimuth_deg" json:"azimuth_deg"`
 }
 
 // Battery is per-battery overrides (keyed by driver name in the top-level map).

@@ -282,13 +282,7 @@ func ComputeDispatch(
 	// hardware truth beats guesses. Only override when something >0 is
 	// actually being reported, so an offline / stale EV driver doesn't
 	// silently zero out a user-set manual value.
-	var evSum float64
-	for _, r := range store.ReadingsByType(telemetry.DerEV) {
-		if h := store.DriverHealth(r.Driver); h == nil || !h.IsOnline() {
-			continue
-		}
-		evSum += r.SmoothedW
-	}
+	evSum := store.SumOnlineEVW()
 	if evSum > 0 {
 		state.EVChargingW = evSum
 	}

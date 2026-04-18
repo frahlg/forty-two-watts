@@ -171,9 +171,50 @@ func TestBuildSlotsEmptyForecast(t *testing.T) {
 }
 
 func TestSelectPlannerPVWBothNaN(t *testing.T) {
-	got := selectPlannerPVW(math.NaN(), math.NaN())
+	got := selectPlannerPVW(math.NaN(), math.NaN(), false)
 	if got != 0 {
 		t.Errorf("both NaN should return 0, got %f", got)
+	}
+}
+
+// Radiation-backed forecast: predicted twin gets a minority vote so an
+// under-trained RLS can't dominate. 4000W forecast + 2000W twin with
+// PlannerRadiationWeight=0.3 → 0.7*4000 + 0.3*2000 = 3400.
+func TestSelectPlannerPVWRadiationBlend(t *testing.T) {
+	got := selectPlannerPVW(4000, 2000, true)
+	want := 0.7*4000 + 0.3*2000
+	if math.Abs(got-want) > 0.01 {
+		t.Errorf("radiation blend: got %f, want %f", got, want)
+	}
+}
+
+// Even a wild twin overshoot gets capped by the 30% weight — 4000W
+// forecast + 10000W twin → 0.7*4000 + 0.3*10000 = 5800. Still sane,
+// not the full 10000 the cloud-only path would have let through.
+func TestSelectPlannerPVWRadiationBlendClampsWildTwin(t *testing.T) {
+	got := selectPlannerPVW(4000, 10000, true)
+	want := 0.7*4000 + 0.3*10000
+	if math.Abs(got-want) > 0.01 {
+		t.Errorf("radiation blend clamping: got %f, want %f", got, want)
+	}
+	// Without radiation backing, the same inputs would let the twin
+	// take over completely (cloud-only path, not collapsed).
+	if got := selectPlannerPVW(4000, 10000, false); got != 10000 {
+		t.Errorf("cloud-only path should pass through twin prediction, got %f", got)
+	}
+}
+
+// When forecast is radiation-backed but zero (night), the legacy cloud
+// path takes over — we don't want to emit 0.3*predicted for a slot
+// where the forecast correctly says "no sun".
+func TestSelectPlannerPVWRadiationZeroForecastIgnoresBlend(t *testing.T) {
+	// Twin predicts 300W at night (probably garbage); radiation says 0.
+	// With the guard, we fall through to cloud-only logic: forecast <
+	// 200 threshold → use twin. That's the original behaviour and
+	// matches "we have no sun, twin is the only signal left".
+	got := selectPlannerPVW(0, 300, true)
+	if got != 300 {
+		t.Errorf("zero-forecast with radiation flag should fall through, got %f", got)
 	}
 }
 
@@ -202,7 +243,11 @@ func TestOptimizeSelfConsumptionDoesNotDischargeWithOldTerminalPrice(t *testing.
 // slot length, that stale plans return ok=false, and that out-of-window
 // queries return ok=false.
 func TestSlotDirectiveAt(t *testing.T) {
-	now := time.Date(2026, 4, 17, 12, 0, 0, 0, time.UTC)
+	// Anchor on real wall clock — SlotDirectiveAt rejects plans older
+	// than MaxPlanAge (30 min) via time.Since(GeneratedAtMs), so a
+	// hardcoded past timestamp would make this test flaky as soon as
+	// the wall clock drifts past the plan's age ceiling.
+	now := time.Now().UTC().Truncate(time.Second)
 	slotStart := now.Add(-3 * time.Minute) // we're 3 min into a 15-min slot
 	slotLenMin := 15
 
@@ -242,7 +287,9 @@ func TestSlotDirectiveAt(t *testing.T) {
 
 // Discharge intent (negative BatteryW) surfaces as negative energy.
 func TestSlotDirectiveAtDischarge(t *testing.T) {
-	now := time.Date(2026, 4, 17, 17, 0, 0, 0, time.UTC)
+	// Use real wall clock — MaxPlanAge (30 min) would reject a hardcoded
+	// past timestamp. Same flake as TestSlotDirectiveAt earlier.
+	now := time.Now().UTC().Truncate(time.Second)
 	s := &Service{
 		last: &Plan{
 			GeneratedAtMs: now.UnixMilli(),

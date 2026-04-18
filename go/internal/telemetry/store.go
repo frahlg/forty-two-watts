@@ -257,6 +257,32 @@ func (s *Store) ReadingsByType(t DerType) []*DerReading {
 	return out
 }
 
+// SumOnlineEVW returns the summed SmoothedW across every online EV
+// driver. Used by the status endpoint, the loadmodel sampler, the MPC
+// divergence check, and the control loop's grid bias — all four need
+// the same "what is the EV charger drawing right now (and it's
+// trustworthy)" signal, derived the same way.
+//
+// Offline drivers (stale telemetry, watchdog tripped) are skipped so a
+// dangling 3.6 kW last-known reading can't sneak into load or grid
+// accounting after the driver has actually stopped reporting.
+func (s *Store) SumOnlineEVW() float64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var sum float64
+	for _, r := range s.readings {
+		if r.DerType != DerEV {
+			continue
+		}
+		h, ok := s.health[r.Driver]
+		if !ok || !h.IsOnline() {
+			continue
+		}
+		sum += r.SmoothedW
+	}
+	return sum
+}
+
 // ReadingsByDriver returns all readings from one driver.
 func (s *Store) ReadingsByDriver(driver string) []*DerReading {
 	s.mu.RLock(); defer s.mu.RUnlock()

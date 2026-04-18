@@ -27,6 +27,18 @@ type LoadPredictor func(t time.Time) float64
 // Leave nil to cap the plan horizon at what's been published.
 type PricePredictor func(zone string, t time.Time) float64
 
+// LoadpointProbe returns the EV loadpoint state the DP should extend
+// itself with. Called once per replan with the slot length (minutes)
+// the DP will actually use — so the probe can map any user wall-clock
+// deadline to a correct slot index. Return nil when no loadpoint
+// should be optimized (unplugged, unconfigured, or during initial
+// rollout when operator wants to disable EV-in-DP).
+//
+// Wired in main.go against *loadpoint.Manager; kept as a plain
+// closure type to avoid the mpc package importing loadpoint (which
+// would risk a cycle if loadpoint ever needs mpc types).
+type LoadpointProbe func(slotLenMin int) *LoadpointSpec
+
 // Service wires the optimizer to the rest of the stack: pulls prices +
 // forecast from the SQLite store, reads current SoC from the telemetry
 // store, and re-plans on a ticker. The latest plan is cached.
@@ -37,9 +49,19 @@ type Service struct {
 	BaseLoad float64 // baseline household load (W). 0 disables load assumption.
 	Horizon  time.Duration
 	Interval time.Duration
-	PV       PVPredictor    // optional — overrides stored pv_w_estimated
-	Load     LoadPredictor  // optional — overrides flat BaseLoad
-	Price    PricePredictor // optional — fills in future slots when day-ahead isn't published yet
+	PV        PVPredictor    // optional — overrides stored pv_w_estimated
+	Load      LoadPredictor  // optional — overrides flat BaseLoad
+	Price     PricePredictor // optional — fills in future slots when day-ahead isn't published yet
+	Loadpoint LoadpointProbe // optional — when non-nil, the DP extends its state with EV dimensions
+
+	// SaveDiag is called synchronously after every successful replan
+	// with the same Diagnostic the /api/mpc/diagnose endpoint would
+	// return + the trigger reason ("scheduled" / "reactive-pv" /
+	// "reactive-load" / "manual"). Nil disables persistence — the
+	// in-memory diagnose still works. Wired in main.go against
+	// state.Store.SaveDiagnostic so operators can time-travel past
+	// decisions; see docs/mpc-planner.md.
+	SaveDiag func(d *Diagnostic, reason string) error
 
 	// Reactive replan: when the integrated energy gap between actual
 	// and the plan's current-slot prediction exceeds a threshold over
@@ -83,8 +105,11 @@ type Service struct {
 
 	Defaults Params
 
-	mu   sync.RWMutex
-	last *Plan
+	mu              sync.RWMutex
+	last            *Plan
+	lastSlots       []Slot // inputs that went into the most recent Optimize call
+	lastParams      Params // params that went into the most recent Optimize call
+	lastLoadpointID string // ID of the loadpoint active in the most recent plan (empty = none)
 
 	stop chan struct{}
 	done chan struct{}
@@ -139,6 +164,18 @@ type SlotDirective struct {
 	BatteryEnergyWh float64 // total energy for the slot (site-signed)
 	SoCTargetPct    float64 // plan's SoC at SlotEnd — used by divergence detector
 	Strategy        Mode    // echoed for logging + API
+
+	// LoadpointEnergyWh carries per-loadpoint EV energy budgets for
+	// this slot. Keyed by Loadpoint.ID. Positive = charging energy
+	// the plan allocated. Empty map when no loadpoints are
+	// configured / active. The dispatch layer converts energy to
+	// instantaneous power via the same `remaining_wh × 3600 /
+	// remaining_s` formula it uses for the battery.
+	LoadpointEnergyWh map[string]float64
+
+	// LoadpointSoCTargetPct is the plan's EV SoC at SlotEnd per
+	// loadpoint. Used by per-loadpoint divergence check in Phase 4.1.
+	LoadpointSoCTargetPct map[string]float64
 }
 
 // SlotDirectiveAt returns the energy-allocation directive for the slot
@@ -149,8 +186,12 @@ func (s *Service) SlotDirectiveAt(now time.Time) (SlotDirective, bool) {
 	if s == nil {
 		return SlotDirective{}, false
 	}
+	// Snapshot plan + loadpoint ID together under the same RLock so
+	// a concurrent replan() can't swap one without the other — a
+	// classic read-race that Codex flagged.
 	s.mu.RLock()
 	p := s.last
+	lpID := s.lastLoadpointID
 	s.mu.RUnlock()
 	if p == nil {
 		return SlotDirective{}, false
@@ -167,13 +208,26 @@ func (s *Service) SlotDirectiveAt(now time.Time) (SlotDirective, bool) {
 		}
 		// energy_wh = power_w * hours. a.SlotLenMin/60 gives hours.
 		energyWh := a.BatteryW * float64(a.SlotLenMin) / 60.0
-		return SlotDirective{
+		d := SlotDirective{
 			SlotStart:       time.UnixMilli(a.SlotStartMs),
 			SlotEnd:         time.UnixMilli(endMs),
 			BatteryEnergyWh: energyWh,
 			SoCTargetPct:    a.SoCPct,
 			Strategy:        s.Defaults.Mode,
-		}, true
+		}
+		// EV energy budget for the slot (single-loadpoint for now —
+		// keyed under lpID snapshot so the dispatch layer routes
+		// to the right driver).
+		if a.LoadpointW > 0 && lpID != "" {
+			lpEnergyWh := a.LoadpointW * float64(a.SlotLenMin) / 60.0
+			d.LoadpointEnergyWh = map[string]float64{
+				lpID: lpEnergyWh,
+			}
+			d.LoadpointSoCTargetPct = map[string]float64{
+				lpID: a.LoadpointSoCPct,
+			}
+		}
+		return d, true
 	}
 	return SlotDirective{}, false
 }
@@ -339,7 +393,11 @@ func (s *Service) checkDivergence(ctx context.Context) {
 			for _, r := range s.Tele.ReadingsByType(telemetry.DerBattery) {
 				batW += r.SmoothedW
 			}
-			loadW = m.SmoothedW - pvW - batW
+			evW := s.Tele.SumOnlineEVW()
+			// House-only load: subtract EV so the divergence detector
+			// compares actual house consumption against the plan's
+			// house-load forecast, not a moving "house + EV" target.
+			loadW = m.SmoothedW - pvW - batW - evW
 			if loadW < 0 {
 				loadW = 0
 			}
@@ -476,6 +534,22 @@ func (s *Service) replan(_ context.Context) *Plan {
 		}
 	}
 
+	// Loadpoint extension: if a probe is wired AND returns an active
+	// spec, the DP adds an EV SoC dimension and produces per-slot
+	// LoadpointW decisions. One loadpoint at a time — multi-LP
+	// support is on the roadmap.
+	var loadpointID string
+	if s.Loadpoint != nil {
+		slotLenMin := 60 // safe fallback — most price sources are hourly
+		if len(slots) > 0 && slots[0].LenMin > 0 {
+			slotLenMin = slots[0].LenMin
+		}
+		if spec := s.Loadpoint(slotLenMin); spec != nil && spec.PluggedIn {
+			p.Loadpoint = spec
+			loadpointID = spec.ID
+		}
+	}
+
 	slog.Info("mpc: optimize params",
 		"mode", p.Mode,
 		"terminal_ore", p.TerminalSoCPrice,
@@ -485,6 +559,8 @@ func (s *Service) replan(_ context.Context) *Plan {
 		"soc_levels", p.SoCLevels,
 		"action_levels", p.ActionLevels,
 		"soc_start", p.InitialSoCPct,
+		"loadpoint_active", p.Loadpoint != nil,
+		"loadpoint_id", loadpointID,
 	)
 	plan := Optimize(slots, p)
 
@@ -497,17 +573,39 @@ func (s *Service) replan(_ context.Context) *Plan {
 
 	s.mu.Lock()
 	s.last = &plan
+	s.lastSlots = slots
+	s.lastParams = p
+	s.lastLoadpointID = loadpointID
 	s.lastReplanAt = time.Now()
 	reason := s.lastReason
 	if reason == "" {
 		reason = "manual"
 	}
+	replanAtMs := s.lastReplanAt.UnixMilli()
 	s.mu.Unlock()
 	slog.Info("mpc: replanned",
 		"slots", len(slots),
 		"soc_start", p.InitialSoCPct,
 		"cost_ore", plan.TotalCostOre,
 		"reason", reason)
+
+	// Persist a diagnostic snapshot so operators can time-travel to
+	// this replan later. Best-effort: errors log and continue so a
+	// flaky disk never blocks planning.
+	//
+	// Critically: build from the LOCAL plan/slots/p we just computed,
+	// not from s.last via Diagnose(). A concurrent replan could have
+	// swapped s.last between our unlock and the Diagnose() call,
+	// which would pair a different plan with OUR reason — writing a
+	// corrupt snapshot. Using the locals keeps (plan, reason)
+	// atomically consistent even under concurrent replans.
+	if s.SaveDiag != nil {
+		if d := buildDiagnostic(&plan, slots, p, s.Zone, replanAtMs, reason); d != nil {
+			if err := s.SaveDiag(d, reason); err != nil {
+				slog.Warn("mpc: persist diagnostic failed", "err", err)
+			}
+		}
+	}
 	return &plan
 }
 
@@ -557,7 +655,7 @@ func extendPricesWithForecast(prices []state.PricePoint, zone string, pricer Pri
 	mod := start % (int64(slotLen) * 60 * 1000)
 	start -= mod
 	for ts := start; ts < untilMs; ts += int64(slotLen) * 60 * 1000 {
-		t := time.UnixMilli(ts)
+		t := time.UnixMilli(ts).UTC()
 		spot := pricer(zone, t)
 		total := (spot + gridTariff) * (1 + vatPct/100.0)
 		prices = append(prices, state.PricePoint{
@@ -593,12 +691,13 @@ func buildSlots(prices []state.PricePoint, forecasts []state.ForecastPoint, base
 		if slotEnd <= nowMs {
 			continue // past slot
 		}
-		slotT := time.UnixMilli(pr.SlotTsMs)
+		slotT := time.UnixMilli(pr.SlotTsMs).UTC()
 		var pvW float64
 		forecastPVW := lookupPV(forecasts, pr.SlotTsMs)
 		if pv != nil {
 			cloud := lookupCloud(forecasts, pr.SlotTsMs)
-			pvW = selectPlannerPVW(forecastPVW, pv(slotT, cloud))
+			radiationBacked := lookupHasRadiation(forecasts, pr.SlotTsMs)
+			pvW = selectPlannerPVW(forecastPVW, pv(slotT, cloud), radiationBacked)
 		} else {
 			pvW = forecastPVW
 		}
@@ -668,14 +767,44 @@ func selfConsumptionTerminalPrice(prices []state.PricePoint, bonus, fee float64)
 	return spread
 }
 
-func selectPlannerPVW(forecastPVW, predictedPVW float64) float64 {
+// PlannerRadiationWeight is how much the RLS twin's prediction
+// contributes when the forecast is backed by a measured-radiation
+// (or direct-PV) signal. The rest comes from the forecast itself.
+//
+// The twin's job in that regime is per-site calibration: orientation,
+// soiling, inverter derate — a multiplicative correction on top of an
+// already physically-grounded prediction. Letting it contribute more
+// than ~30 % re-introduces the very brittleness we switched off
+// cloud-only forecasts to escape (an under-trained twin can produce
+// wild predictions from the time-of-day features alone when fed
+// non-representative training data).
+const PlannerRadiationWeight = 0.3
+
+func selectPlannerPVW(forecastPVW, predictedPVW float64, radiationBacked bool) float64 {
+	// Invalid predicted → fall back to forecast (unchanged).
 	switch {
 	case math.IsNaN(predictedPVW), math.IsInf(predictedPVW, 0), predictedPVW < 0:
 		if math.IsNaN(forecastPVW) || math.IsInf(forecastPVW, 0) {
 			return 0
 		}
 		return forecastPVW
-	case forecastPVW < plannerMinForecastPVFallbackW:
+	}
+
+	// Radiation-backed forecasts (open_meteo, forecast_solar) have the
+	// correct diurnal shape and cloud response already. Blend the twin's
+	// prediction in as a thin per-site calibration instead of letting it
+	// override the forecast. Typical picture on homelab-rpi after the
+	// switch: forecast shows smooth bell curve 0–8 kW, an under-trained
+	// twin still spits random spikes from overfit feature vectors — and
+	// we want the smooth curve.
+	if radiationBacked && forecastPVW > 0 {
+		return (1-PlannerRadiationWeight)*forecastPVW + PlannerRadiationWeight*predictedPVW
+	}
+
+	// Cloud-only legacy path: prefer the twin when forecast is near zero
+	// (forecast probably missing), fall back to forecast when the twin
+	// collapsed to ~0 (twin probably broken).
+	if forecastPVW < plannerMinForecastPVFallbackW {
 		return predictedPVW
 	}
 	collapseCeil := math.Max(plannerMaxCollapsedPVW, forecastPVW*plannerMaxCollapsedPVFrac)
@@ -683,6 +812,25 @@ func selectPlannerPVW(forecastPVW, predictedPVW float64) float64 {
 		return forecastPVW
 	}
 	return predictedPVW
+}
+
+// lookupHasRadiation reports whether the forecast row covering `ts` has
+// a measured-radiation or direct-PV signal from the provider (as
+// opposed to a cloud-derated naive estimate). Used by the planner to
+// decide how much to trust the forecast vs the RLS twin. Anchors on
+// the same slot-boundary rules as lookupPV.
+func lookupHasRadiation(forecasts []state.ForecastPoint, ts int64) bool {
+	for _, f := range forecasts {
+		slotLen := f.SlotLenMin
+		if slotLen <= 0 {
+			slotLen = 60
+		}
+		end := f.SlotTsMs + int64(slotLen)*60*1000
+		if ts >= f.SlotTsMs && ts < end {
+			return f.SolarWm2 != nil
+		}
+	}
+	return false
 }
 
 // lookupCloud returns the cloud cover (%) for the forecast row covering

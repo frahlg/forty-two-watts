@@ -7,6 +7,29 @@ import (
 	"time"
 )
 
+// TestHourOfWeekStableAcrossDST — the bucket index must not shift when
+// the same absolute instant is represented in a different timezone.
+// Before the UTC coercion, evening-hour Predict calls around DST
+// boundaries silently drew from the wrong bucket.
+func TestHourOfWeekStableAcrossDST(t *testing.T) {
+	stockholm, err := time.LoadLocation("Europe/Stockholm")
+	if err != nil {
+		t.Skipf("Europe/Stockholm tzdata unavailable: %v", err)
+	}
+	instants := []time.Time{
+		time.Date(2026, 3, 29, 1, 0, 0, 0, time.UTC),
+		time.Date(2026, 10, 25, 1, 0, 0, 0, time.UTC),
+		time.Date(2026, 7, 15, 17, 0, 0, 0, time.UTC),
+		time.Date(2026, 12, 15, 20, 0, 0, 0, time.UTC),
+	}
+	for _, inst := range instants {
+		if HourOfWeek(inst) != HourOfWeek(inst.In(stockholm)) {
+			t.Errorf("HourOfWeek differs: utc=%d local=%d (inst=%v)",
+				HourOfWeek(inst), HourOfWeek(inst.In(stockholm)), inst)
+		}
+	}
+}
+
 // synthetic household: 300W baseline, morning peak 2500W around 07:30,
 // evening peak 3500W around 19:00.
 func synthetic(t time.Time) float64 {

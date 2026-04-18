@@ -184,6 +184,12 @@
           '<label>Friendly name</label><input type="text" id="driver-catalog-name" placeholder="e.g. ferroamp-house">' +
           '</div></div>' +
           '<button class="btn-add" id="driver-catalog-add">+ Add selected</button>' +
+          '<p style="color:var(--text-dim);font-size:0.75rem;margin:8px 0 0">' +
+          '🟢 production — verified on real hardware at ≥1 site · ' +
+          '🟡 beta — working on a single site, awaiting a second · ' +
+          '🔴 experimental — ported from reference, not yet proven against live hardware. ' +
+          'Hover a driver for site + date notes.' +
+          '</p>' +
           '</fieldset>';
         setTimeout(function () {
           fetch("/api/drivers/catalog").then(function (r) { return r.json(); }).then(function (data) {
@@ -199,7 +205,15 @@
               var opt = document.createElement("option");
               opt.value = e.path;
               var protoLabel = (e.protocols || []).join("+");
-              opt.textContent = (e.name || e.filename) + "  —  " + (e.manufacturer || "?") + "  [" + protoLabel + "]" + (e.version ? "  v" + e.version : "");
+              // Prefix with a verification badge so operators scanning
+              // the dropdown can immediately see which drivers are
+              // battle-tested vs just ported from a reference.
+              //   🟢 production, 🟡 beta, 🔴 experimental
+              var badge =
+                e.verification_status === "production" ? "🟢 " :
+                e.verification_status === "beta"       ? "🟡 " :
+                                                         "🔴 ";
+              opt.textContent = badge + (e.name || e.filename) + "  —  " + (e.manufacturer || "?") + "  [" + protoLabel + "]" + (e.version ? "  v" + e.version : "");
               opt.dataset.protocols = protoLabel;
               opt.dataset.id = e.id || "";
               opt.dataset.httpHosts = (e.http_hosts || []).join(",");
@@ -207,6 +221,8 @@
               // http_hosts is declared by cloud drivers too (Easee uses it
               // for allowed-hosts), so it can't be used on its own.
               opt.dataset.connectionHost = (e.connection_defaults && e.connection_defaults.host) || "";
+              opt.dataset.verificationStatus = e.verification_status || "experimental";
+              if (e.verification_notes) opt.title = e.verification_notes;
               sel.appendChild(opt);
             });
           });
@@ -468,8 +484,10 @@
 
       case "weather":
         if (!currentConfig.weather) currentConfig.weather = { latitude: 59.3293, longitude: 18.0686 };
+        if (!Array.isArray(currentConfig.weather.pv_arrays)) currentConfig.weather.pv_arrays = [];
         html = '<fieldset><legend>Weather forecast &amp; PV</legend>' +
-          selectField("Provider", "weather.provider", ["met_no", "openweather", "none"], "met_no") +
+          selectField("Provider", "weather.provider", ["met_no", "openweather", "open_meteo", "forecast_solar", "none"], "met_no",
+            "met_no + openweather: cloud-cover only. open_meteo: direct shortwave radiation (better day-one forecast). forecast_solar: site-calibrated watts using the panel geometry below (best with multi-array setups).") +
           '<div class="field-row"><div>' +
           field("Latitude", "weather.latitude", "number", 59.3293) +
           '</div><div>' +
@@ -480,11 +498,30 @@
           field("PV rated (W)", "weather.pv_rated_w", "number", 10000) +
           field("API key (OpenWeather only)", "weather.api_key", "text", "") +
           '</fieldset>' +
-          '<p style="color:var(--text-dim);font-size:0.8rem;margin-top:8px">' +
-          'met.no is free and requires no key. PV rated is your array nameplate (sum of all panels) — seeds the digital-twin prior so day-one PV forecasts are accurate. The twin refines from live telemetry automatically.' +
-          '</p>';
-        // Init Leaflet after innerHTML is set
-        setTimeout(function() { initWeatherMap(); }, 0);
+          // Multi-array editor — only actually used by forecast_solar, but
+          // visible under all providers so advanced operators can enter
+          // their site geometry up front. Each row: optional label + kWp +
+          // tilt + azimuth. Lets forecast_solar sum per-plane output
+          // instead of averaging into a single tilt/azimuth.
+          '<fieldset><legend>PV arrays ' + help(
+            'Optional. If set, forecast_solar uses these per-plane values to produce a site-calibrated forecast. ' +
+            'Leave empty to let the model learn your orientation from telemetry — predictions are fine after a few varied days.') + '</legend>' +
+          '<div id="pv-arrays-list"></div>' +
+          '<button class="btn-add" id="pv-array-add" type="button">+ Add array</button>' +
+          '<p style="color:var(--text-dim);font-size:0.75rem;margin:8px 0 0">' +
+          'Tilt: 0° = flat roof, 35° = typical pitched roof, 90° = wall. Azimuth: 0 = N, 90 = E, 180 = S, 270 = W.' +
+          '</p>' +
+          '</fieldset>';
+        // Init Leaflet + arrays editor after innerHTML is set
+        setTimeout(function() {
+          initWeatherMap();
+          renderPVArrays();
+          var addBtn = document.getElementById("pv-array-add");
+          if (addBtn) addBtn.addEventListener("click", function () {
+            currentConfig.weather.pv_arrays.push({ name: "", kwp: 0, tilt_deg: 35, azimuth_deg: 180 });
+            renderPVArrays();
+          });
+        }, 0);
         break;
 
       case "batteries":
@@ -766,6 +803,59 @@
     var div = document.createElement("div");
     div.textContent = s == null ? "" : String(s);
     return div.innerHTML;
+  }
+
+  // Render the PV-arrays list inside #pv-arrays-list. Each row is an
+  // independent panel plane (tilt + azimuth + kWp). Entries write back
+  // to currentConfig.weather.pv_arrays by index so the global save
+  // handler picks them up without per-input data-path plumbing.
+  function renderPVArrays() {
+    var host = document.getElementById("pv-arrays-list");
+    if (!host) return;
+    var arrays = (currentConfig.weather && currentConfig.weather.pv_arrays) || [];
+    if (arrays.length === 0) {
+      host.innerHTML = '<p style="color:var(--text-dim);font-size:0.75rem;margin:4px 0 8px">No arrays defined — model will learn orientation from telemetry.</p>';
+      return;
+    }
+    var rows = arrays.map(function (a, i) {
+      return '<fieldset style="margin:6px 0;padding:8px 10px">' +
+        '<div class="field-row" style="gap:8px;align-items:flex-end">' +
+          '<div style="flex:1.4"><label>Name</label>' +
+            '<input type="text" data-pv-arr="' + i + '" data-field="name" value="' + escHtml(a.name || "") + '" placeholder="e.g. south roof">' +
+          '</div>' +
+          '<div style="flex:1"><label>kWp</label>' +
+            '<input type="number" step="0.1" data-pv-arr="' + i + '" data-field="kwp" value="' + (a.kwp || 0) + '">' +
+          '</div>' +
+          '<div style="flex:1"><label>Tilt °</label>' +
+            '<input type="number" step="1" min="0" max="90" data-pv-arr="' + i + '" data-field="tilt_deg" value="' + (a.tilt_deg || 0) + '">' +
+          '</div>' +
+          '<div style="flex:1"><label>Azimuth °</label>' +
+            '<input type="number" step="1" min="0" max="360" data-pv-arr="' + i + '" data-field="azimuth_deg" value="' + (a.azimuth_deg || 0) + '">' +
+          '</div>' +
+          '<button class="btn-remove" data-pv-arr-remove="' + i + '" type="button" title="Remove">✕</button>' +
+        '</div></fieldset>';
+    });
+    host.innerHTML = rows.join("");
+    // Wire handlers — delegation off host so re-renders don't leak listeners.
+    host.onchange = function (e) {
+      var idx = e.target && e.target.dataset && e.target.dataset.pvArr;
+      if (idx == null || idx === "") return;
+      var field = e.target.dataset.field;
+      var arr = currentConfig.weather.pv_arrays;
+      if (!arr[idx]) return;
+      if (field === "name") {
+        arr[idx][field] = e.target.value;
+      } else {
+        var v = parseFloat(e.target.value);
+        if (!isNaN(v)) arr[idx][field] = v;
+      }
+    };
+    host.onclick = function (e) {
+      var idx = e.target && e.target.dataset && e.target.dataset.pvArrRemove;
+      if (idx == null || idx === "") return;
+      currentConfig.weather.pv_arrays.splice(parseInt(idx, 10), 1);
+      renderPVArrays();
+    };
   }
 
   function initWeatherMap() {

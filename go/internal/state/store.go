@@ -172,6 +172,25 @@ func (s *Store) migrate() error {
 			last_seen_ms  INTEGER NOT NULL
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_devices_name ON devices(driver_name)`,
+
+		// ---- Planner diagnostics (one snapshot per replan) ----
+		// Persists the full structured output of mpc.Service.Diagnose() so
+		// operators can time-travel: load any past moment and see what the
+		// DP saw + what it decided + why. Denormalized total_cost_ore +
+		// horizon_slots so the timeline UI can render summary rows without
+		// unmarshalling every JSON blob.
+		//
+		// Retention: DiagnosticsRecentRetention (30 d) in SQLite; older
+		// rows roll off to <coldDir>/diagnostics/YYYY/MM/DD.parquet via
+		// RolloffDiagnosticsToParquet.
+		`CREATE TABLE IF NOT EXISTS planner_diagnostics (
+			ts_ms          INTEGER PRIMARY KEY NOT NULL,
+			reason         TEXT    NOT NULL,
+			zone           TEXT    NOT NULL,
+			total_cost_ore REAL    NOT NULL,
+			horizon_slots  INTEGER NOT NULL,
+			json           TEXT    NOT NULL
+		) STRICT`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.Exec(stmt); err != nil {

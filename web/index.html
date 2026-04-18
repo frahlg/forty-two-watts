@@ -16,6 +16,10 @@
 <body>
   <header>
     <img src="/logo.jpg" alt="42W" class="header-logo"><h1>42W</h1>
+    <nav class="app-tabs" id="app-tabs" role="tablist">
+      <button data-view="live" class="tab-btn active" role="tab">Live</button>
+      <button data-view="diagnose" class="tab-btn" role="tab" title="Time-travel through past planner decisions">Diagnose</button>
+    </nav>
     <div class="header-right">
       <button id="ui-mode-toggle" class="btn-link" title="Show advanced controls + diagnostics">Advanced</button>
       <button id="settings-btn" class="settings-btn" title="Settings">⚙</button>
@@ -50,7 +54,7 @@
     </div>
   </div>
 
-  <main>
+  <main id="view-live">
     <!-- Summary Cards — compact 5-in-a-row -->
     <section class="summary-cards">
       <div class="card summary-card" id="card-grid">
@@ -251,6 +255,42 @@
     </section>
   </main>
 
+  <!-- Diagnose view — time-travel through persisted planner snapshots -->
+  <main id="view-diagnose" class="hidden">
+    <section class="diagnose-header">
+      <div class="diagnose-header-row">
+        <div class="diagnose-title">
+          <h2>Diagnose</h2>
+          <span class="plan-summary" id="diagnose-meta">—</span>
+        </div>
+        <div class="diagnose-range">
+          <label>Range:
+            <select id="diagnose-range-select">
+              <option value="1h">Last 1h</option>
+              <option value="6h">Last 6h</option>
+              <option value="24h" selected>Last 24h</option>
+              <option value="7d">Last 7d</option>
+              <option value="30d">Last 30d</option>
+            </select>
+          </label>
+          <button id="diagnose-refresh" class="btn-send" title="Reload snapshots">↻</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="diagnose-body">
+      <!-- Left: timeline of replans -->
+      <aside class="diagnose-timeline" id="diagnose-timeline">
+        <div class="diagnose-empty">Loading snapshots…</div>
+      </aside>
+
+      <!-- Right: detail pane for selected snapshot -->
+      <section class="diagnose-detail" id="diagnose-detail">
+        <div class="diagnose-empty">Select a snapshot from the timeline to inspect what the planner saw and decided.</div>
+      </section>
+    </section>
+  </main>
+
   <!-- Self-tune Modal -->
   <div id="self-tune-modal" class="modal hidden">
     <div class="modal-content" style="max-width:520px">
@@ -293,11 +333,12 @@
     </div>
   </div>
 
-  <script src="/app.js?v=de88f43m"></script>
-  <script src="/settings.js?v=de88f43m"></script>
-  <script src="/models.js?v=de88f43m"></script>
-  <script src="/plan.js?v=de88f43m"></script>
-  <script src="/twins.js?v=de88f43m"></script>
+  <script src="/app.js?v=diag1"></script>
+  <script src="/settings.js?v=diag1"></script>
+  <script src="/models.js?v=diag1"></script>
+  <script src="/plan.js?v=diag1"></script>
+  <script src="/twins.js?v=diag1"></script>
+  <script src="/diagnose.js?v=diag1"></script>
   <script>
     <!-- Status bar — always visible at bottom -->
     <footer class="status-bar" id="status-bar">
