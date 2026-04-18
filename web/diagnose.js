@@ -27,11 +27,14 @@
     const view = parts[0] === 'diagnose' ? 'diagnose' : 'live';
     viewLive.classList.toggle('hidden', view !== 'live');
     viewDiag.classList.toggle('hidden', view !== 'diagnose');
-    if (tabs) {
-      tabs.querySelectorAll('.tab-btn').forEach(b => {
+    // Sync active state across both the top-row .tab-btn cluster AND
+    // the drawer-nav-btn duplicates inside the mobile header-right
+    // drawer. Query the whole document so both get the active pill.
+    document.querySelectorAll('.tab-btn[data-view], .drawer-nav-btn[data-view]').forEach(b => {
+      if (b.dataset.view === 'live' || b.dataset.view === 'diagnose') {
         b.classList.toggle('active', b.dataset.view === view);
-      });
-    }
+      }
+    });
     if (view === 'diagnose') {
       state.selectedTs = parts[1] ? Number(parts[1]) : null;
       loadTimeline().then(() => {
@@ -54,6 +57,21 @@
       location.hash = b.dataset.view === 'diagnose' ? '#diagnose' : '#live';
     });
   }
+  // Drawer navigation duplicates (mobile). Same behavior as the
+  // top-row tabs but they also close the drawer so the user lands
+  // straight on the target view.
+  document.addEventListener('click', (e) => {
+    const b = e.target.closest('.drawer-nav-btn[data-view]');
+    if (!b) return;
+    if (b.dataset.view !== 'live' && b.dataset.view !== 'diagnose') return;
+    location.hash = '#' + b.dataset.view;
+    const hdr = document.querySelector('body.ftw-next > header');
+    if (hdr) {
+      hdr.classList.remove('menu-open');
+      const mbtn = document.getElementById('mobile-menu-btn');
+      if (mbtn) mbtn.setAttribute('aria-expanded', 'false');
+    }
+  });
   window.addEventListener('hashchange', applyHash);
 
   // ---- Data state ----

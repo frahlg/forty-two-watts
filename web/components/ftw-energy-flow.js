@@ -56,7 +56,7 @@ class FtwEnergyFlow extends FtwElement {
         var(--hero-bg-bot) 100%);
       border: 1px solid var(--line);
       border-radius: var(--radius-lg);
-      padding: 20px 28px 14px;
+      padding: 14px 28px 6px;
       position: relative;
       overflow: hidden;
     }
@@ -68,50 +68,32 @@ class FtwEnergyFlow extends FtwElement {
         var(--hero-glow-a), transparent 60%);
       pointer-events: none;
     }
-    .head {
-      display: flex;
-      justify-content: space-between;
-      align-items: flex-end;
-      margin-bottom: 6px;
-      position: relative;
-    }
-    .eyebrow {
-      font-size: 10px;
-      font-family: var(--mono);
-      color: var(--fg-muted);
-      text-transform: uppercase;
-      letter-spacing: 0.12em;
-    }
     .title {
-      font-family: var(--sans);
-      font-size: 22px;
-      font-weight: 700;
-      letter-spacing: -0.02em;
-      margin-top: 2px;
-      color: var(--fg);
-    }
-    .legend {
-      display: flex;
-      gap: 18px;
-      font-size: 11px;
-      color: var(--fg-dim);
       font-family: var(--mono);
-      flex-wrap: wrap;
-      justify-content: flex-end;
-    }
-    .legend i {
-      display: inline-block;
-      width: 10px;
-      height: 10px;
-      border-radius: 2px;
-      margin-right: 6px;
-      vertical-align: middle;
+      font-size: 13px;
+      font-weight: 600;
+      letter-spacing: 0.22em;
+      text-transform: uppercase;
+      color: var(--fg);
+      text-align: center;
+      padding: 2px 0;
+      margin-bottom: 2px;
+      position: relative;
     }
     svg {
       width: 100%;
       height: 490px;
       display: block;
     }
+    /* SVG text classes — font-size values are in viewBox units (the SVG
+       scales with container width via preserveAspectRatio), so at narrow
+       viewports the default sizes render too small. Media queries below
+       bump them back into legible range on small screens. */
+    .sv-node-title { font-family: var(--mono); font-size: 10px; font-weight: 500; letter-spacing: 0.08em; }
+    .sv-node-value { font-family: var(--mono); font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
+    .sv-node-sub   { font-family: var(--mono); font-size: 10px; letter-spacing: 0.04em; }
+    .sv-hub-value  { font-family: var(--mono); font-size: 18px; font-weight: 700; font-variant-numeric: tabular-nums; }
+    .sv-hub-label  { font-family: var(--mono); font-size: 9px; letter-spacing: 0.1em; }
     /* One dash cycle advances by exactly (dash + gap). The fwd/rev pair
        keeps direction declarative — we flip the animation-name, not the
        path, so swapping a source→sink edge (grid export, battery
@@ -124,11 +106,21 @@ class FtwEnergyFlow extends FtwElement {
       animation: ef-spin 24s linear infinite;
     }
     @media (max-width: 900px) {
-      :host { padding: 14px 12px 10px; }
+      :host { padding: 10px 12px 4px; }
       svg { height: 465px; }
+      .sv-node-title { font-size: 13px; }
+      .sv-node-value { font-size: 24px; }
+      .sv-node-sub   { font-size: 13px; }
+      .sv-hub-value  { font-size: 22px; }
+      .sv-hub-label  { font-size: 11px; }
     }
     @media (max-width: 600px) {
       svg { height: 420px; }
+      .sv-node-title { font-size: 18px; }
+      .sv-node-value { font-size: 30px; }
+      .sv-node-sub   { font-size: 16px; }
+      .sv-hub-value  { font-size: 28px; }
+      .sv-hub-label  { font-size: 14px; }
     }
   `;
 
@@ -153,12 +145,30 @@ class FtwEnergyFlow extends FtwElement {
     // each afterRender would make restored bornAt values (from the
     // snapshot Map) refer to the old timeline — particles would jump.
     this._tickStart = performance.now();
+    // Compact layout kicks in on narrow viewports — shortens beams so
+    // the node boxes cluster closer to the hub, leaving more room for
+    // the enlarged text. Kept in sync with the (max-width: 600px) CSS
+    // breakpoint via matchMedia so fonts and geometry flip together.
+    this._mq = typeof window !== "undefined" && window.matchMedia
+      ? window.matchMedia("(max-width: 600px)")
+      : null;
+    this._compact = !!(this._mq && this._mq.matches);
+    this._onMqChange = (e) => {
+      this._compact = e.matches;
+      this.update();
+    };
+    if (this._mq) {
+      this._mq.addEventListener("change", this._onMqChange);
+    }
   }
 
   disconnectedCallback() {
     if (this._rafId) cancelAnimationFrame(this._rafId);
     this._rafId = null;
     this._particles = [];
+    if (this._mq) {
+      this._mq.removeEventListener("change", this._onMqChange);
+    }
   }
 
   // Bulk setter — preferred update path. Scalars merge; arrays replace
@@ -305,10 +315,45 @@ class FtwEnergyFlow extends FtwElement {
       ? this._readings.batteries
       : [{ name: "", kw: 0, soc: null, placeholder: true }];
 
-    const pvPositions  = clusterH(pvList.length,  CX,       TOP_Y,  BOX_W, GAP_H);
-    const batPositions = clusterV(batList.length, RIGHT_X,  CY,     BOX_H, GAP_V);
-    const gridPos = { x: LEFT_X, y: CY };
-    const evPos   = { x: CX,      y: BOT_Y };
+    // × layout with circular nodes at every viewport size. Two tiers of
+    // parameters: desktop keeps the full 0..1000 viewBox with larger
+    // circles + hub; compact crops to 180..820 and shrinks the
+    // geometry so the uniform zoom from preserveAspectRatio lands
+    // readable at phone widths. Hub text y-offsets are tier-specific
+    // so the load value sits visually centered between the house icon
+    // and the CONSUMING label at both sizes.
+    const P = this._compact
+      ? {
+          vbX: 180, vbW: 640,
+          leftX: 285, rightX: 715,
+          topY: 90, botY: 440,
+          baseR: 86, hubR: 95,
+          hubIconY: CY - 49, hubValueY: CY + 10, hubLabelY: CY + 34,
+        }
+      : {
+          vbX: 0, vbW: W,
+          leftX: 240, rightX: 760,
+          topY: 130, botY: 400,
+          baseR: 84, hubR: 99,
+          hubIconY: CY - 50, hubValueY: CY + 10, hubLabelY: CY + 36,
+        };
+
+    // Multi-device cluster in the PV (top-left) quadrant. Bounds run
+    // from the viewBox left edge to the hub's left edge; clusterAt
+    // shrinks the circles to fit n side-by-side and centers the row
+    // within those bounds. Single-device keeps baseR and sits on the
+    // corner anchor for the classic × silhouette.
+    const pvC = clusterAt(
+      pvList.length, P.leftX, P.topY, P.baseR,
+      P.vbX + 10, CX - P.hubR - 18,
+    );
+    // Battery: top-right quadrant, hub-left to viewBox-right.
+    const batC = clusterAt(
+      batList.length, P.rightX, P.topY, P.baseR,
+      CX + P.hubR + 18, P.vbX + P.vbW - 10,
+    );
+    const gridPos = { x: P.leftX,  y: P.botY };
+    const evPos   = { x: P.rightX, y: P.botY };
 
     // Build all edges: each entry carries geometry + magnitude + direction.
     const edges = [];
@@ -316,11 +361,12 @@ class FtwEnergyFlow extends FtwElement {
       const magnitude = Math.max(0, -pv.kw);
       edges.push(edge(
         `pv-${i}`,
-        pvPositions[i], gridPos /* unused for side=top */,
+        pvC.positions[i], gridPos /* unused for diagonal */,
         "top", +1,
         magnitude,
         "var(--amber)",
         !pv.placeholder && magnitude > 0.05,
+        0, 0, /* boxW/boxH unused in diagonal */ true, pvC.r, P.hubR,
       ));
     });
     edges.push(edge(
@@ -331,16 +377,18 @@ class FtwEnergyFlow extends FtwElement {
       Math.abs(grid),
       grid >= 0 ? "var(--red-e)" : "var(--green-e)",
       Math.abs(grid) > 0.05,
+      0, 0, true, P.baseR, P.hubR,
     ));
     batList.forEach((bat, i) => {
       edges.push(edge(
         `bat-${i}`,
-        batPositions[i], batPositions[i],
+        batC.positions[i], batC.positions[i],
         "right",
         bat.kw >= 0 ? +1 : -1,
         Math.abs(bat.kw),
         "var(--cyan)",
         !bat.placeholder && Math.abs(bat.kw) > 0.05,
+        0, 0, true, batC.r, P.hubR,
       ));
     });
     edges.push(edge(
@@ -350,6 +398,7 @@ class FtwEnergyFlow extends FtwElement {
       Math.max(0, ev),
       "var(--white-s)",
       ev > 0.05,
+      0, 0, true, P.baseR, P.hubR,
     ));
 
     const maxKw = Math.max(0.5, ...edges.map(e => e.kw));
@@ -360,69 +409,56 @@ class FtwEnergyFlow extends FtwElement {
     this._particles = [];
     const edgesSvg = edges.map(e => renderEdge(e, maxKw, this._particles)).join("");
 
+    // Every node is a circle now — renderNode (rectangular) is retired.
     const pvNodes = pvList.map((pv, i) =>
-      renderNode({
-        pos: pvPositions[i],
+      renderCircleNode({
+        pos: pvC.positions[i],
         // Solar shows POSITIVE kW — sign flip is display-only, all
         // internal state (chartHistory, math) stays on site convention.
         value: pv.placeholder ? "—" : fmtKw(-pv.kw),
         title: labelWithName("SOLAR", pv.name, pvList.length),
         sub: pv.placeholder ? "no data" : (pv.kw < -0.05 ? "generating" : "idle"),
         color: !pv.placeholder && pv.kw < -0.05 ? "var(--amber)" : "var(--fg-muted)",
-        side: "top", icon: "sun",
+        radius: pvC.r,
       })
     ).join("");
 
-    const gridNode = renderNode({
+    const gridNode = renderCircleNode({
       pos: gridPos,
       value: fmtKw(grid),
       title: "GRID",
       sub: Math.abs(grid) < 0.05 ? "balanced" : (grid >= 0 ? "importing" : "exporting"),
       color: Math.abs(grid) < 0.05 ? "var(--fg-muted)" :
              (grid >= 0 ? "var(--red-e)" : "var(--green-e)"),
-      side: "left", icon: "grid",
+      radius: P.baseR,
     });
 
     const batNodes = batList.map((bat, i) =>
-      renderNode({
-        pos: batPositions[i],
+      renderCircleNode({
+        pos: batC.positions[i],
         value: bat.placeholder ? "—" : fmtKw(bat.kw),
-        title: labelWithName(
-          "BATTERY", bat.name, batList.length,
-          bat.soc != null && !bat.placeholder ? ` · ${Math.round(bat.soc)}%` : "",
-        ),
+        title: labelWithName("BATTERY", bat.name, batList.length),
         sub: bat.placeholder ? "no data" :
              (Math.abs(bat.kw) < 0.05 ? "idle" :
               (bat.kw >= 0 ? "charging" : "discharging")),
         color: bat.placeholder ? "var(--fg-muted)" : "var(--cyan)",
-        side: "right", icon: "bat",
         soc: bat.placeholder ? null : bat.soc,
+        radius: batC.r,
       })
     ).join("");
 
-    const evNode = renderNode({
+    const evNode = renderCircleNode({
       pos: evPos,
       value: fmtKw(ev),
       title: "EV CHARGER",
       sub: ev > 0.05 ? "charging" : "idle",
       color: ev > 0.05 ? "var(--green-e)" : "var(--white-s)",
-      side: "bottom", icon: "ev",
+      radius: P.baseR,
     });
 
     return `
-      <div class="head">
-        <div>
-          <div class="eyebrow">Live flow</div>
-          <div class="title">Energy balance</div>
-        </div>
-        <div class="legend">
-          <span><i style="background:var(--amber)"></i>PV</span>
-          <span><i style="background:var(--red-e)"></i>Import</span>
-          <span><i style="background:var(--green-e)"></i>Export</span>
-          <span><i style="background:var(--cyan)"></i>Battery</span>
-        </div>
-      </div>
-      <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet" aria-hidden="true">
+      <div class="title">Energy balance</div>
+      <svg viewBox="${P.vbX} 0 ${P.vbW} ${H}" preserveAspectRatio="xMidYMid meet" aria-hidden="true">
         <defs>
           <radialGradient id="ef-hub" cx="50%" cy="50%" r="50%">
             <stop offset="0%" stop-color="oklch(0.85 0.18 var(--accent-hue))" stop-opacity="0.55"/>
@@ -449,27 +485,25 @@ class FtwEnergyFlow extends FtwElement {
 
         <!-- HOUSE / hub: load reading lives here -->
         <g>
-          <circle cx="${CX}" cy="${CY}" r="${HUB_R}"
+          <circle cx="${CX}" cy="${CY}" r="${P.hubR}"
                   fill="var(--hero-house-fill)"
                   stroke="var(--hero-house-stroke)" stroke-width="1.5"/>
-          <circle class="ring" cx="${CX}" cy="${CY}" r="${HUB_R - 8}"
+          <circle class="ring" cx="${CX}" cy="${CY}" r="${P.hubR - 8}"
                   fill="none"
                   stroke="var(--hero-house-ring)" stroke-width="1"
                   stroke-dasharray="2 4"/>
-          <g transform="translate(${CX - 16}, ${CY - 30})"
+          <g transform="translate(${CX - 16}, ${P.hubIconY})"
              stroke="var(--hero-house-stroke)" stroke-width="1.6"
              fill="none" stroke-linecap="round" stroke-linejoin="round">
             <path d="M2 16 L16 3 L30 16 L30 26 L2 26 Z"/>
             <path d="M12 26 V18 H20 V26"/>
           </g>
-          <text x="${CX}" y="${CY + 16}" text-anchor="middle"
-                fill="var(--hero-load-text)"
-                style="font-family:var(--mono);font-size:18px;font-weight:700;font-variant-numeric:tabular-nums">
+          <text x="${CX}" y="${P.hubValueY}" text-anchor="middle"
+                fill="var(--hero-load-text)" class="sv-hub-value">
             ${fmtKw(load)}
           </text>
-          <text x="${CX}" y="${CY + 32}" text-anchor="middle"
-                fill="var(--hero-label-text)"
-                style="font-family:var(--mono);font-size:9px;letter-spacing:0.1em">
+          <text x="${CX}" y="${P.hubLabelY}" text-anchor="middle"
+                fill="var(--hero-label-text)" class="sv-hub-label">
             CONSUMING
           </text>
         </g>
@@ -484,6 +518,32 @@ class FtwEnergyFlow extends FtwElement {
 }
 
 // ---------- geometry + edge helpers ----------
+
+// Multi-device horizontal cluster inside the × layout's corner
+// quadrant. For n = 1 the device sits on the corner anchor with full
+// baseR. For n > 1 the circles shrink so they fit between the given
+// [leftBound, rightBound] (inner viewBox edge and the hub's edge),
+// then sit evenly spaced and centered in that span. The radius floor
+// keeps multi-device circles readable even when bounds are tight.
+function clusterAt(n, anchorX, anchorY, baseR, leftBound, rightBound) {
+  if (n <= 1) {
+    return { positions: [{ x: anchorX, y: anchorY }], r: baseR };
+  }
+  const gap = 14;
+  const span = rightBound - leftBound;
+  // Max radius that fits n circles + (n-1) gaps inside span:
+  //   n * 2r + (n-1) * gap <= span
+  const maxR = Math.floor((span - (n - 1) * gap) / (2 * n));
+  const r = Math.max(34, Math.min(Math.floor(baseR * 0.85), maxR));
+  const stride = 2 * r + gap;
+  const cx = (leftBound + rightBound) / 2;
+  const half = ((n - 1) * stride) / 2;
+  const positions = Array.from({ length: n }, (_, i) => ({
+    x: cx - half + i * stride,
+    y: anchorY,
+  }));
+  return { positions, r };
+}
 
 // Spread N items along a horizontal axis, centered on (anchorX, fixedY).
 // Spacing is box-width + gap so boxes never overlap, even at N=3+.
@@ -507,20 +567,48 @@ function clusterV(n, fixedX, anchorY, boxH, gap) {
 // side of the hub it lives on. `dir > 0` means energy flows INTO the hub
 // (displayed as particles moving from box → hub). dir < 0 reverses the
 // endpoints so animateMotion runs box-ward.
-function edge(id, pos, _unused, side, dir, kw, color, active) {
+function edge(id, pos, _unused, side, dir, kw, color, active, boxW = BOX_W, boxH = BOX_H, diagonal = false, nodeR = 0, hubR = HUB_R) {
   let from, to;
-  if (side === "top") {
-    from = { x: pos.x, y: pos.y + BOX_H / 2 };
-    to   = { x: CX,    y: CY - HUB_R };
+  if (diagonal) {
+    // Diagonal beam for × layout: endpoints sit on the unit vector
+    // between box and hub centers. When nodeR > 0 the node is a circle
+    // and the box-side endpoint lands on its perimeter along that
+    // vector; otherwise we fall back to the nearest box corner. The
+    // hub-side endpoint sits on the hub perimeter. Default orientation
+    // (before the dir-based swap below) has to match the cardinal side
+    // it replaces — pv/grid default box→hub (dir=+1 means flow into
+    // the hub), bat/ev default hub→box (dir=+1 means flow out of it).
+    // Getting this wrong means a discharging battery animates toward
+    // the battery instead of toward the house.
+    const dx = CX - pos.x;
+    const dy = CY - pos.y;
+    const len = Math.hypot(dx, dy) || 1;
+    const ux = dx / len;
+    const uy = dy / len;
+    const boxEdge = nodeR > 0
+      ? { x: pos.x + ux * nodeR, y: pos.y + uy * nodeR }
+      : {
+          x: pos.x + (ux > 0 ? boxW / 2 : -boxW / 2),
+          y: pos.y + (uy > 0 ? boxH / 2 : -boxH / 2),
+        };
+    const hubEdge = { x: CX - ux * hubR, y: CY - uy * hubR };
+    if (side === "right" || side === "bottom") {
+      from = hubEdge; to = boxEdge;
+    } else {
+      from = boxEdge; to = hubEdge;
+    }
+  } else if (side === "top") {
+    from = { x: pos.x, y: pos.y + boxH / 2 };
+    to   = { x: CX,    y: CY - hubR };
   } else if (side === "bottom") {
-    from = { x: CX,    y: CY + HUB_R };
-    to   = { x: pos.x, y: pos.y - BOX_H / 2 };
+    from = { x: CX,    y: CY + hubR };
+    to   = { x: pos.x, y: pos.y - boxH / 2 };
   } else if (side === "left") {
-    from = { x: pos.x + BOX_W / 2, y: pos.y };
-    to   = { x: CX - HUB_R,        y: CY };
+    from = { x: pos.x + boxW / 2, y: pos.y };
+    to   = { x: CX - hubR,        y: CY };
   } else { // right
-    from = { x: CX + HUB_R,        y: CY };
-    to   = { x: pos.x - BOX_W / 2, y: pos.y };
+    from = { x: CX + hubR,        y: CY };
+    to   = { x: pos.x - boxW / 2, y: pos.y };
   }
   // Swap when energy flows the "unusual" way for that side (grid export,
   // battery discharge). animateMotion always walks the path start→end,
@@ -685,42 +773,80 @@ function hashStr(s) {
 
 // ---------- nodes ----------
 
-function renderNode({ pos, title, value, sub, color, side, icon, soc }) {
-  const x = pos.x - BOX_W / 2;
-  const y = pos.y - BOX_H / 2;
+// Circular node for the × layout. Text is centered and respread for a
+// disk: title near the top, value at the middle, sub below the middle,
+// and — for batteries — a SoC reading as a fourth line below sub.
+// Text baselines scale with radius so a desktop-size 105 px circle and
+// a multi-device 55 px circle both read proportionally. Stroke is the
+// accent color so each node carries its identity on the edge of the
+// circle — no separate stripe needed the way rectangular boxes have.
+function renderCircleNode({ pos, title, value, sub, color, soc, radius = 86 }) {
+  const r = radius;
+  const { x, y } = pos;
+  const titleY = Math.round(-0.42 * r);
+  const valueY = Math.round(0.09  * r);
+  const subY   = Math.round(0.42  * r);
+  const socY   = Math.round(0.70  * r);
+  const socText = soc != null
+    ? `<text x="${x}" y="${y + socY}" text-anchor="middle"
+             fill="var(--cyan)" class="sv-node-sub">SoC ${Math.round(soc)}%</text>`
+    : "";
+  return `
+    <g>
+      <circle cx="${x}" cy="${y}" r="${r}"
+              fill="var(--hero-box-fill)" stroke="${color}" stroke-width="2"/>
+      <text x="${x}" y="${y + titleY}" text-anchor="middle"
+            fill="var(--hero-label-text)" class="sv-node-title">
+        ${escapeXml(title)}
+      </text>
+      <text x="${x}" y="${y + valueY}" text-anchor="middle" fill="${color}" class="sv-node-value">
+        ${value}
+      </text>
+      <text x="${x}" y="${y + subY}" text-anchor="middle"
+            fill="var(--hero-sub-text)" class="sv-node-sub">
+        ${escapeXml(sub)}
+      </text>
+      ${socText}
+    </g>`;
+}
+
+function renderNode({
+  pos, title, value, sub, color, side, icon, soc,
+  boxW = BOX_W, boxH = BOX_H,
+  textY = { title: 20, value: 46, sub: 64, soc: 70 },
+}) {
+  const x = pos.x - boxW / 2;
+  const y = pos.y - boxH / 2;
   // Accent stripe sits on the OUTER edge of each box (away from hub) so
   // the eye follows the colored line back toward the house.
   const stripe =
-    side === "left"   ? { x,                 y,                 w: 3,     h: BOX_H } :
-    side === "right"  ? { x: x + BOX_W - 3,  y,                 w: 3,     h: BOX_H } :
-    side === "top"    ? { x,                 y,                 w: BOX_W, h: 3 }     :
-                        { x,                 y: y + BOX_H - 3,  w: BOX_W, h: 3 };
+    side === "left"   ? { x,                 y,                 w: 3,    h: boxH } :
+    side === "right"  ? { x: x + boxW - 3,   y,                 w: 3,    h: boxH } :
+    side === "top"    ? { x,                 y,                 w: boxW, h: 3 }    :
+                        { x,                 y: y + boxH - 3,   w: boxW, h: 3 };
   const socBar = soc != null ? `
-    <rect x="${x + 14}" y="${y + 70}" width="${BOX_W - 28}" height="2.5" rx="1.25"
+    <rect x="${x + 14}" y="${y + textY.soc}" width="${boxW - 28}" height="2.5" rx="1.25"
           fill="var(--hero-soc-track)"/>
-    <rect x="${x + 14}" y="${y + 70}" width="${((BOX_W - 28) * (soc / 100)).toFixed(1)}" height="2.5" rx="1.25"
+    <rect x="${x + 14}" y="${y + textY.soc}" width="${((boxW - 28) * (soc / 100)).toFixed(1)}" height="2.5" rx="1.25"
           fill="var(--cyan)"/>` : "";
   return `
     <g>
-      <rect x="${x}" y="${y}" width="${BOX_W}" height="${BOX_H}" rx="12"
+      <rect x="${x}" y="${y}" width="${boxW}" height="${boxH}" rx="12"
             fill="var(--hero-box-fill)" stroke="var(--hero-box-border)" stroke-width="1"/>
       <rect x="${stripe.x}" y="${stripe.y}" width="${stripe.w}" height="${stripe.h}" rx="1.5"
             fill="${color}"/>
-      <text x="${x + 14}" y="${y + 20}"
-            fill="var(--hero-label-text)"
-            style="font-family:var(--mono);font-size:10px;font-weight:500;letter-spacing:0.08em">
+      <text x="${x + 14}" y="${y + textY.title}"
+            fill="var(--hero-label-text)" class="sv-node-title">
         ${escapeXml(title)}
       </text>
-      <text x="${x + 14}" y="${y + 46}" fill="${color}"
-            style="font-family:var(--mono);font-size:20px;font-weight:700;font-variant-numeric:tabular-nums;letter-spacing:-0.01em">
+      <text x="${x + 14}" y="${y + textY.value}" fill="${color}" class="sv-node-value">
         ${value}
       </text>
-      <text x="${x + 14}" y="${y + 64}"
-            fill="var(--hero-sub-text)"
-            style="font-family:var(--mono);font-size:10px;letter-spacing:0.04em">
+      <text x="${x + 14}" y="${y + textY.sub}"
+            fill="var(--hero-sub-text)" class="sv-node-sub">
         ${escapeXml(sub)}
       </text>
-      <g transform="translate(${x + BOX_W - 30}, ${y + 12})" opacity="0.55">
+      <g transform="translate(${x + boxW - 30}, ${y + 12})" opacity="0.55">
         ${iconGlyph(icon, color)}
       </g>
       ${socBar}
