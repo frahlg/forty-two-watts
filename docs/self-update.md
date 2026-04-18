@@ -15,7 +15,7 @@ processes so the main container never touches the Docker socket.
 │  │  ───────────────        │     │  ─────────────               │   │
 │  │  selfupdate.Checker     │     │  net/http on UDS             │   │
 │  │  - polls GH Releases    │◀────┤  POST /update {action}       │   │
-│  │  - serves /api/version  │ UDS │  POST /status                │   │
+│  │  - serves /api/version  │ UDS │  GET /status                 │   │
 │  │    /* endpoints         │     │                              │   │
 │  │  - reads state.json     │     │  shells out:                 │   │
 │  │                         │     │   docker compose pull        │   │
