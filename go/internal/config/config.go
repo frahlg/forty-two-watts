@@ -29,6 +29,20 @@ type Config struct {
 	Batteries     map[string]Battery `yaml:"batteries,omitempty" json:"batteries,omitempty"`
 	OCPP          *OCPP              `yaml:"ocpp,omitempty" json:"ocpp,omitempty"`
 	EVCharger     *EVCharger         `yaml:"ev_charger,omitempty" json:"ev_charger,omitempty"`
+	Loadpoints    []Loadpoint        `yaml:"loadpoints,omitempty" json:"loadpoints,omitempty"`
+}
+
+// Loadpoint is one EV charge point the planner can reason about.
+// Phase 3 introduces the schema + observable surface; Phase 4 wires
+// it into the DP state space so the MPC optimizes battery + EV jointly.
+// See docs/plan-ems-contract.md + go/internal/loadpoint.
+type Loadpoint struct {
+	ID                string    `yaml:"id" json:"id"`
+	DriverName        string    `yaml:"driver_name" json:"driver_name"`
+	MinChargeW        float64   `yaml:"min_charge_w,omitempty" json:"min_charge_w,omitempty"`
+	MaxChargeW        float64   `yaml:"max_charge_w,omitempty" json:"max_charge_w,omitempty"`
+	AllowedStepsW     []float64 `yaml:"allowed_steps_w,omitempty" json:"allowed_steps_w,omitempty"`
+	VehicleCapacityWh float64   `yaml:"vehicle_capacity_wh,omitempty" json:"vehicle_capacity_wh,omitempty"`
 }
 
 // OCPP configures the embedded OCPP 1.6J Central System for EV chargers.

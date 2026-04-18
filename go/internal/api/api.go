@@ -27,6 +27,7 @@ import (
 	"github.com/frahlg/forty-two-watts/go/internal/forecast"
 	"github.com/frahlg/forty-two-watts/go/internal/ha"
 	"github.com/frahlg/forty-two-watts/go/internal/loadmodel"
+	"github.com/frahlg/forty-two-watts/go/internal/loadpoint"
 	"github.com/frahlg/forty-two-watts/go/internal/mpc"
 	"github.com/frahlg/forty-two-watts/go/internal/prices"
 	"github.com/frahlg/forty-two-watts/go/internal/pvmodel"
@@ -78,6 +79,10 @@ type Deps struct {
 
 	// Optional: load digital-twin self-learner.
 	LoadModel *loadmodel.Service
+
+	// Optional: EV loadpoints (Phase 3 observable skeleton; Phase 4
+	// wires these into MPC decision surface).
+	Loadpoints *loadpoint.Manager
 
 	// Optional: HA MQTT bridge (nil if disabled).
 	HA *ha.Bridge
@@ -151,6 +156,7 @@ func (s *Server) routes() {
 	s.handle("GET  /api/ev/status", s.handleEVStatus)
 	s.handle("POST /api/ev/command", s.handleEVCommand)
 	s.handle("POST /api/ev/chargers", s.handleEVChargers)
+	s.handle("GET  /api/loadpoints", s.handleLoadpoints)
 
 	// ---- Static web UI ----
 	// Everything not matched above falls through to the static server.
@@ -1387,4 +1393,18 @@ func (s *Server) handleEVChargers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, chargers)
+}
+
+// GET /api/loadpoints returns the configured EV loadpoints with their
+// current observable state. Read-only in Phase 3; POST /target comes
+// in Phase 4 with the full charger control wiring.
+func (s *Server) handleLoadpoints(w http.ResponseWriter, r *http.Request) {
+	if s.deps.Loadpoints == nil {
+		writeJSON(w, 200, map[string]any{"enabled": false, "loadpoints": []any{}})
+		return
+	}
+	writeJSON(w, 200, map[string]any{
+		"enabled":    true,
+		"loadpoints": s.deps.Loadpoints.States(),
+	})
 }

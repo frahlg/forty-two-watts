@@ -74,6 +74,11 @@ type Slot struct {
 	// the planner doesn't over-commit to uncertain spikes. Defaults to
 	// 1.0 when callers leave it zero.
 	Confidence float64
+
+	// Limits caps grid flow for this slot. Zero value = unlimited.
+	// See power_limits.go for use cases (peak-tariff capacity, DSO
+	// curtailment, service-entrance current limit).
+	Limits PowerLimits
 }
 
 // Params bounds the optimization. All fields are required.
@@ -258,6 +263,14 @@ func Optimize(slots []Slot, p Params) Plan {
 
 				// Mode-based feasibility.
 				if !modeAllows(p.Mode, baselineGridW, gridW, actW) {
+					continue
+				}
+
+				// Per-slot power limits (tariff capacity / DSO
+				// curtailment / service-entrance fuse). Zero-value
+				// PowerLimits is unlimited — the zero-check lives
+				// inside allowsImport/allowsExport.
+				if !slot.Limits.allowsImport(gridW) || !slot.Limits.allowsExport(gridW) {
 					continue
 				}
 

@@ -31,6 +31,7 @@ import (
 	"github.com/frahlg/forty-two-watts/go/internal/forecast"
 	"github.com/frahlg/forty-two-watts/go/internal/ha"
 	"github.com/frahlg/forty-two-watts/go/internal/loadmodel"
+	"github.com/frahlg/forty-two-watts/go/internal/loadpoint"
 	mqttcli "github.com/frahlg/forty-two-watts/go/internal/mqtt"
 	modbuscli "github.com/frahlg/forty-two-watts/go/internal/modbus"
 	"github.com/frahlg/forty-two-watts/go/internal/mpc"
@@ -465,6 +466,28 @@ func main() {
 			"pvtwin", pvSvc != nil)
 	}
 
+	// ---- EV loadpoints (observable skeleton) ----
+	// Phase 3 of the planner overhaul introduces the Loadpoint concept
+	// as a first-class entity the API / UI can surface. Phase 4 extends
+	// the MPC's DP with per-loadpoint state + wires Observe() into
+	// charger drivers.
+	lpMgr := loadpoint.NewManager()
+	if len(cfg.Loadpoints) > 0 {
+		lpCfg := make([]loadpoint.Config, 0, len(cfg.Loadpoints))
+		for _, lp := range cfg.Loadpoints {
+			lpCfg = append(lpCfg, loadpoint.Config{
+				ID:                lp.ID,
+				DriverName:        lp.DriverName,
+				MinChargeW:        lp.MinChargeW,
+				MaxChargeW:        lp.MaxChargeW,
+				AllowedStepsW:     lp.AllowedStepsW,
+				VehicleCapacityWh: lp.VehicleCapacityWh,
+			})
+		}
+		lpMgr.Load(lpCfg)
+		slog.Info("loadpoints configured", "count", len(cfg.Loadpoints))
+	}
+
 	// ---- Start HTTP API ----
 	// Forward-declare haBridge so Deps can reference it; the bridge
 	// gets wired further down (HA is optional + depends on reg.Names()).
@@ -485,6 +508,7 @@ func main() {
 		MPC:        mpcSvc,
 		PVModel:    pvSvc,
 		LoadModel:  loadSvc,
+		Loadpoints: lpMgr,
 		HA:         haBridge,
 		Registry:   reg,
 		Version:    Version,
