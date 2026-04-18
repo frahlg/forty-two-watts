@@ -111,7 +111,8 @@ header h1 {
   padding: 1rem 1.5rem;
   min-height: calc(100vh - 120px);
 }
-#view-diagnose.hidden { display: none; }
+#view-diagnose.hidden,
+#view-live.hidden { display: none; }
 
 .diagnose-header {
   background: var(--surface);

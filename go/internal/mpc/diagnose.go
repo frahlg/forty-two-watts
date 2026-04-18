@@ -78,17 +78,29 @@ func (s *Service) Diagnose() *Diagnostic {
 	if s.last == nil || len(s.lastSlots) == 0 {
 		return nil
 	}
-	// Slots and Actions are generated in the same order by Optimize:
-	// action[i] corresponds to slot[i]. Guard against a mismatch
-	// anyway — better one-off wrong row than a panic in production.
-	n := len(s.lastSlots)
-	if len(s.last.Actions) < n {
-		n = len(s.last.Actions)
+	return buildDiagnostic(s.last, s.lastSlots, s.lastParams, s.Zone,
+		s.lastReplanAt.UnixMilli(), s.lastReason)
+}
+
+// buildDiagnostic assembles a Diagnostic from explicit inputs — no
+// access to Service state. Used by Diagnose() (holds the read lock
+// while calling) and by replan() which passes its locally-captured
+// plan/slots/params to guarantee the persisted snapshot + reason are
+// atomically paired even when a concurrent replan swaps s.last mid-
+// flight.
+func buildDiagnostic(plan *Plan, slots []Slot, p Params, zone string,
+	replanAtMs int64, reason string) *Diagnostic {
+	if plan == nil || len(slots) == 0 {
+		return nil
+	}
+	n := len(slots)
+	if len(plan.Actions) < n {
+		n = len(plan.Actions)
 	}
 	out := make([]DiagnosticSlot, n)
 	for i := 0; i < n; i++ {
-		slot := s.lastSlots[i]
-		action := s.last.Actions[i]
+		slot := slots[i]
+		action := plan.Actions[i]
 		out[i] = DiagnosticSlot{
 			Idx:         i,
 			SlotStartMs: slot.StartMs,
@@ -108,12 +120,11 @@ func (s *Service) Diagnose() *Diagnostic {
 			PVLimitW:    action.PVLimitW,
 		}
 	}
-	p := s.lastParams
 	return &Diagnostic{
-		ComputedAtMs: s.last.GeneratedAtMs,
-		Zone:         s.Zone,
-		Horizon:      s.last.HorizonSlots,
-		TotalCostOre: s.last.TotalCostOre,
+		ComputedAtMs: plan.GeneratedAtMs,
+		Zone:         zone,
+		Horizon:      plan.HorizonSlots,
+		TotalCostOre: plan.TotalCostOre,
 		Params: DiagnosticParams{
 			Mode:                p.Mode,
 			InitialSoCPct:       p.InitialSoCPct,
@@ -131,7 +142,7 @@ func (s *Service) Diagnose() *Diagnostic {
 			ExportFeeOreKwh:     p.ExportFeeOreKwh,
 		},
 		Slots:          out,
-		LastReplanAtMs: s.lastReplanAt.UnixMilli(),
-		LastReason:     s.lastReason,
+		LastReplanAtMs: replanAtMs,
+		LastReason:     reason,
 	}
 }
