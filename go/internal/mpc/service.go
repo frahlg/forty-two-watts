@@ -83,8 +83,10 @@ type Service struct {
 
 	Defaults Params
 
-	mu   sync.RWMutex
-	last *Plan
+	mu         sync.RWMutex
+	last       *Plan
+	lastSlots  []Slot  // inputs that went into the most recent Optimize call
+	lastParams Params  // params that went into the most recent Optimize call
 
 	stop chan struct{}
 	done chan struct{}
@@ -501,6 +503,8 @@ func (s *Service) replan(_ context.Context) *Plan {
 
 	s.mu.Lock()
 	s.last = &plan
+	s.lastSlots = slots
+	s.lastParams = p
 	s.lastReplanAt = time.Now()
 	reason := s.lastReason
 	if reason == "" {

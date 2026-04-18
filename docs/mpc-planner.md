@@ -138,6 +138,7 @@ when the operator has chosen one.
 
 - `GET  /api/mpc/plan` — latest cached plan (mode, horizon, per-slot actions with reasons)
 - `POST /api/mpc/replan` — force an immediate replan
+- `GET  /api/mpc/diagnose` — per-slot audit view: what the DP saw (price, spot, confidence, PV, load) joined with what it decided (battery, grid, SoC, cost, reason) plus the full `Params` the optimize was parameterized with. Meant for debugging "why did the planner decide X at this slot?" without shelling into the host
 - `POST /api/mode {"mode":"planner_arbitrage"}` — activates a strategy AND forces an MPC replan so targets take effect within one control cycle
 
 ---
