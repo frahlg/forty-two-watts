@@ -79,7 +79,7 @@ docker compose up -d
 docker compose ps
 
 # Open the UI, click the version text in the top-right header
-# → modal opens → click "Restart (test)"
+# → modal opens → click "Restart"
 # → the overlay counts down while the sidecar runs pull + up -d --force-recreate
 # → the new main container writes state=done
 # → UI hard-reloads into the (same) version
