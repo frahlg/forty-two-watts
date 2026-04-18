@@ -56,13 +56,17 @@ services:
     network_mode: none
 
     environment:
-      # The sidecar runs `docker compose -f /compose/docker-compose.yml`
-      # internally; without this hint compose would derive its project
-      # name from `/compose` (the mount point) and create a parallel
+      # Point the sidecar's internal `docker compose -f <path>` at the
+      # same absolute host path the user invoked compose with. This
+      # matters because the host daemon — not the sidecar — interprets
+      # the bind paths in the file, so they must be real host paths.
+      FTW_UPDATER_COMPOSE: ${PWD:-.}/docker-compose.yml
+      # Without this the sidecar's internal compose would derive its
+      # project name from the -f file's parent dir and create a parallel
       # set of containers/volumes instead of recreating the real ones.
-      # Defaults to `forty-two-watts` (the repo dir name + the layout
-      # shown in operations.md); override at launch time if you deploy
-      # to a differently-named directory:
+      # Defaults to `forty-two-watts` (matches the layout in
+      # operations.md); override at launch time if your deploy dir is
+      # named differently:
       #   COMPOSE_PROJECT_NAME=myhome docker compose up -d
       COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME:-forty-two-watts}
 
@@ -72,9 +76,15 @@ services:
       # main service. If you want to harden this further, put
       # tecnativa/docker-socket-proxy in front and swap the bind.
       - /var/run/docker.sock:/var/run/docker.sock
-      # Read-only bind of this compose file so the sidecar can
-      # `docker compose -f /compose/docker-compose.yml pull forty-two-watts`.
-      - ./docker-compose.yml:/compose/docker-compose.yml:ro
+      # Bind the WHOLE project directory at its host path, read-only.
+      # Rationale: when the sidecar runs `docker compose up -d`, compose
+      # asks the host daemon to resolve `./data:/app/data` — which the
+      # daemon reads as an ABSOLUTE HOST PATH. If the path inside the
+      # sidecar doesn't match the host, the daemon binds a phantom
+      # directory and the recreated main container boots with empty
+      # state. ${PWD} comes from the shell at `docker compose up` time,
+      # which is the invocation flow documented in operations.md.
+      - ${PWD:-.}:${PWD:-.}:ro
       # Shared with the main container so the update status survives the
       # main app being recreated (tmpfs contents outlive the container
       # lifecycle of individual services that mount the same volume).

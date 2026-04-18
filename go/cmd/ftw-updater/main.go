@@ -44,7 +44,13 @@ type State struct {
 
 type server struct {
 	composeFile string
-	statusPath  string
+	// overrideFiles are auto-discovered compose overrides next to
+	// composeFile (e.g. docker-compose.override.yml). Each one is added
+	// as an extra -f arg to every compose invocation so the sidecar
+	// sees the same merged config the user sees when running compose by
+	// hand from the project dir.
+	overrideFiles []string
+	statusPath    string
 	// skipPull is a dev-only escape hatch: when true, the "pulling" phase
 	// becomes a no-op. Needed for local smoke tests where the image lives
 	// only on the dev machine (`docker compose pull` would fail, or worse,
@@ -57,6 +63,33 @@ type server struct {
 	runMu sync.Mutex
 	// runner lets tests inject a fake exec.
 	runner func(ctx context.Context, args ...string) error
+}
+
+// composeArgs returns the common prefix of every `docker compose` invocation
+// the sidecar makes — the base file plus any auto-discovered overrides,
+// followed by whatever subcommand + args the caller passes.
+func (s *server) composeArgs(sub ...string) []string {
+	out := []string{"compose", "-f", s.composeFile}
+	for _, o := range s.overrideFiles {
+		out = append(out, "-f", o)
+	}
+	return append(out, sub...)
+}
+
+// discoverOverrides looks for the standard override filenames in the same
+// directory as base, in the same order the compose CLI resolves them.
+// Only returns files that actually exist — the list is used verbatim as
+// additional -f flags so a missing file would error the command.
+func discoverOverrides(base string) []string {
+	dir := filepath.Dir(base)
+	var out []string
+	for _, name := range []string{"docker-compose.override.yml", "docker-compose.override.yaml", "compose.override.yml", "compose.override.yaml"} {
+		p := filepath.Join(dir, name)
+		if _, err := os.Stat(p); err == nil {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func main() {
@@ -84,6 +117,14 @@ func main() {
 		statusPath:  *statusPath,
 		skipPull:    *skipPull,
 		runner:      dockerCompose,
+	}
+	// Auto-discover override files alongside the base, the same way the
+	// compose CLI does when invoked without -f. Without this the sidecar
+	// would ignore local dev overrides (network_mode, build args, …) and
+	// recreate the main container with base-file settings only.
+	srv.overrideFiles = discoverOverrides(*compose)
+	if len(srv.overrideFiles) > 0 {
+		slog.Info("ftw-updater: override files discovered", "files", srv.overrideFiles)
 	}
 	if *skipPull {
 		slog.Warn("ftw-updater: skip-pull enabled — production deploys should leave this off")
@@ -168,7 +209,7 @@ func (s *server) runJob(action, target string) {
 	defer cancel()
 
 	if !s.skipPull {
-		pullArgs := []string{"compose", "-f", s.composeFile, "pull", mainServiceName}
+		pullArgs := s.composeArgs("pull", mainServiceName)
 		if err := s.runner(ctx, pullArgs...); err != nil {
 			s.writeState(State{State: "failed", Action: action, Target: target, StartedAt: now, UpdatedAt: time.Now(), Message: "pull failed: " + err.Error()})
 			slog.Error("pull failed", "err", err)
@@ -180,12 +221,12 @@ func (s *server) runJob(action, target string) {
 
 	s.writeState(State{State: "restarting", Action: action, Target: target, StartedAt: now, UpdatedAt: time.Now()})
 
-	upArgs := []string{"compose", "-f", s.composeFile, "up", "-d", mainServiceName}
+	upArgs := s.composeArgs("up", "-d", mainServiceName)
 	if action == "restart" {
 		// --force-recreate is what makes restart actually restart when the
 		// image digest didn't change — exactly the dev/test path the main
 		// UI exposes as the "Restart" button.
-		upArgs = append([]string{"compose", "-f", s.composeFile, "up", "-d", "--force-recreate"}, mainServiceName)
+		upArgs = s.composeArgs("up", "-d", "--force-recreate", mainServiceName)
 	}
 	if err := s.runner(ctx, upArgs...); err != nil {
 		s.writeState(State{State: "failed", Action: action, Target: target, StartedAt: now, UpdatedAt: time.Now(), Message: "up -d failed: " + err.Error()})

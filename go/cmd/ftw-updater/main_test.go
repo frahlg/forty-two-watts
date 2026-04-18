@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -207,6 +208,28 @@ func TestHandleStatus_ReadsFile(t *testing.T) {
 	}
 	if st.State != "pulling" {
 		t.Errorf("state = %q", st.State)
+	}
+}
+
+func TestDiscoverOverridesAndComposeArgs(t *testing.T) {
+	dir := t.TempDir()
+	base := filepath.Join(dir, "docker-compose.yml")
+	if err := os.WriteFile(base, []byte("version: '3'\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// No override yet → no extra -f flags.
+	if got := discoverOverrides(base); len(got) != 0 {
+		t.Errorf("no override yet, got %v", got)
+	}
+	override := filepath.Join(dir, "docker-compose.override.yml")
+	if err := os.WriteFile(override, []byte("version: '3'\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := &server{composeFile: base, overrideFiles: discoverOverrides(base)}
+	args := s.composeArgs("up", "-d", "svc")
+	want := []string{"compose", "-f", base, "-f", override, "up", "-d", "svc"}
+	if strings.Join(args, " ") != strings.Join(want, " ") {
+		t.Errorf("composeArgs =\n  %v\nwant\n  %v", args, want)
 	}
 }
 
