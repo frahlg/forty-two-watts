@@ -1440,16 +1440,122 @@
     evModalBody.appendChild(p);
   }
 
+  // renderLoadpointSoCSection — operator-facing SoC correction UI.
+  // The Easee cloud API is blind to the vehicle's BMS; our current_soc
+  // is inferred from plug-in anchor + delivered_wh. If that drifts
+  // from reality (wrong anchor, mid-session plug-swap, different car)
+  // the operator needs a way to tell us the actual SoC off the
+  // dashboard. This posts to /api/loadpoints/{id}/soc which re-anchors
+  // the session so future observations accumulate from the correct
+  // baseline.
+  function renderLoadpointSoCSection(loadpoints) {
+    var section = document.createElement("div");
+    section.style.marginTop = "1rem";
+    section.style.paddingTop = "0.75rem";
+    section.style.borderTop = "1px solid var(--border)";
+    var h = document.createElement("div");
+    h.style.fontSize = "0.75rem";
+    h.style.color = "var(--text-dim)";
+    h.style.textTransform = "uppercase";
+    h.style.letterSpacing = "0.04em";
+    h.style.marginBottom = "0.5rem";
+    h.textContent = "Loadpoints (planner)";
+    section.appendChild(h);
+    loadpoints.forEach(function (lp) {
+      var row = document.createElement("div");
+      row.style.display = "flex";
+      row.style.alignItems = "center";
+      row.style.gap = "0.5rem";
+      row.style.marginBottom = "0.4rem";
+      var name = document.createElement("span");
+      name.style.flex = "1";
+      name.style.fontWeight = "600";
+      name.textContent = lp.id;
+      var state = document.createElement("span");
+      state.style.fontSize = "0.75rem";
+      state.style.color = "var(--text-dim)";
+      state.textContent = lp.plugged_in
+        ? (lp.current_power_w > 1
+           ? Math.round(lp.current_power_w) + " W"
+           : "plugged, idle")
+        : "unplugged";
+      var socLabel = document.createElement("span");
+      socLabel.style.fontSize = "0.75rem";
+      socLabel.style.color = "var(--text-dim)";
+      socLabel.textContent = "SoC:";
+      var socInput = document.createElement("input");
+      socInput.type = "number";
+      socInput.min = "0";
+      socInput.max = "100";
+      socInput.step = "1";
+      socInput.style.width = "4.5rem";
+      socInput.style.background = "var(--bg)";
+      socInput.style.color = "var(--text)";
+      socInput.style.border = "1px solid var(--border)";
+      socInput.style.borderRadius = "3px";
+      socInput.style.padding = "0.2rem 0.35rem";
+      socInput.disabled = !lp.plugged_in;
+      socInput.title = lp.plugged_in
+        ? "Correct to what your car actually shows"
+        : "Plug in the car to set SoC";
+      socInput.value = lp.plugged_in && lp.current_soc_pct != null
+        ? Math.round(lp.current_soc_pct) : "";
+      var btn = document.createElement("button");
+      btn.textContent = "Set";
+      btn.className = "btn-send";
+      btn.style.padding = "0.2rem 0.55rem";
+      btn.style.fontSize = "0.75rem";
+      btn.disabled = !lp.plugged_in;
+      btn.addEventListener("click", function () {
+        var v = Number(socInput.value);
+        if (!(v >= 0 && v <= 100)) return;
+        btn.disabled = true; btn.textContent = "…";
+        fetch("/api/loadpoints/" + encodeURIComponent(lp.id) + "/soc", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ soc_pct: v }),
+        }).then(function (r) {
+          btn.textContent = r.ok ? "✓" : "×";
+          setTimeout(function () {
+            btn.textContent = "Set"; btn.disabled = !lp.plugged_in;
+            refreshEvModal();
+          }, 800);
+        }).catch(function () {
+          btn.textContent = "×";
+          setTimeout(function () { btn.textContent = "Set"; btn.disabled = false; }, 1200);
+        });
+      });
+      row.appendChild(name);
+      row.appendChild(state);
+      row.appendChild(socLabel);
+      row.appendChild(socInput);
+      row.appendChild(btn);
+      section.appendChild(row);
+    });
+    return section;
+  }
+
   function refreshEvModal() {
-    fetch("/api/ev/status").then(function (r) { return r.json(); }).then(function (d) {
-      if (!d || d.connected === false) {
+    // Fetch both the legacy EV status AND the loadpoint manager state
+    // — the latter is what the MPC actually optimizes against. Shown
+    // as a separate section so operators can correct the inferred
+    // vehicle SoC (our infer is blind without a vehicle API).
+    Promise.all([
+      fetch("/api/ev/status").then(function (r) { return r.json(); }).catch(function () { return null; }),
+      fetch("/api/loadpoints").then(function (r) { return r.json(); }).catch(function () { return null; }),
+    ]).then(function (pair) {
+      var ev = pair[0];
+      var lps = pair[1];
+      evModalBody.textContent = "";
+      if (ev && ev.connected !== false) {
+        evModalBody.appendChild(renderEvStatusTable(ev));
+      } else if (!lps || !lps.loadpoints || lps.loadpoints.length === 0) {
         setEvModalMessage("No EV charger connected");
         return;
       }
-      evModalBody.textContent = "";
-      evModalBody.appendChild(renderEvStatusTable(d));
-    }).catch(function () {
-      setEvModalMessage("Failed to load EV status");
+      if (lps && lps.enabled && lps.loadpoints && lps.loadpoints.length > 0) {
+        evModalBody.appendChild(renderLoadpointSoCSection(lps.loadpoints));
+      }
     });
   }
 

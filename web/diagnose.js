@@ -166,7 +166,14 @@
     // Header metadata
     const ageMin = Math.round((Date.now() - s.ts_ms) / 60000);
     const params = d.params || {};
-    const lpActive = d.slots && d.slots.some(x => x.loadpoint_w);
+    // Show EV columns whenever the snapshot tracked EV state — either
+    // because the DP chose to charge (loadpoint_w > 0) OR because a
+    // loadpoint was plugged in so ev_soc is meaningful even when
+    // charging = 0. Otherwise we'd hide the columns on snapshots
+    // where the plan said "idle the EV this hour" and operators
+    // would never see the SoC trajectory.
+    const lpActive = d.slots && d.slots.some(x =>
+      x.loadpoint_w || x.loadpoint_soc_pct);
     const header = `
       <div class="diagnose-detail-header">
         <div>

@@ -217,12 +217,12 @@
       const actions = hasUpdate
         ? `
             <button class="btn btn-primary" data-action="update">Update to ${escapeHTML(info.latest || "")}</button>
-            <button class="btn" data-action="restart">Restart (test)</button>
+            <button class="btn" data-action="restart">Restart</button>
             <button class="btn btn-ghost" data-action="skip">Skip this version</button>
           `
         : `
             <button class="btn" data-action="check">Check for updates</button>
-            <button class="btn" data-action="restart">Restart (test)</button>
+            <button class="btn" data-action="restart">Restart</button>
           `;
 
       const notesHref = safeHref(info.release_notes_url);

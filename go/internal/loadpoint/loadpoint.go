@@ -252,6 +252,50 @@ func (m *Manager) SetTarget(id string, socPct float64, targetTime time.Time) boo
 	return true
 }
 
+// SetCurrentSoC lets an operator correct the inferred vehicle SoC
+// mid-session. Chargers like Easee don't report the vehicle's actual
+// BMS state, so the manager defaults to
+// `plugin_soc_pct + session_wh / capacity` — which drifts if the
+// plug-in anchor was wrong. This resets the session anchor so the
+// CURRENT estimate equals `socPct` and future observations accumulate
+// from there. Only applies while plugged in; no-op otherwise.
+//
+// Returns false for unknown IDs or when the loadpoint is unplugged.
+func (m *Manager) SetCurrentSoC(id string, socPct float64) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	lp, ok := m.byID[id]
+	if !ok {
+		return false
+	}
+	if !lp.pluggedIn {
+		return false
+	}
+	if socPct < 0 {
+		socPct = 0
+	}
+	if socPct > 100 {
+		socPct = 100
+	}
+	// Re-anchor: new_anchor + delivered/capacity*100 == socPct.
+	// → new_anchor = socPct − delivered/capacity*100
+	deliveredPct := 0.0
+	if lp.VehicleCapacityWh > 0 {
+		deliveredPct = lp.deliveredWhSession / lp.VehicleCapacityWh * 100.0
+	}
+	anchor := socPct - deliveredPct
+	if anchor < 0 {
+		anchor = 0
+	}
+	if anchor > 100 {
+		anchor = 100
+	}
+	lp.sessionPluginSoCPct = anchor
+	lp.currentSoCPct = estimateSoCPct(anchor, lp.deliveredWhSession, lp.VehicleCapacityWh)
+	lp.updatedAtMs = time.Now().UnixMilli()
+	return true
+}
+
 func (lp *loadpointRuntime) snapshot() State {
 	steps := make([]float64, len(lp.AllowedStepsW))
 	copy(steps, lp.AllowedStepsW)
