@@ -406,6 +406,28 @@ func main() {
 	defer loadSvc.Stop()
 	slog.Info("loadmodel started", "peak_w", loadPeakW, "quality", loadSvc.Model().Quality())
 
+	// ---- EV loadpoints (observable + MPC-input) ----
+	// Phase 3 introduced the Loadpoint concept as a first-class
+	// entity the API / UI surfaces. Phase 4 wires the MPC's DP with
+	// the first plugged-in loadpoint's state so battery + EV are
+	// co-optimized in one DP instead of two separate schedulers.
+	lpMgr := loadpoint.NewManager()
+	if len(cfg.Loadpoints) > 0 {
+		lpCfg := make([]loadpoint.Config, 0, len(cfg.Loadpoints))
+		for _, lp := range cfg.Loadpoints {
+			lpCfg = append(lpCfg, loadpoint.Config{
+				ID:                lp.ID,
+				DriverName:        lp.DriverName,
+				MinChargeW:        lp.MinChargeW,
+				MaxChargeW:        lp.MaxChargeW,
+				AllowedStepsW:     lp.AllowedStepsW,
+				VehicleCapacityWh: lp.VehicleCapacityWh,
+			})
+		}
+		lpMgr.Load(lpCfg)
+		slog.Info("loadpoints configured", "count", len(cfg.Loadpoints))
+	}
+
 	// ---- Start MPC planner (optional) ----
 	mpcSvc := buildMPC(cfg, st, tel, capacities)
 	if mpcSvc != nil {
@@ -415,6 +437,50 @@ func main() {
 		mpcSvc.Load = loadSvc.Predict
 		mpcSvc.Price = priceFc.Predict
 		mpcSvc.SiteMeter = cfg.SiteMeterDriver()
+		// Wire the loadpoint probe so the DP extends its state space
+		// when an EV is plugged in. Single-loadpoint for now: picks
+		// the first plugged-in one.
+		mpcSvc.Loadpoint = func() *mpc.LoadpointSpec {
+			for _, st := range lpMgr.States() {
+				if !st.PluggedIn {
+					continue
+				}
+				// Pull capacity off the configured loadpoint.
+				var capWh float64 = 60000 // 60 kWh fallback
+				for _, c := range cfg.Loadpoints {
+					if c.ID == st.ID && c.VehicleCapacityWh > 0 {
+						capWh = c.VehicleCapacityWh
+						break
+					}
+				}
+				// Map target time → slot index. The replan loop
+				// decides slot boundaries, so a "target by X" maps
+				// to "hours from now" → slot index. Anything past
+				// horizon maps to horizon end.
+				targetSlot := -1
+				if !st.TargetTime.IsZero() {
+					delta := time.Until(st.TargetTime)
+					if delta > 0 {
+						targetSlot = int(delta / (15 * time.Minute))
+					}
+				}
+				return &mpc.LoadpointSpec{
+					ID:              st.ID,
+					CapacityWh:      capWh,
+					Levels:          11,
+					MinPct:          0,
+					MaxPct:          100,
+					InitialSoCPct:   st.CurrentSoCPct,
+					PluggedIn:       true,
+					TargetSoCPct:    st.TargetSoCPct,
+					TargetSlotIdx:   targetSlot,
+					MaxChargeW:      st.MaxChargeW,
+					AllowedStepsW:   st.AllowedStepsW,
+					ChargeEfficiency: 0.9,
+				}
+			}
+			return nil
+		}
 		if cfg.Price != nil {
 			mpcSvc.ExportBonusOreKwh = cfg.Price.ExportBonusOreKwh
 			mpcSvc.ExportFeeOreKwh = cfg.Price.ExportFeeOreKwh
@@ -464,28 +530,6 @@ func main() {
 			"horizon", mpcSvc.Horizon,
 			"interval", mpcSvc.Interval,
 			"pvtwin", pvSvc != nil)
-	}
-
-	// ---- EV loadpoints (observable skeleton) ----
-	// Phase 3 of the planner overhaul introduces the Loadpoint concept
-	// as a first-class entity the API / UI can surface. Phase 4 extends
-	// the MPC's DP with per-loadpoint state + wires Observe() into
-	// charger drivers.
-	lpMgr := loadpoint.NewManager()
-	if len(cfg.Loadpoints) > 0 {
-		lpCfg := make([]loadpoint.Config, 0, len(cfg.Loadpoints))
-		for _, lp := range cfg.Loadpoints {
-			lpCfg = append(lpCfg, loadpoint.Config{
-				ID:                lp.ID,
-				DriverName:        lp.DriverName,
-				MinChargeW:        lp.MinChargeW,
-				MaxChargeW:        lp.MaxChargeW,
-				AllowedStepsW:     lp.AllowedStepsW,
-				VehicleCapacityWh: lp.VehicleCapacityWh,
-			})
-		}
-		lpMgr.Load(lpCfg)
-		slog.Info("loadpoints configured", "count", len(cfg.Loadpoints))
 	}
 
 	// ---- Start HTTP API ----

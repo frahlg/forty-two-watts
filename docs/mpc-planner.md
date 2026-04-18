@@ -140,6 +140,8 @@ when the operator has chosen one.
 - `POST /api/mpc/replan` — force an immediate replan
 - `GET  /api/mpc/diagnose` — per-slot audit view: what the DP saw (price, spot, confidence, PV, load) joined with what it decided (battery, grid, SoC, cost, reason) plus the full `Params` the optimize was parameterized with. Meant for debugging "why did the planner decide X at this slot?" without shelling into the host
 - `POST /api/mode {"mode":"planner_arbitrage"}` — activates a strategy AND forces an MPC replan so targets take effect within one control cycle
+- `GET  /api/loadpoints` — list configured EV loadpoints + observable state (plug, SoC, power, session Wh)
+- `POST /api/loadpoints/{id}/target` — set user intent `{soc_pct: 80, target_time_ms: …}`; triggers an MPC replan
 
 ---
 
@@ -249,3 +251,49 @@ If you add a new predictor or new time-field access inside the
 planner, coerce `t` with `t.UTC()` first. Tests
 (`TestPredictStableAcrossDST`, `TestHourOfWeekStableAcrossDST`,
 `TestFeaturesStableAcrossDST`) enforce the invariant per package.
+
+---
+
+## Unified EV charging (Phase 4)
+
+When one or more loadpoints are configured and the MPC's `LoadpointProbe`
+sees a plugged-in EV, the DP extends its state space with a per-vehicle
+SoC dimension. The optimization then schedules **battery AND EV actions
+jointly** rather than treating the EV as uncontrolled load — avoiding
+the "two planners fighting" problem that happens when an external EVCC-
+style scheduler runs alongside our MPC.
+
+Per-slot decision space expands from `(battery_soc, battery_action)` to
+`(battery_soc, ev_soc, battery_action, ev_action)`. The EV action set is
+discrete (the charger's allowed W levels), which lets us handle the
+disjunctive 1-phase↔3-phase gap without MILP.
+
+### Target + deadline
+
+User intent (`POST /api/loadpoints/{id}/target`) sets `target_soc_pct` +
+`target_time_ms`. The planner maps the time to a horizon slot index
+and adds a shortfall penalty at that slot: missing the target costs
+`missed_kwh × horizon_mean_price × 4`. Factor 4 is tuned so meeting the
+target dominates any single-slot charging cost, with lexicographic
+degradation when infeasible — if the vehicle can't reach target by
+deadline, the DP maximizes delivered energy instead of returning no plan.
+
+### No deadline
+
+`target_soc_pct == 0` or `target_time_ms == 0` means "charge
+opportunistically". No penalty, no push — the DP will only charge when
+a slot is cheap enough to be worth it relative to battery alternatives
+and terminal credit.
+
+### Output
+
+`Action.LoadpointW` per slot (W, positive = charging) and
+`Action.LoadpointSoCPct` (post-slot EV SoC). The SlotDirective the EMS
+consumes carries `LoadpointEnergyWh[id]` and `LoadpointSoCTargetPct[id]`
+for the dispatch layer.
+
+### What's not yet wired
+
+- Driver-side charger capability (`ChargerCap`) — coming in Phase 4.1
+- Per-loadpoint divergence check for reactive replan
+- UI for setting target + target-time (API is ready; web-form follows)
