@@ -124,6 +124,17 @@ func (w *Watcher) reload() {
 	if newCfg.Site.MinDispatchIntervalS != oldCfg.Site.MinDispatchIntervalS {
 		w.ctrl.MinDispatchIntervalS = newCfg.Site.MinDispatchIntervalS
 	}
+	// Promote / demote the site meter. Without this, adding a meter
+	// driver via /settings wires up the driver itself (telemetry flows,
+	// shows up in Advanced) but `api.handleStatus` keeps reading
+	// `ctrl.SiteMeterDriver` — which was empty at boot when no meter
+	// was configured yet — so the hero UI's grid_w stays at 0 and the
+	// meter looks "missing from the flow" even though it's emitting.
+	newSite := newCfg.SiteMeterDriver()
+	if newSite != w.ctrl.SiteMeterDriver {
+		slog.Info("config reload: site_meter", "old", w.ctrl.SiteMeterDriver, "new", newSite)
+		w.ctrl.SiteMeterDriver = newSite
+	}
 	w.ctrlMu.Unlock()
 
 	// Swap global pointer
