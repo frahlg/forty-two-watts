@@ -12,7 +12,11 @@ import (
 )
 
 // stateKey is the config k/v key where we persist the model JSON.
-const stateKey = "pvmodel/state"
+// The `_utc` suffix invalidates pre-UTC-coercion models: learned β
+// coefficients were fitted against local-zone hour-of-day harmonic
+// features and would silently misalign if restored under the current
+// UTC-based Features(). Fresh init + ~50 samples retrains.
+const stateKey = "pvmodel/state_utc"
 
 // ClearSkyFunc is injected by main.go to decouple pvmodel from the
 // forecast package. Returns clear-sky GHI (W/m²) for the site's lat/lon

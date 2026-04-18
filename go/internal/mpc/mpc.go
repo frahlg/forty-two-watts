@@ -453,6 +453,21 @@ func Optimize(slots []Slot, p Params) Plan {
 						}
 					}
 				}
+				// If every action at this (slot, soc, ev_soc) state
+				// was rejected (mode + PowerLimits combined out of
+				// feasibility), bestV stays +Inf and bestPolicy
+				// defaults to 0 — which encodes (battery action 0,
+				// EV action 0) = "full discharge, EV off", NOT
+				// "idle". A forward-sim that reaches this state
+				// would pick the worst possible action. Fall back
+				// to closest-to-idle: battery action at the middle
+				// of the grid (≈0 W when ActionLevels is odd) and
+				// EV off. The +Inf V propagates upstream so the
+				// DP avoids routing through this infeasible region
+				// when a legal path exists.
+				if math.IsInf(bestV, 1) {
+					bestPolicy = ((A - 1) / 2) * EA
+				}
 				V[t][si][ei] = bestV
 				Policy[t][si][ei] = bestPolicy
 			}

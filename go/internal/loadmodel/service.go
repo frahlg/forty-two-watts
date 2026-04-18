@@ -16,7 +16,10 @@ import (
 // package from the forecast module.
 type TempFunc func(t time.Time) (float64, bool)
 
-const stateKey = "loadmodel/state"
+// Bumped from "loadmodel/state" after HourOfWeek switched to UTC
+// coercion: pre-switch buckets were indexed in local zone and would
+// silently misalign if restored. Fresh init retrains from telemetry.
+const stateKey = "loadmodel/state_utc"
 
 // Service trains the load model online from telemetry. Mirrors
 // pvmodel.Service so operators + future code have one pattern.

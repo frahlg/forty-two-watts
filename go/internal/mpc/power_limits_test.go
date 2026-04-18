@@ -112,6 +112,48 @@ func TestOptimizeRespectsImportCap(t *testing.T) {
 	}
 }
 
+// TestOptimizeInfeasibleStatePicksNearIdle — when every action at a
+// state violates limits or mode, the DP previously left Policy at 0
+// which encodes "full discharge, EV off" — the worst possible
+// fallback. We now pick the closest-to-idle action so forward-sim
+// produces something sensible. Codex flagged this in PR #99 review.
+func TestOptimizeInfeasibleStatePicksNearIdle(t *testing.T) {
+	// One slot with BOTH import and export hard-capped to 0 → no
+	// grid flow allowed. Baseline load (+ no PV) is 500 W of import,
+	// already violating MaxImportW=1. No feasible action exists.
+	// Forward-sim should pick battery action ≈ 0 (action index =
+	// (A-1)/2 with A=5 → index 2 → 0 W at the mid-point of the
+	// action grid).
+	slots := []Slot{
+		{StartMs: 0, LenMin: 60, PriceOre: 50, SpotOre: 20,
+			LoadW: 500, Confidence: 1.0,
+			Limits: PowerLimits{MaxImportW: 1, MaxExportW: 1}},
+	}
+	p := Params{
+		Mode:                ModeSelfConsumption,
+		SoCLevels:           11,
+		CapacityWh:          5000,
+		SoCMinPct:           10,
+		SoCMaxPct:           95,
+		InitialSoCPct:       50,
+		ActionLevels:        5,
+		MaxChargeW:          2000,
+		MaxDischargeW:       2000,
+		ChargeEfficiency:    0.95,
+		DischargeEfficiency: 0.95,
+	}
+	plan := Optimize(slots, p)
+	if len(plan.Actions) != 1 {
+		t.Fatalf("expected 1 action, got %d", len(plan.Actions))
+	}
+	// Key assertion: fallback is near-idle, NOT full-discharge (−2000 W).
+	a := plan.Actions[0]
+	if a.BatteryW < -500 {
+		t.Errorf("infeasible fallback should be near-idle, "+
+			"got BatteryW=%.1f (full-discharge = −2000)", a.BatteryW)
+	}
+}
+
 // TestOptimizeRespectsExportCap mirrors the import test — PV surplus
 // exported into a negative-price slot must respect the cap.
 func TestOptimizeRespectsExportCap(t *testing.T) {

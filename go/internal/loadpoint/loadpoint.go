@@ -117,7 +117,11 @@ func (m *Manager) Load(cfgs []Config) {
 		}
 		lp := &loadpointRuntime{Config: c}
 		if existing, ok := m.byID[c.ID]; ok {
-			// Preserve observed state across reload.
+			// Preserve observed state across reload. The session
+			// plug-in anchor is carried too — otherwise a config
+			// hot-reload during a charging session would drop our
+			// SoC reference and reset the estimate back to
+			// PluginSoCPct even though delivered_wh has grown.
 			lp.pluggedIn = existing.pluggedIn
 			lp.currentSoCPct = existing.currentSoCPct
 			lp.currentPowerW = existing.currentPowerW
@@ -125,6 +129,7 @@ func (m *Manager) Load(cfgs []Config) {
 			lp.targetSoCPct = existing.targetSoCPct
 			lp.targetTime = existing.targetTime
 			lp.updatedAtMs = existing.updatedAtMs
+			lp.sessionPluginSoCPct = existing.sessionPluginSoCPct
 		}
 		newByID[c.ID] = lp
 		newOrder = append(newOrder, c.ID)

@@ -28,14 +28,16 @@ type LoadPredictor func(t time.Time) float64
 type PricePredictor func(zone string, t time.Time) float64
 
 // LoadpointProbe returns the EV loadpoint state the DP should extend
-// itself with. Called once per replan. Return nil when no loadpoint
+// itself with. Called once per replan with the slot length (minutes)
+// the DP will actually use — so the probe can map any user wall-clock
+// deadline to a correct slot index. Return nil when no loadpoint
 // should be optimized (unplugged, unconfigured, or during initial
 // rollout when operator wants to disable EV-in-DP).
 //
 // Wired in main.go against *loadpoint.Manager; kept as a plain
 // closure type to avoid the mpc package importing loadpoint (which
 // would risk a cycle if loadpoint ever needs mpc types).
-type LoadpointProbe func() *LoadpointSpec
+type LoadpointProbe func(slotLenMin int) *LoadpointSpec
 
 // Service wires the optimizer to the rest of the stack: pulls prices +
 // forecast from the SQLite store, reads current SoC from the telemetry
@@ -175,8 +177,12 @@ func (s *Service) SlotDirectiveAt(now time.Time) (SlotDirective, bool) {
 	if s == nil {
 		return SlotDirective{}, false
 	}
+	// Snapshot plan + loadpoint ID together under the same RLock so
+	// a concurrent replan() can't swap one without the other — a
+	// classic read-race that Codex flagged.
 	s.mu.RLock()
 	p := s.last
+	lpID := s.lastLoadpointID
 	s.mu.RUnlock()
 	if p == nil {
 		return SlotDirective{}, false
@@ -201,15 +207,15 @@ func (s *Service) SlotDirectiveAt(now time.Time) (SlotDirective, bool) {
 			Strategy:        s.Defaults.Mode,
 		}
 		// EV energy budget for the slot (single-loadpoint for now —
-		// keyed under lastLoadpointID so the dispatch layer routes
+		// keyed under lpID snapshot so the dispatch layer routes
 		// to the right driver).
-		if a.LoadpointW > 0 && s.lastLoadpointID != "" {
+		if a.LoadpointW > 0 && lpID != "" {
 			lpEnergyWh := a.LoadpointW * float64(a.SlotLenMin) / 60.0
 			d.LoadpointEnergyWh = map[string]float64{
-				s.lastLoadpointID: lpEnergyWh,
+				lpID: lpEnergyWh,
 			}
 			d.LoadpointSoCTargetPct = map[string]float64{
-				s.lastLoadpointID: a.LoadpointSoCPct,
+				lpID: a.LoadpointSoCPct,
 			}
 		}
 		return d, true
@@ -525,7 +531,11 @@ func (s *Service) replan(_ context.Context) *Plan {
 	// support is on the roadmap.
 	var loadpointID string
 	if s.Loadpoint != nil {
-		if spec := s.Loadpoint(); spec != nil && spec.PluggedIn {
+		slotLenMin := 60 // safe fallback — most price sources are hourly
+		if len(slots) > 0 && slots[0].LenMin > 0 {
+			slotLenMin = slots[0].LenMin
+		}
+		if spec := s.Loadpoint(slotLenMin); spec != nil && spec.PluggedIn {
 			p.Loadpoint = spec
 			loadpointID = spec.ID
 		}

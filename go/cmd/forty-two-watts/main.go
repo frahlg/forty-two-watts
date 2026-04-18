@@ -215,6 +215,17 @@ func main() {
 	var pvSvc *pvmodel.Service
 	var forecastSvc *forecast.Service
 
+	// ---- EV loadpoints ----
+	// Manager is created early so the config hot-reload closure can
+	// reference it; actual Load() runs against initial cfg below.
+	// Phase 4 wires the first plugged-in loadpoint's state into the
+	// MPC's DP so battery + EV are co-optimized in one DP.
+	lpMgr := loadpoint.NewManager()
+	if len(cfg.Loadpoints) > 0 {
+		lpMgr.Load(buildLoadpointConfigs(cfg.Loadpoints))
+		slog.Info("loadpoints configured", "count", len(cfg.Loadpoints))
+	}
+
 	// ---- Config hot-reload watcher ----
 	watcher, err := configreload.New(*configPath, cfgMu, cfg, ctrlMu, ctrl,
 		func(newCfg, oldCfg *config.Config) {
@@ -237,6 +248,12 @@ func main() {
 				capacities[k] = v
 			}
 			capMu.Unlock()
+
+			// Hot-reload EV loadpoints so operators can add / remove /
+			// retune them without restarting. Manager preserves
+			// observed state across reloads (plug status, session
+			// anchor, current SoC estimate) — see loadpoint.Manager.Load.
+			lpMgr.Load(buildLoadpointConfigs(newCfg.Loadpoints))
 
 			// Weather diff → push live into the PV twin + forecast
 			// fetcher without a process restart. Users adjust rated PV
@@ -406,28 +423,6 @@ func main() {
 	defer loadSvc.Stop()
 	slog.Info("loadmodel started", "peak_w", loadPeakW, "quality", loadSvc.Model().Quality())
 
-	// ---- EV loadpoints (observable + MPC-input) ----
-	// Phase 3 introduced the Loadpoint concept as a first-class
-	// entity the API / UI surfaces. Phase 4 wires the MPC's DP with
-	// the first plugged-in loadpoint's state so battery + EV are
-	// co-optimized in one DP instead of two separate schedulers.
-	lpMgr := loadpoint.NewManager()
-	if len(cfg.Loadpoints) > 0 {
-		lpCfg := make([]loadpoint.Config, 0, len(cfg.Loadpoints))
-		for _, lp := range cfg.Loadpoints {
-			lpCfg = append(lpCfg, loadpoint.Config{
-				ID:                lp.ID,
-				DriverName:        lp.DriverName,
-				MinChargeW:        lp.MinChargeW,
-				MaxChargeW:        lp.MaxChargeW,
-				AllowedStepsW:     lp.AllowedStepsW,
-				VehicleCapacityWh: lp.VehicleCapacityWh,
-			})
-		}
-		lpMgr.Load(lpCfg)
-		slog.Info("loadpoints configured", "count", len(cfg.Loadpoints))
-	}
-
 	// ---- Start MPC planner (optional) ----
 	mpcSvc := buildMPC(cfg, st, tel, capacities)
 	if mpcSvc != nil {
@@ -440,7 +435,7 @@ func main() {
 		// Wire the loadpoint probe so the DP extends its state space
 		// when an EV is plugged in. Single-loadpoint for now: picks
 		// the first plugged-in one.
-		mpcSvc.Loadpoint = func() *mpc.LoadpointSpec {
+		mpcSvc.Loadpoint = func(slotLenMin int) *mpc.LoadpointSpec {
 			for _, st := range lpMgr.States() {
 				if !st.PluggedIn {
 					continue
@@ -453,15 +448,19 @@ func main() {
 						break
 					}
 				}
-				// Map target time → slot index. The replan loop
-				// decides slot boundaries, so a "target by X" maps
-				// to "hours from now" → slot index. Anything past
-				// horizon maps to horizon end.
+				// Map target time → slot index using the DP's
+				// actual slot length (hour-of-prices vs. 15-min
+				// quarters vary by market). Anything past horizon
+				// gets clamped by the DP itself; negative means
+				// "no deadline".
+				if slotLenMin <= 0 {
+					slotLenMin = 60
+				}
 				targetSlot := -1
 				if !st.TargetTime.IsZero() {
 					delta := time.Until(st.TargetTime)
 					if delta > 0 {
-						targetSlot = int(delta / (15 * time.Minute))
+						targetSlot = int(delta / (time.Duration(slotLenMin) * time.Minute))
 					}
 				}
 				return &mpc.LoadpointSpec{
@@ -783,32 +782,32 @@ func main() {
 					if !plugged {
 						continue
 					}
+					// Resolve this tick's EV setpoint. Default 0 W so
+					// the charger is explicitly told to stand down
+					// whenever the MPC has no allocation for this
+					// slot — without an explicit command, the
+					// charger silently keeps drawing at its last
+					// setpoint from a previous slot.
+					var cmdW float64
 					d, ok := mpcSvc.SlotDirectiveAt(time.Now())
-					if !ok || d.LoadpointEnergyWh == nil {
-						continue
+					if ok {
+						if budgetWh, hasBudget := d.LoadpointEnergyWh[lpCfg.ID]; hasBudget {
+							remainingS := d.SlotEnd.Sub(time.Now()).Seconds()
+							// Subtract what's already been delivered
+							// so a mid-slot dispatch doesn't
+							// overshoot. Approximated from current
+							// power × fraction of slot elapsed.
+							elapsed := d.SlotEnd.Sub(d.SlotStart).Seconds() - remainingS
+							if elapsed < 0 {
+								elapsed = 0
+							}
+							alreadyWh := powerW * elapsed / 3600.0
+							remainingWh := budgetWh - alreadyWh
+							wantW := control.EnergyBudgetToPowerW(remainingWh, remainingS)
+							cmdW = control.SnapChargeW(wantW, lpCfg.MinChargeW,
+								lpCfg.MaxChargeW, lpCfg.AllowedStepsW)
+						}
 					}
-					budgetWh, hasBudget := d.LoadpointEnergyWh[lpCfg.ID]
-					if !hasBudget {
-						continue
-					}
-					remainingS := d.SlotEnd.Sub(time.Now()).Seconds()
-					// The budget is total energy for the slot; we
-					// subtract what's already been delivered so far
-					// so a mid-slot dispatch doesn't overshoot.
-					// Without a per-slot start-energy anchor, we
-					// approximate "delivered this slot" as the
-					// charger's current power × fraction of slot
-					// elapsed. In practice most dispatch ticks are
-					// late in the slot so the error is small.
-					elapsed := d.SlotEnd.Sub(d.SlotStart).Seconds() - remainingS
-					if elapsed < 0 {
-						elapsed = 0
-					}
-					alreadyWh := powerW * elapsed / 3600.0
-					remainingWh := budgetWh - alreadyWh
-					wantW := control.EnergyBudgetToPowerW(remainingWh, remainingS)
-					cmdW := control.SnapChargeW(wantW, lpCfg.MinChargeW,
-						lpCfg.MaxChargeW, lpCfg.AllowedStepsW)
 					payload, _ := json.Marshal(map[string]any{
 						"action":  "ev_set_current",
 						"power_w": cmdW,
@@ -906,6 +905,25 @@ func driverCapacitiesFrom(drivers []config.Driver) map[string]float64 {
 		if d.BatteryCapacityWh > 0 {
 			out[d.Name] = d.BatteryCapacityWh
 		}
+	}
+	return out
+}
+
+// buildLoadpointConfigs adapts YAML-facing config.Loadpoint entries
+// into the internal loadpoint.Config shape. Shared between initial
+// boot and the hot-reload watcher so the two paths can't drift.
+func buildLoadpointConfigs(src []config.Loadpoint) []loadpoint.Config {
+	out := make([]loadpoint.Config, 0, len(src))
+	for _, lp := range src {
+		out = append(out, loadpoint.Config{
+			ID:                lp.ID,
+			DriverName:        lp.DriverName,
+			MinChargeW:        lp.MinChargeW,
+			MaxChargeW:        lp.MaxChargeW,
+			AllowedStepsW:     lp.AllowedStepsW,
+			VehicleCapacityWh: lp.VehicleCapacityWh,
+			PluginSoCPct:      lp.PluginSoCPct,
+		})
 	}
 	return out
 }
