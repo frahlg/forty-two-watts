@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"net/http"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -1150,7 +1151,11 @@ func (s *Server) handleMPCDiagnoseHistory(w http.ResponseWriter, r *http.Request
 		return
 	}
 	// If the query window extends before the SQLite retention and we
-	// have a cold-storage root configured, top up with Parquet.
+	// have a cold-storage root configured, top up with Parquet. After
+	// merging we re-sort newest-first and re-apply the caller's limit
+	// so the combined response honours the same contract as the
+	// pure-hot path (otherwise cold rows would append at the tail and
+	// break the "newest first" promise + could overshoot `limit`).
 	coldDir := s.deps.ColdDir
 	if coldDir != "" {
 		hotCutoff := now - int64(state.DiagnosticsRecentRetention/time.Millisecond)
@@ -1160,8 +1165,14 @@ func (s *Server) handleMPCDiagnoseHistory(w http.ResponseWriter, r *http.Request
 				coldUntil = until
 			}
 			cold, cerr := s.deps.State.LoadDiagnosticsFromParquet(coldDir, since, coldUntil)
-			if cerr == nil {
+			if cerr == nil && len(cold) > 0 {
 				summaries = append(summaries, cold...)
+				sort.Slice(summaries, func(i, j int) bool {
+					return summaries[i].TsMs > summaries[j].TsMs
+				})
+				if limit > 0 && len(summaries) > limit {
+					summaries = summaries[:limit]
+				}
 			}
 		}
 	}

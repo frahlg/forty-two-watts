@@ -581,6 +581,7 @@ func (s *Service) replan(_ context.Context) *Plan {
 	if reason == "" {
 		reason = "manual"
 	}
+	replanAtMs := s.lastReplanAt.UnixMilli()
 	s.mu.Unlock()
 	slog.Info("mpc: replanned",
 		"slots", len(slots),
@@ -590,11 +591,16 @@ func (s *Service) replan(_ context.Context) *Plan {
 
 	// Persist a diagnostic snapshot so operators can time-travel to
 	// this replan later. Best-effort: errors log and continue so a
-	// flaky disk never blocks planning. Runs outside the lock — the
-	// plan pointer is already swapped in, so Diagnose() reads
-	// consistent state without needing us to hold anything.
+	// flaky disk never blocks planning.
+	//
+	// Critically: build from the LOCAL plan/slots/p we just computed,
+	// not from s.last via Diagnose(). A concurrent replan could have
+	// swapped s.last between our unlock and the Diagnose() call,
+	// which would pair a different plan with OUR reason — writing a
+	// corrupt snapshot. Using the locals keeps (plan, reason)
+	// atomically consistent even under concurrent replans.
 	if s.SaveDiag != nil {
-		if d := s.Diagnose(); d != nil {
+		if d := buildDiagnostic(&plan, slots, p, s.Zone, replanAtMs, reason); d != nil {
 			if err := s.SaveDiag(d, reason); err != nil {
 				slog.Warn("mpc: persist diagnostic failed", "err", err)
 			}

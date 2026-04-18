@@ -140,6 +140,11 @@
     try {
       const r = await fetch('/api/mpc/diagnose/at?ts=' + tsMs);
       const j = await r.json();
+      // Discard stale responses: if the user clicked a different
+      // snapshot while this fetch was in flight, state.selectedTs
+      // has moved on. Rendering here would flash the old detail
+      // on top of the user's newer click.
+      if (state.selectedTs !== tsMs) return;
       if (!j || !j.snapshot) {
         if (el) el.innerHTML = '<div class="diagnose-empty">Snapshot not found.</div>';
         return;
@@ -147,6 +152,7 @@
       state.detail = j.snapshot;
       renderDetail();
     } catch (e) {
+      if (state.selectedTs !== tsMs) return;
       if (el) el.innerHTML = `<div class="diagnose-empty">Error: ${escapeHtml(e.message)}</div>`;
     }
   }
