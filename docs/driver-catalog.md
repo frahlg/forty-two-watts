@@ -6,8 +6,8 @@ in `drivers/` that follows the v2.1 host API (see
 
 ## At a glance
 
-21 drivers covering 17 manufacturers across 3 protocols (Modbus TCP,
-MQTT, HTTP/REST). Read-only: 12. With control: 9.
+22 drivers covering 17 manufacturers across 3 protocols (Modbus TCP,
+MQTT, HTTP/REST). Read-only: 13. With control: 9.
 
 Protocols in use: Modbus TCP, MQTT, HTTP/REST.
 
@@ -31,6 +31,7 @@ back to the device; read-only drivers only emit telemetry.
 | Huawei SUN2000 | Huawei | Modbus | battery, meter, pv | yes | SUN2000-10KTL-M1, SUN2000-5KTL-L1 | `drivers/huawei.lua` |
 | CTEK Chargestorm (API v1) | CTEK | Modbus | ev | yes | Chargestorm Connected 2/3 (CSOS ≥ 4.9.3) | `drivers/ctek.lua` |
 | CTEK Chargestorm (API v2) | CTEK | Modbus | ev | yes | Chargestorm Connected 2/3 (CSOS ≥ 4.9.3) | `drivers/ctek_v2.lua` |
+| CTEK Chargestorm (MQTT, telemetry) | CTEK | MQTT | ev | no | Chargestorm Connected 2/3 (CSOS ≥ 3.11.15.1) | `drivers/ctek_mqtt.lua` |
 | Kostal Plenticore Plus / Piko IQ | Kostal | Modbus | battery, meter, pv | no | Plenticore Plus 10, Piko IQ 7.0 | `drivers/kostal.lua` |
 | Pixii PowerShaper | Pixii | Modbus | battery, meter | no | PowerShaper 2, PowerShaper 20 | `drivers/pixii.lua` |
 | SMA Sunny Tripower / Sunny Boy Storage | SMA | Modbus | battery, meter, pv | no | Sunny Tripower 10.0, Sunny Boy Storage 3.7 | `drivers/sma.lua` |
