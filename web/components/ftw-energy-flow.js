@@ -315,58 +315,45 @@ class FtwEnergyFlow extends FtwElement {
       ? this._readings.batteries
       : [{ name: "", kw: 0, soc: null, placeholder: true }];
 
-    // Compact mode tightens the four cardinal anchors, crops the
-    // viewBox for a uniform zoom, and swaps the rectangular node boxes
-    // for circular disks that echo the central hub — less visual
-    // noise and a natural "× of nodes around a hub" silhouette.
-    const topY    = this._compact ? 90       : TOP_Y;
-    const botY    = this._compact ? H - 90   : BOT_Y;
-    const leftX   = this._compact ? 285      : LEFT_X;
-    const rightX  = this._compact ? W - 285  : RIGHT_X;
-    const vbX     = this._compact ? 180      : 0;
-    const vbW     = this._compact ? 640      : W;
-    const boxW    = this._compact ? 210      : BOX_W;
-    const boxH    = this._compact ? 110      : BOX_H;
-    const textY   = this._compact
-      ? { title: 26, value: 62, sub: 90, soc: 100 }
-      : { title: 20, value: 46, sub: 64, soc: 70  };
-    // Circular geometry (compact only). nodeR sized so 30 px value +
-    // 18 px title + 16 px sub line up inside without overflowing; hubR
-    // grown so the bigger house icon + bigger load value + CONSUMING
-    // label stop crowding each other the way they did at HUB_R=64 with
-    // compact fonts.
-    const nodeR       = 86;
-    const hubR        = this._compact ? 95       : HUB_R;
-    const hubIconY    = this._compact ? CY - 49  : CY - 30;
-    // Baseline placed so the value text's visual center sits midway
-    // between the icon bottom (CY - 23 in compact) and the label top
-    // (~CY + 23). A 28 px cap-height sits ~7 px above its baseline, so
-    // baseline at CY + 10 puts the centerline near CY.
-    const hubValueY   = this._compact ? CY + 10  : CY + 16;
-    const hubLabelY   = this._compact ? CY + 34  : CY + 32;
+    // × layout with circular nodes at every viewport size. Two tiers of
+    // parameters: desktop keeps the full 0..1000 viewBox with larger
+    // circles + hub; compact crops to 180..820 and shrinks the
+    // geometry so the uniform zoom from preserveAspectRatio lands
+    // readable at phone widths. Hub text y-offsets are tier-specific
+    // so the load value sits visually centered between the house icon
+    // and the CONSUMING label at both sizes.
+    const P = this._compact
+      ? {
+          vbX: 180, vbW: 640,
+          leftX: 285, rightX: 715,
+          topY: 90, botY: 440,
+          baseR: 86, hubR: 95,
+          hubIconY: CY - 49, hubValueY: CY + 10, hubLabelY: CY + 34,
+        }
+      : {
+          vbX: 0, vbW: W,
+          leftX: 240, rightX: 760,
+          topY: 130, botY: 400,
+          baseR: 105, hubR: 110,
+          hubIconY: CY - 56, hubValueY: CY + 10, hubLabelY: CY + 40,
+        };
 
-    // Compact rotates the cardinal "+" to an "×": each box owns its own
-    // quadrant instead of competing for a midline strip. PV top-left,
-    // battery top-right, grid bottom-left, EV bottom-right preserves
-    // each box's original cardinal intuition (PV still up, EV still
-    // down, grid still left, battery still right) while doubling the
-    // per-box area budget on a roughly-square viewport. Multi-device
-    // clusters fall back to a vertical stack from the corner anchor —
-    // starts to overflow at n > 2, acceptable for v1.
-    const pvPositions = this._compact
-      ? clusterV(pvList.length,  leftX,  topY,  boxH, GAP_V)
-      : clusterH(pvList.length,  CX,     topY,  boxW, GAP_H);
-    const batPositions = this._compact
-      ? clusterV(batList.length, rightX, topY,  boxH, GAP_V)
-      : clusterV(batList.length, rightX, CY,    boxH, GAP_V);
-    const gridPos = this._compact ? { x: leftX,  y: botY } : { x: leftX, y: CY };
-    const evPos   = this._compact ? { x: rightX, y: botY } : { x: CX,    y: botY };
-
-    // Diagonal beams use corner-based geometry in edge() — see the
-    // `diagonal` param. Stripe direction (via `side`) stays cardinal so
-    // each box still reads as "top / right / left / bottom" even when
-    // physically positioned in a corner.
-    const diag = this._compact;
+    // Multi-device cluster in the PV (top-left) quadrant. Bounds run
+    // from the viewBox left edge to the hub's left edge; clusterAt
+    // shrinks the circles to fit n side-by-side and centers the row
+    // within those bounds. Single-device keeps baseR and sits on the
+    // corner anchor for the classic × silhouette.
+    const pvC = clusterAt(
+      pvList.length, P.leftX, P.topY, P.baseR,
+      P.vbX + 10, CX - P.hubR - 18,
+    );
+    // Battery: top-right quadrant, hub-left to viewBox-right.
+    const batC = clusterAt(
+      batList.length, P.rightX, P.topY, P.baseR,
+      CX + P.hubR + 18, P.vbX + P.vbW - 10,
+    );
+    const gridPos = { x: P.leftX,  y: P.botY };
+    const evPos   = { x: P.rightX, y: P.botY };
 
     // Build all edges: each entry carries geometry + magnitude + direction.
     const edges = [];
@@ -374,12 +361,12 @@ class FtwEnergyFlow extends FtwElement {
       const magnitude = Math.max(0, -pv.kw);
       edges.push(edge(
         `pv-${i}`,
-        pvPositions[i], gridPos /* unused for side=top */,
+        pvC.positions[i], gridPos /* unused for diagonal */,
         "top", +1,
         magnitude,
         "var(--amber)",
         !pv.placeholder && magnitude > 0.05,
-        boxW, boxH, diag, nodeR, hubR,
+        0, 0, /* boxW/boxH unused in diagonal */ true, pvC.r, P.hubR,
       ));
     });
     edges.push(edge(
@@ -390,18 +377,18 @@ class FtwEnergyFlow extends FtwElement {
       Math.abs(grid),
       grid >= 0 ? "var(--red-e)" : "var(--green-e)",
       Math.abs(grid) > 0.05,
-      boxW, boxH, diag, nodeR, hubR,
+      0, 0, true, P.baseR, P.hubR,
     ));
     batList.forEach((bat, i) => {
       edges.push(edge(
         `bat-${i}`,
-        batPositions[i], batPositions[i],
+        batC.positions[i], batC.positions[i],
         "right",
         bat.kw >= 0 ? +1 : -1,
         Math.abs(bat.kw),
         "var(--cyan)",
         !bat.placeholder && Math.abs(bat.kw) > 0.05,
-        boxW, boxH, diag, nodeR, hubR,
+        0, 0, true, batC.r, P.hubR,
       ));
     });
     edges.push(edge(
@@ -411,7 +398,7 @@ class FtwEnergyFlow extends FtwElement {
       Math.max(0, ev),
       "var(--white-s)",
       ev > 0.05,
-      boxW, boxH, diag, nodeR, hubR,
+      0, 0, true, P.baseR, P.hubR,
     ));
 
     const maxKw = Math.max(0.5, ...edges.map(e => e.kw));
@@ -422,64 +409,56 @@ class FtwEnergyFlow extends FtwElement {
     this._particles = [];
     const edgesSvg = edges.map(e => renderEdge(e, maxKw, this._particles)).join("");
 
-    // Circular nodes in compact (the × layout), rectangular everywhere
-    // else. Same signature for both helpers so the call sites below
-    // don't need a branch per node.
-    const nodeFn = this._compact ? renderCircleNode : renderNode;
-
+    // Every node is a circle now — renderNode (rectangular) is retired.
     const pvNodes = pvList.map((pv, i) =>
-      nodeFn({
-        pos: pvPositions[i],
+      renderCircleNode({
+        pos: pvC.positions[i],
         // Solar shows POSITIVE kW — sign flip is display-only, all
         // internal state (chartHistory, math) stays on site convention.
         value: pv.placeholder ? "—" : fmtKw(-pv.kw),
         title: labelWithName("SOLAR", pv.name, pvList.length),
         sub: pv.placeholder ? "no data" : (pv.kw < -0.05 ? "generating" : "idle"),
         color: !pv.placeholder && pv.kw < -0.05 ? "var(--amber)" : "var(--fg-muted)",
-        side: "top", icon: "sun",
-        boxW, boxH, textY, radius: nodeR,
+        radius: pvC.r,
       })
     ).join("");
 
-    const gridNode = nodeFn({
+    const gridNode = renderCircleNode({
       pos: gridPos,
       value: fmtKw(grid),
       title: "GRID",
       sub: Math.abs(grid) < 0.05 ? "balanced" : (grid >= 0 ? "importing" : "exporting"),
       color: Math.abs(grid) < 0.05 ? "var(--fg-muted)" :
              (grid >= 0 ? "var(--red-e)" : "var(--green-e)"),
-      side: "left", icon: "grid",
-      boxW, boxH, textY, radius: nodeR,
+      radius: P.baseR,
     });
 
     const batNodes = batList.map((bat, i) =>
-      nodeFn({
-        pos: batPositions[i],
+      renderCircleNode({
+        pos: batC.positions[i],
         value: bat.placeholder ? "—" : fmtKw(bat.kw),
         title: labelWithName("BATTERY", bat.name, batList.length),
         sub: bat.placeholder ? "no data" :
              (Math.abs(bat.kw) < 0.05 ? "idle" :
               (bat.kw >= 0 ? "charging" : "discharging")),
         color: bat.placeholder ? "var(--fg-muted)" : "var(--cyan)",
-        side: "right", icon: "bat",
         soc: bat.placeholder ? null : bat.soc,
-        boxW, boxH, textY, radius: nodeR,
+        radius: batC.r,
       })
     ).join("");
 
-    const evNode = nodeFn({
+    const evNode = renderCircleNode({
       pos: evPos,
       value: fmtKw(ev),
       title: "EV CHARGER",
       sub: ev > 0.05 ? "charging" : "idle",
       color: ev > 0.05 ? "var(--green-e)" : "var(--white-s)",
-      side: "bottom", icon: "ev",
-      boxW, boxH, textY, radius: nodeR,
+      radius: P.baseR,
     });
 
     return `
       <div class="title">Energy balance</div>
-      <svg viewBox="${vbX} 0 ${vbW} ${H}" preserveAspectRatio="xMidYMid meet" aria-hidden="true">
+      <svg viewBox="${P.vbX} 0 ${P.vbW} ${H}" preserveAspectRatio="xMidYMid meet" aria-hidden="true">
         <defs>
           <radialGradient id="ef-hub" cx="50%" cy="50%" r="50%">
             <stop offset="0%" stop-color="oklch(0.85 0.18 var(--accent-hue))" stop-opacity="0.55"/>
@@ -506,24 +485,24 @@ class FtwEnergyFlow extends FtwElement {
 
         <!-- HOUSE / hub: load reading lives here -->
         <g>
-          <circle cx="${CX}" cy="${CY}" r="${hubR}"
+          <circle cx="${CX}" cy="${CY}" r="${P.hubR}"
                   fill="var(--hero-house-fill)"
                   stroke="var(--hero-house-stroke)" stroke-width="1.5"/>
-          <circle class="ring" cx="${CX}" cy="${CY}" r="${hubR - 8}"
+          <circle class="ring" cx="${CX}" cy="${CY}" r="${P.hubR - 8}"
                   fill="none"
                   stroke="var(--hero-house-ring)" stroke-width="1"
                   stroke-dasharray="2 4"/>
-          <g transform="translate(${CX - 16}, ${hubIconY})"
+          <g transform="translate(${CX - 16}, ${P.hubIconY})"
              stroke="var(--hero-house-stroke)" stroke-width="1.6"
              fill="none" stroke-linecap="round" stroke-linejoin="round">
             <path d="M2 16 L16 3 L30 16 L30 26 L2 26 Z"/>
             <path d="M12 26 V18 H20 V26"/>
           </g>
-          <text x="${CX}" y="${hubValueY}" text-anchor="middle"
+          <text x="${CX}" y="${P.hubValueY}" text-anchor="middle"
                 fill="var(--hero-load-text)" class="sv-hub-value">
             ${fmtKw(load)}
           </text>
-          <text x="${CX}" y="${hubLabelY}" text-anchor="middle"
+          <text x="${CX}" y="${P.hubLabelY}" text-anchor="middle"
                 fill="var(--hero-label-text)" class="sv-hub-label">
             CONSUMING
           </text>
@@ -539,6 +518,32 @@ class FtwEnergyFlow extends FtwElement {
 }
 
 // ---------- geometry + edge helpers ----------
+
+// Multi-device horizontal cluster inside the × layout's corner
+// quadrant. For n = 1 the device sits on the corner anchor with full
+// baseR. For n > 1 the circles shrink so they fit between the given
+// [leftBound, rightBound] (inner viewBox edge and the hub's edge),
+// then sit evenly spaced and centered in that span. The radius floor
+// keeps multi-device circles readable even when bounds are tight.
+function clusterAt(n, anchorX, anchorY, baseR, leftBound, rightBound) {
+  if (n <= 1) {
+    return { positions: [{ x: anchorX, y: anchorY }], r: baseR };
+  }
+  const gap = 14;
+  const span = rightBound - leftBound;
+  // Max radius that fits n circles + (n-1) gaps inside span:
+  //   n * 2r + (n-1) * gap <= span
+  const maxR = Math.floor((span - (n - 1) * gap) / (2 * n));
+  const r = Math.max(34, Math.min(Math.floor(baseR * 0.85), maxR));
+  const stride = 2 * r + gap;
+  const cx = (leftBound + rightBound) / 2;
+  const half = ((n - 1) * stride) / 2;
+  const positions = Array.from({ length: n }, (_, i) => ({
+    x: cx - half + i * stride,
+    y: anchorY,
+  }));
+  return { positions, r };
+}
 
 // Spread N items along a horizontal axis, centered on (anchorX, fixedY).
 // Spacing is box-width + gap so boxes never overlap, even at N=3+.
@@ -768,33 +773,36 @@ function hashStr(s) {
 
 // ---------- nodes ----------
 
-// Circular node for the compact × layout. Text is centered and
-// respread for a disk: title near the top, value at the middle, sub
-// below the middle, and — for batteries — a SoC reading as a fourth
-// line below sub. The older horizontal SoC bar ran through the same
-// baseline as "discharging" which made them hard to read together;
-// a plain text line reads cleaner at this radius. Stroke is the
+// Circular node for the × layout. Text is centered and respread for a
+// disk: title near the top, value at the middle, sub below the middle,
+// and — for batteries — a SoC reading as a fourth line below sub.
+// Text baselines scale with radius so a desktop-size 105 px circle and
+// a multi-device 55 px circle both read proportionally. Stroke is the
 // accent color so each node carries its identity on the edge of the
 // circle — no separate stripe needed the way rectangular boxes have.
-function renderCircleNode({ pos, title, value, sub, color, soc, radius = 82 }) {
+function renderCircleNode({ pos, title, value, sub, color, soc, radius = 86 }) {
   const r = radius;
   const { x, y } = pos;
+  const titleY = Math.round(-0.42 * r);
+  const valueY = Math.round(0.09  * r);
+  const subY   = Math.round(0.42  * r);
+  const socY   = Math.round(0.70  * r);
   const socText = soc != null
-    ? `<text x="${x}" y="${y + 60}" text-anchor="middle"
+    ? `<text x="${x}" y="${y + socY}" text-anchor="middle"
              fill="var(--cyan)" class="sv-node-sub">SoC ${Math.round(soc)}%</text>`
     : "";
   return `
     <g>
       <circle cx="${x}" cy="${y}" r="${r}"
               fill="var(--hero-box-fill)" stroke="${color}" stroke-width="2"/>
-      <text x="${x}" y="${y - 36}" text-anchor="middle"
+      <text x="${x}" y="${y + titleY}" text-anchor="middle"
             fill="var(--hero-label-text)" class="sv-node-title">
         ${escapeXml(title)}
       </text>
-      <text x="${x}" y="${y + 8}" text-anchor="middle" fill="${color}" class="sv-node-value">
+      <text x="${x}" y="${y + valueY}" text-anchor="middle" fill="${color}" class="sv-node-value">
         ${value}
       </text>
-      <text x="${x}" y="${y + 36}" text-anchor="middle"
+      <text x="${x}" y="${y + subY}" text-anchor="middle"
             fill="var(--hero-sub-text)" class="sv-node-sub">
         ${escapeXml(sub)}
       </text>

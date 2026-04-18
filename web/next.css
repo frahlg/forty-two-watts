@@ -58,12 +58,28 @@ body.ftw-next > header {
   max-width: 1560px;
   margin: 20px auto 20px;
   padding: 12px 28px;
-  background: oklch(0.16 0.018 250 / 0.7);
-  backdrop-filter: blur(14px);
-  -webkit-backdrop-filter: blur(14px);
   border: 1px solid var(--line);
   border-bottom: 1px solid var(--line);
   border-radius: var(--radius-lg);
+  /* Background + backdrop-filter live on the ::before below, NOT on
+     the header itself. Why: backdrop-filter on an element creates a
+     new containing block for its position:fixed descendants, which
+     made the <ftw-update-badge> modal center against the header pill
+     instead of the viewport — visibly half-off-screen on narrow
+     viewports. Moving the blur to a pseudo-element keeps the same
+     visual while leaving the header a normal flow element for
+     modal-positioning purposes. */
+}
+body.ftw-next > header::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: oklch(0.16 0.018 250 / 0.7);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border-radius: inherit;
+  pointer-events: none;
+  z-index: -1;
 }
 /* On viewports wider than 1560 px, the header pill already has 28px of
    horizontal padding so the brand / nav / right-cluster line up with
@@ -673,7 +689,7 @@ html[data-theme="light"] body.ftw-next::before {
       oklch(0.8 0.1 220 / 0.12), transparent 60%),
     linear-gradient(to bottom, transparent 0%, oklch(0.94 0.012 250) 100%);
 }
-html[data-theme="light"] body.ftw-next > header {
+html[data-theme="light"] body.ftw-next > header::before {
   background: oklch(0.98 0.005 250 / 0.7);
 }
 html[data-theme="light"] body.ftw-next .mode-buttons button.active {
