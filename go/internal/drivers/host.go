@@ -23,6 +23,10 @@ type MQTTCap interface {
 	// PopMessages returns and clears any buffered messages received since
 	// the last call.
 	PopMessages() []MQTTMessage
+	// Close disconnects the underlying client. Called by Registry.Remove
+	// so a driver restart doesn't leak a paho session under the same
+	// clientID. Safe to call on an already-closed cap.
+	Close() error
 }
 
 // MQTTMessage is one inbound MQTT message.
@@ -36,6 +40,8 @@ type ModbusCap interface {
 	Read(addr uint16, count uint16, kind int32) ([]uint16, error)
 	WriteSingle(addr uint16, value uint16) error
 	WriteMulti(addr uint16, values []uint16) error
+	// Close tears down the TCP connection. Called on driver remove.
+	Close() error
 }
 
 // HostEnv is the per-driver runtime context. Captures capabilities (potentially

@@ -152,6 +152,16 @@ func (r *Registry) Add(ctx context.Context, cfg config.Driver) error {
 	r.mu.Lock()
 	r.rec[cfg.Name] = rd
 	r.mu.Unlock()
+	// Create the health record eagerly so /api/status reflects
+	// "driver is running" the instant Add returns, instead of
+	// rendering as `not_running: true` until the first successful
+	// emit. The previous lazy-on-emit pattern made a freshly-
+	// restarted MQTT driver look dead until the first message
+	// arrived (which can be 30+ s for slow telemetry topics), and
+	// mis-presented an alive-but-waiting driver as a failed one.
+	if r.tel != nil {
+		r.tel.DriverHealthMut(cfg.Name)
+	}
 	go r.runLoop(rd)
 	slog.Info("driver added", "name", cfg.Name, "path", cfg.Lua)
 	return nil
@@ -169,6 +179,18 @@ func (r *Registry) runLoop(rd *runningDriver) {
 		case <-rd.stop:
 			_ = rd.driver.DefaultMode(ctx)
 			_ = rd.driver.Cleanup(ctx)
+			// Tear down capability connections so a subsequent Add
+			// with the same driver name doesn't race an old MQTT
+			// session (broker resolves the conflict by kicking the
+			// newer one on the next connect, and subscribe ACKs get
+			// lost). Modbus TCP connections similarly need an explicit
+			// close so the server side frees the slot.
+			if rd.env.MQTT != nil {
+				_ = rd.env.MQTT.Close()
+			}
+			if rd.env.Modbus != nil {
+				_ = rd.env.Modbus.Close()
+			}
 			return
 		case cmd := <-rd.cmdCh:
 			var err error
@@ -185,6 +207,14 @@ func (r *Registry) runLoop(rd *runningDriver) {
 			if _, err := rd.driver.Poll(ctx); err != nil {
 				slog.Warn("driver poll failed", "name", rd.cfg.Name, "err", err)
 				r.tel.DriverHealthMut(rd.cfg.Name).RecordError(err.Error())
+			} else if r.tel != nil {
+				// Record the successful tick so driver_poll bumps the
+				// health record's TickCount even when the driver itself
+				// has nothing to emit yet (e.g. ferroamp between MQTT
+				// subscribe and the first inbound message). Without
+				// this, drivers that wait on slow telemetry topics
+				// are indistinguishable from ones that crashed.
+				r.tel.DriverHealthMut(rd.cfg.Name).RecordSuccess()
 			}
 			// Re-arm timer at driver's requested interval
 			interval = rd.env.PollInterval()

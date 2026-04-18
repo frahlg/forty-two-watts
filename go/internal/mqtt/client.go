@@ -45,8 +45,17 @@ func Dial(host string, port int, username, password, clientID string) (*Capabili
 	return cap, nil
 }
 
-// Close disconnects the client.
-func (c *Capability) Close() { c.client.Disconnect(250) }
+// Close disconnects the client. Returns error so the signature matches
+// drivers.MQTTCap — that lets the registry call Close() uniformly at
+// driver teardown. Without it a stale paho client stays connected
+// under the same clientID; the broker kicks the newer one on the
+// next Dial and subscribe ACKs to the new client race with the old
+// disconnect, which is what caused ferroamp to go silent after a
+// POST /api/drivers/ferroamp/restart on 2026-04-17.
+func (c *Capability) Close() error {
+	c.client.Disconnect(250)
+	return nil
+}
 
 // Subscribe — implements drivers.MQTTCap.
 func (c *Capability) Subscribe(topic string) error {
