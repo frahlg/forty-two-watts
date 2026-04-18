@@ -239,8 +239,11 @@
       targetDisp.textContent = t === 0 ? "target 0" : "target " + formatW(t);
     }
 
-    // PV — negative = generating
-    pvW.textContent = formatW(data.pv_w);
+    // PV — stored as negative (site convention) but displayed positive
+    // so "SOLAR 5.3 kW" reads as generation magnitude without the minus.
+    // Internal data (chart history, hero setReadings, plan math) stays
+    // on site convention — flip is for this tile only.
+    pvW.textContent = formatW(-data.pv_w);
     pvW.className = "card-value val-generation";
 
     // Load
@@ -263,6 +266,38 @@
     var socPct = Math.round(data.bat_soc * 100);
     batSoc.textContent = socPct + "%";
     socFill.setAttribute("value", socPct);
+
+    // Hero energy-flow diagram — walk `data.drivers` so multi-PV / multi-
+    // battery rigs render one node per source, stacked. Any driver that
+    // exposes pv_w is treated as a solar producer; any with bat_w is a
+    // battery. setReadings() replaces only the arrays it receives, so a
+    // transient /api/status error preserves the last good cluster.
+    var flowEl = document.getElementById("energy-flow");
+    if (flowEl && typeof flowEl.setReadings === "function") {
+      var pvs = [];
+      var batteries = [];
+      var drvs = data.drivers || {};
+      Object.keys(drvs).forEach(function (name) {
+        var d = drvs[name] || {};
+        if (d.pv_w != null) {
+          pvs.push({ name: name, kw: d.pv_w / 1000 });
+        }
+        if (d.bat_w != null) {
+          batteries.push({
+            name: name,
+            kw: d.bat_w / 1000,
+            soc: d.bat_soc != null ? Math.round(d.bat_soc * 100) : null,
+          });
+        }
+      });
+      flowEl.setReadings({
+        grid:      (data.grid_w || 0) / 1000,
+        load:      (data.load_w || 0) / 1000,
+        ev:        (data.ev_w   || 0) / 1000,
+        pvs:       pvs,
+        batteries: batteries,
+      });
+    }
 
     // Mode buttons — primary (strategy) + advanced (manual)
     currentMode = data.mode;
@@ -992,7 +1027,7 @@
 
     // Tooltip box for forecast values
     var labels = [
-      { name: "PV pred",   val: a.pv_w,   color: "#86efac" },
+      { name: "PV pred",   val: -a.pv_w,  color: "#86efac" },
       { name: "Load pred", val: a.load_w, color: "#fde68a" },
       { name: "Battery",   val: a.battery_w, color: "#f59e0b", showSign: true },
       { name: "Grid",      val: a.grid_w,    color: "#ef4444", showSign: true },
@@ -1158,7 +1193,7 @@
         body =
           '<div class="driver-stats">' +
           '  <span class="stat-label">Meter</span><span class="stat-value">' + formatW(meterW) + "</span>" +
-          '  <span class="stat-label">PV</span><span class="stat-value">' + formatW(pvWVal) + "</span>" +
+          '  <span class="stat-label">PV</span><span class="stat-value">' + formatW(-pvWVal) + "</span>" +
           batteryRow +
           '  <span class="stat-label">SoC</span><span class="stat-value">' + formatSoc(batSocVal) + "</span>" +
           '  <span class="stat-label">Ticks</span><span class="stat-value">' + ticks + "</span>" +

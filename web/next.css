@@ -1,0 +1,665 @@
+/* forty-two-watts — /next redesign overrides.
+ *
+ * Loaded AFTER /style.css so it layers on top. Everything here is scoped
+ * to `body.ftw-next` to guarantee we never leak into /index.html, which
+ * still depends on the legacy style.css rules. The goal is a "control
+ * room" aesthetic — deep ink background, warm-amber accents, mono
+ * numerics, and an energy-flow hero as the centerpiece.
+ *
+ * Structure matches next.html top-to-bottom.
+ */
+
+/* ---- Page chrome ---- */
+body.ftw-next {
+  background: var(--ink);
+  color: var(--fg);
+  font-family: var(--sans);
+  font-size: 14px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+}
+body.ftw-next::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(ellipse 80% 60% at 50% -10%,
+      oklch(0.25 0.08 var(--accent-hue) / 0.25), transparent 60%),
+    radial-gradient(ellipse 60% 40% at 90% 100%,
+      oklch(0.25 0.1 220 / 0.15), transparent 60%),
+    linear-gradient(to bottom, transparent 0%, oklch(0.1 0.015 250) 100%);
+}
+
+body.ftw-next > header,
+body.ftw-next > main,
+body.ftw-next > footer,
+body.ftw-next > section {
+  position: relative;
+  z-index: 1;
+}
+
+body.ftw-next main {
+  max-width: 1560px;
+  margin: 0 auto;
+  padding: 0 28px 60px;
+  gap: 16px;
+}
+/* Matching footer geometry so the page has one consistent content
+   rectangle from header-edge to footer-edge. */
+body.ftw-next footer {
+  max-width: 1560px;
+  margin: 16px auto 0;
+  padding: 12px 28px;
+}
+
+/* ---- Header — rounded pill with backdrop blur.
+       Horizontal padding matches main (28 px) so the pill's content
+       edges align with the cards below it — no "inset" look on wide
+       screens. Outer margin is 28 px left/right inside the 1560 px
+       max-width so the pill itself sits within the same rectangle as
+       main's padding box. ---- */
+body.ftw-next > header {
+  box-sizing: border-box;
+  max-width: 1560px;
+  margin: 20px auto 20px;
+  padding: 12px 28px;
+  background: oklch(0.16 0.018 250 / 0.7);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+}
+/* On viewports wider than 1560 px, the header pill already has 28px of
+   horizontal padding so the brand / nav / right-cluster line up with
+   the grid cells below. On narrower viewports, header spans full width
+   (minus the side pads on main), giving the same alignment without
+   explicit margin math. */
+body.ftw-next > header h1 {
+  font-family: var(--sans);
+  font-weight: 700;
+  font-size: 17px;
+  letter-spacing: -0.01em;
+  color: var(--fg);
+}
+body.ftw-next > header .header-logo {
+  height: 30px;
+  border-radius: 6px;
+}
+body.ftw-next .app-tabs {
+  gap: 4px;
+}
+body.ftw-next .tab-btn {
+  padding: 7px 14px;
+  font-size: 13px;
+  color: var(--fg-dim);
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  background: transparent;
+}
+body.ftw-next .tab-btn:hover {
+  color: var(--fg);
+  background: oklch(0.22 0.02 250);
+}
+body.ftw-next .tab-btn.active {
+  background: var(--ink-raised);
+  color: var(--fg);
+  border-color: var(--line);
+}
+body.ftw-next .header-right {
+  gap: 10px;
+}
+body.ftw-next .version {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--fg-muted);
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+body.ftw-next .settings-btn {
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--fg-dim);
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border-radius: var(--radius-sm);
+  font-size: 14px;
+  display: grid;
+  place-items: center;
+  margin-right: 0;
+  transition: background .15s, color .15s;
+}
+body.ftw-next .settings-btn:hover {
+  background: var(--ink-raised);
+  color: var(--fg);
+  border-color: var(--line);
+}
+body.ftw-next #ui-mode-toggle {
+  color: var(--fg-dim);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 6px 12px;
+  font-size: 12px;
+  font-family: var(--mono);
+  background: transparent;
+  cursor: pointer;
+  transition: border-color .15s, color .15s, background .15s;
+}
+body.ftw-next #ui-mode-toggle:hover {
+  color: var(--fg);
+  background: var(--ink-raised);
+}
+
+/* Header icon buttons (theme + hero-mode toggles). Same visual family
+   as the existing settings-btn but square so an icon glyph lands
+   centred regardless of which character is chosen. */
+body.ftw-next .icon-btn {
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--fg-dim);
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border-radius: var(--radius-sm);
+  font-size: 14px;
+  font-family: var(--sans);
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  transition: background .15s, color .15s, border-color .15s;
+}
+body.ftw-next .icon-btn:hover {
+  background: var(--ink-raised);
+  color: var(--fg);
+}
+body.ftw-next .icon-btn[aria-pressed="true"] {
+  color: var(--fg);
+  background: oklch(0.3 0.1 var(--accent-hue) / 0.2);
+  border-color: var(--accent-e);
+}
+
+/* Hamburger — hidden on desktop, visible under 720 px. Lives next to
+   the header-right cluster so it's always reachable even when that
+   cluster is collapsed into the drawer below. */
+body.ftw-next .mobile-menu-btn {
+  display: none;
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--fg);
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-sm);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background .15s, color .15s;
+}
+body.ftw-next .mobile-menu-btn:hover {
+  background: var(--ink-raised);
+}
+
+/* ---- Energy flow hero slot ---- */
+body.ftw-next .flow-hero {
+  margin-bottom: 4px;
+}
+body.ftw-next .flow-hero ftw-energy-flow {
+  display: block;
+}
+
+/* ---- Hero / numbers mode switch ---- */
+/* Default body has mode-hero OR mode-numbers applied from the init
+   block at the bottom of next.html. mode-hero hides the four big-number
+   tiles for Grid/PV/Battery/Load (they duplicate the hero); mode-numbers
+   hides the hero. Non-dup tiles (SoC, Fuse, EV, energy totals, controls,
+   charts) stay visible in both modes. */
+body.ftw-next.mode-hero    .ftw-hide-in-hero { display: none !important; }
+body.ftw-next.mode-numbers .flow-hero        { display: none !important; }
+
+/* ---- Summary tiles ---- */
+body.ftw-next .summary-cards {
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 12px;
+}
+body.ftw-next .summary-card {
+  background: var(--ink-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  padding: 14px 16px;
+  text-align: left;
+  position: relative;
+  overflow: hidden;
+  transition: border-color .2s;
+}
+body.ftw-next .summary-card:hover {
+  border-color: oklch(0.35 0.02 250);
+}
+body.ftw-next .summary-card .card-label {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--fg-muted);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  margin-bottom: 8px;
+}
+body.ftw-next .summary-card .card-value {
+  font-family: var(--mono);
+  font-size: 1.55rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+  color: var(--fg);
+  line-height: 1.1;
+}
+body.ftw-next .summary-card .card-sub {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--fg-muted);
+  margin-top: 4px;
+  letter-spacing: 0.02em;
+}
+body.ftw-next .card-target {
+  font-family: var(--mono);
+  color: var(--fg-muted);
+  opacity: 0.8;
+}
+
+/* Directional colour accents — preserve legacy val-* hooks but rebind
+   them to the oklch palette so they read cleanly on the new ink bg. */
+body.ftw-next .val-import      { color: var(--red-e); }
+body.ftw-next .val-export      { color: var(--green-e); }
+body.ftw-next .val-generation  { color: var(--amber); }
+body.ftw-next .val-charging    { color: var(--cyan); }
+body.ftw-next .val-discharging { color: var(--cyan-dim); }
+body.ftw-next .val-neutral     { color: var(--fg); }
+body.ftw-next .val-ev-charging { color: var(--green-e); }
+body.ftw-next .val-ev-connected{ color: var(--amber); }
+
+/* Fuse bars — taller, colored background fits the tile style. */
+body.ftw-next .fuse-phases { gap: 5px; }
+body.ftw-next .fuse-phase-bar,
+body.ftw-next .fuse-bar {
+  background: oklch(0.22 0.015 250);
+  border-radius: 3px;
+}
+body.ftw-next .fuse-phase-fill,
+body.ftw-next .fuse-fill { background: var(--green-e); }
+body.ftw-next .fuse-phase-fill.warn,
+body.ftw-next .fuse-fill.warn { background: var(--amber); }
+body.ftw-next .fuse-phase-fill.crit,
+body.ftw-next .fuse-fill.crit { background: var(--red-e); }
+body.ftw-next .fuse-phase-fill.export { background: var(--cyan); }
+body.ftw-next .fuse-phase-label,
+body.ftw-next .fuse-phase-val { font-family: var(--mono); }
+
+/* ---- Energy cards (today) ---- */
+body.ftw-next .energy-cards {
+  grid-template-columns: repeat(6, 1fr);
+  gap: 12px;
+  margin-top: 0;
+}
+body.ftw-next .energy-card {
+  background: var(--ink-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  padding: 12px 14px;
+}
+body.ftw-next .energy-card .card-label {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--fg-muted);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  margin-bottom: 6px;
+}
+body.ftw-next .energy-card .card-value {
+  font-family: var(--mono);
+  font-size: 1.15rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+@media (max-width: 900px) {
+  body.ftw-next .energy-cards { grid-template-columns: repeat(2, 1fr); }
+  body.ftw-next .summary-cards { grid-template-columns: repeat(2, 1fr); }
+}
+
+/* ---- Controls row (strategy + sliders) ---- */
+body.ftw-next .controls-row {
+  grid-template-columns: 1.2fr 1fr 1fr;
+  gap: 12px;
+  margin-top: 4px;
+}
+body.ftw-next .control-card {
+  background: var(--ink-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  padding: 14px 16px;
+}
+body.ftw-next .control-card .card-label {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--fg-muted);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  margin-bottom: 10px;
+}
+body.ftw-next .mode-buttons {
+  gap: 6px;
+}
+body.ftw-next .mode-buttons button {
+  background: oklch(0.13 0.015 250);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-sm);
+  color: var(--fg-dim);
+  padding: 8px 10px;
+  font-family: var(--sans);
+  font-size: 12px;
+  transition: background .15s, color .15s, border-color .15s;
+}
+body.ftw-next .mode-buttons button:hover {
+  background: oklch(0.2 0.02 250);
+  color: var(--fg);
+}
+body.ftw-next .mode-buttons button.active {
+  background: oklch(0.3 0.1 var(--accent-hue) / 0.25);
+  border-color: var(--accent-e);
+  color: var(--fg);
+}
+body.ftw-next .strategy-hint {
+  margin-top: 10px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--fg-dim);
+  line-height: 1.5;
+}
+body.ftw-next .slider-group-compact {
+  gap: 10px;
+}
+body.ftw-next .slider-group-compact input[type="range"] {
+  accent-color: var(--accent-e);
+}
+body.ftw-next .slider-current {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--fg);
+  font-variant-numeric: tabular-nums;
+}
+body.ftw-next .card-hint {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--fg-muted);
+  margin-top: 8px;
+}
+
+body.ftw-next .btn-send {
+  background: var(--accent-e);
+  border-color: var(--accent-e);
+  color: oklch(0.15 0.02 250);
+  font-family: var(--mono);
+  font-weight: 600;
+  font-size: 12px;
+  border-radius: var(--radius-sm);
+  padding: 6px 12px;
+  transition: filter .15s;
+}
+body.ftw-next .btn-send:hover { filter: brightness(1.1); opacity: 1; }
+body.ftw-next .btn-link {
+  background: transparent;
+  border: none;
+  color: var(--accent-e);
+  font-family: var(--mono);
+  font-size: 11px;
+  text-decoration: none;
+  cursor: pointer;
+  padding: 4px 6px;
+}
+body.ftw-next .btn-link:hover { text-decoration: underline; }
+
+/* ---- Charts: live + plan side-by-side ---- */
+body.ftw-next .live-plan-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-top: 4px;
+}
+@media (max-width: 1100px) {
+  body.ftw-next .live-plan-row { grid-template-columns: 1fr; }
+  body.ftw-next .controls-row  { grid-template-columns: 1fr; }
+}
+
+body.ftw-next #chart-section,
+body.ftw-next #plan-section {
+  background: var(--ink-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  padding: 16px 18px;
+}
+body.ftw-next .chart-header h2 {
+  font-family: var(--sans);
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--fg);
+  margin: 0;
+}
+body.ftw-next .chart-container {
+  background: transparent;
+  border: none;
+  padding: 4px 0 0;
+}
+body.ftw-next .range-buttons button {
+  background: oklch(0.13 0.015 250);
+  border: 1px solid var(--line);
+  color: var(--fg-dim);
+  font-family: var(--mono);
+  font-size: 10px;
+  padding: 4px 8px;
+  border-radius: 5px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+body.ftw-next .range-buttons button.active {
+  background: var(--accent-e);
+  color: oklch(0.15 0.02 250);
+  border-color: var(--accent-e);
+  font-weight: 600;
+}
+body.ftw-next .chart-legend {
+  font-family: var(--mono);
+  color: var(--fg-dim);
+  font-size: 11px;
+  margin-top: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line-soft);
+}
+body.ftw-next .plan-summary {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--fg-muted);
+}
+body.ftw-next .plan-actions { gap: 10px; display: flex; align-items: center; }
+
+/* ---- ML twins / drivers / calibration sections ---- */
+body.ftw-next .section-header h2,
+body.ftw-next #twins-section h2,
+body.ftw-next #drivers-section h2,
+body.ftw-next #models-section h2 {
+  font-family: var(--sans);
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--fg);
+  letter-spacing: -0.005em;
+}
+
+body.ftw-next .driver-card,
+body.ftw-next #twins-grid > div {
+  background: var(--ink-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+}
+
+/* ---- Footer strip ---- */
+body.ftw-next footer {
+  max-width: 1560px;
+  margin: 16px auto 0;
+  padding: 12px 16px;
+  background: transparent;
+  border-top: none;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--fg-muted);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+body.ftw-next .status-bar {
+  background: oklch(0.11 0.015 250);
+  border-top: 1px solid var(--line);
+  color: var(--fg-muted);
+  font-family: var(--mono);
+}
+
+/* ---- Modal refinements ---- */
+body.ftw-next .modal-content {
+  background: var(--ink-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+}
+
+/* ---- Diagnose ---- */
+body.ftw-next .diagnose-title h2 { font-family: var(--sans); }
+body.ftw-next .diagnose-timeline,
+body.ftw-next .diagnose-detail {
+  background: var(--ink-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+}
+
+/* ---------- Mobile menu (≤720 px) ---------- */
+/* Below the breakpoint the header collapses: tabs + header-right fold
+   into a drawer anchored to the top-right corner of the header pill.
+   The hamburger button (#mobile-menu-btn) stays in the flex row. */
+@media (max-width: 720px) {
+  /* Whole-page density: shrink outer padding so content doesn't get
+     squeezed against the rounded corners, and pull the header closer
+     to the top edge. */
+  body.ftw-next main {
+    padding: 0 12px 48px;
+    gap: 12px;
+  }
+  body.ftw-next > header {
+    margin: 10px 12px 14px;
+    grid-template-columns: auto 1fr auto;
+    gap: 10px;
+    padding: 10px 12px;
+    position: relative;
+  }
+  body.ftw-next > header h1 { font-size: 15px; }
+  body.ftw-next > header .header-logo { height: 26px; }
+  body.ftw-next footer {
+    margin: 10px 12px 0;
+    padding: 10px 6px;
+  }
+
+  body.ftw-next .header-right,
+  body.ftw-next .app-tabs {
+    display: none;
+  }
+  body.ftw-next .mobile-menu-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    justify-self: end;
+  }
+
+  /* Drawer layering: the drawer must sit above the energy-flow hero
+     (which owns its own stacking context via the :host gradient) and
+     the fuse-bar progress animations. 1000 is below the legacy modal
+     backdrop (also 1000) so an open modal still wins; but we only
+     ever show the drawer OR a modal, never both at once. */
+  body.ftw-next > header.menu-open {
+    z-index: 1000;
+  }
+  body.ftw-next > header.menu-open .header-right,
+  body.ftw-next > header.menu-open .app-tabs {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+    position: absolute;
+    top: calc(100% + 8px);
+    right: 0;
+    min-width: 220px;
+    padding: 14px;
+    background: var(--ink-raised);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-md);
+    box-shadow: 0 10px 32px rgba(0, 0, 0, 0.45);
+    z-index: 1001;
+  }
+  /* Tabs drawer anchored slightly offset from the right-cluster drawer
+     so if both happen to be visible (shouldn't, but belt-and-braces)
+     they don't stack directly on top of each other. */
+  body.ftw-next > header.menu-open .app-tabs {
+    top: calc(100% + 8px);
+    right: 0;
+    left: auto;
+  }
+  body.ftw-next > header.menu-open .header-right .icon-btn,
+  body.ftw-next > header.menu-open .header-right .settings-btn {
+    width: 100%;
+    height: 36px;
+    justify-content: flex-start;
+    padding: 0 12px;
+  }
+  body.ftw-next > header.menu-open .header-right #ui-mode-toggle,
+  body.ftw-next > header.menu-open .header-right .version {
+    text-align: left;
+  }
+  body.ftw-next > header.menu-open .app-tabs .tab-btn {
+    text-align: left;
+  }
+
+  /* Compact the summary/energy card padding so the smaller tiles
+     don't waste vertical space. */
+  body.ftw-next .summary-card { padding: 10px 12px; }
+  body.ftw-next .summary-card .card-value { font-size: 1.25rem; }
+  body.ftw-next .energy-cards { grid-template-columns: repeat(2, 1fr); gap: 8px; }
+  body.ftw-next .energy-card { padding: 9px 11px; }
+  body.ftw-next .energy-card .card-value { font-size: 1rem; }
+
+  /* Charts stack vertically — the side-by-side live + plan layout
+     squeezes canvases too narrow to read on phones. */
+  body.ftw-next .live-plan-row { grid-template-columns: 1fr; gap: 12px; }
+  body.ftw-next #chart-section,
+  body.ftw-next #plan-section { padding: 12px 14px; }
+}
+
+/* ---------- Light-theme specific fixes ---------- */
+/* Most surfaces use tokens that flip automatically. These are the cases
+   where the dark-mode sheet hardcoded a rgba or hex that needs an
+   explicit override so the light variant reads correctly. */
+html[data-theme="light"] body.ftw-next::before {
+  background:
+    radial-gradient(ellipse 80% 60% at 50% -10%,
+      oklch(0.8 0.08 var(--accent-hue) / 0.20), transparent 60%),
+    radial-gradient(ellipse 60% 40% at 90% 100%,
+      oklch(0.8 0.1 220 / 0.12), transparent 60%),
+    linear-gradient(to bottom, transparent 0%, oklch(0.94 0.012 250) 100%);
+}
+html[data-theme="light"] body.ftw-next > header {
+  background: oklch(0.98 0.005 250 / 0.7);
+}
+html[data-theme="light"] body.ftw-next .mode-buttons button.active {
+  background: oklch(0.75 0.14 var(--accent-hue) / 0.25);
+}
+html[data-theme="light"] body.ftw-next .status-bar {
+  background: oklch(0.94 0.01 250);
+}
+/* Legacy val-* text colours are tuned for dark-on-dark in style.css;
+   tokens above re-point them but a few hex fallbacks slip through in
+   inline styles — use a readable dim for neutral text on light bg. */
+html[data-theme="light"] body.ftw-next .val-neutral { color: var(--fg); }

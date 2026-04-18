@@ -5,11 +5,18 @@
  * and component-local styles. Load this file BEFORE style.css so the rest
  * of the sheet (and every <ftw-*> element) resolves var(--x) correctly.
  *
- * To retheme the whole app, edit this file. Nothing else should declare
- * the same custom properties.
+ * Theme switching: <html> carries `data-theme="dark"` or `"light"`.
+ * next-app.js (init block at the bottom of next.html) reads localStorage
+ * then falls back to prefers-color-scheme. Absence of the attribute is
+ * treated as dark so legacy /index.html keeps its historical appearance.
+ *
+ * LEGACY tokens (hex) live inside :root so /index.html continues to work
+ * unchanged. The NEXT palette (oklch + typography) is what /next.html +
+ * next.css read for the redesign.
  */
 
 :root {
+  /* ----- Legacy palette — /index.html depends on these. ----- */
   --bg: #0f0f1a;
   --surface: #1a1a2e;
   --surface2: #22223a;
@@ -22,4 +29,94 @@
   --blue: #3388ff;
   --accent: #5566ff;
   --radius: 8px;
+
+  /* ----- Next palette: dark (default). Also used when data-theme is
+         absent so nothing is uncoloured during FOUC. ----- */
+  --ink:        oklch(0.14 0.015 250);
+  --ink-raised: oklch(0.18 0.02 250);
+  --ink-sunken: oklch(0.11 0.015 250);
+  --line:       oklch(0.26 0.015 250);
+  --line-soft:  oklch(0.22 0.015 250);
+  --fg:         oklch(0.96 0.01 250);
+  --fg-dim:     oklch(0.70 0.015 250);
+  --fg-muted:   oklch(0.50 0.015 250);
+
+  --amber:    oklch(0.82 0.18 75);
+  --amber-d:  oklch(0.65 0.14 75);
+  --red-e:    oklch(0.72 0.18 20);
+  --green-e:  oklch(0.78 0.16 150);
+  --cyan:     oklch(0.82 0.14 210);
+  --cyan-dim: oklch(0.65 0.10 210);
+  --violet:   oklch(0.80 0.14 300);
+  --white-s:  oklch(0.95 0.01 250);
+
+  --accent-hue: 65;
+  --accent-e: oklch(0.82 0.16 var(--accent-hue));
+
+  /* Hero-specific surfaces. Extracted as tokens so the flow hero adapts
+     cleanly to the light theme without duplicating the SVG render path. */
+  --hero-bg-top: oklch(0.17 0.02 250);
+  --hero-bg-bot: oklch(0.13 0.015 250);
+  --hero-glow-a: oklch(0.4 0.15 var(--accent-hue) / 0.08);
+  --hero-line-base: oklch(0.24 0.015 250);
+  --hero-box-fill: oklch(0.18 0.02 250 / 0.95);
+  --hero-box-border: oklch(0.28 0.015 250);
+  --hero-house-fill: oklch(0.2 0.025 250);
+  --hero-house-stroke: oklch(0.7 0.14 var(--accent-hue));
+  --hero-house-ring:   oklch(0.55 0.1 var(--accent-hue));
+  --hero-load-text:    oklch(0.9 0.08 var(--accent-hue));
+  --hero-label-text:   oklch(0.6 0.015 250);
+  --hero-sub-text:     oklch(0.5 0.015 250);
+  --hero-soc-track:    oklch(0.25 0.015 250);
+
+  --sans: 'Inter', -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --mono: 'JetBrains Mono', 'SF Mono', Menlo, ui-monospace, monospace;
+
+  --radius-lg: 18px;
+  --radius-md: 14px;
+  --radius-sm: 10px;
+}
+
+/* ----- Light theme — applied when <html data-theme="light"> is set.
+        Only the next-era tokens flip; legacy ones stay so /index.html
+        keeps its dark appearance even if a user flips the switch while
+        on the legacy route. ----- */
+html[data-theme="light"] {
+  --ink:        oklch(0.985 0.005 250);
+  --ink-raised: oklch(0.975 0.005 250);
+  --ink-sunken: oklch(0.95 0.008 250);
+  --line:       oklch(0.85 0.01 250);
+  --line-soft:  oklch(0.90 0.008 250);
+  --fg:         oklch(0.22 0.02 250);
+  --fg-dim:     oklch(0.40 0.02 250);
+  --fg-muted:   oklch(0.55 0.015 250);
+
+  /* Functional colours pulled ~15% darker so they keep contrast on paper
+     without turning neon. Accent hue still drives --accent-e. */
+  --amber:    oklch(0.68 0.17 75);
+  --amber-d:  oklch(0.55 0.14 75);
+  --red-e:    oklch(0.55 0.20 20);
+  --green-e:  oklch(0.58 0.18 150);
+  --cyan:     oklch(0.58 0.14 210);
+  --cyan-dim: oklch(0.48 0.10 210);
+  --violet:   oklch(0.55 0.14 300);
+  --white-s:  oklch(0.30 0.015 250);
+
+  --accent-e: oklch(0.68 0.16 var(--accent-hue));
+
+  /* Hero: pale paper-ish gradient, mid-contrast lines + boxes so the
+     SVG reads clearly against a light body. */
+  --hero-bg-top:  oklch(0.97 0.008 250);
+  --hero-bg-bot:  oklch(0.93 0.012 250);
+  --hero-glow-a:  oklch(0.72 0.14 var(--accent-hue) / 0.10);
+  --hero-line-base:    oklch(0.82 0.01 250);
+  --hero-box-fill:     oklch(0.98 0.005 250 / 0.96);
+  --hero-box-border:   oklch(0.84 0.01 250);
+  --hero-house-fill:   oklch(0.97 0.008 250);
+  --hero-house-stroke: oklch(0.55 0.14 var(--accent-hue));
+  --hero-house-ring:   oklch(0.72 0.10 var(--accent-hue));
+  --hero-load-text:    oklch(0.40 0.18 var(--accent-hue));
+  --hero-label-text:   oklch(0.45 0.015 250);
+  --hero-sub-text:     oklch(0.55 0.015 250);
+  --hero-soc-track:    oklch(0.88 0.01 250);
 }
