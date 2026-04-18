@@ -62,6 +62,8 @@
     selectedTs: null,  // currently loaded snapshot
     detail: null,      // full snapshot object
     rangeMs: 24 * 3600 * 1000,
+    chartGeom: null,   // {padL, padT, barW, plotH, nSlots} — for hover hit-testing
+    hoverSlotIdx: null,
   };
 
   const rangeSelect = document.getElementById('diagnose-range-select');
@@ -195,6 +197,7 @@
       </div>
       <div class="diagnose-chart-wrap">
         <canvas id="diag-chart" height="320"></canvas>
+        <div id="diag-chart-highlight" class="diag-chart-highlight hidden"></div>
       </div>
       <div class="diagnose-table-wrap">
         <table class="diag-table">
@@ -216,6 +219,89 @@
     `;
     el.innerHTML = header;
     drawChart(d);
+    bindRowHover(el);
+    bindChartHover(el);
+  }
+
+  function bindRowHover(root) {
+    const rows = root.querySelectorAll('.diag-table tbody tr');
+    rows.forEach(tr => {
+      tr.addEventListener('mouseenter', () => {
+        const i = Number(tr.dataset.slotIdx);
+        showChartHighlight(i);
+      });
+      tr.addEventListener('mouseleave', hideChartHighlight);
+    });
+  }
+
+  function bindChartHover(root) {
+    const canvas = root.querySelector('#diag-chart');
+    if (!canvas) return;
+    canvas.addEventListener('mousemove', onChartMove);
+    canvas.addEventListener('mouseleave', onChartLeave);
+  }
+
+  function onChartMove(e) {
+    const g = state.chartGeom;
+    if (!g) return;
+    const canvas = e.currentTarget;
+    const rect = canvas.getBoundingClientRect();
+    // Scale from client px to the CSS px coords captured at draw time,
+    // in case the canvas was resized after drawChart.
+    const scale = rect.width > 0 ? (canvas.clientWidth / rect.width) : 1;
+    const xCss = (e.clientX - rect.left) * scale;
+    const xInPlot = xCss - g.padL;
+    if (xInPlot < 0 || xInPlot >= g.barW * g.nSlots) {
+      onChartLeave();
+      return;
+    }
+    const i = Math.floor(xInPlot / g.barW);
+    if (i === state.hoverSlotIdx) return;
+    state.hoverSlotIdx = i;
+    showChartHighlight(i);
+    applyRowFilter(i);
+  }
+
+  function onChartLeave() {
+    if (state.hoverSlotIdx == null) return;
+    state.hoverSlotIdx = null;
+    hideChartHighlight();
+    clearRowFilter();
+  }
+
+  function applyRowFilter(center) {
+    const rows = document.querySelectorAll('.diag-table tbody tr');
+    const window = 6;
+    rows.forEach((tr, idx) => {
+      const inWindow = Math.abs(idx - center) <= window;
+      tr.classList.toggle('diag-row-hidden', !inWindow);
+      tr.classList.toggle('diag-row-hover', idx === center);
+    });
+  }
+
+  function clearRowFilter() {
+    document.querySelectorAll('.diag-table tbody tr').forEach(tr => {
+      tr.classList.remove('diag-row-hidden', 'diag-row-hover');
+    });
+  }
+
+  function showChartHighlight(i) {
+    const g = state.chartGeom;
+    const hi = document.getElementById('diag-chart-highlight');
+    const canvas = document.getElementById('diag-chart');
+    if (!g || !hi || !canvas || i < 0 || i >= g.nSlots) return;
+    const offX = canvas.offsetLeft;
+    const offY = canvas.offsetTop;
+    hi.style.left = (offX + g.padL + i * g.barW) + 'px';
+    hi.style.top = (offY + g.padT) + 'px';
+    hi.style.width = Math.max(2, g.barW) + 'px';
+    hi.style.height = g.plotH + 'px';
+    hi.classList.remove('hidden');
+  }
+
+  function hideChartHighlight() {
+    const hi = document.getElementById('diag-chart-highlight');
+    if (hi) hi.classList.add('hidden');
   }
 
   function slotRow(sl, i, lpActive) {
@@ -223,7 +309,7 @@
     const confCls = sl.confidence < 0.9 ? 'conf-low' : '';
     const gridCls = sl.grid_w > 0 ? 'val-import' : (sl.grid_w < 0 ? 'val-export' : 'val-neutral');
     const batCls = sl.battery_w > 0 ? 'val-charging' : (sl.battery_w < 0 ? 'val-discharging' : 'val-neutral');
-    return `<tr>
+    return `<tr data-slot-idx="${i}">
       <td>${sl.idx}</td>
       <td>${fmtHHMM(sl.slot_start_ms)}</td>
       <td>${fmt1(sl.price_ore)}</td>
@@ -262,6 +348,9 @@
     const slots = d.slots;
     const nSlots = slots.length;
     const barW = Math.max(1, plotW / nSlots);
+
+    // Geometry for the row-hover highlight overlay.
+    state.chartGeom = { padL: pad.l, padT: pad.t, barW, plotH, nSlots };
 
     // Three horizontal bands: top third = price, middle third = power, bottom third = SoC
     const priceH = plotH * 0.30;
