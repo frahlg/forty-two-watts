@@ -926,3 +926,86 @@ they'll be omitted from the row when the source didn't provide them
 ```
 
 Handler: `go/internal/api/api.go:670`
+
+## Self-update
+
+In-app version check and pull+restart dispatch to the `ftw-updater`
+sidecar. See [self-update.md](self-update.md) for the end-to-end
+architecture (UDS, shared tmpfs state.json, skip semantics).
+
+### GET /api/version/check
+
+Cached GitHub Releases probe.
+
+**Query params:**
+
+- `force=1` — bypass the 3 h cache and hit GitHub now
+
+**Response (200):**
+
+```json
+{
+  "current": "v1.2.3",
+  "latest": "v1.3.0",
+  "update_available": true,
+  "skipped": false,
+  "skipped_version": "",
+  "published_at": "2026-04-17T10:00:00Z",
+  "release_notes_url": "https://github.com/frahlg/forty-two-watts/releases/tag/v1.3.0",
+  "checked_at": "2026-04-18T08:20:04Z"
+}
+```
+
+`skipped` is true only when `skipped_version == latest` — a newer
+release resurfaces automatically without requiring an explicit unskip.
+
+503 when the self-update service is disabled (`SelfUpdate == nil` in
+Deps). 502 when `force=1` and GitHub is unreachable; the cached view is
+still included in the body.
+
+### POST /api/version/skip
+
+Persist a dismissed version in `state.db` `config` KV under
+`update.skipped_version`.
+
+**Request body:** `{"version":"v1.3.0"}` — empty string is rejected (400).
+
+### POST /api/version/unskip
+
+Clear the persisted skip. Called from the UI's "Check for updates"
+action so a previously-hidden version resurfaces.
+
+### POST /api/version/update
+
+Signal the sidecar to `docker compose pull forty-two-watts` +
+`docker compose up -d forty-two-watts`. Returns 202 as soon as the
+sidecar acknowledges; the UI polls `/api/version/update/status` for
+progress. 502 if the sidecar socket isn't reachable.
+
+### POST /api/version/restart
+
+Same as Update but with `--force-recreate` so the main service restarts
+even when the image digest hasn't changed. Exists to let operators
+exercise the full update flow end-to-end before cutting a release.
+
+### GET /api/version/update/status
+
+Pass-through of the sidecar's `state.json` from the shared tmpfs volume.
+Polled every 2 s by the UI during the countdown.
+
+**Response (200):**
+
+```json
+{
+  "state": "pulling",
+  "action": "update",
+  "target": "v1.3.0",
+  "started_at": "2026-04-18T08:20:10Z",
+  "updated_at": "2026-04-18T08:20:12Z",
+  "message": ""
+}
+```
+
+`state` is one of `idle | pulling | restarting | done | failed`. A
+stale in-flight state (no heartbeat for 5 min) is surfaced as `failed`
+so the UI overlay unblocks.

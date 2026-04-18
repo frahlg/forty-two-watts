@@ -53,6 +53,8 @@ in YAML or re-adding it doesn't orphan a trained model. See
 | `go/internal/loadmodel` | Household load twin (bucketed + heating coefficient) |
 | `go/internal/pvmodel` | PV twin (RLS over sunpos / cloud prior) |
 | `go/internal/mpc` | MPC planner — DP over SoC grid, 48 h horizon |
+| `go/internal/selfupdate` | GH Releases probe + trigger dispatch for the in-app updater sidecar |
+| `go/cmd/ftw-updater` | Sidecar binary — runs docker compose pull + up -d on behalf of the main service |
 | `drivers/` | Lua drivers (`ferroamp.lua`, `sungrow.lua`, …) |
 | `go/test/e2e` | Full-stack test: sims + main + drivers + HTTP |
 
@@ -179,6 +181,7 @@ charge another.
 - `docs/ml-models.md` — PV + load + price twins, MPC inputs (NEW)
 - `docs/api.md` — HTTP endpoint reference (NEW)
 - `docs/operations.md` — deploy, backup, upgrade, troubleshooting (NEW)
+- `docs/self-update.md` — in-app update flow + ftw-updater sidecar architecture
 - `docs/testing.md` — test strategy, sims, e2e recipe (NEW)
 - `docs/configuration.md` — YAML schema reference
 - `docs/battery-models.md` — ARX(1), RLS, cascade, self-tune

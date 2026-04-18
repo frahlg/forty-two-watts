@@ -34,6 +34,7 @@ import (
 	"github.com/frahlg/forty-two-watts/go/internal/pvmodel"
 	"github.com/frahlg/forty-two-watts/go/internal/scanner"
 	"github.com/frahlg/forty-two-watts/go/internal/selftune"
+	"github.com/frahlg/forty-two-watts/go/internal/selfupdate"
 	"github.com/frahlg/forty-two-watts/go/internal/state"
 	"github.com/frahlg/forty-two-watts/go/internal/telemetry"
 )
@@ -92,6 +93,10 @@ type Deps struct {
 	// Driver registry — used by lifecycle endpoints (restart/disable/enable)
 	// and EV command dispatch. Nil disables those endpoints (returns 503).
 	Registry *drivers.Registry
+
+	// Optional: background version-check + updater-sidecar dispatch.
+	// Nil disables every /api/version/* endpoint (returns 503).
+	SelfUpdate *selfupdate.Checker
 
 	Version string
 }
@@ -162,6 +167,13 @@ func (s *Server) routes() {
 	s.handle("POST /api/ev/chargers", s.handleEVChargers)
 	s.handle("GET  /api/loadpoints", s.handleLoadpoints)
 	s.handle("POST /api/loadpoints/{id}/target", s.handleLoadpointTarget)
+	s.handle("POST /api/loadpoints/{id}/soc", s.handleLoadpointSoC)
+	s.handle("GET  /api/version/check", s.handleVersionCheck)
+	s.handle("POST /api/version/skip", s.handleVersionSkip)
+	s.handle("POST /api/version/unskip", s.handleVersionUnskip)
+	s.handle("POST /api/version/update", s.handleVersionUpdate)
+	s.handle("POST /api/version/restart", s.handleVersionRestart)
+	s.handle("GET  /api/version/update/status", s.handleVersionUpdateStatus)
 
 	// ---- Static web UI ----
 	// Everything not matched above falls through to the static server.
@@ -1571,6 +1583,54 @@ func (s *Server) handleLoadpointTarget(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Trigger replan so the new target lands in the schedule fast.
+	if s.deps.MPC != nil {
+		go s.deps.MPC.Replan(r.Context())
+	}
+	writeJSON(w, 200, map[string]any{"ok": true})
+}
+
+// POST /api/loadpoints/{id}/soc lets the operator correct the
+// inferred vehicle SoC. Easee (and most chargers) are blind to the
+// vehicle's BMS — without a vehicle API integration (Tesla, VW, …)
+// we have no way to know actual SoC. We infer from
+// `plugin_soc_pct + delivered_wh / capacity`, but if the plug-in
+// anchor was wrong the estimate drifts. This endpoint re-anchors so
+// `current_soc_pct` equals the value the operator reads off their
+// car, and future observations accumulate from there.
+//
+// Body: {"soc_pct": 60}
+//
+// Returns 409 if the loadpoint is unplugged (can't set SoC on a
+// vehicle that isn't in the session).
+func (s *Server) handleLoadpointSoC(w http.ResponseWriter, r *http.Request) {
+	if s.deps.Loadpoints == nil {
+		writeJSON(w, 404, map[string]string{"error": "loadpoints not configured"})
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, 400, map[string]string{"error": "id required"})
+		return
+	}
+	var req struct {
+		SoCPct float64 `json:"soc_pct"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeJSON(w, 400, map[string]string{"error": err.Error()})
+		return
+	}
+	// Confirm loadpoint exists before inspecting plug state.
+	if _, ok := s.deps.Loadpoints.State(id); !ok {
+		writeJSON(w, 404, map[string]string{"error": "loadpoint not found"})
+		return
+	}
+	if !s.deps.Loadpoints.SetCurrentSoC(id, req.SoCPct) {
+		writeJSON(w, 409, map[string]string{
+			"error": "loadpoint not plugged in — SoC can only be set during an active session",
+		})
+		return
+	}
+	// Trigger replan so the corrected SoC feeds into the next plan.
 	if s.deps.MPC != nil {
 		go s.deps.MPC.Replan(r.Context())
 	}

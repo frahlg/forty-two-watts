@@ -155,13 +155,31 @@ jobs:
         run: gh release upload "${TAG}" "${ASSET}" --clobber
 
   docker:
-    name: docker build + push
+    name: docker build + push (${{ matrix.target }})
     runs-on: ubuntu-latest
     needs: release
     # Only build if semantic-release actually cut a new version. Skipping
     # when there's no release keeps `:latest` deterministic — every
     # `:latest` corresponds to a real tagged version.
     if: needs.release.outputs.new_release_published == 'true'
+    # Build both the main image and the ftw-updater sidecar image from
+    # the same tag. They're paired — `docker compose pull` upgrades them
+    # together — so tagging in lockstep (latest, vX.Y.Z, sha) keeps the
+    # shared state.json schema in sync on both sides of update-ipc.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: main
+            dockerfile: ./Dockerfile
+            image_suffix: ""
+            title: forty-two-watts
+            description: Unified Home Energy Management System
+          - target: updater
+            dockerfile: ./Dockerfile.updater
+            image_suffix: "-updater"
+            title: forty-two-watts-updater
+            description: Sidecar that executes docker compose pull + up for in-app updates
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -187,16 +205,16 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          # ghcr.io/<owner>/<repo>:<tag>
-          images: ghcr.io/${{ github.repository }}
+          # ghcr.io/<owner>/<repo>[-updater]:<tag>
+          images: ghcr.io/${{ github.repository }}${{ matrix.image_suffix }}
           tags: |
             type=raw,value=v${{ needs.release.outputs.new_release_version }}
             type=raw,value=${{ needs.release.outputs.new_release_version }}
             type=raw,value=latest
             type=sha,format=short
           labels: |
-            org.opencontainers.image.title=forty-two-watts
-            org.opencontainers.image.description=Unified Home Energy Management System
+            org.opencontainers.image.title=${{ matrix.title }}
+            org.opencontainers.image.description=${{ matrix.description }}
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.version=${{ needs.release.outputs.new_release_version }}
             org.opencontainers.image.licenses=MIT
@@ -205,7 +223,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: ./Dockerfile
+          file: ${{ matrix.dockerfile }}
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
@@ -213,5 +231,6 @@ jobs:
           build-args: |
             VERSION=v${{ needs.release.outputs.new_release_version }}
           # Use the GHA cache backend so subsequent builds reuse layers.
-          cache-from: type=gha
-          cache-to:   type=gha,mode=max
+          # Per-target scope keeps main + updater from evicting each other.
+          cache-from: type=gha,scope=${{ matrix.target }}
+          cache-to:   type=gha,mode=max,scope=${{ matrix.target }}

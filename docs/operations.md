@@ -175,6 +175,10 @@ Changes that require a full restart (the watcher will not re-wire these):
 
 When in doubt, `sudo systemctl restart forty-two-watts`.
 
+### In-app updates (Docker deploy)
+
+For the `docker-compose.yml` deployment, the web UI's version badge and "Update" / "Restart" buttons drive `docker compose pull` + `up -d` via the `ftw-updater` sidecar. See [self-update.md](self-update.md) for the architecture and how to test the flow locally before a release.
+
 ## 7. Backup + restore
 
 Three things hold state:

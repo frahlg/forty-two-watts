@@ -23,7 +23,8 @@
     <div class="header-right">
       <button id="ui-mode-toggle" class="btn-link" title="Show advanced controls + diagnostics">Advanced</button>
       <button id="settings-btn" class="settings-btn" title="Settings">⚙</button>
-      <span id="version" class="version">...</span>
+      <ftw-update-badge></ftw-update-badge>
+      <span id="version" class="version" title="Click for version info" style="cursor:pointer">...</span>
       <span id="conn-status" class="conn-status connected" title="Connected">&#9679;</span>
     </div>
   </header>
@@ -333,12 +334,35 @@
     </div>
   </div>
 
-  <script src="/app.js?v=diag1"></script>
-  <script src="/settings.js?v=diag1"></script>
-  <script src="/models.js?v=diag1"></script>
-  <script src="/plan.js?v=diag1"></script>
-  <script src="/twins.js?v=diag1"></script>
-  <script src="/diagnose.js?v=diag1"></script>
+  <script src="/app.js?v=soc1"></script>
+  <script src="/settings.js?v=soc1"></script>
+  <script src="/models.js?v=soc1"></script>
+  <script src="/plan.js?v=soc1"></script>
+  <script src="/twins.js?v=soc1"></script>
+  <script src="/diagnose.js?v=soc1"></script>
+  <script src="/update-badge.js?v=soc1" defer></script>
+  <script>
+    // Bridge: clicking the plain-text version span opens the update modal
+    // (the <ftw-update-badge> dot is tiny and easy to miss). Kept inline so
+    // app.js stays untouched by the self-update feature. When the backend
+    // reports the feature disabled (503 on /api/version/check — e.g. native
+    // build with FTW_SELFUPDATE_ENABLED unset), the badge fires
+    // `ftw-selfupdate-disabled` and we strip the pointer affordance here.
+    document.addEventListener("DOMContentLoaded", function () {
+      var v = document.getElementById("version");
+      if (!v) return;
+      function onClick() {
+        var badge = document.querySelector("ftw-update-badge");
+        if (badge && typeof badge.open === "function") badge.open();
+      }
+      v.addEventListener("click", onClick);
+      document.addEventListener("ftw-selfupdate-disabled", function () {
+        v.removeEventListener("click", onClick);
+        v.style.cursor = "default";
+        v.removeAttribute("title");
+      });
+    });
+  </script>
   <script>
     <!-- Status bar — always visible at bottom -->
     <footer class="status-bar" id="status-bar">

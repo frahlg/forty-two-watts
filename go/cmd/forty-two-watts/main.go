@@ -40,6 +40,7 @@ import (
 	"github.com/frahlg/forty-two-watts/go/internal/prices"
 	"github.com/frahlg/forty-two-watts/go/internal/pvmodel"
 	"github.com/frahlg/forty-two-watts/go/internal/selftune"
+	"github.com/frahlg/forty-two-watts/go/internal/selfupdate"
 	"github.com/frahlg/forty-two-watts/go/internal/state"
 	"github.com/frahlg/forty-two-watts/go/internal/telemetry"
 )
@@ -542,6 +543,27 @@ func main() {
 			"pvtwin", pvSvc != nil)
 	}
 
+	// ---- Self-update checker ----
+	// Probes the GitHub Releases API in the background; the UI reads the
+	// cached result via /api/version/check. Gated behind FTW_SELFUPDATE_ENABLED
+	// because the ftw-updater sidecar only exists in the docker-compose deploy.
+	// Native / OS-image builds will ship their own update mechanism and set
+	// their own gate (or leave this one off). Deps.SelfUpdate stays nil when
+	// disabled, which makes every /api/version/* handler return 503 and the
+	// UI hide the badge.
+	var selfUpdater *selfupdate.Checker
+	if envBool("FTW_SELFUPDATE_ENABLED") {
+		selfUpdater = selfupdate.New(selfupdate.Config{
+			CurrentVersion: Version,
+			SocketPath:     envOr("FTW_UPDATER_SOCKET", "/run/ftw-update/sock"),
+			StatusPath:     envOr("FTW_UPDATER_STATUS", "/run/ftw-update/state.json"),
+		}, st)
+		selfUpdater.Start(ctx)
+		slog.Info("selfupdate enabled", "socket", envOr("FTW_UPDATER_SOCKET", "/run/ftw-update/sock"))
+	} else {
+		slog.Info("selfupdate disabled — set FTW_SELFUPDATE_ENABLED=1 to turn on")
+	}
+
 	// ---- Start HTTP API ----
 	// Forward-declare haBridge so Deps can reference it; the bridge
 	// gets wired further down (HA is optional + depends on reg.Names()).
@@ -566,6 +588,7 @@ func main() {
 		Loadpoints: lpMgr,
 		HA:         haBridge,
 		Registry:   reg,
+		SelfUpdate: selfUpdater,
 		Version:    Version,
 	}
 	srv := api.New(deps)
@@ -1147,4 +1170,25 @@ func recordHistory(st *state.Store, tel *telemetry.Store, ctrl *control.State, n
 	}); err != nil {
 		slog.Warn("failed to persist history point", "err", err)
 	}
+}
+
+// envOr returns the env var's value if it is set (even if empty, so an
+// operator can explicitly blank a path to disable a feature — see
+// docs/self-update.md on FTW_UPDATER_SOCKET=""). Returns def only when
+// the variable is unset.
+func envOr(key, def string) string {
+	if v, ok := os.LookupEnv(key); ok {
+		return v
+	}
+	return def
+}
+
+// envBool returns true iff the env var is set to a positive value
+// (1/true/yes/on, case-insensitive). Unset or any other value = false.
+func envBool(key string) bool {
+	switch strings.ToLower(os.Getenv(key)) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
 }

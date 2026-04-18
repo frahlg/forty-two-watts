@@ -1,0 +1,324 @@
+// ftw-updater is the sidecar that executes `docker compose pull` +
+// `docker compose up -d` on behalf of the main forty-two-watts container.
+//
+// It runs in its own container with the Docker socket mounted in and a
+// read-only bind to docker-compose.yml, and listens on a Unix socket shared
+// with the main container via a tmpfs volume. The main container never
+// touches the Docker socket itself — all destructive actions cross this
+// one-way boundary.
+//
+// State is written to state.json in the shared volume before and after
+// each step so the main container can reflect progress to the UI even
+// after it has been recreated.
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"log/slog"
+	"net"
+	"net/http"
+	"os"
+	"os/exec"
+	"os/signal"
+	"path/filepath"
+	"sync"
+	"syscall"
+	"time"
+)
+
+const mainServiceName = "forty-two-watts"
+
+// State mirrors selfupdate.UpdateStatus (we keep a local copy to avoid
+// importing the main module's internal package from this separate cmd).
+type State struct {
+	State     string    `json:"state"` // idle, pulling, restarting, done, failed
+	Action    string    `json:"action,omitempty"`
+	Target    string    `json:"target,omitempty"`
+	StartedAt time.Time `json:"started_at,omitempty"`
+	UpdatedAt time.Time `json:"updated_at,omitempty"`
+	Message   string    `json:"message,omitempty"`
+}
+
+type server struct {
+	composeFile string
+	// overrideFiles are auto-discovered compose overrides next to
+	// composeFile (e.g. docker-compose.override.yml). Each one is added
+	// as an extra -f arg to every compose invocation so the sidecar
+	// sees the same merged config the user sees when running compose by
+	// hand from the project dir.
+	overrideFiles []string
+	statusPath    string
+	// skipPull is a dev-only escape hatch: when true, the "pulling" phase
+	// becomes a no-op. Needed for local smoke tests where the image lives
+	// only on the dev machine (`docker compose pull` would fail, or worse,
+	// overwrite the local build with a stale GHCR tag). Production leaves
+	// this at false.
+	skipPull bool
+
+	// runMu ensures only one pull+up runs at a time. HTTP handlers that
+	// arrive while a job is in flight return 409.
+	runMu sync.Mutex
+	// runner lets tests inject a fake exec.
+	runner func(ctx context.Context, args ...string) error
+}
+
+// composeArgs returns the common prefix of every `docker compose` invocation
+// the sidecar makes — the base file plus any auto-discovered overrides,
+// followed by whatever subcommand + args the caller passes.
+func (s *server) composeArgs(sub ...string) []string {
+	out := []string{"compose", "-f", s.composeFile}
+	for _, o := range s.overrideFiles {
+		out = append(out, "-f", o)
+	}
+	return append(out, sub...)
+}
+
+// discoverOverrides looks for the standard override filenames in the same
+// directory as base, in the same order the compose CLI resolves them.
+// Only returns files that actually exist — the list is used verbatim as
+// additional -f flags so a missing file would error the command.
+func discoverOverrides(base string) []string {
+	dir := filepath.Dir(base)
+	var out []string
+	for _, name := range []string{"docker-compose.override.yml", "docker-compose.override.yaml", "compose.override.yml", "compose.override.yaml"} {
+		p := filepath.Join(dir, name)
+		if _, err := os.Stat(p); err == nil {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func main() {
+	socket := flag.String("socket", envOr("FTW_UPDATER_SOCKET", "/run/ftw-update/sock"), "Unix socket to listen on")
+	statusPath := flag.String("status", envOr("FTW_UPDATER_STATUS", "/run/ftw-update/state.json"), "State file to write")
+	compose := flag.String("compose", envOr("FTW_UPDATER_COMPOSE", "/compose/docker-compose.yml"), "Path to docker-compose.yml")
+	skipPull := flag.Bool("skip-pull", envOr("FTW_UPDATER_SKIP_PULL", "") != "", "Dev: skip docker compose pull (keeps local image)")
+	flag.Parse()
+
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	slog.Info("ftw-updater starting", "socket", *socket, "status", *statusPath, "compose", *compose)
+
+	// Guarantee status dir exists even if the tmpfs mount is empty.
+	if err := os.MkdirAll(filepath.Dir(*statusPath), 0o755); err != nil {
+		slog.Error("mkdir status dir", "err", err)
+		os.Exit(1)
+	}
+	if err := os.MkdirAll(filepath.Dir(*socket), 0o755); err != nil {
+		slog.Error("mkdir socket dir", "err", err)
+		os.Exit(1)
+	}
+
+	srv := &server{
+		composeFile: *compose,
+		statusPath:  *statusPath,
+		skipPull:    *skipPull,
+		runner:      dockerCompose,
+	}
+	// Auto-discover override files alongside the base, the same way the
+	// compose CLI does when invoked without -f. Without this the sidecar
+	// would ignore local dev overrides (network_mode, build args, …) and
+	// recreate the main container with base-file settings only.
+	srv.overrideFiles = discoverOverrides(*compose)
+	if len(srv.overrideFiles) > 0 {
+		slog.Info("ftw-updater: override files discovered", "files", srv.overrideFiles)
+	}
+	if *skipPull {
+		slog.Warn("ftw-updater: skip-pull enabled — production deploys should leave this off")
+	}
+	srv.recoverCrashedState()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /update", srv.handleUpdate)
+	mux.HandleFunc("GET /status", srv.handleStatus)
+
+	// Remove a stale socket — common pattern; the listener would EADDRINUSE otherwise.
+	_ = os.Remove(*socket)
+	ln, err := net.Listen("unix", *socket)
+	if err != nil {
+		slog.Error("listen unix", "err", err)
+		os.Exit(1)
+	}
+	// Socket is in a shared tmpfs volume; restrict to world-rw so the main
+	// container (ftw uid=100) can connect without caring about ownership.
+	if err := os.Chmod(*socket, 0o666); err != nil {
+		slog.Warn("chmod socket", "err", err)
+	}
+
+	httpSrv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	go func() {
+		<-ctx.Done()
+		_ = httpSrv.Close()
+	}()
+
+	slog.Info("ftw-updater listening")
+	if err := httpSrv.Serve(ln); err != nil && err != http.ErrServerClosed {
+		slog.Error("serve", "err", err)
+	}
+}
+
+func (s *server) handleUpdate(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Action string `json:"action"`
+		Target string `json:"target,omitempty"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<12)).Decode(&body); err != nil {
+		http.Error(w, "bad json: "+err.Error(), 400)
+		return
+	}
+	if body.Action != "update" && body.Action != "restart" {
+		http.Error(w, "action must be update or restart", 400)
+		return
+	}
+	if !s.runMu.TryLock() {
+		http.Error(w, "update already in progress", 409)
+		return
+	}
+
+	// Hand off to a goroutine so the HTTP caller gets 202 immediately; the
+	// main container's UI polls /status for progress.
+	go func() {
+		defer s.runMu.Unlock()
+		s.runJob(body.Action, body.Target)
+	}()
+
+	w.WriteHeader(202)
+	_ = json.NewEncoder(w).Encode(map[string]any{"status": "started", "action": body.Action, "target": body.Target})
+}
+
+func (s *server) handleStatus(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	st := s.readState()
+	_ = json.NewEncoder(w).Encode(st)
+}
+
+// runJob executes a pull+up (or pull+up --force-recreate) sequence,
+// emitting state transitions between steps. Runs inside a goroutine so
+// the HTTP handler that kicked it off has already responded.
+func (s *server) runJob(action, target string) {
+	now := time.Now()
+	s.writeState(State{State: "pulling", Action: action, Target: target, StartedAt: now, UpdatedAt: now})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer cancel()
+
+	if !s.skipPull {
+		pullArgs := s.composeArgs("pull", mainServiceName)
+		if err := s.runner(ctx, pullArgs...); err != nil {
+			s.writeState(State{State: "failed", Action: action, Target: target, StartedAt: now, UpdatedAt: time.Now(), Message: "pull failed: " + err.Error()})
+			slog.Error("pull failed", "err", err)
+			return
+		}
+	} else {
+		slog.Info("skip-pull active; continuing straight to compose up")
+	}
+
+	s.writeState(State{State: "restarting", Action: action, Target: target, StartedAt: now, UpdatedAt: time.Now()})
+
+	upArgs := s.composeArgs("up", "-d", mainServiceName)
+	if action == "restart" {
+		// --force-recreate is what makes restart actually restart when the
+		// image digest didn't change — exactly the dev/test path the main
+		// UI exposes as the "Restart" button.
+		upArgs = s.composeArgs("up", "-d", "--force-recreate", mainServiceName)
+	}
+	if err := s.runner(ctx, upArgs...); err != nil {
+		s.writeState(State{State: "failed", Action: action, Target: target, StartedAt: now, UpdatedAt: time.Now(), Message: "up -d failed: " + err.Error()})
+		slog.Error("compose up failed", "err", err)
+		return
+	}
+
+	// The main container is now being recreated. The brand-new replica
+	// will read this "done" state on startup and serve it to the UI that's
+	// still polling in the browser.
+	s.writeState(State{State: "done", Action: action, Target: target, StartedAt: now, UpdatedAt: time.Now(), Message: "compose up -d completed"})
+}
+
+func (s *server) writeState(st State) {
+	if st.UpdatedAt.IsZero() {
+		st.UpdatedAt = time.Now()
+	}
+	tmp := s.statusPath + ".tmp"
+	f, err := os.Create(tmp)
+	if err != nil {
+		slog.Warn("state write", "err", err)
+		return
+	}
+	enc := json.NewEncoder(f)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(st); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		slog.Warn("state encode", "err", err)
+		return
+	}
+	_ = f.Close()
+	// Atomic swap so partial writes never leak to a reader on the other
+	// side of the shared volume.
+	if err := os.Rename(tmp, s.statusPath); err != nil {
+		slog.Warn("state rename", "err", err)
+	}
+}
+
+func (s *server) readState() State {
+	f, err := os.Open(s.statusPath)
+	if err != nil {
+		return State{State: "idle"}
+	}
+	defer f.Close()
+	var st State
+	if err := json.NewDecoder(f).Decode(&st); err != nil || st.State == "" {
+		return State{State: "idle"}
+	}
+	return st
+}
+
+// recoverCrashedState runs once at boot. If state.json says we're in-flight
+// but the heartbeat is older than 5 min, we know the previous updater
+// process was killed mid-run and we flip to failed so the UI unblocks.
+func (s *server) recoverCrashedState() {
+	st := s.readState()
+	if (st.State == "pulling" || st.State == "restarting") && time.Since(st.UpdatedAt) > 5*time.Minute {
+		prev := st.State
+		st.State = "failed"
+		if st.Message == "" {
+			st.Message = "updater process restarted while in-flight"
+		}
+		st.UpdatedAt = time.Now()
+		s.writeState(st)
+		slog.Warn("recovered in-flight state as failed", "prev_state", prev)
+	}
+}
+
+// dockerCompose shells out to the `docker` CLI (the compose plugin ships
+// in the docker:27-cli image). stdout+stderr are captured so a failure
+// includes the compose error text in state.json.
+func dockerCompose(ctx context.Context, args ...string) error {
+	cmd := exec.CommandContext(ctx, "docker", args...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%w: %s", err, truncate(string(out), 400))
+	}
+	slog.Info("docker compose ok", "args", args, "out", truncate(string(out), 200))
+	return nil
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…(truncated)"
+}
+
+func envOr(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
