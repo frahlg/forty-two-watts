@@ -112,10 +112,24 @@ a version you hid earlier resurfaces as soon as you ask about it.
 - **Rollback**: snapshot the pre-update image digest so a subsequent
   "Rollback" button can retag and recreate.
 
-## Disabling
+## Enabling and disabling
 
-Set `FTW_UPDATER_SOCKET=""` in the main container's env to disable the
-Trigger path while keeping the GH probe; the UI buttons will fail fast
-with a clear error. Remove the `ftw-updater` service from
-`docker-compose.yml` if you want the sidecar gone entirely — the main
-container ignores the missing socket gracefully.
+The entire feature is gated on `FTW_SELFUPDATE_ENABLED=1`. The shipped
+`docker-compose.yml` sets this on the main service; any deploy that
+doesn't use the sidecar (bare-metal binary, native OS image, dev build
+started with `go run`, etc.) leaves it unset and the UI hides the badge
+entirely. Handlers under `/api/version/*` return `503 self-update
+disabled` when the flag is off.
+
+Finer-grained knobs, only relevant once the feature is enabled:
+
+- `FTW_UPDATER_SOCKET=""` — keep the GH probe and the "Update available"
+  banner but disable the Update/Restart buttons. The UI shows the
+  notification dot and release notes; clicking Update surfaces a 502.
+- Remove the `ftw-updater` service block from `docker-compose.yml` — the
+  main container ignores the missing socket gracefully and behaves the
+  same as the previous option.
+
+Future native / OS-image builds will ship their own update mechanism and
+either leave this flag off (and wire their own gate) or reuse the same
+name with a different backend.

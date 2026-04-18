@@ -545,15 +545,24 @@ func main() {
 
 	// ---- Self-update checker ----
 	// Probes the GitHub Releases API in the background; the UI reads the
-	// cached result via /api/version/check. Socket/status paths default to
-	// the sidecar layout defined in docker-compose.yml — empty on bare-metal
-	// runs, which disables Trigger/Status gracefully.
-	selfUpdater := selfupdate.New(selfupdate.Config{
-		CurrentVersion: Version,
-		SocketPath:     envOr("FTW_UPDATER_SOCKET", "/run/ftw-update/sock"),
-		StatusPath:     envOr("FTW_UPDATER_STATUS", "/run/ftw-update/state.json"),
-	}, st)
-	selfUpdater.Start(ctx)
+	// cached result via /api/version/check. Gated behind FTW_SELFUPDATE_ENABLED
+	// because the ftw-updater sidecar only exists in the docker-compose deploy.
+	// Native / OS-image builds will ship their own update mechanism and set
+	// their own gate (or leave this one off). Deps.SelfUpdate stays nil when
+	// disabled, which makes every /api/version/* handler return 503 and the
+	// UI hide the badge.
+	var selfUpdater *selfupdate.Checker
+	if envBool("FTW_SELFUPDATE_ENABLED") {
+		selfUpdater = selfupdate.New(selfupdate.Config{
+			CurrentVersion: Version,
+			SocketPath:     envOr("FTW_UPDATER_SOCKET", "/run/ftw-update/sock"),
+			StatusPath:     envOr("FTW_UPDATER_STATUS", "/run/ftw-update/state.json"),
+		}, st)
+		selfUpdater.Start(ctx)
+		slog.Info("selfupdate enabled", "socket", envOr("FTW_UPDATER_SOCKET", "/run/ftw-update/sock"))
+	} else {
+		slog.Info("selfupdate disabled — set FTW_SELFUPDATE_ENABLED=1 to turn on")
+	}
 
 	// ---- Start HTTP API ----
 	// Forward-declare haBridge so Deps can reference it; the bridge
@@ -1172,4 +1181,14 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// envBool returns true iff the env var is set to a positive value
+// (1/true/yes/on, case-insensitive). Unset or any other value = false.
+func envBool(key string) bool {
+	switch strings.ToLower(os.Getenv(key)) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
 }

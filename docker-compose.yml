@@ -29,6 +29,13 @@ services:
     container_name: forty-two-watts
     restart: unless-stopped
 
+    environment:
+      # Turns on the in-app self-update feature (version-check banner +
+      # Update/Restart buttons). Only meaningful alongside the ftw-updater
+      # sidecar below; native / OS-image deploys leave this unset so the
+      # UI hides the feature entirely. See docs/self-update.md.
+      FTW_SELFUPDATE_ENABLED: "1"
+
     # Host networking is required for:
     #   - Modbus TCP to inverters / meters on the LAN
     #   - MQTT brokers on the LAN (no port forwarding)

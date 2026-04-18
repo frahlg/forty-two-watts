@@ -344,13 +344,22 @@
   <script>
     // Bridge: clicking the plain-text version span opens the update modal
     // (the <ftw-update-badge> dot is tiny and easy to miss). Kept inline so
-    // app.js stays untouched by the self-update feature.
+    // app.js stays untouched by the self-update feature. When the backend
+    // reports the feature disabled (503 on /api/version/check — e.g. native
+    // build with FTW_SELFUPDATE_ENABLED unset), the badge fires
+    // `ftw-selfupdate-disabled` and we strip the pointer affordance here.
     document.addEventListener("DOMContentLoaded", function () {
       var v = document.getElementById("version");
       if (!v) return;
-      v.addEventListener("click", function () {
+      function onClick() {
         var badge = document.querySelector("ftw-update-badge");
         if (badge && typeof badge.open === "function") badge.open();
+      }
+      v.addEventListener("click", onClick);
+      document.addEventListener("ftw-selfupdate-disabled", function () {
+        v.removeEventListener("click", onClick);
+        v.style.cursor = "default";
+        v.removeAttribute("title");
       });
     });
   </script>

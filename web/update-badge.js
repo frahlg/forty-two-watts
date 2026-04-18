@@ -26,6 +26,7 @@
       this._updateOriginalVersion = null;
       this._checkTimer = null;
       this._statusTimer = null;
+      this._disabled = false;         // set true on 503 (feature gated off)
       this._render();
     }
 
@@ -40,28 +41,53 @@
     }
 
     // Public: called by the header #version click handler in index.html so
-    // the operator can open the modal without aiming at the tiny dot.
+    // the operator can open the modal without aiming at the tiny dot. No-op
+    // when the backend has told us the feature is gated off.
     open() {
+      if (this._disabled) return;
       this._phase = "dialog";
       this._render();
       this._refresh(false); // surface the freshest info when opened
     }
 
+    // Permanently shut the element down: stop polling, clear shadow DOM, hide
+    // from layout, and fire an event so the #version bridge can drop its
+    // cursor/pointer affordance. Called when the backend returns 503, which
+    // means the feature is gated off (FTW_SELFUPDATE_ENABLED unset) — not a
+    // transient error, so we don't ever retry.
+    _disable() {
+      if (this._disabled) return;
+      this._disabled = true;
+      clearInterval(this._checkTimer);
+      clearInterval(this._statusTimer);
+      this._shadow.innerHTML = "";
+      this.hidden = true;
+      this.dispatchEvent(new CustomEvent("ftw-selfupdate-disabled", { bubbles: true }));
+    }
+
     // ---- data ----
     _refresh(force) {
+      if (this._disabled) return;
       const url = force ? "/api/version/check?force=1" : "/api/version/check";
       fetch(url)
-        .then((r) =>
-          r.json()
+        .then((r) => {
+          // 503 = feature disabled by the backend. Stop polling and get out
+          // of the way entirely — this is deployment config, not a bug.
+          if (r.status === 503) {
+            this._disable();
+            return null;
+          }
+          return r.json()
             .then((body) => ({ ok: r.ok, body }))
-            .catch(() => ({ ok: r.ok, body: null }))
-        )
-        .then(({ ok, body }) => {
+            .catch(() => ({ ok: r.ok, body: null }));
+        })
+        .then((result) => {
+          if (!result) return; // disabled, nothing to render
           // The handler returns the full Info schema on both success and the
-          // force=1 error path, so we render either way. When ok=false, body.err
-          // carries the reason and the UI shows "Last check failed: …".
-          if (body && typeof body === "object") {
-            this._info = body;
+          // force=1 error path, so we render either way. When ok=false,
+          // body.err carries the reason and the UI shows "Last check failed".
+          if (result.body && typeof result.body === "object") {
+            this._info = result.body;
             this._render();
           }
         })
