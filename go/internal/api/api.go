@@ -156,6 +156,7 @@ func (s *Server) routes() {
 	s.handle("POST /api/ev/command", s.handleEVCommand)
 	s.handle("POST /api/ev/chargers", s.handleEVChargers)
 	s.handle("GET  /api/loadpoints", s.handleLoadpoints)
+	s.handle("POST /api/loadpoints/{id}/target", s.handleLoadpointTarget)
 
 	// ---- Static web UI ----
 	// Everything not matched above falls through to the static server.
@@ -1377,8 +1378,7 @@ func (s *Server) handleEVChargers(w http.ResponseWriter, r *http.Request) {
 }
 
 // GET /api/loadpoints returns the configured EV loadpoints with their
-// current observable state. Read-only in Phase 3; POST /target comes
-// in Phase 4 with the full charger control wiring.
+// current observable state.
 func (s *Server) handleLoadpoints(w http.ResponseWriter, r *http.Request) {
 	if s.deps.Loadpoints == nil {
 		writeJSON(w, 200, map[string]any{"enabled": false, "loadpoints": []any{}})
@@ -1388,4 +1388,45 @@ func (s *Server) handleLoadpoints(w http.ResponseWriter, r *http.Request) {
 		"enabled":    true,
 		"loadpoints": s.deps.Loadpoints.States(),
 	})
+}
+
+// POST /api/loadpoints/{id}/target sets user intent for an EV
+// loadpoint: the SoC % the vehicle should reach by the target time.
+// Triggers an MPC replan so the new target takes effect within one
+// control cycle.
+//
+// Body: {"soc_pct": 80, "target_time_ms": 1745000000000}
+//
+// target_time_ms == 0 → no deadline (charge opportunistically).
+func (s *Server) handleLoadpointTarget(w http.ResponseWriter, r *http.Request) {
+	if s.deps.Loadpoints == nil {
+		writeJSON(w, 404, map[string]string{"error": "loadpoints not configured"})
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, 400, map[string]string{"error": "id required"})
+		return
+	}
+	var req struct {
+		SoCPct       float64 `json:"soc_pct"`
+		TargetTimeMs int64   `json:"target_time_ms"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeJSON(w, 400, map[string]string{"error": err.Error()})
+		return
+	}
+	var deadline time.Time
+	if req.TargetTimeMs > 0 {
+		deadline = time.UnixMilli(req.TargetTimeMs).UTC()
+	}
+	if !s.deps.Loadpoints.SetTarget(id, req.SoCPct, deadline) {
+		writeJSON(w, 404, map[string]string{"error": "loadpoint not found"})
+		return
+	}
+	// Trigger replan so the new target lands in the schedule fast.
+	if s.deps.MPC != nil {
+		go s.deps.MPC.Replan(r.Context())
+	}
+	writeJSON(w, 200, map[string]any{"ok": true})
 }

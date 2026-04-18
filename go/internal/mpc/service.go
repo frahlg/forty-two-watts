@@ -27,6 +27,16 @@ type LoadPredictor func(t time.Time) float64
 // Leave nil to cap the plan horizon at what's been published.
 type PricePredictor func(zone string, t time.Time) float64
 
+// LoadpointProbe returns the EV loadpoint state the DP should extend
+// itself with. Called once per replan. Return nil when no loadpoint
+// should be optimized (unplugged, unconfigured, or during initial
+// rollout when operator wants to disable EV-in-DP).
+//
+// Wired in main.go against *loadpoint.Manager; kept as a plain
+// closure type to avoid the mpc package importing loadpoint (which
+// would risk a cycle if loadpoint ever needs mpc types).
+type LoadpointProbe func() *LoadpointSpec
+
 // Service wires the optimizer to the rest of the stack: pulls prices +
 // forecast from the SQLite store, reads current SoC from the telemetry
 // store, and re-plans on a ticker. The latest plan is cached.
@@ -37,9 +47,10 @@ type Service struct {
 	BaseLoad float64 // baseline household load (W). 0 disables load assumption.
 	Horizon  time.Duration
 	Interval time.Duration
-	PV       PVPredictor    // optional — overrides stored pv_w_estimated
-	Load     LoadPredictor  // optional — overrides flat BaseLoad
-	Price    PricePredictor // optional — fills in future slots when day-ahead isn't published yet
+	PV        PVPredictor    // optional — overrides stored pv_w_estimated
+	Load      LoadPredictor  // optional — overrides flat BaseLoad
+	Price     PricePredictor // optional — fills in future slots when day-ahead isn't published yet
+	Loadpoint LoadpointProbe // optional — when non-nil, the DP extends its state with EV dimensions
 
 	// Reactive replan: when the integrated energy gap between actual
 	// and the plan's current-slot prediction exceeds a threshold over
@@ -83,8 +94,9 @@ type Service struct {
 
 	Defaults Params
 
-	mu   sync.RWMutex
-	last *Plan
+	mu              sync.RWMutex
+	last            *Plan
+	lastLoadpointID string // ID of the loadpoint active in the most recent plan (empty = none)
 
 	stop chan struct{}
 	done chan struct{}
@@ -139,6 +151,18 @@ type SlotDirective struct {
 	BatteryEnergyWh float64 // total energy for the slot (site-signed)
 	SoCTargetPct    float64 // plan's SoC at SlotEnd — used by divergence detector
 	Strategy        Mode    // echoed for logging + API
+
+	// LoadpointEnergyWh carries per-loadpoint EV energy budgets for
+	// this slot. Keyed by Loadpoint.ID. Positive = charging energy
+	// the plan allocated. Empty map when no loadpoints are
+	// configured / active. The dispatch layer converts energy to
+	// instantaneous power via the same `remaining_wh × 3600 /
+	// remaining_s` formula it uses for the battery.
+	LoadpointEnergyWh map[string]float64
+
+	// LoadpointSoCTargetPct is the plan's EV SoC at SlotEnd per
+	// loadpoint. Used by per-loadpoint divergence check in Phase 4.1.
+	LoadpointSoCTargetPct map[string]float64
 }
 
 // SlotDirectiveAt returns the energy-allocation directive for the slot
@@ -167,13 +191,26 @@ func (s *Service) SlotDirectiveAt(now time.Time) (SlotDirective, bool) {
 		}
 		// energy_wh = power_w * hours. a.SlotLenMin/60 gives hours.
 		energyWh := a.BatteryW * float64(a.SlotLenMin) / 60.0
-		return SlotDirective{
+		d := SlotDirective{
 			SlotStart:       time.UnixMilli(a.SlotStartMs),
 			SlotEnd:         time.UnixMilli(endMs),
 			BatteryEnergyWh: energyWh,
 			SoCTargetPct:    a.SoCPct,
 			Strategy:        s.Defaults.Mode,
-		}, true
+		}
+		// EV energy budget for the slot (single-loadpoint for now —
+		// keyed under lastLoadpointID so the dispatch layer routes
+		// to the right driver).
+		if a.LoadpointW > 0 && s.lastLoadpointID != "" {
+			lpEnergyWh := a.LoadpointW * float64(a.SlotLenMin) / 60.0
+			d.LoadpointEnergyWh = map[string]float64{
+				s.lastLoadpointID: lpEnergyWh,
+			}
+			d.LoadpointSoCTargetPct = map[string]float64{
+				s.lastLoadpointID: a.LoadpointSoCPct,
+			}
+		}
+		return d, true
 	}
 	return SlotDirective{}, false
 }
@@ -480,6 +517,18 @@ func (s *Service) replan(_ context.Context) *Plan {
 		}
 	}
 
+	// Loadpoint extension: if a probe is wired AND returns an active
+	// spec, the DP adds an EV SoC dimension and produces per-slot
+	// LoadpointW decisions. One loadpoint at a time — multi-LP
+	// support is on the roadmap.
+	var loadpointID string
+	if s.Loadpoint != nil {
+		if spec := s.Loadpoint(); spec != nil && spec.PluggedIn {
+			p.Loadpoint = spec
+			loadpointID = spec.ID
+		}
+	}
+
 	slog.Info("mpc: optimize params",
 		"mode", p.Mode,
 		"terminal_ore", p.TerminalSoCPrice,
@@ -489,6 +538,8 @@ func (s *Service) replan(_ context.Context) *Plan {
 		"soc_levels", p.SoCLevels,
 		"action_levels", p.ActionLevels,
 		"soc_start", p.InitialSoCPct,
+		"loadpoint_active", p.Loadpoint != nil,
+		"loadpoint_id", loadpointID,
 	)
 	plan := Optimize(slots, p)
 
@@ -501,6 +552,7 @@ func (s *Service) replan(_ context.Context) *Plan {
 
 	s.mu.Lock()
 	s.last = &plan
+	s.lastLoadpointID = loadpointID
 	s.lastReplanAt = time.Now()
 	reason := s.lastReason
 	if reason == "" {
