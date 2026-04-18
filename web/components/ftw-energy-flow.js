@@ -68,44 +68,15 @@ class FtwEnergyFlow extends FtwElement {
         var(--hero-glow-a), transparent 60%);
       pointer-events: none;
     }
-    .head {
-      display: flex;
-      justify-content: space-between;
-      align-items: flex-end;
-      margin-bottom: 6px;
-      position: relative;
-    }
-    .eyebrow {
-      font-size: 10px;
-      font-family: var(--mono);
-      color: var(--fg-muted);
-      text-transform: uppercase;
-      letter-spacing: 0.12em;
-    }
     .title {
-      font-family: var(--sans);
-      font-size: 22px;
-      font-weight: 700;
-      letter-spacing: -0.02em;
-      margin-top: 2px;
-      color: var(--fg);
-    }
-    .legend {
-      display: flex;
-      gap: 18px;
-      font-size: 11px;
-      color: var(--fg-dim);
       font-family: var(--mono);
-      flex-wrap: wrap;
-      justify-content: flex-end;
-    }
-    .legend i {
-      display: inline-block;
-      width: 10px;
-      height: 10px;
-      border-radius: 2px;
-      margin-right: 6px;
-      vertical-align: middle;
+      font-size: 11px;
+      font-weight: 500;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      color: var(--fg-muted);
+      margin-bottom: 10px;
+      position: relative;
     }
     svg {
       width: 100%;
@@ -148,8 +119,6 @@ class FtwEnergyFlow extends FtwElement {
       .sv-node-sub   { font-size: 16px; }
       .sv-hub-value  { font-size: 28px; }
       .sv-hub-label  { font-size: 14px; }
-      .title         { font-size: 26px; }
-      .legend        { font-size: 13px; }
     }
   `;
 
@@ -367,7 +336,11 @@ class FtwEnergyFlow extends FtwElement {
     const nodeR       = 86;
     const hubR        = this._compact ? 95       : HUB_R;
     const hubIconY    = this._compact ? CY - 49  : CY - 30;
-    const hubValueY   = this._compact ? CY + 4   : CY + 16;
+    // Baseline placed so the value text's visual center sits midway
+    // between the icon bottom (CY - 23 in compact) and the label top
+    // (~CY + 23). A 28 px cap-height sits ~7 px above its baseline, so
+    // baseline at CY + 10 puts the centerline near CY.
+    const hubValueY   = this._compact ? CY + 10  : CY + 16;
     const hubLabelY   = this._compact ? CY + 34  : CY + 32;
 
     // Compact rotates the cardinal "+" to an "×": each box owns its own
@@ -503,18 +476,7 @@ class FtwEnergyFlow extends FtwElement {
     });
 
     return `
-      <div class="head">
-        <div>
-          <div class="eyebrow">Live flow</div>
-          <div class="title">Energy balance</div>
-        </div>
-        <div class="legend">
-          <span><i style="background:var(--amber)"></i>PV</span>
-          <span><i style="background:var(--red-e)"></i>Import</span>
-          <span><i style="background:var(--green-e)"></i>Export</span>
-          <span><i style="background:var(--cyan)"></i>Battery</span>
-        </div>
-      </div>
+      <div class="title">Energy balance</div>
       <svg viewBox="${vbX} 0 ${vbW} ${H}" preserveAspectRatio="xMidYMid meet" aria-hidden="true">
         <defs>
           <radialGradient id="ef-hub" cx="50%" cy="50%" r="50%">
