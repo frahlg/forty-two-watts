@@ -1,48 +1,48 @@
--- CTEK Chargestorm EV Charger Driver (Automation API v1)
+-- CTEK Chargestorm EV Charger Driver (Automation API v2)
 -- Emits: EV
 -- Protocol: Modbus/TCP
 --
+-- This file is the API v2 twin of drivers/ctek.lua. The two variants
+-- are identical in every respect EXCEPT the base register addresses
+-- (v1 uses 0x1xxx, v2 uses 0x2xxx). CTEK introduced the api_version
+-- selector in CSOS 4.8.2 — v2 is required whenever you run both the
+-- internal-meter Modbus server and the NANOGRID™ limit-control server
+-- on the same CCU (CSOS allows at most one of them on api_version=1).
+--
 -- Hardware + firmware:
 --   Requires a CTEK Chargestorm Connected 2 or Connected 3 running
---   CSOS (Chargestorm OS) firmware 4.9.3 or later. Older firmware
---   either lacks the Modbus/TCP automation server entirely (CSOS
---   < 3.11.16) or lacks the charging-limit control register (CSOS
---   < 4.9.0). Connect the CCU to LAN and:
+--   CSOS (Chargestorm OS) firmware 4.9.3 or later. On the CCU:
 --
---     Automation → ModbusTCPEnable                  = true
---     Automation → modbus_tcp_automation_api_version = 1
+--     Automation → ModbusTCPEnable                   = true
+--     Automation → modbus_tcp_automation_api_version = 2
 --
---   Use drivers/ctek_v2.lua if you've set the API version to 2 on the
---   CCU instead. The only difference between the two variants is the
---   base register address (0x1xxx for v1, 0x2xxx for v2); all register
---   semantics, units, and function codes are identical. CTEK recommends
---   running either the charging-control API or the NANOGRID™ limit
---   control on API v2 if you want both enabled simultaneously.
+--   Use drivers/ctek.lua if the CCU is still on api_version=1.
 --
 -- Unit identifier selects the outlet on dual-outlet stations:
 --   unit_id = 1 → EVSE1 (left outlet, or single-outlet station)
 --   unit_id = 2 → EVSE2 (right outlet)
 --
--- Register map (source: CTEK "Automation interface" v1.0, rev 6b4af7):
+-- Register map (source: CTEK "Automation interface" v1.0, rev 6b4af7,
+-- API v2 column):
 --
 --   Identity / meter type:
---     0x1000         API version       (u16)
---     0x1001         API status, 0=OK  (u16)
---     0x1002         EnergyMeterType   (u16 enum)
---     0x1003..0x1008 Serial (12 ASCII chars, 2 per register, big-endian bytes)
+--     0x2000         API version       (u16)
+--     0x2001         API status, 0=OK  (u16)
+--     0x2002         EnergyMeterType   (u16 enum)
+--     0x2003..0x2008 Serial (12 ASCII chars, 2 per register, big-endian bytes)
 --
---   Telemetry (one contiguous read 0x1100..0x1108 = 9 regs):
---     0x1100..0x1101 Lifetime energy (Wh, u32 big-endian, high word first)
---     0x1102..0x1104 Per-phase current, L1/L2/L3 (u16 × 10⁻³ A, i.e. mA)
---     0x1105..0x1107 Per-phase voltage L1-N/L2-N/L3-N (u16 × 10⁻¹ V)
---     0x1108         Total active power (u16 W)
+--   Telemetry (one contiguous read 0x2100..0x2108 = 9 regs):
+--     0x2100..0x2101 Lifetime energy (Wh, u32 big-endian, high word first)
+--     0x2102..0x2104 Per-phase current, L1/L2/L3 (u16 × 10⁻³ A, i.e. mA)
+--     0x2105..0x2107 Per-phase voltage L1-N/L2-N/L3-N (u16 × 10⁻¹ V)
+--     0x2108         Total active power (u16 W)
 --
 --   Control:
---     0x1200         Charging limit (u16 A, read/write) — 0 disables
+--     0x2200         Charging limit (u16 A, read/write) — 0 disables
 --                    charging; values 1..5 are treated as 0 by the
 --                    charger (IEC 61851 minimum is 6 A). Setpoint is
 --                    lost on charger restart.
---     0x1201         Maximum assignment (u16 A, read-only) — upper
+--     0x2201         Maximum assignment (u16 A, read-only) — upper
 --                    bound the charger will accept given current
 --                    de-rating, schedules, NANOGRID™ curtailment, etc.
 --
@@ -53,7 +53,7 @@
 -- Config example (config.yaml):
 --   drivers:
 --     - name: ctek
---       lua: drivers/ctek.lua
+--       lua: drivers/ctek_v2.lua
 --       capabilities:
 --         modbus:
 --           host: 192.168.1.190
@@ -66,18 +66,18 @@
 --         voltage_v: 230        # nominal per-phase voltage; default 230
 
 DRIVER = {
-  id           = "ctek-chargestorm",
-  name         = "CTEK Chargestorm (API v1)",
+  id           = "ctek-chargestorm-v2",
+  name         = "CTEK Chargestorm (API v2)",
   manufacturer = "CTEK",
   version      = "0.2.0",
   protocols    = { "modbus" },
   capabilities = { "ev" },
-  description  = "CTEK Chargestorm Connected 2/3 via Modbus/TCP Automation API v1 (CSOS ≥ 4.9.3). Full telemetry + current-limit control.",
+  description  = "CTEK Chargestorm Connected 2/3 via Modbus/TCP Automation API v2 (CSOS ≥ 4.9.3). Full telemetry + current-limit control.",
   homepage     = "https://www.ctek.com",
   authors      = { "forty-two-watts contributors" },
   tested_models = { "Chargestorm Connected 2", "Chargestorm Connected 3" },
   verification_status = "beta",
-  verification_notes = "Register map per CTEK Automation interface v1.0; charging-limit write verified against CSOS 4.9.x. Derived charging/connected flags approximate the real EVSE state since the state code is MQTT-only.",
+  verification_notes = "Register map per CTEK Automation interface v1.0 (API v2 offsets); charging-limit write verified against CSOS 4.9.x. Derived charging/connected flags approximate the real EVSE state since the state code is MQTT-only.",
   connection_defaults = {
     port    = 502,
     unit_id = 1,
@@ -87,18 +87,17 @@ DRIVER = {
 PROTOCOL = "modbus"
 
 ----------------------------------------------------------------------------
--- Register addresses — API v1.
--- The v2 variant (drivers/ctek_v2.lua) differs ONLY in the base offsets
--- (0x2xxx instead of 0x1xxx); keep the two files in sync when register
--- semantics change.
+-- Register addresses — API v2.
+-- Mirror of drivers/ctek.lua with every 0x1xxx offset shifted to 0x2xxx.
+-- Keep the two files in sync when register semantics change.
 ----------------------------------------------------------------------------
-local REG_API_VERSION   = 0x1000
-local REG_API_STATUS    = 0x1001
-local REG_METER_TYPE    = 0x1002
-local REG_SERIAL_BASE   = 0x1003   -- 6 regs → 12 ASCII chars
-local REG_TELEMETRY     = 0x1100   -- 9 regs: energy(2) + I(3) + V(3) + W(1)
-local REG_CHARGE_LIMIT  = 0x1200   -- r/w
-local REG_MAX_ASSIGN    = 0x1201   -- r/o
+local REG_API_VERSION   = 0x2000
+local REG_API_STATUS    = 0x2001
+local REG_METER_TYPE    = 0x2002
+local REG_SERIAL_BASE   = 0x2003   -- 6 regs → 12 ASCII chars
+local REG_TELEMETRY     = 0x2100   -- 9 regs: energy(2) + I(3) + V(3) + W(1)
+local REG_CHARGE_LIMIT  = 0x2200   -- r/w
+local REG_MAX_ASSIGN    = 0x2201   -- r/o
 
 ----------------------------------------------------------------------------
 -- Runtime config (overridden from config.yaml in driver_init)
@@ -108,10 +107,7 @@ local min_a     = 6
 local max_a     = 16
 local voltage_v = 230
 
--- Last setpoint we successfully wrote. Used as the resume target when
--- ev_start / ev_resume come in without a specific current.
 local last_set_a = 0
-
 local sn_read = false
 
 ----------------------------------------------------------------------------
@@ -122,7 +118,7 @@ local function clamp_amps(a)
     if a == nil then return 0 end
     a = math.floor(a + 0.5)
     if a <= 0 then return 0 end
-    if a < min_a then return 0 end     -- below minimum → pause
+    if a < min_a then return 0 end
     if a > max_a then return max_a end
     return a
 end
@@ -132,9 +128,6 @@ local function watts_to_amps(power_w)
     return math.floor((power_w / voltage_v / phases) + 0.5)
 end
 
--- Decode a SunSpec/CTEK-style ASCII block where each u16 register packs
--- two bytes of the string in big-endian order. The charger pads the
--- tail with NUL bytes; stop at the first one to get a clean serial.
 local function decode_ascii(regs, n)
     local s = ""
     for i = 1, n do
@@ -182,18 +175,15 @@ function driver_init(config)
         if tonumber(config.voltage_v) then voltage_v = tonumber(config.voltage_v)             end
     end
 
-    if min_a < 6 then min_a = 6 end         -- IEC 61851 floor
+    if min_a < 6 then min_a = 6 end
     if max_a < min_a then max_a = min_a end
 
-    -- Sanity-check the CCU is serving API v1 on this unit. A mismatch
-    -- here means the operator enabled v2 instead — suggest the v2
-    -- driver rather than silently reading back garbage.
     local ok, api_regs = pcall(host.modbus_read, REG_API_VERSION, 2, "holding")
     if ok and api_regs and api_regs[1] then
         local api_ver    = api_regs[1]
         local api_status = api_regs[2] or 0
         host.log("info", string.format(
-            "CTEK: API v%d, status %d (expected v1 from this driver; use drivers/ctek_v2.lua for v2)",
+            "CTEK: API v%d, status %d (expected v2 from this driver; use drivers/ctek.lua for v1)",
             api_ver, api_status))
     end
 
@@ -209,9 +199,6 @@ function driver_init(config)
 end
 
 function driver_poll()
-    -- One-shot serial read. Keys device identity to the EVSE serial so
-    -- battery/other models keyed on device_id stay stable across driver
-    -- renames.
     if not sn_read then
         local ok_sn, sn_regs = pcall(host.modbus_read, REG_SERIAL_BASE, 6, "holding")
         if ok_sn and sn_regs then
@@ -223,9 +210,6 @@ function driver_poll()
         end
     end
 
-    -- Telemetry block: 9 registers in one transaction so the energy
-    -- counter, per-phase current + voltage, and total power all come
-    -- from a consistent snapshot.
     local ok_tel, tel = pcall(host.modbus_read, REG_TELEMETRY, 9, "holding")
     local ev_w     = 0
     local i_l1, i_l2, i_l3 = 0, 0, 0
@@ -244,12 +228,6 @@ function driver_poll()
         host.log("warn", "CTEK: telemetry block read failed")
     end
 
-    -- Control setpoints: charging limit (current target) + max
-    -- assignment (upper bound the charger will honour). The Chargestorm
-    -- itself exposes no "connector state" flag on Modbus — the clean
-    -- state code ("CHRG", "PAUS", "EVRD", …) is MQTT-only. Derive
-    -- charging / connected conservatively from the current + power
-    -- readings so the dispatch clamp has something to key off.
     local limit, max_assign = last_set_a, max_a
     local ok_ctl, ctl = pcall(host.modbus_read, REG_CHARGE_LIMIT, 2, "holding")
     if ok_ctl and ctl then
@@ -260,11 +238,6 @@ function driver_poll()
 
     local max_phase_a = math.max(i_l1, i_l2, i_l3)
     local charging = (ev_w > 100) or (max_phase_a > 1.0)
-    -- "Connected" is noisy over Modbus alone: when the car is plugged
-    -- but not yet authenticated or ramping, current + power both read
-    -- zero. Report connected whenever the charger is actively delivering
-    -- OR whenever a non-zero limit is in effect — the latter covers
-    -- "plan has scheduled a charging window; cable plugged".
     local connected = charging or (limit >= min_a and max_assign > 0)
 
     host.emit("ev", {
@@ -309,10 +282,6 @@ function driver_command(action, power_w, cmd)
     end
 
     if action == "ev_start" or action == "ev_resume" then
-        -- Without a target current in the command, resume at whatever
-        -- setpoint was in effect before the pause. If we've never
-        -- written one (first start after boot), fall back to max_a so
-        -- the car actually draws current instead of sitting idle.
         local amps = (last_set_a and last_set_a >= min_a) and last_set_a or max_a
         return write_setpoint(amps)
     end
@@ -322,14 +291,7 @@ function driver_command(action, power_w, cmd)
 end
 
 function driver_default_mode()
-    -- EV chargers have no "autonomous self-consumption" equivalent.
-    -- The Chargestorm will continue at the last-written current limit
-    -- until the operator changes it or the car unplugs, which is the
-    -- right behaviour when the EMS loses contact — the user still
-    -- gets their car charged. Matches the Easee driver's stance.
 end
 
 function driver_cleanup()
-    -- No-op: leave the setpoint where it is so a service restart
-    -- doesn't interrupt an active charging session.
 end
