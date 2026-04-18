@@ -112,6 +112,15 @@ class FtwEnergyFlow extends FtwElement {
       height: 490px;
       display: block;
     }
+    /* SVG text classes — font-size values are in viewBox units (the SVG
+       scales with container width via preserveAspectRatio), so at narrow
+       viewports the default sizes render too small. Media queries below
+       bump them back into legible range on small screens. */
+    .sv-node-title { font-family: var(--mono); font-size: 10px; font-weight: 500; letter-spacing: 0.08em; }
+    .sv-node-value { font-family: var(--mono); font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
+    .sv-node-sub   { font-family: var(--mono); font-size: 10px; letter-spacing: 0.04em; }
+    .sv-hub-value  { font-family: var(--mono); font-size: 18px; font-weight: 700; font-variant-numeric: tabular-nums; }
+    .sv-hub-label  { font-family: var(--mono); font-size: 9px; letter-spacing: 0.1em; }
     /* One dash cycle advances by exactly (dash + gap). The fwd/rev pair
        keeps direction declarative — we flip the animation-name, not the
        path, so swapping a source→sink edge (grid export, battery
@@ -126,9 +135,21 @@ class FtwEnergyFlow extends FtwElement {
     @media (max-width: 900px) {
       :host { padding: 14px 12px 10px; }
       svg { height: 465px; }
+      .sv-node-title { font-size: 13px; }
+      .sv-node-value { font-size: 24px; }
+      .sv-node-sub   { font-size: 13px; }
+      .sv-hub-value  { font-size: 22px; }
+      .sv-hub-label  { font-size: 11px; }
     }
     @media (max-width: 600px) {
       svg { height: 420px; }
+      .sv-node-title { font-size: 18px; }
+      .sv-node-value { font-size: 30px; }
+      .sv-node-sub   { font-size: 16px; }
+      .sv-hub-value  { font-size: 28px; }
+      .sv-hub-label  { font-size: 14px; }
+      .title         { font-size: 26px; }
+      .legend        { font-size: 13px; }
     }
   `;
 
@@ -153,12 +174,30 @@ class FtwEnergyFlow extends FtwElement {
     // each afterRender would make restored bornAt values (from the
     // snapshot Map) refer to the old timeline — particles would jump.
     this._tickStart = performance.now();
+    // Compact layout kicks in on narrow viewports — shortens beams so
+    // the node boxes cluster closer to the hub, leaving more room for
+    // the enlarged text. Kept in sync with the (max-width: 600px) CSS
+    // breakpoint via matchMedia so fonts and geometry flip together.
+    this._mq = typeof window !== "undefined" && window.matchMedia
+      ? window.matchMedia("(max-width: 600px)")
+      : null;
+    this._compact = !!(this._mq && this._mq.matches);
+    this._onMqChange = (e) => {
+      this._compact = e.matches;
+      this.update();
+    };
+    if (this._mq) {
+      this._mq.addEventListener("change", this._onMqChange);
+    }
   }
 
   disconnectedCallback() {
     if (this._rafId) cancelAnimationFrame(this._rafId);
     this._rafId = null;
     this._particles = [];
+    if (this._mq) {
+      this._mq.removeEventListener("change", this._onMqChange);
+    }
   }
 
   // Bulk setter — preferred update path. Scalars merge; arrays replace
@@ -305,10 +344,19 @@ class FtwEnergyFlow extends FtwElement {
       ? this._readings.batteries
       : [{ name: "", kw: 0, soc: null, placeholder: true }];
 
-    const pvPositions  = clusterH(pvList.length,  CX,       TOP_Y,  BOX_W, GAP_H);
-    const batPositions = clusterV(batList.length, RIGHT_X,  CY,     BOX_H, GAP_V);
-    const gridPos = { x: LEFT_X, y: CY };
-    const evPos   = { x: CX,      y: BOT_Y };
+    // Compact mode pulls the four cardinal anchors toward the hub so the
+    // beams are roughly half-length — leaves the box cluster tight and
+    // gives the enlarged text on narrow viewports room to breathe
+    // without overflowing the viewBox.
+    const topY    = this._compact ? 110      : TOP_Y;
+    const botY    = this._compact ? H - 110  : BOT_Y;
+    const leftX   = this._compact ? 230      : LEFT_X;
+    const rightX  = this._compact ? W - 230  : RIGHT_X;
+
+    const pvPositions  = clusterH(pvList.length,  CX,      topY,  BOX_W, GAP_H);
+    const batPositions = clusterV(batList.length, rightX,  CY,    BOX_H, GAP_V);
+    const gridPos = { x: leftX, y: CY };
+    const evPos   = { x: CX,    y: botY };
 
     // Build all edges: each entry carries geometry + magnitude + direction.
     const edges = [];
@@ -463,13 +511,11 @@ class FtwEnergyFlow extends FtwElement {
             <path d="M12 26 V18 H20 V26"/>
           </g>
           <text x="${CX}" y="${CY + 16}" text-anchor="middle"
-                fill="var(--hero-load-text)"
-                style="font-family:var(--mono);font-size:18px;font-weight:700;font-variant-numeric:tabular-nums">
+                fill="var(--hero-load-text)" class="sv-hub-value">
             ${fmtKw(load)}
           </text>
           <text x="${CX}" y="${CY + 32}" text-anchor="middle"
-                fill="var(--hero-label-text)"
-                style="font-family:var(--mono);font-size:9px;letter-spacing:0.1em">
+                fill="var(--hero-label-text)" class="sv-hub-label">
             CONSUMING
           </text>
         </g>
@@ -707,17 +753,14 @@ function renderNode({ pos, title, value, sub, color, side, icon, soc }) {
       <rect x="${stripe.x}" y="${stripe.y}" width="${stripe.w}" height="${stripe.h}" rx="1.5"
             fill="${color}"/>
       <text x="${x + 14}" y="${y + 20}"
-            fill="var(--hero-label-text)"
-            style="font-family:var(--mono);font-size:10px;font-weight:500;letter-spacing:0.08em">
+            fill="var(--hero-label-text)" class="sv-node-title">
         ${escapeXml(title)}
       </text>
-      <text x="${x + 14}" y="${y + 46}" fill="${color}"
-            style="font-family:var(--mono);font-size:20px;font-weight:700;font-variant-numeric:tabular-nums;letter-spacing:-0.01em">
+      <text x="${x + 14}" y="${y + 46}" fill="${color}" class="sv-node-value">
         ${value}
       </text>
       <text x="${x + 14}" y="${y + 64}"
-            fill="var(--hero-sub-text)"
-            style="font-family:var(--mono);font-size:10px;letter-spacing:0.04em">
+            fill="var(--hero-sub-text)" class="sv-node-sub">
         ${escapeXml(sub)}
       </text>
       <g transform="translate(${x + BOX_W - 30}, ${y + 12})" opacity="0.55">
