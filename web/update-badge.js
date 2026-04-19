@@ -349,6 +349,14 @@
           top: 50%; left: 50%;
           transform: translate(-50%, -50%);
           width: min(92vw, 460px);
+          /* Cap height + scroll so shorter viewports can't push the
+             header (close ×) or the footer (Update / Restart / Skip)
+             off-screen. Without this the modal clipped above the
+             viewport and the operator saw only the middle "Release
+             notes" block with no actionable buttons — reported on a
+             laptop-height browser running the /next dashboard. */
+          max-height: 85vh;
+          overflow-y: auto;
           background: var(--surface, #1e293b);
           color: var(--text, #e2e8f0);
           border: 1px solid var(--border, #334155);
@@ -393,6 +401,12 @@
           padding: 0.75rem 1rem;
           border-top: 1px solid var(--border, #334155);
           flex-wrap: wrap;
+          /* Stick to the bottom of the modal while body scrolls so
+             the primary action (Update / Restart) remains visible
+             however long the release-notes body grows. */
+          position: sticky;
+          bottom: 0;
+          background: var(--surface, #1e293b);
         }
         .btn {
           appearance: none;
