@@ -54,6 +54,7 @@ in YAML or re-adding it doesn't orphan a trained model. See
 | `go/internal/pvmodel` | PV twin (RLS over sunpos / cloud prior) |
 | `go/internal/mpc` | MPC planner — DP over SoC grid, 48 h horizon |
 | `go/internal/selfupdate` | GH Releases probe + trigger dispatch for the in-app updater sidecar |
+| `go/internal/nova` | Opt-in federation client to Sourceful Nova Core — ES256 identity, JWT signer, HTTP client (claim + provision), clean telemetry payload + boundary adapter, MQTT publisher |
 | `go/cmd/ftw-updater` | Sidecar binary — runs docker compose pull + up -d on behalf of the main service |
 | `drivers/` | Lua drivers (`ferroamp.lua`, `sungrow.lua`, …) |
 | `go/test/e2e` | Full-stack test: sims + main + drivers + HTTP |
@@ -182,6 +183,7 @@ charge another.
 - `docs/api.md` — HTTP endpoint reference (NEW)
 - `docs/operations.md` — deploy, backup, upgrade, troubleshooting (NEW)
 - `docs/self-update.md` — in-app update flow + ftw-updater sidecar architecture
+- `docs/nova-integration.md` — opt-in federation to Sourceful Nova Core (MQTT + ES256 JWT, clean schema + legacy adapter)
 - `docs/testing.md` — test strategy, sims, e2e recipe (NEW)
 - `docs/configuration.md` — YAML schema reference
 - `docs/battery-models.md` — ARX(1), RLS, cascade, self-tune

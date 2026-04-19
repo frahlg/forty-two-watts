@@ -30,6 +30,39 @@ type Config struct {
 	OCPP          *OCPP              `yaml:"ocpp,omitempty" json:"ocpp,omitempty"`
 	EVCharger     *EVCharger         `yaml:"ev_charger,omitempty" json:"ev_charger,omitempty"`
 	Loadpoints    []Loadpoint        `yaml:"loadpoints,omitempty" json:"loadpoints,omitempty"`
+	Nova          *Nova              `yaml:"nova,omitempty" json:"nova,omitempty"`
+}
+
+// Nova is the opt-in Sourceful Nova Core federation config. When enabled,
+// forty-two-watts publishes telemetry to Nova's MQTT broker (NATS MQTT
+// adapter) and reconciles device/DER registrations via Nova's core-api.
+//
+// Identity is an ES256 keypair generated on first run and stored at
+// KeyPath (default <state.path sibling>/nova.key). The public key is
+// registered in Nova via the claim flow; the private key signs a short-
+// lived JWT used as the MQTT password.
+//
+// SchemaMode controls the wire format sent to Nova:
+//   - "legacy"  (default): translate forty-two-watts' native clean payload
+//                to the current Nova wire shape (battery sign flip,
+//                PascalCase fields, pv→solar, ev→ev_port). The translation
+//                layer is in internal/nova and is designed to be deleted
+//                once Nova adopts the unified schema.
+//   - "unified": publish forty-two-watts' clean payload directly. Enable
+//                once the Nova schema-alignment PR lands.
+type Nova struct {
+	Enabled            bool   `yaml:"enabled" json:"enabled"`
+	URL                string `yaml:"url" json:"url"`
+	MQTTHost           string `yaml:"mqtt_host" json:"mqtt_host"`
+	MQTTPort           int    `yaml:"mqtt_port,omitempty" json:"mqtt_port,omitempty"`
+	MQTTTLS            bool   `yaml:"mqtt_tls,omitempty" json:"mqtt_tls,omitempty"`
+	GatewaySerial      string `yaml:"gateway_serial" json:"gateway_serial"`
+	OrgID              string `yaml:"org_id" json:"org_id"`
+	SiteID             string `yaml:"site_id" json:"site_id"`
+	KeyPath            string `yaml:"key_path,omitempty" json:"key_path,omitempty"`
+	SchemaMode         string `yaml:"schema_mode,omitempty" json:"schema_mode,omitempty"`
+	PublishIntervalS   int    `yaml:"publish_interval_s,omitempty" json:"publish_interval_s,omitempty"`
+	ReconcileIntervalH int    `yaml:"reconcile_interval_h,omitempty" json:"reconcile_interval_h,omitempty"`
 }
 
 // Loadpoint is one EV charge point the planner can reason about.
@@ -591,6 +624,20 @@ func applyDefaults(c *Config) {
 			c.HomeAssistant.PublishIntervalS = 5
 		}
 	}
+	if c.Nova != nil {
+		if c.Nova.MQTTPort == 0 {
+			c.Nova.MQTTPort = 1883
+		}
+		if c.Nova.SchemaMode == "" {
+			c.Nova.SchemaMode = "legacy"
+		}
+		if c.Nova.PublishIntervalS == 0 {
+			c.Nova.PublishIntervalS = 5
+		}
+		if c.Nova.ReconcileIntervalH == 0 {
+			c.Nova.ReconcileIntervalH = 24
+		}
+	}
 }
 
 // Validate ensures the config is internally consistent and safe to run with.
@@ -631,6 +678,28 @@ func (c *Config) Validate() error {
 	}
 	if c.Fuse.MaxAmps <= 0 {
 		return errors.New("fuse.max_amps must be > 0")
+	}
+	if c.Nova != nil && c.Nova.Enabled {
+		if c.Nova.URL == "" {
+			return errors.New("nova.url is required when nova.enabled")
+		}
+		if c.Nova.MQTTHost == "" {
+			return errors.New("nova.mqtt_host is required when nova.enabled")
+		}
+		if c.Nova.GatewaySerial == "" {
+			return errors.New("nova.gateway_serial is required when nova.enabled — run `forty-two-watts nova-claim`")
+		}
+		if c.Nova.OrgID == "" {
+			return errors.New("nova.org_id is required when nova.enabled")
+		}
+		if c.Nova.SiteID == "" {
+			return errors.New("nova.site_id is required when nova.enabled")
+		}
+		switch c.Nova.SchemaMode {
+		case "legacy", "unified":
+		default:
+			return fmt.Errorf("nova.schema_mode must be \"legacy\" or \"unified\", got %q", c.Nova.SchemaMode)
+		}
 	}
 	return nil
 }

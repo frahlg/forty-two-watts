@@ -214,6 +214,21 @@ func (s *Store) migrate() error {
 			horizon_slots  INTEGER NOT NULL,
 			json           TEXT    NOT NULL
 		) STRICT`,
+
+		// Nova federation: one row per local DER we've provisioned in Nova.
+		// Keyed on (device_id, der_type) so a hybrid inverter with multiple
+		// DERs (battery + pv + meter on the same device_id) has one row per
+		// DER. The Nova-generated der_id is stored purely for diagnostics
+		// and future control-topic subscriptions; the publish path uses
+		// (hardware_id, der_name) which are client-owned.
+		`CREATE TABLE IF NOT EXISTS nova_ders (
+			device_id   TEXT NOT NULL,
+			der_type    TEXT NOT NULL,
+			der_name    TEXT NOT NULL,
+			der_id      TEXT NOT NULL,
+			synced_ms   INTEGER NOT NULL,
+			PRIMARY KEY (device_id, der_type)
+		) STRICT`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.Exec(stmt); err != nil {

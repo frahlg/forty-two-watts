@@ -36,6 +36,7 @@ import (
 	mqttcli "github.com/frahlg/forty-two-watts/go/internal/mqtt"
 	modbuscli "github.com/frahlg/forty-two-watts/go/internal/modbus"
 	"github.com/frahlg/forty-two-watts/go/internal/mpc"
+	"github.com/frahlg/forty-two-watts/go/internal/nova"
 	"github.com/frahlg/forty-two-watts/go/internal/ocpp"
 	"github.com/frahlg/forty-two-watts/go/internal/priceforecast"
 	"github.com/frahlg/forty-two-watts/go/internal/prices"
@@ -52,6 +53,18 @@ import (
 var Version = "dev"
 
 func main() {
+	// Subcommand dispatch — a bare first non-flag argument selects one
+	// of the bootstrap CLIs, e.g. `forty-two-watts nova-claim --url=…`.
+	// Everything else is the long-running service.
+	if len(os.Args) > 1 && !strings.HasPrefix(os.Args[1], "-") {
+		switch os.Args[1] {
+		case "nova-claim":
+			// Shift os.Args so the subcommand's flag.FlagSet sees its own flags.
+			runNovaClaim(os.Args[2:])
+			return
+		}
+	}
+
 	configPath := flag.String("config", "config.yaml", "Path to config.yaml")
 	webDir := flag.String("web", "web", "Path to static web UI directory")
 	driverDirFlag := flag.String("drivers", "", "Path to drivers directory (default: <config-dir>/drivers)")
@@ -746,6 +759,31 @@ func main() {
 			haBridge = bridge
 			defer haBridge.Stop()
 			deps.HA = haBridge // late-binding for API
+		}
+	}
+
+	// ---- Nova Core federation (optional) ----
+	// Publishes telemetry to Sourceful Nova Core's MQTT broker (NATS
+	// MQTT adapter). Requires a one-time `forty-two-watts nova-claim`
+	// bootstrap to register the gateway's ES256 key and provision
+	// device/DER records under an org. When disabled or unconfigured,
+	// this block is a no-op.
+	if cfg.Nova != nil && cfg.Nova.Enabled {
+		keyPath := cfg.Nova.KeyPath
+		if keyPath == "" {
+			keyPath = filepath.Join(filepath.Dir(statePath), "nova.key")
+		}
+		novaID, err := nova.LoadOrCreateIdentity(keyPath)
+		if err != nil {
+			slog.Warn("nova identity load failed — federation disabled", "err", err)
+		} else if pub, err := nova.Start(cfg.Nova, novaID, st, tel); err != nil {
+			slog.Warn("nova publisher failed to start", "err", err)
+		} else if pub != nil {
+			defer pub.Stop()
+			slog.Info("nova federation enabled",
+				"mqtt", fmt.Sprintf("%s:%d", cfg.Nova.MQTTHost, cfg.Nova.MQTTPort),
+				"gateway_serial", cfg.Nova.GatewaySerial,
+				"schema_mode", cfg.Nova.SchemaMode)
 		}
 	}
 
