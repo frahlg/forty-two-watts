@@ -524,7 +524,13 @@ func main() {
 				Strategy:        string(d.Strategy),
 			}, true
 		}
-		ctrl.UseEnergyDispatch = cfg.Planner != nil && cfg.Planner.UseEnergyDispatch
+		// Default to the energy-allocation path. The plan is a
+		// scheduler (decides WHEN each strategy applies); the EMS is
+		// the regulator (decides HOW batteries react — from live
+		// telemetry, not plan forecasts). See docs/plan-ems-contract.md.
+		// `planner.legacy_dispatch: true` opts back to the old
+		// PI-on-grid-target path for emergency rollback.
+		ctrl.UseEnergyDispatch = cfg.Planner == nil || !cfg.Planner.LegacyDispatch
 		// If the restored control mode is a planner variant, push the
 		// corresponding mpc.Mode so the plan is built with the strategy
 		// the user actually picked — not whatever cfg.planner.mode says.

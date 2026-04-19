@@ -2,7 +2,14 @@
 
 Design note for the dispatch-layer rework. Three principles, the mode
 taxonomy they imply, the wire contract between the planner and the EMS,
-and the migration plan. Status: proposal — not yet implemented.
+and the migration plan.
+
+**Status: shipped (2026-04-19).** Energy-allocation dispatch is the
+default path for every planner mode. The legacy PI-on-grid-target
+path remains as `planner.legacy_dispatch: true` for emergency rollback
+and as the plan-stale fallback. See `go/internal/control/dispatch.go`
+(energy branch at line 338) and `go/internal/mpc/service.go:185`
+(`SlotDirectiveAt`).
 
 ## Motivating incident
 
