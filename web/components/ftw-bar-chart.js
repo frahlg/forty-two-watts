@@ -124,7 +124,9 @@ class FtwBarChart extends FtwElement {
     }
     const cols = this._data.map((d) => {
       const v = Number(d.value) || 0;
-      const pct = max > 0 ? Math.max(2, (v / max) * 100) : 0;
+      // 2% floor keeps tiny-but-nonzero values visible; gate on v>0 so
+      // truly-zero buckets render as empty columns, not 2% slivers.
+      const pct = max > 0 && v > 0 ? Math.max(2, (v / max) * 100) : 0;
       const display = d.displayValue != null ? String(d.displayValue) : shortNum(v);
       const title = d.title != null ? String(d.title) : `${d.label || ""}: ${display}`;
       return `<div class="col" title="${escapeHtml(title)}">` +

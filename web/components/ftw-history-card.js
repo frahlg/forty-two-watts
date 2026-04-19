@@ -115,6 +115,8 @@ class FtwHistoryCard extends FtwElement {
     this._chart = null;
     this._totalEl = null;
     this._toggleEl = null;
+    this._reqSeq = 0;
+    this._abort = null;
   }
 
   connectedCallback() {
@@ -124,6 +126,7 @@ class FtwHistoryCard extends FtwElement {
   }
   disconnectedCallback() {
     if (this._timer) { clearInterval(this._timer); this._timer = null; }
+    if (this._abort) { this._abort.abort(); this._abort = null; }
   }
 
   attributeChangedCallback(name) {
@@ -136,7 +139,10 @@ class FtwHistoryCard extends FtwElement {
 
   _restartPolling() {
     if (this._timer) { clearInterval(this._timer); this._timer = null; }
-    const ms = Number(this.getAttribute("poll-ms") || 300000);
+    // `??` not `||`: poll-ms="0" must disable polling, but "0" is truthy
+    // in the ||-fallback so that path silently reverts to 300000.
+    const raw = this.getAttribute("poll-ms");
+    const ms = Number(raw ?? 300000);
     if (ms > 0 && this.isConnected) {
       this._timer = setInterval(() => this._refresh(), ms);
     }
@@ -205,10 +211,22 @@ class FtwHistoryCard extends FtwElement {
     const metric = this.getAttribute("metric") || "import";
     const field  = FIELD_BY_METRIC[metric] || "import_wh";
     const days   = this._daysFor(this._range);
+
+    // Cancel any in-flight request and bump the sequence so stale
+    // responses arriving after a Week/Month toggle don't overwrite the
+    // newer chart. Both guards matter: AbortController stops the older
+    // network request, and the seq check stops a response that resolved
+    // just before we aborted.
+    if (this._abort) this._abort.abort();
+    this._abort = new AbortController();
+    const seq = ++this._reqSeq;
+    const signal = this._abort.signal;
+
     this._chart.setAttribute("loading", "true");
-    fetch("/api/energy/daily?days=" + days)
+    fetch("/api/energy/daily?days=" + days, { signal })
       .then((r) => r.json())
       .then((resp) => {
+        if (seq !== this._reqSeq) return;
         const buckets = (resp && resp.days) || [];
         let sum = 0;
         const data = buckets.map((b) => {
@@ -227,7 +245,9 @@ class FtwHistoryCard extends FtwElement {
           : "— kWh";
         this._chart.data = data;
       })
-      .catch(() => {
+      .catch((err) => {
+        if (err && err.name === "AbortError") return;
+        if (seq !== this._reqSeq) return;
         this._chart.removeAttribute("loading");
         this._chart.data = [];
         this._totalEl.textContent = "failed to load";
