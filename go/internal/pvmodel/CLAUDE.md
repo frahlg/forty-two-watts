@@ -45,6 +45,12 @@ Output sanity envelope: if `y > 1.05 * rated` → return the physics prior
 instead (`model.go:140-143`). A wild RLS coefficient can't escape into the
 plan.
 
+Predict gate (`model.go:109-117`):
+
+- `clearSkyW < 50` → return 0. Physics: no sun → no PV. Mirrors the
+  Update-side gate; without this the intercept term (`x[0]=1`) projects
+  any non-zero `Beta[0]` into every night slot (issue #133).
+
 Input outlier rejection (`model.go:149-180`):
 
 - `clearSkyW < 50` → skip (night, no signal).

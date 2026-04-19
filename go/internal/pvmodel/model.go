@@ -107,6 +107,16 @@ func Features(clearSkyW, cloudPct float64, t time.Time) [NFeat]float64 {
 const WarmupSamples = 50
 
 func (m Model) Predict(clearSkyW, cloudPct float64, t time.Time) float64 {
+	// Physics gate: no sun above the horizon → no PV output. Mirrors the
+	// Update-side guard (`clearSkyW < 50` skips training), so prediction
+	// and training share one definition of "night". Without this gate the
+	// intercept term in Features (x[0]=1.0) projects Beta[0] into every
+	// night slot — and since RLS is free to pick a non-zero Beta[0] when
+	// that minimizes daytime residual, the model routinely emits
+	// 500-1500 W of phantom generation at 02:00. See issue #133.
+	if clearSkyW < 50 {
+		return 0
+	}
 	// Learned prediction.
 	x := Features(clearSkyW, cloudPct, t)
 	var learned float64
