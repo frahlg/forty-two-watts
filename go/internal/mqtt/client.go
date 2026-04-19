@@ -13,7 +13,8 @@ import (
 
 // Capability wraps a paho client to match drivers.MQTTCap.
 type Capability struct {
-	client paho.Client
+	client  paho.Client
+	handler paho.MessageHandler
 
 	mu       sync.Mutex
 	incoming []drivers.MQTTMessage
@@ -22,20 +23,30 @@ type Capability struct {
 // Dial connects to an MQTT broker and returns a Capability.
 func Dial(host string, port int, username, password, clientID string) (*Capability, error) {
 	cap := &Capability{}
+	// Shared message handler reused for every subscription + the default
+	// route. paho.mqtt.golang only falls back to DefaultPublishHandler
+	// for messages that don't match any per-subscription callback, and
+	// even then the routing behaviour for *live* (non-retained)
+	// publishes has historically been flaky with a nil subscription
+	// callback — we caught CTEK Chargestorm's CTEK/.../em + /status
+	// live publishes dropping on the floor while the retained CCU/...
+	// topics routed fine. Passing this exact handler to every Subscribe
+	// call removes the ambiguity.
+	cap.handler = func(_ paho.Client, m paho.Message) {
+		cap.mu.Lock()
+		cap.incoming = append(cap.incoming, drivers.MQTTMessage{
+			Topic:   m.Topic(),
+			Payload: string(m.Payload()),
+		})
+		cap.mu.Unlock()
+	}
 	opts := paho.NewClientOptions().
 		AddBroker(fmt.Sprintf("tcp://%s:%d", host, port)).
 		SetClientID(clientID).
 		SetAutoReconnect(true).
 		SetConnectRetry(true).
 		SetConnectRetryInterval(5 * time.Second).
-		SetDefaultPublishHandler(func(_ paho.Client, m paho.Message) {
-			cap.mu.Lock()
-			cap.incoming = append(cap.incoming, drivers.MQTTMessage{
-				Topic:   m.Topic(),
-				Payload: string(m.Payload()),
-			})
-			cap.mu.Unlock()
-		})
+		SetDefaultPublishHandler(cap.handler)
 	if username != "" { opts.SetUsername(username) }
 	if password != "" { opts.SetPassword(password) }
 	cap.client = paho.NewClient(opts)
@@ -58,8 +69,17 @@ func (c *Capability) Close() error {
 }
 
 // Subscribe — implements drivers.MQTTCap.
+//
+// Passes the shared handler (same one that's wired to the default
+// publish handler on the client) so live publishes are reliably
+// delivered. paho's internal routing treats a nil subscription
+// callback as "no handler" and has shipped with firmware-specific
+// quirks where live messages on that topic stop reaching the default
+// handler — retained messages still came through, which is how CTEK's
+// /em + /status silently dropped while /Configuration + /Version
+// worked. See the note on the Dial handler setup.
 func (c *Capability) Subscribe(topic string) error {
-	tok := c.client.Subscribe(topic, 0, nil)
+	tok := c.client.Subscribe(topic, 0, c.handler)
 	tok.WaitTimeout(5 * time.Second)
 	return tok.Error()
 }
