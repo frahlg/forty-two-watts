@@ -218,23 +218,34 @@ func TestSelectPlannerPVWRadiationZeroForecastIgnoresBlend(t *testing.T) {
 	}
 }
 
-// Guardrail: if we had used the OLD default (mean retail import price as
-// terminal value), the same scenario wouldn't discharge. This test exists
-// to document *why* the fix matters.
-func TestOptimizeSelfConsumptionDoesNotDischargeWithOldTerminalPrice(t *testing.T) {
+// Strict self_consumption: even with a high terminal price (= mean
+// import), the DP must still discharge when battery has headroom
+// (SoC > min + 20). This used to be a guardrail documenting the
+// OPPOSITE behaviour — that a too-high terminal price blocked
+// discharge and we'd just sit and import. The strict-SC bias
+// introduced in the planner-logic investigation round inverts it:
+// self_consumption now means "use the battery first" regardless of
+// the terminal-value arithmetic. That matches the operator intent
+// the mode name implies.
+func TestOptimizeSelfConsumptionDischargesDespiteHighTerminal(t *testing.T) {
 	slots := []Slot{
 		{StartMs: 0, LenMin: 60, PriceOre: 300, SpotOre: 80, LoadW: 3000, PVW: -500, Confidence: 1},
 		{StartMs: 3600 * 1000, LenMin: 60, PriceOre: 300, SpotOre: 80, LoadW: 3000, PVW: -500, Confidence: 1},
 	}
 	p := baseParams(ModeSelfConsumption)
 	p.InitialSoCPct = 80
-	p.TerminalSoCPrice = 300 // old default = mean import price
+	p.TerminalSoCPrice = 300 // mean import price — pre-strict this would have blocked discharge.
 
 	plan := Optimize(slots, p)
+	var anyDischarge bool
 	for _, a := range plan.Actions {
-		if a.BatteryW < -1e-6 {
-			t.Fatalf("OLD behavior unexpectedly discharged — test is stale. got %+v", plan.Actions)
+		if a.BatteryW < -100 {
+			anyDischarge = true
+			break
 		}
+	}
+	if !anyDischarge {
+		t.Fatalf("strict SC should discharge despite terminal=mean; got actions %+v", plan.Actions)
 	}
 }
 
