@@ -516,14 +516,10 @@
   // --- Save config ---
 
   window.saveConfig = function () {
-    if (configuredDrivers.length === 0) {
-      var errEl = document.getElementById('save-error');
-      errEl.className = 'error-msg';
-      errEl.textContent = 'At least one device must be configured.';
-      errEl.style.display = 'block';
-      return;
-    }
-
+    // Empty drivers list is valid — e.g. an EV-only site that only
+    // configured a cloud EV charger in step 7 and doesn't own local
+    // hardware. The backend accepts this and runs with a no-op
+    // control loop (no site meter to balance against).
     var btn = document.getElementById('save-btn');
     btn.disabled = true;
     btn.textContent = 'Saving...';

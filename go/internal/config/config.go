@@ -576,9 +576,12 @@ func applyDefaults(c *Config) {
 
 // Validate ensures the config is internally consistent and safe to run with.
 func (c *Config) Validate() error {
-	if len(c.Drivers) == 0 {
-		return errors.New("at least one driver must be configured")
-	}
+	// Empty drivers list is a valid shape — e.g. an EV-only site that
+	// configured a cloud EV charger in the setup wizard and doesn't
+	// own local inverter/meter hardware. Control loop becomes a no-op
+	// (SiteMeterDriver() returns "" and telemetry lookups just miss);
+	// the site meter check below only fires once at least one driver
+	// exists.
 	siteMeters := 0
 	names := make(map[string]bool, len(c.Drivers))
 	for _, d := range c.Drivers {
@@ -600,7 +603,7 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("driver %q: must have mqtt, modbus, or http capability", d.Name)
 		}
 	}
-	if siteMeters == 0 {
+	if len(c.Drivers) > 0 && siteMeters == 0 {
 		return errors.New("at least one driver must be is_site_meter: true")
 	}
 

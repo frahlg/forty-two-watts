@@ -100,15 +100,18 @@ func TestRelativeDriverPathResolved(t *testing.T) {
 	}
 }
 
-func TestRejectsNoDrivers(t *testing.T) {
+func TestAcceptsNoDrivers(t *testing.T) {
+	// EV-only sites (cloud charger configured via the setup wizard Step 7
+	// without any local hardware) ship an empty drivers list; validator
+	// must accept it. Control loop becomes a no-op at runtime.
 	yaml := `
 site: { name: x }
 fuse: { max_amps: 16 }
 drivers: []
 api: { port: 8080 }
 `
-	if _, err := Parse([]byte(yaml), "."); err == nil {
-		t.Fatal("expected error for empty drivers")
+	if _, err := Parse([]byte(yaml), "."); err != nil {
+		t.Fatalf("expected empty drivers to be accepted, got: %v", err)
 	}
 }
 
