@@ -100,22 +100,30 @@ func TestRelativeDriverPathResolved(t *testing.T) {
 	}
 }
 
-func TestRejectsNoDrivers(t *testing.T) {
+func TestAcceptsEmptyDrivers(t *testing.T) {
+	// The setup wizard lets operators finish onboarding without any
+	// hardware configured; drivers come later via /settings. Validate
+	// should accept an empty list rather than refuse the whole config.
 	yaml := `
-site: { name: x }
-fuse: { max_amps: 16 }
+site: { name: x, smoothing_alpha: 0.3 }
+fuse: { max_amps: 16, phases: 3, voltage: 230 }
 drivers: []
 api: { port: 8080 }
 `
-	if _, err := Parse([]byte(yaml), "."); err == nil {
-		t.Fatal("expected error for empty drivers")
+	if _, err := Parse([]byte(yaml), "."); err != nil {
+		t.Fatalf("empty drivers should parse cleanly, got: %v", err)
 	}
 }
 
-func TestRejectsNoSiteMeter(t *testing.T) {
+func TestAcceptsNoSiteMeter(t *testing.T) {
+	// Same reasoning as TestAcceptsEmptyDrivers — setup / onboarding
+	// often lands here (EV charger added before the grid meter).
+	// Runtime components gate on telemetry presence rather than
+	// parse-time validation, so we accept the config and let the
+	// operator add a site meter later.
 	yaml := `
-site: { name: x }
-fuse: { max_amps: 16 }
+site: { name: x, smoothing_alpha: 0.3 }
+fuse: { max_amps: 16, phases: 3, voltage: 230 }
 drivers:
   - name: a
     lua: a.lua
@@ -123,9 +131,8 @@ drivers:
       mqtt: { host: 1.1.1.1 }
 api: { port: 8080 }
 `
-	_, err := Parse([]byte(yaml), ".")
-	if err == nil {
-		t.Fatal("expected error for no site meter")
+	if _, err := Parse([]byte(yaml), "."); err != nil {
+		t.Fatalf("no site meter should parse cleanly, got: %v", err)
 	}
 }
 

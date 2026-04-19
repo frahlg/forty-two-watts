@@ -93,29 +93,19 @@
       });
   };
 
-  window.showManualIP = function () {
-    document.getElementById('manual-ip-form').style.display = 'block';
-    document.getElementById('manual-ip-toggle').style.display = 'none';
-  };
-
   function useScanDevice(ip, port, protocol) {
     selectedDevice = { ip: ip, port: port, protocol: protocol };
     goStep(4);
   }
 
-  window.useManualDevice = function () {
-    var ip = document.getElementById('manual-ip').value.trim();
-    var port = parseInt(document.getElementById('manual-port').value, 10) || 502;
-    if (!ip) return;
-    selectedDevice = { ip: ip, port: port, protocol: guessProtocol(port) };
+  // "Add device manually" — skip the scan, go straight to driver
+  // selection. No device pre-selected, so step 4 shows the full driver
+  // catalog (no protocol filter) and step 5 renders connection fields
+  // from the chosen driver's `connection_defaults`.
+  window.addDeviceManually = function () {
+    selectedDevice = null;
     goStep(4);
   };
-
-  function guessProtocol(port) {
-    if (port === 1883 || port === 8883) return 'mqtt';
-    if (port === 80 || port === 443 || port === 8080) return 'http';
-    return 'modbus';
-  }
 
   // --- Step 4: Driver catalog ---
 
@@ -136,35 +126,54 @@
       });
   }
 
+  function driverLabel(entry) {
+    // Prepend the manufacturer only when the driver's own name doesn't
+    // already start with it — avoids "CTEK CTEK Chargestorm (…)" when
+    // the driver metadata already sets the manufacturer into the name.
+    var base = entry.name || entry.filename || '';
+    var mfr  = entry.manufacturer || '';
+    if (mfr && base.toLowerCase().indexOf(mfr.toLowerCase()) !== 0) {
+      base = mfr + ' ' + base;
+    }
+    if (entry.protocols && entry.protocols.length > 0) {
+      base += ' (' + entry.protocols.join(', ');
+      if (entry.capabilities && entry.capabilities.length > 0) {
+        base += ', ' + entry.capabilities.join('+');
+      }
+      base += ')';
+    }
+    return base;
+  }
+
   function populateDriverDropdown() {
     var sel = document.getElementById('driver-select');
     sel.innerHTML = '<option value="">-- Select a driver --</option>';
 
+    // Protocol filter only applies when the user picked a device from a
+    // scan (we know its protocol). Manual entry shows the full catalog.
     var proto = selectedDevice ? selectedDevice.protocol : null;
 
+    // Decorate each entry with its rendered label + original index so
+    // the sort-by-label stays stable and we can still recover the
+    // catalog index when the user picks one.
+    var rows = [];
     driverCatalog.forEach(function (entry, idx) {
-      // Filter by protocol if we have one
       if (proto && entry.protocols && entry.protocols.length > 0) {
         var match = entry.protocols.some(function (p) {
           return p.toLowerCase() === proto.toLowerCase();
         });
         if (!match) return;
       }
+      rows.push({ idx: idx, label: driverLabel(entry) });
+    });
+    rows.sort(function (a, b) {
+      return a.label.localeCompare(b.label, undefined, { sensitivity: 'base' });
+    });
 
-      var label = '';
-      if (entry.manufacturer) label += entry.manufacturer + ' ';
-      label += entry.name || entry.filename;
-      if (entry.protocols && entry.protocols.length > 0) {
-        label += ' (' + entry.protocols.join(', ');
-        if (entry.capabilities && entry.capabilities.length > 0) {
-          label += ', ' + entry.capabilities.join('+');
-        }
-        label += ')';
-      }
-
+    rows.forEach(function (r) {
       var opt = document.createElement('option');
-      opt.value = String(idx);
-      opt.textContent = label;
+      opt.value = String(r.idx);
+      opt.textContent = r.label;
       sel.appendChild(opt);
     });
   }
@@ -197,12 +206,176 @@
 
   // --- Step 5: Configure driver ---
 
+  // Describe which connection + config fields to render per driver. The
+  // primary lookup is by the driver's declared `protocols`; a small
+  // registry of driver-specific extras (CTEK MQTT's base_topic / cbid
+  // etc.) rides on top, keyed by DRIVER.id. Everything here is a plain
+  // description list so the renderer stays agnostic of field IDs.
+  //
+  // Field shape:
+  //   { key: "host", label: "IP address", type: "text",
+  //     placeholder: "...", default: <from connection_defaults> }
+  //
+  // `target` is where the value lands:
+  //   "capabilities.<proto>.<key>"  → config.drivers[].capabilities.<proto>.<key>
+  //   "config.<key>"                → config.drivers[].config.<key>
+  function connectionFieldsFor(entry) {
+    if (!entry || !entry.protocols || entry.protocols.length === 0) return [];
+    var proto = entry.protocols[0];
+    var cd    = entry.connection_defaults || {};
+    var fields = [];
+
+    if (proto === 'modbus') {
+      fields.push({ target: 'capabilities.modbus.host',    key: 'host',    label: 'IP address', type: 'text',
+                    placeholder: '192.168.1.10', required: true });
+      fields.push({ target: 'capabilities.modbus.port',    key: 'port',    label: 'Port',       type: 'number',
+                    default: cd.port != null ? cd.port : 502 });
+      fields.push({ target: 'capabilities.modbus.unit_id', key: 'unit_id', label: 'Unit ID',    type: 'number',
+                    default: cd.unit_id != null ? cd.unit_id : 1 });
+    } else if (proto === 'mqtt') {
+      fields.push({ target: 'capabilities.mqtt.host',     key: 'host',     label: 'Broker IP',        type: 'text',
+                    placeholder: '192.168.1.10', required: true });
+      fields.push({ target: 'capabilities.mqtt.port',     key: 'port',     label: 'Port',             type: 'number',
+                    default: cd.port != null ? cd.port : 1883 });
+      fields.push({ target: 'capabilities.mqtt.username', key: 'username', label: 'Username',         type: 'text',
+                    default: cd.username || '' });
+      fields.push({ target: 'capabilities.mqtt.password', key: 'password', label: 'Password',         type: 'password',
+                    default: cd.password || '' });
+    } else if (proto === 'http') {
+      // Local HTTP driver (e.g. a REST-speaking inverter on the LAN) —
+      // CD advertises a host. Cloud drivers (Easee) declare http_hosts
+      // but no CD.host, and their creds live in config.* instead; we
+      // punt those to the integrations step (step 7).
+      if (cd.host !== undefined || (!entry.http_hosts || entry.http_hosts.length === 0)) {
+        fields.push({ target: 'capabilities.http.host', key: 'host', label: 'IP address', type: 'text',
+                      placeholder: '192.168.1.10', required: true });
+        fields.push({ target: 'capabilities.http.port', key: 'port', label: 'Port',       type: 'number',
+                      default: cd.port != null ? cd.port : 80 });
+      } else {
+        fields.push({ cloudHint: true,
+                      message: 'This driver is a cloud API. Configure its credentials in the "Optional integrations" step (step 7).' });
+      }
+    }
+    return fields;
+  }
+
+  // Driver-specific config knobs rendered alongside the connection
+  // fields. Only the handful we actually need for a first-run bootstrap
+  // — everything else can be tweaked from /settings later.
+  function extraFieldsFor(entry) {
+    if (!entry) return [];
+    var out = [];
+    if (entry.id === 'ctek-chargestorm-mqtt') {
+      out.push({ target: 'config.base_topic', key: 'base_topic', label: 'MQTT base topic', type: 'text',
+                 default: 'CTEK' });
+      out.push({ target: 'config.cbid', key: 'cbid', label: 'Charger ID (optional)', type: 'text',
+                 placeholder: 'leave empty to auto-detect first charger' });
+      out.push({ target: 'config.outlet', key: 'outlet', label: 'Outlet (1 = EVSE1, 2 = EVSE2)', type: 'number',
+                 default: 1 });
+    }
+    if (entry.id === 'ctek-chargestorm' || entry.id === 'ctek-chargestorm-v2') {
+      out.push({ target: 'config.outlet', key: 'outlet', label: 'Outlet (passed via unit_id)', type: 'number',
+                 default: 1, disabled: true, hint: 'unit_id above controls the outlet.' });
+    }
+    return out;
+  }
+
+  function renderFields(containerId, fields) {
+    var container = document.getElementById(containerId);
+    container.innerHTML = '';
+    if (fields.length === 0) return;
+
+    // Group numeric host/port fields onto a single row for a tidier
+    // layout. Everything else goes on its own row.
+    var i = 0;
+    while (i < fields.length) {
+      var f = fields[i];
+
+      if (f.cloudHint) {
+        var hint = document.createElement('div');
+        hint.className = 'cloud-hint';
+        hint.textContent = f.message;
+        container.appendChild(hint);
+        i++;
+        continue;
+      }
+
+      var next = fields[i + 1];
+      var pairable = next && !next.cloudHint &&
+                     ((f.key === 'host' && (next.key === 'port' || next.key === 'unit_id')) ||
+                      (f.key === 'port'));
+      if (pairable) {
+        var row = document.createElement('div');
+        row.className = 'form-row';
+        row.appendChild(makeFieldGroup(f));
+        row.appendChild(makeFieldGroup(next));
+        container.appendChild(row);
+        i += 2;
+      } else {
+        container.appendChild(makeFieldGroup(f));
+        i++;
+      }
+    }
+  }
+
+  function makeFieldGroup(f) {
+    var group = document.createElement('div');
+    group.className = 'form-group';
+    var label = document.createElement('label');
+    var inputId = 'drv-f-' + f.key;
+    label.setAttribute('for', inputId);
+    label.textContent = f.label;
+    group.appendChild(label);
+
+    var input = document.createElement('input');
+    input.id = inputId;
+    input.type = f.type || 'text';
+    if (f.default !== undefined && f.default !== null) input.value = String(f.default);
+    if (f.placeholder) input.placeholder = f.placeholder;
+    if (f.disabled)    input.disabled = true;
+    input.dataset.target = f.target;
+    input.dataset.key    = f.key;
+    if (f.required) input.dataset.required = '1';
+    group.appendChild(input);
+
+    if (f.hint) {
+      var small = document.createElement('small');
+      small.textContent = f.hint;
+      group.appendChild(small);
+    }
+    return group;
+  }
+
+  function readFieldInto(driver, input) {
+    var target = input.dataset.target;
+    if (!target) return;
+    var raw = input.value;
+    if (input.type === 'number') {
+      raw = raw.trim();
+      if (raw === '') return;
+      raw = parseFloat(raw);
+      if (isNaN(raw)) return;
+      if (Number.isInteger(raw)) raw = parseInt(raw, 10);
+    } else {
+      raw = raw.trim();
+      if (raw === '') return;
+    }
+    // target looks like "capabilities.modbus.host" or "config.base_topic"
+    var parts = target.split('.');
+    var cur = driver;
+    for (var i = 0; i < parts.length - 1; i++) {
+      var p = parts[i];
+      if (cur[p] == null) cur[p] = {};
+      cur = cur[p];
+    }
+    cur[parts[parts.length - 1]] = raw;
+  }
+
   function prefillDriverConfig() {
     if (!selectedCatalog) return;
 
     var nameBase = (selectedCatalog.manufacturer || selectedCatalog.id || 'device').toLowerCase()
       .replace(/[^a-z0-9]/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '');
-    // Make unique if name already taken
     var name = nameBase;
     var n = 2;
     while (configuredDrivers.some(function (d) { return d.name === name; })) {
@@ -211,50 +384,48 @@
     }
     document.getElementById('drv-name').value = name;
 
+    // Render connection fields from the driver's catalog entry.
+    var connFields = connectionFieldsFor(selectedCatalog);
+    // Pre-fill host/port from a scanned device if the user got here via
+    // the scan path, so they don't have to retype the IP.
     if (selectedDevice) {
-      document.getElementById('drv-ip').value = selectedDevice.ip;
-      document.getElementById('drv-port').value = selectedDevice.port;
+      connFields.forEach(function (f) {
+        if (f.key === 'host' && selectedDevice.ip)   f.default = selectedDevice.ip;
+        if (f.key === 'port' && selectedDevice.port) f.default = selectedDevice.port;
+      });
     }
+    renderFields('drv-connection-fields', connFields);
+    renderFields('drv-extra-fields',      extraFieldsFor(selectedCatalog));
 
-    // Show/hide unit ID for modbus
-    var isModbus = !selectedCatalog.protocols || selectedCatalog.protocols.length === 0 ||
-      selectedCatalog.protocols.some(function (p) { return p === 'modbus'; });
-    document.getElementById('drv-unitid-group').style.display = isModbus ? 'block' : 'none';
-
-    // Show battery capacity if capabilities include battery
     var hasBattery = selectedCatalog.capabilities &&
       selectedCatalog.capabilities.some(function (c) { return c === 'battery'; });
     document.getElementById('drv-battery-group').style.display = hasBattery ? 'block' : 'none';
 
-    // First driver defaults to site meter
-    document.getElementById('drv-site-meter').checked = configuredDrivers.length === 0;
-
-    // Default port based on protocol
-    if (!selectedDevice) {
-      var defPort = 502;
-      if (selectedCatalog.protocols && selectedCatalog.protocols.indexOf('mqtt') >= 0) defPort = 1883;
-      if (selectedCatalog.protocols && selectedCatalog.protocols.indexOf('http') >= 0) defPort = 8080;
-      document.getElementById('drv-port').value = defPort;
-    }
+    // First driver defaults to site meter. EV-only drivers never are.
+    var isEVOnly = selectedCatalog.capabilities &&
+      selectedCatalog.capabilities.length === 1 &&
+      selectedCatalog.capabilities[0] === 'ev';
+    document.getElementById('drv-site-meter').checked =
+      !isEVOnly && configuredDrivers.length === 0;
   }
 
   window.saveDriver = function () {
     var name = document.getElementById('drv-name').value.trim();
     if (!name) { alert('Driver name is required.'); return; }
 
-    var ip = document.getElementById('drv-ip').value.trim();
-    var port = parseInt(document.getElementById('drv-port').value, 10);
-    var unitId = parseInt(document.getElementById('drv-unitid').value, 10) || 1;
-    var isSiteMeter = document.getElementById('drv-site-meter').checked;
-    var batteryKwh = parseFloat(document.getElementById('drv-battery-kwh').value) || 0;
-
-    if (!ip) { alert('IP address is required.'); return; }
-
-    // Determine protocol from catalog entry
-    var protocol = 'modbus';
-    if (selectedCatalog && selectedCatalog.protocols && selectedCatalog.protocols.length > 0) {
-      protocol = selectedCatalog.protocols[0];
+    // Validate required fields on the dynamic form.
+    var inputs = document.querySelectorAll('#drv-connection-fields [data-target], #drv-extra-fields [data-target]');
+    for (var i = 0; i < inputs.length; i++) {
+      var inp = inputs[i];
+      if (inp.dataset.required === '1' && !inp.value.trim()) {
+        alert('Missing: ' + inp.previousSibling.textContent);
+        inp.focus();
+        return;
+      }
     }
+
+    var isSiteMeter = document.getElementById('drv-site-meter').checked;
+    var batteryKwh  = parseFloat(document.getElementById('drv-battery-kwh').value) || 0;
 
     var driver = {
       name: name,
@@ -262,37 +433,18 @@
       is_site_meter: isSiteMeter,
       capabilities: {}
     };
+    if (batteryKwh > 0) driver.battery_capacity_wh = batteryKwh * 1000;
 
-    if (batteryKwh > 0) {
-      driver.battery_capacity_wh = batteryKwh * 1000;
+    // Walk every rendered input and set its target path on the driver
+    // object. This replaces the older protocol-switch hardcode so a new
+    // driver type only needs a connectionFieldsFor() entry.
+    for (var j = 0; j < inputs.length; j++) {
+      readFieldInto(driver, inputs[j]);
     }
 
-    if (protocol === 'modbus') {
-      driver.capabilities.modbus = { host: ip, port: port, unit_id: unitId };
-    } else if (protocol === 'mqtt') {
-      driver.capabilities.mqtt = { host: ip, port: port };
-    } else if (protocol === 'http') {
-      driver.capabilities.http = { allowed_hosts: [ip] };
-      // connection_defaults.host is declared only by drivers that take a
-      // user-configurable local endpoint — seed config.host from the IP the
-      // user just entered. Cloud drivers (Easee etc.) declare http_hosts
-      // for allowed-hosts handling but have no connection_defaults.host;
-      // their vendor endpoint is hardcoded and they key off
-      // config.email/password instead, so leave config untouched here.
-      var connHost = (selectedCatalog && selectedCatalog.connection_defaults &&
-                      selectedCatalog.connection_defaults.host) || '';
-      if (connHost) {
-        driver.config = driver.config || {};
-        driver.config.host = ip;
-      }
-    }
-
-    // If this is the site meter, uncheck others
     if (isSiteMeter) {
       configuredDrivers.forEach(function (d) { d.is_site_meter = false; });
     }
-
-    // Store catalog ref for display
     driver._catalog = selectedCatalog;
 
     configuredDrivers.push(driver);
@@ -374,7 +526,21 @@
     if (!integrationListenersBound) {
       integrationListenersBound = true;
       document.getElementById('ev-provider').addEventListener('change', function () {
-        document.getElementById('ev-fields').style.display = this.value ? 'block' : 'none';
+        var kind = this.value;
+        // Easee = cloud creds; CTEK variants = local charger (IP + port,
+        // optionally unit_id for Modbus). Hide both blocks by default and
+        // show the one that matches.
+        var cloud = document.getElementById('ev-cloud-fields');
+        var local = document.getElementById('ev-local-fields');
+        cloud.style.display = (kind === 'easee') ? 'block' : 'none';
+        local.style.display = (kind === 'ctek-modbus' || kind === 'ctek-mqtt') ? 'block' : 'none';
+        if (kind === 'ctek-modbus') {
+          document.getElementById('ev-local-port').value = 502;
+          document.getElementById('ev-local-unitid-group').style.display = 'block';
+        } else if (kind === 'ctek-mqtt') {
+          document.getElementById('ev-local-port').value = 1883;
+          document.getElementById('ev-local-unitid-group').style.display = 'none';
+        }
       });
       document.getElementById('ha-enabled').addEventListener('change', function () {
         document.getElementById('ha-fields').style.display = this.checked ? 'block' : 'none';
@@ -446,14 +612,10 @@
   // --- Save config ---
 
   window.saveConfig = function () {
-    if (configuredDrivers.length === 0) {
-      var errEl = document.getElementById('save-error');
-      errEl.className = 'error-msg';
-      errEl.textContent = 'At least one device must be configured.';
-      errEl.style.display = 'block';
-      return;
-    }
-
+    // Empty device list is OK now — the operator can come back and add
+    // drivers from /settings. The backend accepts a config with zero
+    // drivers and runs the API + web UI in a parked state so this first
+    // save isn't blocking.
     var btn = document.getElementById('save-btn');
     btn.disabled = true;
     btn.textContent = 'Saving...';
@@ -524,14 +686,48 @@
     }
 
     // EV Charger
+    //
+    // Easee is a cloud API → lands in the top-level `ev_charger` block
+    // so the Go-side provider adapter can pick it up.
+    //
+    // CTEK variants are local hardware → materialised as an additional
+    // entry in cfg.drivers, using whichever Lua driver matches the
+    // picked protocol. This keeps the top-level ev_charger block
+    // reserved for cloud APIs and means the device shows up in the
+    // same driver list as everything else.
     var evProvider = document.getElementById('ev-provider').value;
-    if (evProvider) {
+    if (evProvider === 'easee') {
       cfg.ev_charger = {
-        provider: evProvider,
+        provider: 'easee',
         email: document.getElementById('ev-email').value.trim(),
         password: document.getElementById('ev-password').value,
         serial: document.getElementById('ev-serial').value.trim()
       };
+    } else if (evProvider === 'ctek-modbus' || evProvider === 'ctek-mqtt') {
+      var ip      = document.getElementById('ev-local-ip').value.trim();
+      var port    = parseInt(document.getElementById('ev-local-port').value, 10) || 0;
+      var unitId  = parseInt(document.getElementById('ev-local-unitid').value, 10) || 1;
+      if (ip) {
+        // Pick a unique driver name. Operators running multiple CTEK
+        // stations on one site can add the rest via /settings.
+        var baseName = 'ctek';
+        var name = baseName;
+        var idx = 2;
+        while (cfg.drivers.some(function (d) { return d.name === name; })) {
+          name = baseName + '_' + idx;
+          idx++;
+        }
+        var drv = { name: name, is_site_meter: false, capabilities: {} };
+        if (evProvider === 'ctek-modbus') {
+          drv.lua = 'drivers/ctek.lua';
+          drv.capabilities.modbus = { host: ip, port: port || 502, unit_id: unitId };
+        } else {
+          drv.lua = 'drivers/ctek_mqtt.lua';
+          drv.capabilities.mqtt = { host: ip, port: port || 1883 };
+          drv.config = { outlet: unitId, base_topic: 'CTEK' };
+        }
+        cfg.drivers.push(drv);
+      }
     }
 
     // Home Assistant
@@ -557,6 +753,43 @@
     d.textContent = s;
     return d.innerHTML;
   }
+
+  // Skip the whole wizard — write a minimal default config so the
+  // backend restarts out of bootstrap mode, then land the browser in
+  // the main app. Operators finish the work in /settings.
+  window.skipSetup = function () {
+    var cfg = {
+      site: {
+        name: 'My Home',
+        control_interval_s: 5,
+        grid_target_w: 0,
+        grid_tolerance_w: 42,
+        watchdog_timeout_s: 60,
+        smoothing_alpha: 0.3,
+        gain: 0.5,
+        slew_rate_w: 500,
+        min_dispatch_interval_s: 5
+      },
+      fuse:    { max_amps: 16, phases: 3, voltage: 230 },
+      drivers: [],
+      api:     { port: 8080 }
+    };
+    fetch('/api/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(cfg)
+    }).then(function (r) {
+      if (!r.ok) return r.json().then(function (d) {
+        throw new Error(d.error || 'Skip failed');
+      });
+      // Give the bootstrap a moment to write the config and restart
+      // the process. If it's back up quickly the redirect will hit
+      // the real UI; if not the browser will retry.
+      setTimeout(function () { window.location.href = '/'; }, 2000);
+    }).catch(function (err) {
+      alert('Could not skip setup: ' + err.message);
+    });
+  };
 
   // --- Init ---
   renderDots();
