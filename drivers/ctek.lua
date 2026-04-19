@@ -1,38 +1,29 @@
--- CTEK Chargestorm EV Charger Driver (Automation API v1, hybrid MQTT + Modbus)
+-- CTEK Chargestorm EV Charger Driver (Automation API v1)
 -- Emits: EV
--- Protocols: Modbus/TCP (control + telemetry) and MQTT (telemetry, optional)
+-- Protocol: Modbus/TCP
 --
 -- Hardware + firmware:
---   Requires a CTEK Chargestorm Connected 2 or Connected 3 running CSOS
---   (Chargestorm OS) firmware 4.9.3 or later for the Modbus charging-limit
---   register; MQTT telemetry works from CSOS 3.11.15.1 / 3.12.6.
+--   Requires a CTEK Chargestorm Connected 2 or Connected 3 running
+--   CSOS (Chargestorm OS) firmware 4.9.3 or later. Older firmware
+--   either lacks the Modbus/TCP automation server entirely (CSOS
+--   < 3.11.16) or lacks the charging-limit control register (CSOS
+--   < 4.9.0). Connect the CCU to LAN and:
 --
---   Modbus side (control + Modbus telemetry):
 --     Automation → ModbusTCPEnable                  = true
 --     Automation → modbus_tcp_automation_api_version = 1
---   Use drivers/ctek_v2.lua if you've set the API version to 2 instead.
---   The two variants differ ONLY in the base register address (0x1xxx vs
---   0x2xxx); semantics, units and function codes are identical.
 --
---   MQTT side (optional richer telemetry):
---     Automation → MQTT
---       MqttEnabled    = true
---       MqttServer     = <broker-ip>
---       MqttPort       = 1883
---       MqttBaseTopic  = CTEK
---       MqttLogin / MqttPassword = <broker credentials, if required>
---   The MQTT side is strictly read-only on CTEK's interface, so even with
---   it configured this driver still drives the charging limit over Modbus.
---   When MQTT is configured the EVSE state code ("CHRG", "PAUS", "EVRD",
---   …), per-phase telemetry, lifetime energy counter and grid frequency
---   come from the broker — Modbus is then only used for control + as a
---   cold-start fallback while we wait for the first MQTT message.
+--   Use drivers/ctek_v2.lua if you've set the API version to 2 on the
+--   CCU instead. The only difference between the two variants is the
+--   base register address (0x1xxx for v1, 0x2xxx for v2); all register
+--   semantics, units, and function codes are identical. CTEK recommends
+--   running either the charging-control API or the NANOGRID™ limit
+--   control on API v2 if you want both enabled simultaneously.
 --
 -- Unit identifier selects the outlet on dual-outlet stations:
 --   unit_id = 1 → EVSE1 (left outlet, or single-outlet station)
 --   unit_id = 2 → EVSE2 (right outlet)
 --
--- Modbus register map (source: CTEK "Automation interface" v1.0, rev 6b4af7):
+-- Register map (source: CTEK "Automation interface" v1.0, rev 6b4af7):
 --
 --   Identity / meter type:
 --     0x1000         API version       (u16)
@@ -55,37 +46,6 @@
 --                    bound the charger will accept given current
 --                    de-rating, schedules, NANOGRID™ curtailment, etc.
 --
--- MQTT topic layout (same source PDF, §2.2):
---     <base>/<CBID>/evse1/em            energy meter JSON, per-outlet
---     <base>/<CBID>/evse2/em            (dual-outlet stations only)
---     <base>/<CBID>/evse1/status        EVSE state + assigned current
---     <base>/<CBID>/evse1/meterinfo     serial number of the meter
---   <base>   — MqttBaseTopic on the CCU (default "CTEK").
---   <CBID>   — the charger's serial / board ID, e.g. 91728M03W4010406.
---
---   em payload:
---     { "current":[A_L1,A_L2,A_L3], "voltage":[V_L1,V_L2,V_L3],
---       "power":<W>, "energy":<Wh>, "frequency":<Hz>, "timestamp":"..." }
---
---   status payload:
---     { "assigned":<A>, "state":"CHRG", "timestamp":"..." }
---
---     State codes (PDF §2.4):
---       AVAL Available, no EV connected
---       PAUS Pause, charging disallowed by station
---       EVRD EV is ready (plug + auth done, ramp pending)
---       CHRG Charging
---       FLTY Fault
---       DSBL Disabled
---       CONN EV connected, waiting for authentication
---       NCRQ No charging requested by EV
---       AUTH Authenticated, waiting for EV to connect
---       INVL Invalid
---       GONE EV disappeared
---       DONE Session finished
---       SUHT Transient → pause
---       STHT Transient → stop
---
 -- Sign convention (SITE = positive W flows INTO the site):
 --   ev.w: always positive when charging — an EVSE is a one-way load;
 --   there's no vehicle-to-grid path on Chargestorm.
@@ -95,37 +55,29 @@
 --     - name: ctek
 --       lua: drivers/ctek.lua
 --       capabilities:
---         modbus:                       # required for control
+--         modbus:
 --           host: 192.168.1.190
 --           port: 502
---           unit_id: 1                  # 1 = EVSE1, 2 = EVSE2
---         mqtt:                         # optional; richer telemetry + state
---           host: 192.168.1.190         # CCU runs an internal broker
---           port: 1883
---           username: ""
---           password: ""
+--           unit_id: 1         # 1 = EVSE1, 2 = EVSE2
 --       config:
---         phases:     3                 # 1 or 3; default 3
---         min_a:      6                 # minimum charge current (A); default 6
---         max_a:      16                # fuse-limited max (A); default 16
---         voltage_v:  230               # nominal per-phase voltage; default 230
---         base_topic: "CTEK"            # MQTT base topic; matches CCU default
---         cbid:       ""                # optional: pin to one charger's serial
---         outlet:     1                 # MQTT outlet selector (mirror unit_id)
+--         phases:    3          # 1 or 3; default 3
+--         min_a:     6          # minimum charge current (A); default 6
+--         max_a:     16         # fuse-limited max (A); default 16
+--         voltage_v: 230        # nominal per-phase voltage; default 230
 
 DRIVER = {
   id           = "ctek-chargestorm",
   name         = "CTEK Chargestorm (API v1)",
   manufacturer = "CTEK",
-  version      = "0.3.0",
-  protocols    = { "modbus", "mqtt" },
+  version      = "0.2.0",
+  protocols    = { "modbus" },
   capabilities = { "ev" },
-  description  = "CTEK Chargestorm Connected 2/3, hybrid driver: Modbus/TCP Automation API v1 (CSOS ≥ 4.9.3) for control, MQTT for richer telemetry + EVSE state code.",
+  description  = "CTEK Chargestorm Connected 2/3 via Modbus/TCP Automation API v1 (CSOS ≥ 4.9.3). Full telemetry + current-limit control.",
   homepage     = "https://www.ctek.com",
   authors      = { "forty-two-watts contributors" },
   tested_models = { "Chargestorm Connected 2", "Chargestorm Connected 3" },
   verification_status = "beta",
-  verification_notes = "Register map per CTEK Automation interface v1.0; MQTT topic layout per the same PDF rev 6b4af7. Charging-limit write verified against CSOS 4.9.x.",
+  verification_notes = "Register map per CTEK Automation interface v1.0; charging-limit write verified against CSOS 4.9.x. Derived charging/connected flags approximate the real EVSE state since the state code is MQTT-only.",
   connection_defaults = {
     port    = 502,
     unit_id = 1,
@@ -148,51 +100,19 @@ local REG_TELEMETRY     = 0x1100   -- 9 regs: energy(2) + I(3) + V(3) + W(1)
 local REG_CHARGE_LIMIT  = 0x1200   -- r/w
 local REG_MAX_ASSIGN    = 0x1201   -- r/o
 
-local API_VERSION_EXPECTED = 1
-local OTHER_DRIVER_HINT    = "drivers/ctek_v2.lua"
-
 ----------------------------------------------------------------------------
 -- Runtime config (overridden from config.yaml in driver_init)
 ----------------------------------------------------------------------------
-local phases     = 3
-local min_a      = 6
-local max_a      = 16
-local voltage_v  = 230
-local base_topic = "CTEK"
-local cbid       = nil   -- snap to first seen CBID when not configured
-local outlet     = 1
+local phases    = 3
+local min_a     = 6
+local max_a     = 16
+local voltage_v = 230
 
 -- Last setpoint we successfully wrote. Used as the resume target when
 -- ev_start / ev_resume come in without a specific current.
 local last_set_a = 0
-local sn_read    = false
 
--- Cached MQTT state. CTEK publishes em at a low rate (~30 s) so we keep
--- the last decoded payload around and emit on every poll regardless.
-local last_em        = nil   -- decoded em JSON table
-local last_status    = nil   -- decoded status JSON table
-local mqtt_enabled   = false -- subscribed successfully → trust MQTT data
-
--- Per-state connected / charging derivation. Keyed on the 4-letter code
--- CTEK puts in status.state. "connected" is true whenever the EV is
--- physically plugged AND the charger isn't in a fault/unavailable state;
--- "charging" is strictly the CHRG state.
-local STATE_FLAGS = {
-    AVAL = { connected = false, charging = false },
-    PAUS = { connected = true,  charging = false },
-    EVRD = { connected = true,  charging = false },
-    CHRG = { connected = true,  charging = true  },
-    CONN = { connected = true,  charging = false },
-    NCRQ = { connected = true,  charging = false },
-    AUTH = { connected = false, charging = false },   -- waiting for EV
-    DONE = { connected = true,  charging = false },
-    GONE = { connected = false, charging = false },
-    SUHT = { connected = true,  charging = false },   -- transient → pause
-    STHT = { connected = true,  charging = false },   -- transient → stop
-    FLTY = { connected = false, charging = false },
-    DSBL = { connected = false, charging = false },
-    INVL = { connected = false, charging = false },
-}
+local sn_read = false
 
 ----------------------------------------------------------------------------
 -- Helpers
@@ -229,20 +149,6 @@ local function decode_ascii(regs, n)
     return s
 end
 
-local function safe_num(v)
-    if v == nil then return nil end
-    local n = tonumber(v)
-    if n ~= n then return nil end   -- nan guard
-    return n
-end
-
--- em.current / em.voltage come as 3-element arrays. Lua arrays from
--- host.json_decode are 1-indexed tables, so [1]/[2]/[3] = L1/L2/L3.
-local function arr3(t, i)
-    if type(t) ~= "table" then return 0 end
-    return safe_num(t[i]) or 0
-end
-
 local function write_setpoint(amps)
     local ok, err = pcall(host.modbus_write, REG_CHARGE_LIMIT, amps)
     if not ok then
@@ -257,46 +163,6 @@ local function read_setpoint()
     local ok, regs = pcall(host.modbus_read, REG_CHARGE_LIMIT, 1, "holding")
     if not ok or not regs or not regs[1] then return nil end
     return regs[1]
-end
-
--- Parse "<base>/<CBID>/evse<N>/<leaf>" and return (CBID, outlet, leaf).
--- Returns nil if the topic doesn't match our expected shape so we can
--- ignore stray subscriptions without spamming warnings.
-local function parse_topic(topic)
-    local base, id, evse, leaf = topic:match("^([^/]+)/([^/]+)/([^/]+)/([^/]+)$")
-    if not base or base ~= base_topic then return nil end
-    local n = evse:match("^evse(%d+)$")
-    if not n then return nil end
-    return id, tonumber(n), leaf
-end
-
-local function drain_mqtt()
-    local messages = host.mqtt_messages()
-    if not messages then return end
-    for _, msg in ipairs(messages) do
-        local msg_cbid, msg_outlet, leaf = parse_topic(msg.topic)
-        if msg_cbid and msg_outlet == outlet then
-            -- Pin to first seen CBID if config didn't specify one.
-            -- Anchoring device_id to the CTEK serial means battery /
-            -- model state keyed on device_id survives a driver rename.
-            if not cbid then
-                cbid = msg_cbid
-                host.set_sn(cbid)
-                sn_read = true
-                host.log("info", "CTEK: locked onto CBID " .. cbid .. " from MQTT")
-            end
-            if msg_cbid == cbid then
-                local ok, data = pcall(host.json_decode, msg.payload)
-                if ok and data then
-                    if leaf == "em" then
-                        last_em = data
-                    elseif leaf == "status" then
-                        last_status = data
-                    end
-                end
-            end
-        end
-    end
 end
 
 ----------------------------------------------------------------------------
@@ -314,58 +180,26 @@ function driver_init(config)
         if tonumber(config.min_a)     then min_a     = math.floor(tonumber(config.min_a))     end
         if tonumber(config.max_a)     then max_a     = math.floor(tonumber(config.max_a))     end
         if tonumber(config.voltage_v) then voltage_v = tonumber(config.voltage_v)             end
-        if type(config.base_topic) == "string" and #config.base_topic > 0 then
-            base_topic = config.base_topic
-        end
-        if type(config.cbid) == "string" and #config.cbid > 0 then
-            cbid = config.cbid
-            host.set_sn(cbid)
-            sn_read = true
-        end
-        if tonumber(config.outlet) then
-            local o = math.floor(tonumber(config.outlet))
-            if o == 1 or o == 2 then outlet = o end
-        end
     end
 
     if min_a < 6 then min_a = 6 end         -- IEC 61851 floor
     if max_a < min_a then max_a = min_a end
 
-    -- MQTT side: optional. Subscribe with a wildcard on CBID so we don't
-    -- force the operator to hard-code the charger's serial. If the host
-    -- wasn't granted an MQTT capability the subscribe call returns an
-    -- error string and we just stay Modbus-only.
-    local em_topic        = string.format("%s/+/evse%d/em",        base_topic, outlet)
-    local status_topic    = string.format("%s/+/evse%d/status",    base_topic, outlet)
-    local meterinfo_topic = string.format("%s/+/evse%d/meterinfo", base_topic, outlet)
-    local sub_ok = pcall(function()
-        host.mqtt_subscribe(em_topic)
-        host.mqtt_subscribe(status_topic)
-        host.mqtt_subscribe(meterinfo_topic)
-    end)
-    if sub_ok then
-        mqtt_enabled = true
-        host.log("info", string.format(
-            "CTEK: MQTT subscribed to %s/%s/evse%d/{em,status,meterinfo}",
-            base_topic, cbid or "+", outlet))
-    end
-
-    -- Modbus side: sanity-check the API version. A mismatch means the
-    -- operator enabled v2 instead — suggest the v2 driver rather than
-    -- silently reading back garbage. Skipped silently if Modbus isn't
-    -- wired (MQTT-only deployments).
+    -- Sanity-check the CCU is serving API v1 on this unit. A mismatch
+    -- here means the operator enabled v2 instead — suggest the v2
+    -- driver rather than silently reading back garbage.
     local ok, api_regs = pcall(host.modbus_read, REG_API_VERSION, 2, "holding")
     if ok and api_regs and api_regs[1] then
         local api_ver    = api_regs[1]
         local api_status = api_regs[2] or 0
         host.log("info", string.format(
-            "CTEK: Modbus API v%d, status %d (expected v%d; use %s for the other version)",
-            api_ver, api_status, API_VERSION_EXPECTED, OTHER_DRIVER_HINT))
+            "CTEK: API v%d, status %d (expected v1 from this driver; use drivers/ctek_v2.lua for v2)",
+            api_ver, api_status))
     end
 
     host.log("info", string.format(
-        "CTEK: driver initialized (phases=%d, min=%dA, max=%dA, V=%.0f, mqtt=%s)",
-        phases, min_a, max_a, voltage_v, mqtt_enabled and "on" or "off"))
+        "CTEK: driver initialized (phases=%d, min=%dA, max=%dA, V=%.0f)",
+        phases, min_a, max_a, voltage_v))
 
     local cur = read_setpoint()
     if cur then
@@ -375,11 +209,9 @@ function driver_init(config)
 end
 
 function driver_poll()
-    if mqtt_enabled then drain_mqtt() end
-
-    -- One-shot serial read off Modbus when we don't already have a CBID
-    -- from MQTT. Keys device identity to the EVSE serial so battery /
-    -- other models keyed on device_id stay stable across driver renames.
+    -- One-shot serial read. Keys device identity to the EVSE serial so
+    -- battery/other models keyed on device_id stay stable across driver
+    -- renames.
     if not sn_read then
         local ok_sn, sn_regs = pcall(host.modbus_read, REG_SERIAL_BASE, 6, "holding")
         if ok_sn and sn_regs then
@@ -391,28 +223,33 @@ function driver_poll()
         end
     end
 
-    -- Modbus telemetry block — always read so we have a live source even
-    -- if MQTT hasn't delivered yet (cold boot, broker reconnect). 9 regs
-    -- in one transaction so the energy counter, per-phase current +
-    -- voltage, and total power all come from a consistent snapshot.
+    -- Telemetry block: 9 registers in one transaction so the energy
+    -- counter, per-phase current + voltage, and total power all come
+    -- from a consistent snapshot.
     local ok_tel, tel = pcall(host.modbus_read, REG_TELEMETRY, 9, "holding")
-    local mb_w  = 0
-    local mb_il = { 0, 0, 0 }
-    local mb_vl = { 0, 0, 0 }
-    local mb_lifetime = 0
+    local ev_w     = 0
+    local i_l1, i_l2, i_l3 = 0, 0, 0
+    local v_l1, v_l2, v_l3 = 0, 0, 0
+    local lifetime_wh = 0
     if ok_tel and tel then
-        mb_lifetime = host.decode_u32_be(tel[1], tel[2])
-        mb_il[1]    = (tel[3] or 0) / 1000
-        mb_il[2]    = (tel[4] or 0) / 1000
-        mb_il[3]    = (tel[5] or 0) / 1000
-        mb_vl[1]    = (tel[6] or 0) / 10
-        mb_vl[2]    = (tel[7] or 0) / 10
-        mb_vl[3]    = (tel[8] or 0) / 10
-        mb_w        = tel[9] or 0
+        lifetime_wh = host.decode_u32_be(tel[1], tel[2])
+        i_l1        = (tel[3] or 0) / 1000
+        i_l2        = (tel[4] or 0) / 1000
+        i_l3        = (tel[5] or 0) / 1000
+        v_l1        = (tel[6] or 0) / 10
+        v_l2        = (tel[7] or 0) / 10
+        v_l3        = (tel[8] or 0) / 10
+        ev_w        = tel[9] or 0
+    else
+        host.log("warn", "CTEK: telemetry block read failed")
     end
 
-    -- Modbus control state: charging limit (current target) + max
-    -- assignment (upper bound the charger will honour).
+    -- Control setpoints: charging limit (current target) + max
+    -- assignment (upper bound the charger will honour). The Chargestorm
+    -- itself exposes no "connector state" flag on Modbus — the clean
+    -- state code ("CHRG", "PAUS", "EVRD", …) is MQTT-only. Derive
+    -- charging / connected conservatively from the current + power
+    -- readings so the dispatch clamp has something to key off.
     local limit, max_assign = last_set_a, max_a
     local ok_ctl, ctl = pcall(host.modbus_read, REG_CHARGE_LIMIT, 2, "holding")
     if ok_ctl and ctl then
@@ -421,54 +258,16 @@ function driver_poll()
         last_set_a  = limit
     end
 
-    -- Pick the source for emitted telemetry. MQTT is preferred when we've
-    -- received an em payload — it carries the EVSE state code and tends
-    -- to refresh on session events faster than our 5 s Modbus poll. Fall
-    -- back to Modbus for cold-start coverage.
-    local ev_w, i_l1, i_l2, i_l3, v_l1, v_l2, v_l3, lifetime_wh, hz, state_code
-    if last_em then
-        ev_w        = safe_num(last_em.power) or mb_w
-        i_l1        = arr3(last_em.current, 1)
-        i_l2        = arr3(last_em.current, 2)
-        i_l3        = arr3(last_em.current, 3)
-        v_l1        = arr3(last_em.voltage, 1)
-        v_l2        = arr3(last_em.voltage, 2)
-        v_l3        = arr3(last_em.voltage, 3)
-        lifetime_wh = safe_num(last_em.energy) or mb_lifetime
-        hz          = safe_num(last_em.frequency)
-    else
-        ev_w        = mb_w
-        i_l1, i_l2, i_l3 = mb_il[1], mb_il[2], mb_il[3]
-        v_l1, v_l2, v_l3 = mb_vl[1], mb_vl[2], mb_vl[3]
-        lifetime_wh = mb_lifetime
-    end
+    local max_phase_a = math.max(i_l1, i_l2, i_l3)
+    local charging = (ev_w > 100) or (max_phase_a > 1.0)
+    -- "Connected" is noisy over Modbus alone: when the car is plugged
+    -- but not yet authenticated or ramping, current + power both read
+    -- zero. Report connected whenever the charger is actively delivering
+    -- OR whenever a non-zero limit is in effect — the latter covers
+    -- "plan has scheduled a charging window; cable plugged".
+    local connected = charging or (limit >= min_a and max_assign > 0)
 
-    -- State derivation: prefer the explicit MQTT state code; otherwise
-    -- derive conservatively from current + power. The Chargestorm
-    -- exposes no "connector state" flag on Modbus, so the derived
-    -- variant is necessarily approximate.
-    local charging, connected
-    if last_status then
-        state_code = last_status.state
-        local flags = state_code and STATE_FLAGS[state_code]
-        if flags then
-            connected = flags.connected
-            charging  = flags.charging
-        end
-    end
-    if charging == nil then
-        local max_phase_a = math.max(i_l1, i_l2, i_l3)
-        charging = (ev_w > 100) or (max_phase_a > 1.0)
-        -- "Connected" is noisy over Modbus alone: when the car is plugged
-        -- but not yet authenticated or ramping, current + power both read
-        -- zero. Report connected whenever the charger is actively
-        -- delivering OR whenever a non-zero limit is in effect — the
-        -- latter covers "plan has scheduled a charging window; cable
-        -- plugged".
-        connected = charging or (limit >= min_a and max_assign > 0)
-    end
-
-    local ev = {
+    host.emit("ev", {
         w           = ev_w,
         connected   = connected,
         charging    = charging,
@@ -477,11 +276,7 @@ function driver_poll()
         l1_v        = v_l1, l2_v = v_l2, l3_v = v_l3,
         l1_a        = i_l1, l2_a = i_l2, l3_a = i_l3,
         lifetime_wh = lifetime_wh,
-    }
-    if hz then ev.hz = hz end
-    if state_code then ev.state_label = state_code end
-
-    host.emit("ev", ev)
+    })
 
     host.emit_metric("ev_set_current_a",  limit)
     host.emit_metric("ev_max_assign_a",   max_assign)
@@ -493,7 +288,6 @@ function driver_poll()
     host.emit_metric("ev_l3_v",           v_l3)
     host.emit_metric("ev_power_w",        ev_w)
     host.emit_metric("ev_lifetime_wh",    lifetime_wh)
-    if hz then host.emit_metric("grid_hz", hz) end
 
     return 5000
 end

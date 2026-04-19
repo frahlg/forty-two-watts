@@ -219,43 +219,76 @@
   // `target` is where the value lands:
   //   "capabilities.<proto>.<key>"  → config.drivers[].capabilities.<proto>.<key>
   //   "config.<key>"                → config.drivers[].config.<key>
-  function connectionFieldsFor(entry) {
-    if (!entry || !entry.protocols || entry.protocols.length === 0) return [];
-    var proto = entry.protocols[0];
-    var cd    = entry.connection_defaults || {};
+  // Default port per protocol — used as the form-field default when the
+  // driver's connection_defaults block doesn't specify one. Only the
+  // primary protocol's port comes from connection_defaults.port (which
+  // is a single scalar, by design — drivers with multiple protocols
+  // can't disambiguate which one the default belongs to).
+  var PROTO_DEFAULT_PORT = { modbus: 502, mqtt: 1883, http: 80 };
+
+  function fieldsForProtocol(proto, entry, isPrimary, multi) {
+    var cd     = entry.connection_defaults || {};
+    var prefix = multi ? (proto.toUpperCase() + ' ') : '';
+    var port   = isPrimary && cd.port != null ? cd.port : PROTO_DEFAULT_PORT[proto];
+    // When a driver speaks more than one protocol the secondary
+    // endpoints are optional — operator might wire only Modbus and let
+    // MQTT stay dark. Required validation is only enforced on the
+    // primary protocol's host.
+    var hostRequired = isPrimary;
     var fields = [];
 
     if (proto === 'modbus') {
-      fields.push({ target: 'capabilities.modbus.host',    key: 'host',    label: 'IP address', type: 'text',
-                    placeholder: '192.168.1.10', required: true });
-      fields.push({ target: 'capabilities.modbus.port',    key: 'port',    label: 'Port',       type: 'number',
-                    default: cd.port != null ? cd.port : 502 });
-      fields.push({ target: 'capabilities.modbus.unit_id', key: 'unit_id', label: 'Unit ID',    type: 'number',
+      fields.push({ target: 'capabilities.modbus.host',    key: 'modbus_host',
+                    label: prefix + 'IP address', type: 'text',
+                    placeholder: '192.168.1.10', required: hostRequired });
+      fields.push({ target: 'capabilities.modbus.port',    key: 'modbus_port',
+                    label: prefix + 'Port', type: 'number', default: port });
+      fields.push({ target: 'capabilities.modbus.unit_id', key: 'modbus_unit_id',
+                    label: prefix + 'Unit ID', type: 'number',
                     default: cd.unit_id != null ? cd.unit_id : 1 });
     } else if (proto === 'mqtt') {
-      fields.push({ target: 'capabilities.mqtt.host',     key: 'host',     label: 'Broker IP',        type: 'text',
-                    placeholder: '192.168.1.10', required: true });
-      fields.push({ target: 'capabilities.mqtt.port',     key: 'port',     label: 'Port',             type: 'number',
-                    default: cd.port != null ? cd.port : 1883 });
-      fields.push({ target: 'capabilities.mqtt.username', key: 'username', label: 'Username',         type: 'text',
-                    default: cd.username || '' });
-      fields.push({ target: 'capabilities.mqtt.password', key: 'password', label: 'Password',         type: 'password',
-                    default: cd.password || '' });
+      fields.push({ target: 'capabilities.mqtt.host',     key: 'mqtt_host',
+                    label: prefix + (multi ? 'broker IP' : 'Broker IP'), type: 'text',
+                    placeholder: '192.168.1.10', required: hostRequired });
+      fields.push({ target: 'capabilities.mqtt.port',     key: 'mqtt_port',
+                    label: prefix + 'Port', type: 'number', default: port });
+      fields.push({ target: 'capabilities.mqtt.username', key: 'mqtt_username',
+                    label: prefix + 'Username', type: 'text', default: cd.username || '' });
+      fields.push({ target: 'capabilities.mqtt.password', key: 'mqtt_password',
+                    label: prefix + 'Password', type: 'password', default: cd.password || '' });
     } else if (proto === 'http') {
       // Local HTTP driver (e.g. a REST-speaking inverter on the LAN) —
       // CD advertises a host. Cloud drivers (Easee) declare http_hosts
       // but no CD.host, and their creds live in config.* instead; we
-      // punt those to the integrations step (step 7).
+      // punt those to the integrations step (step 7) via cloudHint.
       if (cd.host !== undefined || (!entry.http_hosts || entry.http_hosts.length === 0)) {
-        fields.push({ target: 'capabilities.http.host', key: 'host', label: 'IP address', type: 'text',
-                      placeholder: '192.168.1.10', required: true });
-        fields.push({ target: 'capabilities.http.port', key: 'port', label: 'Port',       type: 'number',
-                      default: cd.port != null ? cd.port : 80 });
-      } else {
+        fields.push({ target: 'capabilities.http.host', key: 'http_host',
+                      label: prefix + 'IP address', type: 'text',
+                      placeholder: '192.168.1.10', required: hostRequired });
+        fields.push({ target: 'capabilities.http.port', key: 'http_port',
+                      label: prefix + 'Port', type: 'number', default: port });
+      } else if (isPrimary) {
         fields.push({ cloudHint: true,
                       message: 'This driver is a cloud API. Configure its credentials in the "Optional integrations" step (step 7).' });
       }
     }
+    return fields;
+  }
+
+  // Iterate every protocol the driver declares, not just the first —
+  // hybrid drivers (e.g. CTEK Chargestorm with both Modbus control and
+  // MQTT telemetry on the same box) need both endpoints rendered so the
+  // operator can point each at its actual port. The driver's metadata
+  // (`protocols = { ... }`) is the single source of truth for what's
+  // shown.
+  function connectionFieldsFor(entry) {
+    if (!entry || !entry.protocols || entry.protocols.length === 0) return [];
+    var protos = entry.protocols;
+    var multi  = protos.length > 1;
+    var fields = [];
+    protos.forEach(function (p, idx) {
+      fields = fields.concat(fieldsForProtocol(p, entry, idx === 0, multi));
+    });
     return fields;
   }
 
@@ -266,12 +299,8 @@
     if (!entry) return [];
     var out = [];
     if (entry.id === 'ctek-chargestorm' || entry.id === 'ctek-chargestorm-v2') {
-      out.push({ target: 'config.base_topic', key: 'base_topic', label: 'MQTT base topic', type: 'text',
-                 default: 'CTEK', hint: 'Only used when the MQTT capability is wired (optional richer telemetry).' });
-      out.push({ target: 'config.cbid', key: 'cbid', label: 'Charger ID (optional)', type: 'text',
-                 placeholder: 'leave empty to auto-detect first charger' });
-      out.push({ target: 'config.outlet', key: 'outlet', label: 'Outlet (1 = EVSE1, 2 = EVSE2)', type: 'number',
-                 default: 1, hint: 'Mirrors unit_id; also drives the MQTT topic filter.' });
+      out.push({ target: 'config.outlet', key: 'outlet', label: 'Outlet (passed via unit_id)', type: 'number',
+                 default: 1, disabled: true, hint: 'unit_id above controls the outlet.' });
     }
     return out;
   }
@@ -297,9 +326,19 @@
       }
 
       var next = fields[i + 1];
+      // Pair host+port (or port+unit_id) onto a single row when both are
+      // for the same protocol. Match by target suffix so the namespaced
+      // keys (`modbus_host`, `mqtt_host`, …) used by hybrid drivers
+      // still pair correctly.
+      function suffix(t) {
+        if (!t) return '';
+        var dot = t.lastIndexOf('.');
+        return dot < 0 ? t : t.substr(dot + 1);
+      }
+      var fSuf = suffix(f.target), nSuf = next && suffix(next.target);
       var pairable = next && !next.cloudHint &&
-                     ((f.key === 'host' && (next.key === 'port' || next.key === 'unit_id')) ||
-                      (f.key === 'port'));
+                     ((fSuf === 'host' && (nSuf === 'port' || nSuf === 'unit_id')) ||
+                      (fSuf === 'port' && nSuf === 'unit_id'));
       if (pairable) {
         var row = document.createElement('div');
         row.className = 'form-row';
@@ -318,7 +357,10 @@
     var group = document.createElement('div');
     group.className = 'form-group';
     var label = document.createElement('label');
-    var inputId = 'drv-f-' + f.key;
+    // Build the input id from the target path so keys like `modbus_host`
+    // and `mqtt_host` (both rendered for a hybrid driver) get distinct
+    // DOM ids and the <label for=…> still binds to the right input.
+    var inputId = 'drv-f-' + (f.target || f.key).replace(/\./g, '-');
     label.setAttribute('for', inputId);
     label.textContent = f.label;
     group.appendChild(label);
@@ -826,26 +868,17 @@
         for (var g = 0; g < evInputs.length; g++) {
           readFieldInto(drv, evInputs[g]);
         }
-        // Hybrid driver auto-wire: when a driver declares more than one
-        // protocol (e.g. CTEK Chargestorm exposes both Modbus and MQTT
-        // on the same box) the wizard only renders fields for the
-        // primary protocol, so opportunistically mirror the host into
-        // the secondary protocol with its default port. The driver
-        // gracefully degrades to primary-only if the secondary endpoint
-        // isn't reachable, and operators can still tune it later via
-        // /settings.
-        var protos = evEntry.protocols || [];
-        var primaryHost = drv.capabilities &&
-          ((drv.capabilities.modbus && drv.capabilities.modbus.host) ||
-           (drv.capabilities.mqtt   && drv.capabilities.mqtt.host)   ||
-           (drv.capabilities.http   && drv.capabilities.http.host));
-        var PROTO_DEFAULT_PORT = { modbus: 502, mqtt: 1883, http: 80 };
-        if (primaryHost) {
-          protos.forEach(function (p) {
-            if (!drv.capabilities[p]) {
-              drv.capabilities[p] = { host: primaryHost, port: PROTO_DEFAULT_PORT[p] || 0 };
+        // Strip empty capability blocks: a hybrid driver with only its
+        // primary endpoint filled in shouldn't carry an empty
+        // {capabilities:{mqtt:{}}} into config — that wires a broker-
+        // less MQTT cap and the driver fails on the first subscribe.
+        for (var capProto in drv.capabilities) {
+          if (drv.capabilities.hasOwnProperty(capProto)) {
+            var cap = drv.capabilities[capProto];
+            if (!cap || typeof cap !== 'object' || !cap.host) {
+              delete drv.capabilities[capProto];
             }
-          });
+          }
         }
         cfg.drivers.push(drv);
       }
