@@ -583,11 +583,37 @@ func (s *Service) replan(_ context.Context) *Plan {
 	}
 	replanAtMs := s.lastReplanAt.UnixMilli()
 	s.mu.Unlock()
+	// Horizon statistics — surfaced in logs so operators can
+	// reconstruct "what did the DP know?" without pulling the full
+	// Diagnostic JSON. Captures the three factors most likely to
+	// explain a surprising decision: mean price level, mean data
+	// confidence (how much of the horizon is forecast vs day-ahead),
+	// and the capacity envelope.
+	var sumPrice, sumConf float64
+	for i := range slots {
+		sumPrice += slots[i].PriceOre
+		c := slots[i].Confidence
+		if c <= 0 {
+			c = 1.0
+		}
+		sumConf += c
+	}
+	var meanPrice, meanConf float64
+	if n := len(slots); n > 0 {
+		meanPrice = sumPrice / float64(n)
+		meanConf = sumConf / float64(n)
+	}
 	slog.Info("mpc: replanned",
 		"slots", len(slots),
 		"soc_start", p.InitialSoCPct,
 		"cost_ore", plan.TotalCostOre,
-		"reason", reason)
+		"reason", reason,
+		"mean_price_ore", meanPrice,
+		"mean_confidence", meanConf,
+		"terminal_soc_price_ore", p.TerminalSoCPrice,
+		"capacity_wh", p.CapacityWh,
+		"max_charge_w", p.MaxChargeW,
+		"max_discharge_w", p.MaxDischargeW)
 
 	// Persist a diagnostic snapshot so operators can time-travel to
 	// this replan later. Best-effort: errors log and continue so a
