@@ -587,47 +587,17 @@
       <h3>EV Charger</h3>
       <div class="form-group">
         <label for="ev-provider">Charger type</label>
+        <!-- Options populated by setup.js from /api/drivers/catalog:
+             every driver entry that declares `ev` in its capabilities
+             list shows up here. Add a new EV driver by dropping a .lua
+             file in drivers/ — no HTML/JS edits required. -->
         <select id="ev-provider">
           <option value="">None</option>
-          <option value="easee">Easee (cloud API)</option>
-          <option value="ctek-modbus">CTEK Chargestorm — Modbus (CSOS ≥ 4.9.3)</option>
-          <option value="ctek-mqtt">CTEK Chargestorm — MQTT (telemetry-only)</option>
         </select>
       </div>
-      <!-- Cloud API fields — shown for Easee. -->
-      <div id="ev-cloud-fields" style="display:none">
-        <div class="form-group">
-          <label for="ev-email">Email</label>
-          <input type="text" id="ev-email" placeholder="user@example.com">
-        </div>
-        <div class="form-group">
-          <label for="ev-password">Password</label>
-          <input type="password" id="ev-password">
-        </div>
-        <div class="form-group">
-          <label for="ev-serial">Serial number</label>
-          <input type="text" id="ev-serial" placeholder="EHHZBKPF">
-        </div>
-      </div>
-      <!-- Local charger fields — shown for CTEK variants. These add a
-           driver entry under the hood, same as adding via step 3. -->
-      <div id="ev-local-fields" style="display:none">
-        <div class="form-row">
-          <div class="form-group">
-            <label for="ev-local-ip">IP address</label>
-            <input type="text" id="ev-local-ip" placeholder="192.168.1.190">
-          </div>
-          <div class="form-group">
-            <label for="ev-local-port">Port</label>
-            <input type="number" id="ev-local-port" min="1" max="65535">
-          </div>
-        </div>
-        <div class="form-group" id="ev-local-unitid-group">
-          <label for="ev-local-unitid">Unit ID (Modbus)</label>
-          <input type="number" id="ev-local-unitid" value="1" min="0" max="255">
-          <small>1 = EVSE1 (left outlet), 2 = EVSE2 (right outlet on dual stations)</small>
-        </div>
-      </div>
+      <!-- Fields for the selected provider are rendered dynamically
+           from the driver's catalog metadata + connection_defaults. -->
+      <div id="ev-provider-fields"></div>
     </div>
 
     <div class="integration-section">

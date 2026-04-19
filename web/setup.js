@@ -265,17 +265,13 @@
   function extraFieldsFor(entry) {
     if (!entry) return [];
     var out = [];
-    if (entry.id === 'ctek-chargestorm-mqtt') {
+    if (entry.id === 'ctek-chargestorm' || entry.id === 'ctek-chargestorm-v2') {
       out.push({ target: 'config.base_topic', key: 'base_topic', label: 'MQTT base topic', type: 'text',
-                 default: 'CTEK' });
+                 default: 'CTEK', hint: 'Only used when the MQTT capability is wired (optional richer telemetry).' });
       out.push({ target: 'config.cbid', key: 'cbid', label: 'Charger ID (optional)', type: 'text',
                  placeholder: 'leave empty to auto-detect first charger' });
       out.push({ target: 'config.outlet', key: 'outlet', label: 'Outlet (1 = EVSE1, 2 = EVSE2)', type: 'number',
-                 default: 1 });
-    }
-    if (entry.id === 'ctek-chargestorm' || entry.id === 'ctek-chargestorm-v2') {
-      out.push({ target: 'config.outlet', key: 'outlet', label: 'Outlet (passed via unit_id)', type: 'number',
-                 default: 1, disabled: true, hint: 'unit_id above controls the outlet.' });
+                 default: 1, hint: 'Mirrors unit_id; also drives the MQTT topic filter.' });
     }
     return out;
   }
@@ -514,6 +510,84 @@
 
   var integrationListenersBound = false;
 
+  // Extra config fields to render for EV drivers that don't fit the
+  // generic connectionFieldsFor() shape. Keyed by DRIVER.id so a new EV
+  // driver can declare its own credentials/knobs without touching the
+  // step 7 renderer. Targets starting with "ev_charger." mean "save as
+  // the top-level cfg.ev_charger block" (preserves the backend's
+  // password-persistence + masking behaviour for cloud providers);
+  // everything else lands as a regular drivers[] entry.
+  var EV_DRIVER_FIELDS = {
+    'easee-cloud': [
+      { target: 'ev_charger.email',    key: 'email',    label: 'Email',
+        type: 'text',     placeholder: 'user@example.com', required: true },
+      { target: 'ev_charger.password', key: 'password', label: 'Password',
+        type: 'password', required: true },
+      { target: 'ev_charger.serial',   key: 'serial',   label: 'Serial (optional)',
+        type: 'text',     placeholder: 'EHHZBKPF',
+        hint: 'Leave blank to auto-detect the first charger on the account.' }
+    ]
+  };
+
+  // Everything needed to render fields for a given EV driver catalog
+  // entry. Cloud drivers (declared via a custom entry in EV_DRIVER_FIELDS
+  // with ev_charger.* targets) get just those fields — no connection
+  // block, because cfg.ev_charger carries the creds and the backend
+  // materialises the driver. Local drivers reuse the same helpers as the
+  // main driver wizard (step 5), so a new Modbus/MQTT EV driver works
+  // with zero changes here.
+  function evFieldsFor(entry) {
+    if (!entry) return [];
+    var custom = EV_DRIVER_FIELDS[entry.id];
+    if (custom && custom.length > 0) {
+      var usesEVCharger = custom.some(function (f) {
+        return f.target && f.target.indexOf('ev_charger.') === 0;
+      });
+      if (usesEVCharger) return custom;
+      return connectionFieldsFor(entry).concat(custom);
+    }
+    return connectionFieldsFor(entry).concat(extraFieldsFor(entry));
+  }
+
+  function populateEVProviders() {
+    var sel = document.getElementById('ev-provider');
+    var prev = sel.value;
+    sel.innerHTML = '<option value="">None</option>';
+
+    var rows = [];
+    driverCatalog.forEach(function (entry) {
+      var caps = entry.capabilities || [];
+      if (caps.indexOf('ev') === -1) return;
+      rows.push({ entry: entry, label: driverLabel(entry) });
+    });
+    rows.sort(function (a, b) {
+      return a.label.localeCompare(b.label, undefined, { sensitivity: 'base' });
+    });
+
+    rows.forEach(function (r) {
+      var opt = document.createElement('option');
+      opt.value = r.entry.id;
+      opt.textContent = r.label;
+      sel.appendChild(opt);
+    });
+
+    if (prev) sel.value = prev;
+    renderEVFields();
+  }
+
+  function findEVEntry(id) {
+    if (!id) return null;
+    for (var i = 0; i < driverCatalog.length; i++) {
+      if (driverCatalog[i].id === id) return driverCatalog[i];
+    }
+    return null;
+  }
+
+  function renderEVFields() {
+    var entry = findEVEntry(document.getElementById('ev-provider').value);
+    renderFields('ev-provider-fields', evFieldsFor(entry));
+  }
+
   function prepareIntegrations() {
     var zone = document.getElementById('price-zone').value;
     document.getElementById('price-zone-readonly').value = zone;
@@ -523,25 +597,23 @@
       providerSel.value = 'elprisetjustnu';
     }
 
+    // Catalog is loaded on step 4 in the standard flow, but the "Skip
+    // device setup" shortcut jumps straight here — fetch it lazily.
+    if (driverCatalog.length === 0) {
+      fetch('/api/drivers/catalog')
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          driverCatalog = data.entries || [];
+          populateEVProviders();
+        })
+        .catch(function () { populateEVProviders(); });
+    } else {
+      populateEVProviders();
+    }
+
     if (!integrationListenersBound) {
       integrationListenersBound = true;
-      document.getElementById('ev-provider').addEventListener('change', function () {
-        var kind = this.value;
-        // Easee = cloud creds; CTEK variants = local charger (IP + port,
-        // optionally unit_id for Modbus). Hide both blocks by default and
-        // show the one that matches.
-        var cloud = document.getElementById('ev-cloud-fields');
-        var local = document.getElementById('ev-local-fields');
-        cloud.style.display = (kind === 'easee') ? 'block' : 'none';
-        local.style.display = (kind === 'ctek-modbus' || kind === 'ctek-mqtt') ? 'block' : 'none';
-        if (kind === 'ctek-modbus') {
-          document.getElementById('ev-local-port').value = 502;
-          document.getElementById('ev-local-unitid-group').style.display = 'block';
-        } else if (kind === 'ctek-mqtt') {
-          document.getElementById('ev-local-port').value = 1883;
-          document.getElementById('ev-local-unitid-group').style.display = 'none';
-        }
-      });
+      document.getElementById('ev-provider').addEventListener('change', renderEVFields);
       document.getElementById('ha-enabled').addEventListener('change', function () {
         document.getElementById('ha-fields').style.display = this.checked ? 'block' : 'none';
       });
@@ -576,12 +648,21 @@
     }
 
     // EV
-    var evProvider = document.getElementById('ev-provider').value;
-    if (evProvider) {
-      var evSerial = document.getElementById('ev-serial').value;
+    var evProviderId = document.getElementById('ev-provider').value;
+    var evEntry = findEVEntry(evProviderId);
+    if (evEntry) {
       html += '<div class="review-section"><h3>EV Charger</h3><div class="review-item">';
-      html += 'Easee';
-      if (evSerial) html += ' (' + esc(evSerial) + ')';
+      html += esc(evEntry.name || evEntry.id);
+      // Surface the distinguishing field (host for local drivers, serial
+      // for cloud ones) if the operator entered one — handy for sanity
+      // checking the review screen without enumerating every possible
+      // knob.
+      var summary = '';
+      var hostInp   = document.querySelector('#ev-provider-fields [data-key="host"]');
+      var serialInp = document.querySelector('#ev-provider-fields [data-key="serial"]');
+      if (hostInp && hostInp.value.trim())        summary = hostInp.value.trim();
+      else if (serialInp && serialInp.value.trim()) summary = serialInp.value.trim();
+      if (summary) html += ' (' + esc(summary) + ')';
       html += '</div></div>';
     }
 
@@ -687,44 +768,84 @@
 
     // EV Charger
     //
-    // Easee is a cloud API → lands in the top-level `ev_charger` block
-    // so the Go-side provider adapter can pick it up.
+    // The selected EV driver is a catalog entry (capability contains
+    // "ev"). We walk the rendered fields and let their `target` paths
+    // decide where the values land:
     //
-    // CTEK variants are local hardware → materialised as an additional
-    // entry in cfg.drivers, using whichever Lua driver matches the
-    // picked protocol. This keeps the top-level ev_charger block
-    // reserved for cloud APIs and means the device shows up in the
-    // same driver list as everything else.
-    var evProvider = document.getElementById('ev-provider').value;
-    if (evProvider === 'easee') {
-      cfg.ev_charger = {
-        provider: 'easee',
-        email: document.getElementById('ev-email').value.trim(),
-        password: document.getElementById('ev-password').value,
-        serial: document.getElementById('ev-serial').value.trim()
-      };
-    } else if (evProvider === 'ctek-modbus' || evProvider === 'ctek-mqtt') {
-      var ip      = document.getElementById('ev-local-ip').value.trim();
-      var port    = parseInt(document.getElementById('ev-local-port').value, 10) || 0;
-      var unitId  = parseInt(document.getElementById('ev-local-unitid').value, 10) || 1;
-      if (ip) {
-        // Pick a unique driver name. Operators running multiple CTEK
-        // stations on one site can add the rest via /settings.
-        var baseName = 'ctek';
+    //   target starts with "ev_charger.*" → cfg.ev_charger (cloud
+    //     providers like Easee — backend persists/masks the password
+    //     from state.db and auto-materialises a Lua driver entry).
+    //
+    //   any other target (capabilities.*, config.*) → cfg.drivers[]
+    //     entry using the catalog entry's path + whatever connection
+    //     fields the driver declared.
+    //
+    // Adding a new EV driver therefore needs nothing but a .lua file in
+    // drivers/ — the dropdown picks it up via /api/drivers/catalog and
+    // the renderer turns its metadata into fields automatically.
+    var evProviderId = document.getElementById('ev-provider').value;
+    var evEntry = findEVEntry(evProviderId);
+    if (evEntry) {
+      var evInputs = document.querySelectorAll('#ev-provider-fields [data-target]');
+      var useEVCharger = false;
+      var bag = {};
+      for (var e = 0; e < evInputs.length; e++) {
+        if ((evInputs[e].dataset.target || '').indexOf('ev_charger.') === 0) {
+          useEVCharger = true;
+          break;
+        }
+      }
+
+      if (useEVCharger) {
+        cfg.ev_charger = {
+          provider: (evEntry.manufacturer || evEntry.id).toLowerCase()
+        };
+        for (var f = 0; f < evInputs.length; f++) {
+          readFieldInto(bag, evInputs[f]);
+        }
+        if (bag.ev_charger) {
+          for (var k in bag.ev_charger) {
+            if (bag.ev_charger.hasOwnProperty(k)) cfg.ev_charger[k] = bag.ev_charger[k];
+          }
+        }
+      } else {
+        var baseName = (evEntry.manufacturer || evEntry.id || 'ev')
+          .toLowerCase().replace(/[^a-z0-9]/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '');
         var name = baseName;
         var idx = 2;
         while (cfg.drivers.some(function (d) { return d.name === name; })) {
           name = baseName + '_' + idx;
           idx++;
         }
-        var drv = { name: name, is_site_meter: false, capabilities: {} };
-        if (evProvider === 'ctek-modbus') {
-          drv.lua = 'drivers/ctek.lua';
-          drv.capabilities.modbus = { host: ip, port: port || 502, unit_id: unitId };
-        } else {
-          drv.lua = 'drivers/ctek_mqtt.lua';
-          drv.capabilities.mqtt = { host: ip, port: port || 1883 };
-          drv.config = { outlet: unitId, base_topic: 'CTEK' };
+        var drv = {
+          name: name,
+          is_site_meter: false,
+          lua: evEntry.path,
+          capabilities: {}
+        };
+        for (var g = 0; g < evInputs.length; g++) {
+          readFieldInto(drv, evInputs[g]);
+        }
+        // Hybrid driver auto-wire: when a driver declares more than one
+        // protocol (e.g. CTEK Chargestorm exposes both Modbus and MQTT
+        // on the same box) the wizard only renders fields for the
+        // primary protocol, so opportunistically mirror the host into
+        // the secondary protocol with its default port. The driver
+        // gracefully degrades to primary-only if the secondary endpoint
+        // isn't reachable, and operators can still tune it later via
+        // /settings.
+        var protos = evEntry.protocols || [];
+        var primaryHost = drv.capabilities &&
+          ((drv.capabilities.modbus && drv.capabilities.modbus.host) ||
+           (drv.capabilities.mqtt   && drv.capabilities.mqtt.host)   ||
+           (drv.capabilities.http   && drv.capabilities.http.host));
+        var PROTO_DEFAULT_PORT = { modbus: 502, mqtt: 1883, http: 80 };
+        if (primaryHost) {
+          protos.forEach(function (p) {
+            if (!drv.capabilities[p]) {
+              drv.capabilities[p] = { host: primaryHost, port: PROTO_DEFAULT_PORT[p] || 0 };
+            }
+          });
         }
         cfg.drivers.push(drv);
       }
