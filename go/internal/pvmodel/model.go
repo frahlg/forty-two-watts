@@ -16,9 +16,10 @@
 // and matches the approach already used for battery dynamics in this
 // codebase — so operators have one mental model instead of two.
 //
-// Feature vector (7 terms — 1st + 2nd time-of-day harmonic):
+// Feature vector (7 slots, first is dead — see Features() — so effectively
+// 6 active terms: clear-sky + cloud-attenuated + 1st + 2nd time-of-day harmonic):
 //
-//	x = [ 1,
+//	x = [ 0,   ← dead; PV is proportional to clear-sky, no intercept (issue #134)
 //	      clearsky_w,
 //	      clearsky_w × (1 − cloud/100)^1.5,
 //	      clearsky_w × sin(2π·hour/24), clearsky_w × cos(2π·hour/24),
@@ -75,6 +76,14 @@ func NewModel(ratedW float64) *Model {
 //
 // Hour-of-day uses UTC so the harmonic phase is stable across DST
 // transitions and matches sunpos's UTC convention (see sunpos.go).
+//
+// Slot 0 is held at 0.0 (not 1.0) on purpose: PV physics pass through
+// the origin — zero sun ⇒ zero output. An RLS-learned intercept has no
+// physical basis and, left free, drifted during training and leaked into
+// night-time predictions (issue #133/#134). Keeping NFeat=7 with a dead
+// first slot preserves on-disk Beta persistence; any loaded Beta[0] is
+// multiplied by 0 and has no effect on predictions. The Update path
+// also re-zeros Beta[0] so drifted persisted models self-heal.
 func Features(clearSkyW, cloudPct float64, t time.Time) [NFeat]float64 {
 	cloudFrac := cloudPct / 100.0
 	if cloudFrac < 0 {
@@ -88,7 +97,7 @@ func Features(clearSkyW, cloudPct float64, t time.Time) [NFeat]float64 {
 	hour := float64(u.Hour()) + float64(u.Minute())/60.0
 	h := 2 * math.Pi * hour / 24.0
 	return [NFeat]float64{
-		1.0,
+		0.0, // dead slot — see doc comment above
 		clearSkyW,
 		clearSkyW * cf,
 		clearSkyW * math.Sin(h),
@@ -238,6 +247,12 @@ func (m *Model) Update(clearSkyW, cloudPct float64, t time.Time, actualPVW float
 	} else {
 		m.MAE = 0.99*m.MAE + 0.01*math.Abs(err)
 	}
+	// Self-heal the intercept: Features[0] is pinned to 0 (see Features
+	// doc), but off-diagonal covariance can still nudge Beta[0] via K[0]
+	// each tick. Zeroing it here keeps the dead slot dead, and — importantly
+	// — migrates models persisted before issue #134 whose Beta[0] had
+	// drifted to a non-zero value during training.
+	m.Beta[0] = 0
 	return true
 }
 

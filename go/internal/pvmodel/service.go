@@ -66,6 +66,13 @@ func NewService(st *state.Store, tel *telemetry.Store, cs ClearSkyFunc, cf Cloud
 			var m Model
 			if err := json.Unmarshal([]byte(js), &m); err == nil && m.Forgetting > 0 {
 				m.RatedW = ratedW // config may have changed rated value
+				// Migrate pre-#134 persisted models: Beta[0] was a free
+				// intercept that drifted during training and leaked into
+				// night predictions. Features() now holds x[0]=0, making
+				// the slot a dead coefficient — zero it on load so any
+				// drifted value doesn't linger until the first Update()
+				// self-heal kicks in.
+				m.Beta[0] = 0
 				s.model = &m
 				slog.Info("pvmodel restored", "samples", m.Samples, "mae_w", m.MAE, "quality", m.Quality())
 			}

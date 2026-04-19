@@ -209,6 +209,44 @@ func TestPredictAtNightReturnsZero(t *testing.T) {
 	}
 }
 
+// Intercept is a dead coefficient (issue #134). Any Beta[0] value must
+// produce the same daytime prediction, i.e. Beta[0] is fully decoupled
+// from output. Complements the night-gate guard in
+// TestPredictAtNightReturnsZero (which covers the night-time case).
+func TestInterceptDoesNotAffectDaytimePredict(t *testing.T) {
+	t0 := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	cs := 900.0
+	cloud := 20.0
+
+	m := NewModel(5000)
+	m.Samples = 100 // past warmup → full trust on learned model
+	baseline := m.Predict(cs, cloud, t0)
+
+	for _, b0 := range []float64{-2000, -500, 0, 500, 2000, 5000} {
+		m2 := NewModel(5000)
+		m2.Samples = 100
+		m2.Beta[0] = b0
+		got := m2.Predict(cs, cloud, t0)
+		if math.Abs(got-baseline) > 1e-9 {
+			t.Errorf("Beta[0]=%.0f changed prediction: %.4f vs baseline %.4f — intercept must be a dead coefficient",
+				b0, got, baseline)
+		}
+	}
+}
+
+// Self-heal: Update zeros Beta[0] at the end of each RLS step so drifted
+// persisted models don't keep the stale intercept forever.
+func TestUpdateZeroesIntercept(t *testing.T) {
+	m := NewModel(10000)
+	m.Beta[0] = 1100 // pretend this was persisted from a pre-#134 drift
+	if !m.Update(800, 30, time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC), 6000) {
+		t.Fatal("update should have run (clearSky > gate, actual sane)")
+	}
+	if m.Beta[0] != 0 {
+		t.Errorf("Beta[0] should be zeroed after Update, got %f", m.Beta[0])
+	}
+}
+
 // Sunrise transition: the moment clearSky crosses the gate threshold the
 // model is live again. Anchors the gate boundary so it doesn't silently
 // creep upward.
