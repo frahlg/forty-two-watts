@@ -15,7 +15,7 @@
 //   class FtwBadge extends FtwElement {
 //     static styles = `
 //       :host { display: inline-flex; }
-//       .pill { background: var(--surface); color: var(--text); }
+//       .pill { background: var(--ink-raised); color: var(--fg); }
 //     `;
 //     render() {
 //       return `<span class="pill"><slot></slot></span>`;

@@ -20,38 +20,40 @@ class FtwBadge extends FtwElement {
       align-items: center;
       padding: 0.15rem 0.55rem;
       border-radius: 999px;
-      font-size: 0.75rem;
-      font-weight: 600;
+      font-family: var(--mono);
+      font-size: 0.7rem;
+      font-weight: 500;
       line-height: 1.4;
-      letter-spacing: 0.02em;
-      border: 1px solid transparent;
-      background: var(--surface2);
-      color: var(--text-dim);
+      letter-spacing: 0.15em;
+      text-transform: uppercase;
+      border: 1px solid var(--line);
+      background: var(--ink-raised);
+      color: var(--fg-muted);
       white-space: nowrap;
     }
     :host([size="sm"]) {
       padding: 0.05rem 0.4rem;
-      font-size: 0.7rem;
+      font-size: 0.65rem;
     }
     :host([status="ok"]) {
-      color: var(--green);
-      border-color: color-mix(in srgb, var(--green) 45%, transparent);
-      background: color-mix(in srgb, var(--green) 14%, var(--surface2));
+      color: var(--green-e);
+      border-color: color-mix(in srgb, var(--green-e) 45%, transparent);
+      background: color-mix(in srgb, var(--green-e) 12%, var(--ink-raised));
     }
     :host([status="warn"]) {
-      color: var(--yellow);
-      border-color: color-mix(in srgb, var(--yellow) 45%, transparent);
-      background: color-mix(in srgb, var(--yellow) 14%, var(--surface2));
+      color: var(--amber);
+      border-color: color-mix(in srgb, var(--amber) 45%, transparent);
+      background: color-mix(in srgb, var(--amber) 12%, var(--ink-raised));
     }
     :host([status="error"]) {
-      color: var(--red);
-      border-color: color-mix(in srgb, var(--red) 45%, transparent);
-      background: color-mix(in srgb, var(--red) 14%, var(--surface2));
+      color: var(--red-e);
+      border-color: color-mix(in srgb, var(--red-e) 45%, transparent);
+      background: color-mix(in srgb, var(--red-e) 12%, var(--ink-raised));
     }
     :host([status="info"]) {
-      color: var(--blue);
-      border-color: color-mix(in srgb, var(--blue) 45%, transparent);
-      background: color-mix(in srgb, var(--blue) 14%, var(--surface2));
+      color: var(--cyan);
+      border-color: color-mix(in srgb, var(--cyan) 45%, transparent);
+      background: color-mix(in srgb, var(--cyan) 12%, var(--ink-raised));
     }
   `;
 

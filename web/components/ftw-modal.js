@@ -50,18 +50,19 @@ class FtwModal extends FtwElement {
       max-height: 90vh;
       display: flex;
       flex-direction: column;
-      background: var(--surface);
-      color: var(--text);
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+      background: var(--ink-raised);
+      color: var(--fg);
+      border: 1px solid var(--line);
+      border-radius: var(--radius-sm);
+      /* No shadow — DESIGN.md forbids drop-shadows on cards/modals.
+         The 0.55 backdrop carries the elevation contrast instead. */
     }
     header {
       display: flex;
       align-items: center;
       justify-content: space-between;
       padding: 0.9rem 1rem;
-      border-bottom: 1px solid var(--border);
+      border-bottom: 1px solid var(--line);
     }
     header ::slotted([slot="title"]) {
       font-size: 1rem;
@@ -71,14 +72,14 @@ class FtwModal extends FtwElement {
       appearance: none;
       background: transparent;
       border: none;
-      color: var(--text-dim);
+      color: var(--fg-dim);
       cursor: pointer;
       font-size: 1.25rem;
       line-height: 1;
       padding: 0 0.25rem;
     }
     .close:hover {
-      color: var(--text);
+      color: var(--fg);
     }
     .body {
       padding: 1rem;
@@ -87,7 +88,7 @@ class FtwModal extends FtwElement {
     }
     footer {
       padding: 0.75rem 1rem;
-      border-top: 1px solid var(--border);
+      border-top: 1px solid var(--line);
       display: flex;
       gap: 0.5rem;
       justify-content: flex-end;

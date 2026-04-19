@@ -29,7 +29,7 @@ class FtwTabs extends FtwElement {
     .strip {
       display: flex;
       gap: 0.25rem;
-      border-bottom: 1px solid var(--border);
+      border-bottom: 1px solid var(--line);
       margin-bottom: 0.75rem;
       overflow-x: auto;
     }
@@ -38,7 +38,7 @@ class FtwTabs extends FtwElement {
       background: transparent;
       border: none;
       border-bottom: 2px solid transparent;
-      color: var(--text-dim);
+      color: var(--fg-dim);
       padding: 0.5rem 0.9rem;
       font: inherit;
       font-size: 0.85rem;
@@ -48,12 +48,12 @@ class FtwTabs extends FtwElement {
       transition: color 0.15s, border-color 0.15s, background 0.15s;
     }
     button:hover {
-      color: var(--text);
-      background: color-mix(in srgb, var(--accent) 8%, transparent);
+      color: var(--fg);
+      background: color-mix(in srgb, var(--accent-e) 8%, transparent);
     }
     button[data-active="true"] {
-      color: var(--text);
-      border-bottom-color: var(--accent);
+      color: var(--fg);
+      border-bottom-color: var(--accent-e);
     }
   `;
 

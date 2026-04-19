@@ -34,7 +34,7 @@ class FtwLegend extends FtwElement {
       gap: 0.25rem 0.9rem;
       align-items: center;
       font-size: 0.8rem;
-      color: var(--text-dim);
+      color: var(--fg-dim);
     }
     .item {
       display: inline-flex;
@@ -47,7 +47,7 @@ class FtwLegend extends FtwElement {
       transition: opacity 0.15s, color 0.15s;
     }
     .item:hover {
-      color: var(--text);
+      color: var(--fg);
     }
     .item.hidden {
       opacity: 0.35;
@@ -103,7 +103,7 @@ class FtwLegend extends FtwElement {
       .map((it) => {
         const hidden = this._hidden.has(it.key) ? " hidden" : "";
         const dash = it.dash ? " dash" : "";
-        const color = escapeAttr(it.color || "var(--text)");
+        const color = escapeAttr(it.color || "var(--fg)");
         return `
           <span class="item${hidden}" data-key="${escapeAttr(it.key)}" style="color:${color}">
             <span class="swatch${dash}"></span>

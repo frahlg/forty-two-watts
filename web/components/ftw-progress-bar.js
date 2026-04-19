@@ -26,7 +26,7 @@ class FtwProgressBar extends FtwElement {
     :host {
       display: block;
       height: var(--ftw-progress-height, 8px);
-      background: var(--surface2);
+      background: var(--ink-sunken);
       border-radius: 999px;
       overflow: hidden;
     }
@@ -36,25 +36,26 @@ class FtwProgressBar extends FtwElement {
       transition: width 0.3s ease, background 0.25s ease;
       border-radius: inherit;
     }
-    .solid-ok       { background: var(--green); }
-    .solid-warn     { background: var(--yellow); }
-    .solid-bad      { background: var(--red); }
-    .solid-neutral  { background: var(--text-dim); }
+    .solid-ok       { background: var(--green-e); }
+    .solid-warn     { background: var(--amber); }
+    .solid-bad      { background: var(--red-e); }
+    .solid-neutral  { background: var(--fg-muted); }
 
-    /* Gradient stops match the legacy .soc-fill look: reveal red→amber→
-     * green as the fill grows (ASC, low=bad, high=good — SoC) or
-     * green→amber→red (DESC, low=good, high=bad — fuse/peak load). */
+    /* Gradient stops: reveal red→amber→green as the fill grows (ASC,
+     * low=bad, high=good — SoC) or green→amber→red (DESC, low=good,
+     * high=bad — fuse/peak load). Uses the next-era functional tokens
+     * so the ramp flips correctly in the light theme. */
     .grad-asc {
       background: linear-gradient(90deg,
-        var(--red) 0%,
-        var(--yellow) 30%,
-        var(--green) 60%);
+        var(--red-e) 0%,
+        var(--amber) 30%,
+        var(--green-e) 60%);
     }
     .grad-desc {
       background: linear-gradient(90deg,
-        var(--green) 0%,
-        var(--yellow) 60%,
-        var(--red) 85%);
+        var(--green-e) 0%,
+        var(--amber) 60%,
+        var(--red-e) 85%);
     }
   `;
 

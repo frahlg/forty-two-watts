@@ -29,9 +29,9 @@ class FtwCard extends FtwElement {
   static styles = `
     :host {
       display: block;
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
+      background: var(--ink-raised);
+      border: 1px solid var(--line);
+      border-radius: var(--radius-sm);
       padding: 1rem 1.25rem;
     }
     :host([variant="compact"]) {
@@ -46,11 +46,11 @@ class FtwCard extends FtwElement {
       transition: transform 0.1s ease, border-color 0.15s ease;
     }
     :host([interactive]:hover) {
-      border-color: color-mix(in srgb, var(--accent) 60%, var(--border));
+      border-color: color-mix(in srgb, var(--accent-e) 60%, var(--line));
       transform: translateY(-1px);
     }
     :host([interactive]:focus-visible) {
-      outline: 2px solid var(--accent);
+      outline: 2px solid var(--accent-e);
       outline-offset: 2px;
     }
     header {
@@ -67,7 +67,7 @@ class FtwCard extends FtwElement {
     header ::slotted([slot="title"]) {
       font-size: 0.9rem;
       font-weight: 600;
-      color: var(--text);
+      color: var(--fg);
     }
   `;
 
