@@ -138,13 +138,19 @@ function driver_poll()
     local is_discharging = (math.floor(status / 4) % 2) == 1
 
     -- PV power: 5016-5017, U32 LE, watts
+    -- Observed on at least one SH-series firmware: this register stays
+    -- at 0 even while MPPT1/MPPT2 V×I clearly indicate generation. So we
+    -- also read the MPPT voltage+current pairs separately and use their
+    -- product as a fallback when the top-level register doesn't match.
     local ok_pv, pv_regs = pcall(host.modbus_read, 5016, 2, "input")
-    local pv_w = 0
+    local pv_w_primary = 0
+    local pv_raw_u32 = 0
     if ok_pv and pv_regs then
-        pv_w = host.decode_u32_le(pv_regs[1], pv_regs[2])
+        pv_w_primary = host.decode_u32_le(pv_regs[1], pv_regs[2])
+        pv_raw_u32   = pv_w_primary
     end
 
-    -- PV MPPT: 5010-5013
+    -- PV MPPT: 5010-5013 (V×0.1, A×0.1 per string)
     local ok_mppt, mppt_regs = pcall(host.modbus_read, 5010, 4, "input")
     local mppt1_v, mppt1_a, mppt2_v, mppt2_a = 0, 0, 0, 0
     if ok_mppt and mppt_regs then
@@ -152,6 +158,26 @@ function driver_poll()
         mppt1_a = mppt_regs[2] * 0.1
         mppt2_v = mppt_regs[3] * 0.1
         mppt2_a = mppt_regs[4] * 0.1
+    end
+    local mppt1_w = mppt1_v * mppt1_a
+    local mppt2_w = mppt2_v * mppt2_a
+    local pv_w_mppt = mppt1_w + mppt2_w
+
+    -- Resolve PV power with a fallback ladder:
+    --   1. Trust 5016-5017 if it reports > 50 W (clearly live).
+    --   2. Otherwise use MPPT sum if that reports > 50 W (primary
+    --      register stuck / firmware quirk).
+    --   3. Zero — panels aren't generating right now.
+    -- 50 W threshold filters out noise-floor readings without swallowing
+    -- genuine low-light output.
+    local pv_w = 0
+    local pv_source = "zero"
+    if pv_w_primary > 50 then
+        pv_w = pv_w_primary
+        pv_source = "primary_reg"
+    elseif pv_w_mppt > 50 then
+        pv_w = pv_w_mppt
+        pv_source = "mppt_sum"
     end
 
     -- PV lifetime energy: 13002-13003, U32 LE × 0.1 kWh
@@ -188,15 +214,26 @@ function driver_poll()
         mppt1_a     = mppt1_a,
         mppt2_v     = mppt2_v,
         mppt2_a     = mppt2_a,
+        mppt1_w     = mppt1_w,
+        mppt2_w     = mppt2_w,
+        pv_source   = pv_source,  -- "primary_reg" | "mppt_sum" | "zero"
         lifetime_wh = pv_gen_wh,
         rated_w     = rated_w,
         temp_c      = heatsink_c,
     })
-    -- Diagnostics: long-format TS DB
+    -- Diagnostics: long-format TS DB. Surface BOTH the primary-register
+    -- reading and the MPPT-derived fallback so operators can see when
+    -- the two disagree (= firmware register quirk) directly in the
+    -- metric browser.
+    host.emit_metric("pv_w_primary",     pv_w_primary)
+    host.emit_metric("pv_w_mppt_sum",    pv_w_mppt)
+    host.emit_metric("pv_raw_u32",       pv_raw_u32)
     host.emit_metric("pv_mppt1_v",       mppt1_v)
     host.emit_metric("pv_mppt1_a",       mppt1_a)
+    host.emit_metric("pv_mppt1_w",       mppt1_w)
     host.emit_metric("pv_mppt2_v",       mppt2_v)
     host.emit_metric("pv_mppt2_a",       mppt2_a)
+    host.emit_metric("pv_mppt2_w",       mppt2_w)
     host.emit_metric("inverter_temp_c",  heatsink_c)
     host.emit_metric("grid_hz",          hz)
 
