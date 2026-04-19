@@ -406,6 +406,37 @@ func ComputeDispatch(
 		if remainingS > 0.5 {
 			targetTotalW = remainingWh * 3600.0 / remainingS
 		}
+		// Catch-up clamp. Without this, |targetTotalW| → ∞ as remainingS → 0
+		// whenever there's any energy debt, and the per-command 5 kW cap is
+		// the only thing standing between the formula and a runaway end-of-
+		// slot spike. After a restart (slotDelivered=0 mid-slot), the same
+		// math compresses the slot's full budget into the remaining time
+		// and produces multi-kW commands the plan never intended.
+		//
+		// Bound deviation from the plan's average power: the formula may
+		// chase up to CatchUpFactor× the planned average to course-correct,
+		// but no further. K=3 lets the EMS deliver 3× the planned rate in
+		// the last third of the slot — enough to make up for a slow start
+		// without blowing past the plan, and degrades gracefully on the
+		// edge cases (idle plan ⇒ no catch-up; tiny plan ⇒ tiny ceiling).
+		const catchUpFactor = 3.0
+		slotSeconds := currentDirective.SlotEnd.Sub(currentDirective.SlotStart).Seconds()
+		if slotSeconds > 0 {
+			plannedAvgW := currentDirective.BatteryEnergyWh * 3600.0 / slotSeconds
+			ceiling := math.Abs(plannedAvgW) * catchUpFactor
+			if ceiling > 0 && math.Abs(targetTotalW) > ceiling {
+				if targetTotalW < 0 {
+					targetTotalW = -ceiling
+				} else {
+					targetTotalW = ceiling
+				}
+			} else if ceiling == 0 {
+				// Idle slot — never try to "give back" delivered energy by
+				// reversing into the grid; just hold at 0 and let the next
+				// slot's plan correct the SoC trajectory.
+				targetTotalW = 0
+			}
+		}
 		// Grid target is a pure observation on this path — useful for UI
 		// + legacy API, not driving PI. Use SetGridTarget so both
 		// GridTargetW *and* PI.Setpoint move to 0 in lockstep: if the

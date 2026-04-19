@@ -602,6 +602,78 @@ func TestEnergyDispatchResetsOnSlotRollover(t *testing.T) {
 	}
 }
 
+// End-of-slot catch-up clamp: when the EMS falls behind the plan (e.g.
+// after a process restart that loses slotDelivered), the formula
+// remainingWh × 3600 / remainingS explodes as remainingS → 0 and the
+// only ceiling is the per-command 5 kW cap. Operator-observed: plan
+// said −1600 W discharge, actual battery hit −5142 W in the last
+// minute of a 15-min slot. Catch-up factor of 3 means at most 3× the
+// plan's average power.
+func TestEnergyDispatchClampsEndOfSlotCatchUp(t *testing.T) {
+	now := time.Now()
+	// Plan: discharge 200 Wh over 15 min ⇒ avg −800 W. Catch-up cap
+	// at 3× ⇒ −2400 W. Without the clamp, the formula would compute
+	// −12 000 W (200 Wh remaining over 60 s), then per-command clamp
+	// to −5000 W.
+	dir := SlotDirective{
+		SlotStart:       now.Add(-14 * time.Minute), // 14 min into slot, 1 min left
+		SlotEnd:         now.Add(1 * time.Minute),
+		BatteryEnergyWh: -200,
+	}
+	store := seedStore(0, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5}, // battery hasn't moved — full 200 Wh debt
+	})
+	st := newStateWithEnergyDispatch(dir, "ferroamp")
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	got := targets[0].TargetW
+	// 3 × (−200 Wh × 3600 / 900 s) = 3 × −800 W = −2400 W.
+	// Allow small slop for clock drift inside ComputeDispatch.
+	if got < -2500 || got > -2300 {
+		t.Errorf("end-of-slot catch-up uncapped or over-capped: TargetW = %.0f, want ≈−2400 W", got)
+	}
+}
+
+// Idle-slot guard: when the plan allocates 0 Wh, the formula must NOT
+// reverse direction to "give back" any over-delivery. K=3 × |0| = 0
+// ceiling → hold at zero and let the next slot's plan correct SoC.
+func TestEnergyDispatchIdleSlotDoesNotReverse(t *testing.T) {
+	now := time.Now()
+	// Plan: idle this slot. Pretend earlier dispatch over-discharged
+	// by 50 Wh — the formula would otherwise want to charge from
+	// grid to "give back" the energy.
+	dir := SlotDirective{
+		SlotStart:       now.Add(-7 * time.Minute),
+		SlotEnd:         now.Add(8 * time.Minute),
+		BatteryEnergyWh: 0,
+	}
+	store := seedStore(0, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	st := newStateWithEnergyDispatch(dir, "ferroamp")
+	// Inject prior over-discharge into the accumulator.
+	st.currentDirective = dir
+	st.slotDelivered = -50
+	st.lastTickTs = now.Add(-1 * time.Second)
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	if got := targets[0].TargetW; math.Abs(got) > 50 {
+		t.Errorf("idle slot must hold near 0, got TargetW = %.0f W", got)
+	}
+}
+
 // Energy-dispatch must keep GridTargetW and PI.Setpoint in lockstep so
 // the legacy path doesn't inherit a stale PI setpoint when the operator
 // later switches out of a planner mode. Regression test for a P1

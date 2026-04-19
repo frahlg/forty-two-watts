@@ -231,6 +231,9 @@ func main() {
 		lpMgr.Load(buildLoadpointConfigs(cfg.Loadpoints))
 		slog.Info("loadpoints configured", "count", len(cfg.Loadpoints))
 	}
+	// Per-loadpoint dispatch state (slot accumulator + holdoff). In-memory
+	// like the battery's currentDirective. See control.EVDispatchState.
+	evDispatch := map[string]*control.EVDispatchState{}
 
 	// Forward-declared so the hot-reload closure below can push
 	// capacity changes into the running planner. Assigned at line
@@ -874,9 +877,9 @@ func main() {
 			// charger driver's latest telemetry and feed it to the
 			// manager (plug state + session Wh → inferred SoC). Then
 			// we ask the MPC for the current slot's energy budget
-			// and translate it to an instantaneous W command. No
-			// PI — energy-allocation contract: remaining Wh /
-			// remaining s → W, snap to the charger's allowed steps.
+			// and hand that to control.EVDispatchState.Tick which
+			// owns the slot accumulator, max-W clamp, holdoff, and
+			// heartbeat. See control/ev_dispatch.go.
 			if len(cfg.Loadpoints) > 0 && mpcSvc != nil {
 				for _, lpCfg := range cfg.Loadpoints {
 					evr := tel.Get(lpCfg.DriverName, telemetry.DerEV)
@@ -897,31 +900,35 @@ func main() {
 					if !plugged {
 						continue
 					}
-					// Resolve this tick's EV setpoint. Default 0 W so
-					// the charger is explicitly told to stand down
-					// whenever the MPC has no allocation for this
-					// slot — without an explicit command, the
-					// charger silently keeps drawing at its last
-					// setpoint from a previous slot.
-					var cmdW float64
-					d, ok := mpcSvc.SlotDirectiveAt(time.Now())
-					if ok {
-						if budgetWh, hasBudget := d.LoadpointEnergyWh[lpCfg.ID]; hasBudget {
-							remainingS := d.SlotEnd.Sub(time.Now()).Seconds()
-							// Subtract what's already been delivered
-							// so a mid-slot dispatch doesn't
-							// overshoot. Approximated from current
-							// power × fraction of slot elapsed.
-							elapsed := d.SlotEnd.Sub(d.SlotStart).Seconds() - remainingS
-							if elapsed < 0 {
-								elapsed = 0
-							}
-							alreadyWh := powerW * elapsed / 3600.0
-							remainingWh := budgetWh - alreadyWh
-							wantW := control.EnergyBudgetToPowerW(remainingWh, remainingS)
-							cmdW = control.SnapChargeW(wantW, lpCfg.MinChargeW,
-								lpCfg.MaxChargeW, lpCfg.AllowedStepsW)
+					// Resolve this tick's plan-allocated energy + slot
+					// window. Empty directive (no plan or no
+					// allocation) → 0 budget → Tick commands 0 W.
+					var (
+						budgetWh             float64
+						slotStart, slotEnd   time.Time
+					)
+					if d, ok := mpcSvc.SlotDirectiveAt(time.Now()); ok {
+						slotStart, slotEnd = d.SlotStart, d.SlotEnd
+						if w, has := d.LoadpointEnergyWh[lpCfg.ID]; has {
+							budgetWh = w
 						}
+					}
+
+					st, ok := evDispatch[lpCfg.ID]
+					if !ok {
+						st = &control.EVDispatchState{}
+						evDispatch[lpCfg.ID] = st
+					}
+					// Holdoff = 30 s matches the observed Easee cloud
+					// lag (command → telemetry confirmation). Heartbeat
+					// = 5 min keeps the charger awake without drowning
+					// the cloud API in repeats.
+					cmdW, send := st.Tick(time.Now(), slotStart, slotEnd,
+						budgetWh, powerW,
+						lpCfg.MinChargeW, lpCfg.MaxChargeW, lpCfg.AllowedStepsW,
+						30*time.Second, 5*time.Minute)
+					if !send {
+						continue
 					}
 					payload, _ := json.Marshal(map[string]any{
 						"action":  "ev_set_current",

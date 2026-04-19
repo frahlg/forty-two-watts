@@ -1,6 +1,9 @@
 package control
 
-import "math"
+import (
+	"math"
+	"time"
+)
 
 // SnapChargeW turns an ideal charging-power request into the nearest
 // feasible level the charger can actually deliver. Used by EV
@@ -61,4 +64,91 @@ func EnergyBudgetToPowerW(remainingWh, remainingS float64) float64 {
 		return 0
 	}
 	return remainingWh * 3600.0 / remainingS
+}
+
+// EVDispatchState carries per-loadpoint dispatch bookkeeping across ticks.
+// One instance per loadpoint, owned by the dispatch loop in main.go.
+//
+// Replaces the inline alreadyWh = powerW × elapsed approximation that
+// over-counted recently-changed power and produced ~30 s on/off
+// oscillations matching the Easee cloud reporting lag. State is in-memory
+// only — a process restart resets the accumulator, which is consistent
+// with the battery dispatch's slotDelivered (see dispatch.go:140-142).
+type EVDispatchState struct {
+	slotStart   time.Time
+	deliveredWh float64
+	lastTickAt  time.Time
+
+	lastSentAt time.Time
+	lastCmdW   float64
+}
+
+// Tick advances one dispatch cycle for one loadpoint and returns the
+// command (cmdW) plus whether to actually send it (send) this tick.
+//
+//   - Slot rollover (slotStart changed) resets the accumulator.
+//   - On-tick: integrates `nowPowerW × dt` into deliveredWh so the
+//     formula sees a real running total, not the inline approximation.
+//   - wantW is clamped to maxW before SnapChargeW so the formula's
+//     end-of-slot blow-up is bounded by the charger's electrical max.
+//   - Holdoff suppresses CHANGE-spam: when the formula wants a different
+//     value but the previous send was less than `holdoff` ago, the prior
+//     command is repeated instead. This is what kills the 6→11→0→6 flap
+//     caused by the Easee cloud's ~25 s reporting lag — the dispatch
+//     loop can run every 5 s without commanding faster than the
+//     telemetry can confirm.
+//   - Heartbeat keeps the charger awake: if cmdW hasn't changed in
+//     `heartbeat` seconds, re-send anyway so a watchdog reset doesn't
+//     silently zero the setpoint.
+//
+// First-tick behavior: send=true so the charger receives an initial
+// command immediately (no implicit "wait the holdoff" delay at startup).
+func (s *EVDispatchState) Tick(
+	now, slotStart, slotEnd time.Time,
+	budgetWh, nowPowerW float64,
+	minW, maxW float64,
+	stepsW []float64,
+	holdoff, heartbeat time.Duration,
+) (cmdW float64, send bool) {
+	// Slot rollover bookkeeping.
+	if !s.slotStart.Equal(slotStart) {
+		s.slotStart = slotStart
+		s.deliveredWh = 0
+		s.lastTickAt = now
+	} else {
+		if !s.lastTickAt.IsZero() {
+			dt := now.Sub(s.lastTickAt).Seconds()
+			// Cap dt at 5 min so a long pause (process suspend, clock
+			// jump) doesn't poison the accumulator.
+			if dt > 0 && dt < 300 {
+				s.deliveredWh += nowPowerW * dt / 3600.0
+			}
+		}
+		s.lastTickAt = now
+	}
+
+	// Compute the desired command.
+	remainingS := slotEnd.Sub(now).Seconds()
+	remainingWh := budgetWh - s.deliveredWh
+	wantW := EnergyBudgetToPowerW(remainingWh, remainingS)
+	if maxW > 0 && wantW > maxW {
+		wantW = maxW
+	}
+	desired := SnapChargeW(wantW, minW, maxW, stepsW)
+
+	// Holdoff (suppress changes) + heartbeat (re-send unchanged).
+	initial := s.lastSentAt.IsZero()
+	sinceSent := now.Sub(s.lastSentAt)
+	if !initial && desired != s.lastCmdW && sinceSent < holdoff {
+		// Want to change but holdoff hasn't elapsed — keep prior value.
+		return s.lastCmdW, false
+	}
+	if !initial && desired == s.lastCmdW && sinceSent < heartbeat {
+		// No change and not yet time to heartbeat — skip this tick.
+		return s.lastCmdW, false
+	}
+
+	s.lastSentAt = now
+	s.lastCmdW = desired
+	return desired, true
 }
