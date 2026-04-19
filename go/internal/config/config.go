@@ -575,11 +575,18 @@ func applyDefaults(c *Config) {
 }
 
 // Validate ensures the config is internally consistent and safe to run with.
+//
+// A config with zero drivers is accepted — the setup wizard lets the
+// operator finish onboarding before adding hardware, and /settings can
+// add drivers afterwards. The "at least one site meter" invariant is
+// NOT enforced at parse time either: an operator might add an EV
+// charger + battery before their grid meter, and we don't want that
+// onboarding flow to fail validation just because the site-meter
+// driver is still to come. Runtime components that need a site meter
+// (dispatch, clamp, control loop) gate on telemetry presence instead.
+// Per-driver checks (name, lua path, at least one capability, no
+// dupes) still apply unchanged.
 func (c *Config) Validate() error {
-	if len(c.Drivers) == 0 {
-		return errors.New("at least one driver must be configured")
-	}
-	siteMeters := 0
 	names := make(map[string]bool, len(c.Drivers))
 	for _, d := range c.Drivers {
 		if d.Name == "" {
@@ -590,18 +597,12 @@ func (c *Config) Validate() error {
 		}
 		names[d.Name] = true
 
-		if d.IsSiteMeter {
-			siteMeters++
-		}
 		if d.Lua == "" {
 			return fmt.Errorf("driver %q: must specify `lua`", d.Name)
 		}
 		if d.EffectiveMQTT() == nil && d.EffectiveModbus() == nil && d.Capabilities.HTTP == nil {
 			return fmt.Errorf("driver %q: must have mqtt, modbus, or http capability", d.Name)
 		}
-	}
-	if siteMeters == 0 {
-		return errors.New("at least one driver must be is_site_meter: true")
 	}
 
 	if c.Site.SmoothingAlpha <= 0 || c.Site.SmoothingAlpha > 1 {

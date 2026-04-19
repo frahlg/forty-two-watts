@@ -418,6 +418,13 @@
       <h2>Welcome to forty-two-watts</h2>
       <p>Let's set up your home energy system in a few steps.</p>
       <button class="btn-primary" onclick="goStep(2)">Get started</button>
+      <!-- Skip-straight-to-app button for returning operators / Pi
+           redeploys who already know their way around and would rather
+           configure everything from /settings. Saves a minimal config
+           (site defaults, no drivers) and exits to the main UI. -->
+      <button class="btn-skip" onclick="skipSetup()" style="margin-top:1rem">
+        Skip setup — I'll configure later
+      </button>
     </div>
   </div>
 
@@ -480,7 +487,7 @@
 
     <div id="scan-controls">
       <button class="btn-primary" id="scan-btn" onclick="startScan()">Scan network</button>
-      <button class="btn-skip" id="manual-ip-toggle" onclick="showManualIP()">I know my device IP</button>
+      <button class="btn-skip" id="manual-add-btn" onclick="addDeviceManually()">Add device manually</button>
     </div>
 
     <div id="scan-status" class="scan-status" style="display:none"></div>
@@ -492,20 +499,6 @@
         </thead>
         <tbody id="scan-tbody"></tbody>
       </table>
-    </div>
-
-    <div id="manual-ip-form" style="display:none">
-      <div class="form-row">
-        <div class="form-group">
-          <label for="manual-ip">IP address</label>
-          <input type="text" id="manual-ip" placeholder="192.168.1.10">
-        </div>
-        <div class="form-group">
-          <label for="manual-port">Port</label>
-          <input type="number" id="manual-port" value="502" min="1" max="65535">
-        </div>
-      </div>
-      <button class="btn-primary" onclick="useManualDevice()" style="margin-top:0.5rem">Use this device</button>
     </div>
 
     <div class="wizard-actions">
@@ -537,28 +530,24 @@
   <!-- Step 5: Configure driver -->
   <div class="step" id="step-5" data-step="5">
     <h2>Configure driver</h2>
-    <p>Fine-tune the connection settings.</p>
+    <p id="drv-config-hint">Fine-tune the connection settings.</p>
 
     <div class="form-group">
       <label for="drv-name">Name</label>
       <input type="text" id="drv-name" placeholder="sungrow">
     </div>
 
-    <div class="form-row">
-      <div class="form-group">
-        <label for="drv-ip">IP address</label>
-        <input type="text" id="drv-ip" placeholder="192.168.1.10">
-      </div>
-      <div class="form-group">
-        <label for="drv-port">Port</label>
-        <input type="number" id="drv-port" value="502" min="1" max="65535">
-      </div>
-    </div>
+    <!-- Connection fields are rendered per-protocol from the driver's
+         catalog entry (connection_defaults + protocols). Modbus adds
+         host/port/unit_id; MQTT adds host/port/username/password;
+         HTTP-local adds host/port. -->
+    <div id="drv-connection-fields"></div>
 
-    <div class="form-group" id="drv-unitid-group">
-      <label for="drv-unitid">Unit ID (Modbus)</label>
-      <input type="number" id="drv-unitid" value="1" min="0" max="255">
-    </div>
+    <!-- Driver-specific config (driver.config block) — a small set of
+         well-known keys rendered when the selected driver advertises
+         them via connection_defaults or a known driver id. Unknown
+         keys can still be edited later via /settings. -->
+    <div id="drv-extra-fields"></div>
 
     <div class="form-check">
       <input type="checkbox" id="drv-site-meter" checked>
@@ -597,26 +586,18 @@
     <div class="integration-section">
       <h3>EV Charger</h3>
       <div class="form-group">
-        <label for="ev-provider">Provider</label>
+        <label for="ev-provider">Charger type</label>
+        <!-- Options populated by setup.js from /api/drivers/catalog:
+             every driver entry that declares `ev` in its capabilities
+             list shows up here. Add a new EV driver by dropping a .lua
+             file in drivers/ — no HTML/JS edits required. -->
         <select id="ev-provider">
           <option value="">None</option>
-          <option value="easee">Easee</option>
         </select>
       </div>
-      <div id="ev-fields" style="display:none">
-        <div class="form-group">
-          <label for="ev-email">Email</label>
-          <input type="text" id="ev-email" placeholder="user@example.com">
-        </div>
-        <div class="form-group">
-          <label for="ev-password">Password</label>
-          <input type="password" id="ev-password">
-        </div>
-        <div class="form-group">
-          <label for="ev-serial">Serial number</label>
-          <input type="text" id="ev-serial" placeholder="EHHZBKPF">
-        </div>
-      </div>
+      <!-- Fields for the selected provider are rendered dynamically
+           from the driver's catalog metadata + connection_defaults. -->
+      <div id="ev-provider-fields"></div>
     </div>
 
     <div class="integration-section">

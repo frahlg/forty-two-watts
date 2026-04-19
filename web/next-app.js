@@ -1518,6 +1518,20 @@
       }
     });
 
+    // Hero-mode click path — the numeric #card-ev tile is hidden when
+    // body.mode-hero, so clicks on the EV circle in the energy-flow
+    // diagram need to open the same modal. <ftw-energy-flow> fires
+    // ftw-flow-node-click with detail.kind ∈ {ev, pv, grid, bat, …};
+    // we route "ev" to the same opener the card uses. Listen on the
+    // host element rather than inside the shadow DOM since the event
+    // is dispatched with composed:true.
+    var flowHero = document.getElementById("energy-flow");
+    if (flowHero) {
+      flowHero.addEventListener("ftw-flow-node-click", function (e) {
+        if (e.detail && e.detail.kind === "ev") openEvModal();
+      });
+    }
+
     function evCommand(action) {
       // Disable all three action buttons while any command is inflight so
       // a Pause→Resume double-click can't send both. The close button

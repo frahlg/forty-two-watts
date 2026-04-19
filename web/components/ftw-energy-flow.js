@@ -105,6 +105,13 @@ class FtwEnergyFlow extends FtwElement {
       transform-origin: center;
       animation: ef-spin 24s linear infinite;
     }
+    /* Clickable node groups — keyboard focus + hover bump so operators
+       can tell which circles open a detail pane. The circle's own
+       stroke-width doubles on hover without perturbing layout. */
+    .ef-clickable { cursor: pointer; outline: none; }
+    .ef-clickable > circle:first-of-type { transition: stroke-width 120ms ease; }
+    .ef-clickable:hover > circle:first-of-type,
+    .ef-clickable:focus-visible > circle:first-of-type { stroke-width: 3.5; }
     @media (max-width: 900px) {
       :host { padding: 10px 12px 4px; }
       svg { height: 465px; }
@@ -222,6 +229,28 @@ class FtwEnergyFlow extends FtwElement {
       cancelAnimationFrame(this._rafId);
       this._rafId = null;
     }
+    // Wire click + keyboard activation on any [data-node-kind] group
+    // that opted in via `clickable`. Dispatches a bubbling CustomEvent
+    // on the host element so the outer app (next-app.js) can listen
+    // without reaching into the shadow DOM. Rebinding per-render is
+    // fine — each render() blows away the shadow tree + re-creates the
+    // groups, so previous listeners are gone with the old nodes.
+    const clickables = this.shadowRoot.querySelectorAll('g.ef-clickable[data-node-kind]');
+    clickables.forEach((g) => {
+      const kind = g.dataset.nodeKind;
+      const fire = () => {
+        this.dispatchEvent(new CustomEvent('ftw-flow-node-click', {
+          detail: { kind },
+          bubbles: true,
+          composed: true,
+        }));
+      };
+      g.addEventListener('click', fire);
+      g.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fire(); }
+      });
+    });
+
     const nodes = this.shadowRoot.querySelectorAll('.ef-p');
     if (!nodes.length || !this._particles.length) return;
     // Wire each DOM node to its param slot. `render()` assigned indices
@@ -454,6 +483,8 @@ class FtwEnergyFlow extends FtwElement {
       sub: ev > 0.05 ? "charging" : "idle",
       color: ev > 0.05 ? "var(--green-e)" : "var(--white-s)",
       radius: P.baseR,
+      kind: "ev",
+      clickable: true,
     });
 
     return `
@@ -780,9 +811,17 @@ function hashStr(s) {
 // a multi-device 55 px circle both read proportionally. Stroke is the
 // accent color so each node carries its identity on the edge of the
 // circle — no separate stripe needed the way rectangular boxes have.
-function renderCircleNode({ pos, title, value, sub, color, soc, radius = 86 }) {
+//
+// Optional `kind` tags the group with a `data-node-kind` attribute so
+// the outer app (next-app.js) can wire click handlers by node type
+// (e.g. ev → open the EV modal, bat → open a battery inspector, …).
+// Without `kind` the group is a plain decoration.
+function renderCircleNode({ pos, title, value, sub, color, soc, radius = 86, kind = null, clickable = false }) {
   const r = radius;
   const { x, y } = pos;
+  const groupAttrs = kind
+    ? ` data-node-kind="${kind}"${clickable ? ' class="ef-clickable" role="button" tabindex="0"' : ''}`
+    : '';
   const titleY = Math.round(-0.42 * r);
   const valueY = Math.round(0.09  * r);
   const subY   = Math.round(0.42  * r);
@@ -792,7 +831,7 @@ function renderCircleNode({ pos, title, value, sub, color, soc, radius = 86 }) {
              fill="var(--cyan)" class="sv-node-sub">SoC ${Math.round(soc)}%</text>`
     : "";
   return `
-    <g>
+    <g${groupAttrs}>
       <circle cx="${x}" cy="${y}" r="${r}"
               fill="var(--hero-box-fill)" stroke="${color}" stroke-width="2"/>
       <text x="${x}" y="${y + titleY}" text-anchor="middle"
