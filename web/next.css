@@ -47,6 +47,12 @@ body.ftw-next > header {
   z-index: 10;
 }
 
+/* Drawer-only Live / Diagnose nav duplicates are hidden everywhere by
+   default and only revealed when the mobile drawer is open (see the
+   ≤720 px block further down). The primary .app-tabs in the header
+   row is what the operator sees on wider viewports. */
+body.ftw-next .drawer-nav-btn { display: none; }
+
 body.ftw-next main {
   max-width: 1560px;
   margin: 0 auto;
@@ -568,8 +574,13 @@ body.ftw-next .diagnose-detail {
     padding: 0 12px 48px;
     gap: 12px;
   }
+  /* Horizontal margin is `auto` so the header's outer rectangle lines
+     up with main's outer rectangle; combined with 12 px padding this
+     puts header content at the same 12 px inset as main's cards.
+     Previous `margin: 10px 12px 14px` stacked a 12 px gutter + 12 px
+     padding (24 px inset) that visibly drifted from the grid below. */
   body.ftw-next > header {
-    margin: 10px 12px 14px;
+    margin: 10px auto 14px;
     grid-template-columns: auto 1fr auto;
     gap: 10px;
     padding: 10px 12px;
@@ -578,8 +589,8 @@ body.ftw-next .diagnose-detail {
   body.ftw-next > header h1 { font-size: 15px; }
   body.ftw-next > header .header-logo { height: 26px; }
   body.ftw-next footer {
-    margin: 10px 12px 0;
-    padding: 10px 6px;
+    margin: 10px auto 0;
+    padding: 10px 12px;
   }
 
   body.ftw-next .header-right,
@@ -593,12 +604,12 @@ body.ftw-next .diagnose-detail {
     justify-self: end;
   }
 
-  /* Drawer-only navigation buttons — hidden on desktop, rendered as
-     drawer items when the hamburger is open. We keep the main
-     .app-tabs completely hidden in the drawer and use these duplicates
-     instead so there's only one drawer rectangle to style and position. */
+  /* Drawer-only navigation buttons — styling for when the hamburger
+     drawer is open. Base `display: none` is hoisted out of the media
+     query below so desktop hides them globally (previously the rule
+     only fired at ≤720 px and the ▶/⏲ glyphs leaked into the header
+     right-cluster on wider viewports). */
   body.ftw-next .drawer-nav-btn {
-    display: none;
     background: transparent;
     border: 1px solid var(--line);
     color: var(--fg);
