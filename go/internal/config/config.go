@@ -88,12 +88,21 @@ type Planner struct {
 	ChargeEfficiency    float64 `yaml:"charge_efficiency,omitempty" json:"charge_efficiency,omitempty"`
 	DischargeEfficiency float64 `yaml:"discharge_efficiency,omitempty" json:"discharge_efficiency,omitempty"`
 	ExportOrePerKWh     float64 `yaml:"export_ore_per_kwh,omitempty" json:"export_ore_per_kwh,omitempty"` // 0 = use mean spot
-	// UseEnergyDispatch switches the control loop from the legacy
-	// PI-on-grid-target path to the energy-allocation path where the
-	// plan directs total battery Wh per slot and the EMS converts to
-	// power in real time. See docs/plan-ems-contract.md. Defaults off
-	// until validated in production.
-	UseEnergyDispatch bool `yaml:"use_energy_dispatch,omitempty" json:"use_energy_dispatch,omitempty"`
+	// LegacyDispatch reverts the control loop from the default
+	// energy-allocation path back to the legacy PI-on-grid-target
+	// path. Provided for emergency rollback only — the energy path
+	// respects the principle "plan allocates energy, EMS reacts to
+	// live data" and is the correct architecture (see
+	// docs/plan-ems-contract.md).
+	LegacyDispatch bool `yaml:"legacy_dispatch,omitempty" json:"legacy_dispatch,omitempty"`
+
+	// UseEnergyDispatch is the deprecated inverse of LegacyDispatch.
+	// Pointer so we can distinguish "unset" (nil) from "explicitly
+	// false" (*false) — the latter matters because an operator who
+	// previously picked legacy dispatch must not be silently flipped
+	// to the energy path on upgrade. Honored with a startup WARN
+	// and will be removed after one release.
+	UseEnergyDispatch *bool `yaml:"use_energy_dispatch,omitempty" json:"use_energy_dispatch,omitempty"`
 }
 
 // Site is the top-level control loop config.

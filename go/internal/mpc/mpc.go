@@ -389,6 +389,45 @@ func Optimize(slots []Slot, p Params) Plan {
 							cost = -slotExportOre(slot) * (-gridKWh)
 						}
 
+						// Strict self-consumption bias. When the mode
+						// is self_consumption and the battery has
+						// headroom above the SoC floor + 20 %, we
+						// add a penalty equal to 2× effPrice per kWh
+						// of HOUSE-driven grid import — so the total
+						// house-import cost the DP sees is tripled.
+						// That makes discharge strictly cheaper than
+						// idle whenever the battery can physically
+						// supply house load.
+						//
+						// The penalty applies only to the house
+						// portion of the import (gridW minus EV). EV
+						// charging has its own deadline-shortfall
+						// penalty (below, 4× meanPrice per kWh of
+						// shortfall); applying the SC bias on top
+						// would let the DP prefer missing an EV
+						// deadline over charging it whenever the
+						// slot price exceeded ~4/3 of the horizon
+						// mean — Codex P1 on PR #122.
+						//
+						// Rationale: operator picked self_consumption
+						// because they want "use my battery before
+						// grid." Pure cost-minimisation over a long
+						// horizon with a high horizon-mean will
+						// sometimes prefer importing today to
+						// preserve SoC for tomorrow's peak — that's
+						// arbitrage behaviour, not self-consumption.
+						// The 20-% floor stops the DP from draining
+						// a nearly-empty battery on a cloudy
+						// morning; above it, discharge wins.
+						if p.Mode == ModeSelfConsumption &&
+							soc > p.SoCMinPct+20 {
+							houseGridW := slot.LoadW + slot.PVW + battW
+							if houseGridW > 0 {
+								houseKWh := houseGridW * dtH / 1000.0
+								cost += 2.0 * effPrice(slot) * houseKWh
+							}
+						}
+
 						// Deadline slot: if this slot is the EV's
 						// deadline AND target isn't met with this
 						// action's evSoc2, add a shortfall penalty.
@@ -568,7 +607,7 @@ func Optimize(slots []Slot, p Params) Plan {
 			GridW:       gridW,
 			SoCPct:      soc2,
 			CostOre:     cost,
-			Reason:      reasonFor(slot, actW, meanPrice),
+			Reason:      reasonFor(slot, actW, gridW, meanPrice),
 		}
 		if evActive {
 			a.LoadpointW = evW
@@ -688,32 +727,66 @@ func modeAllows(m Mode, baselineGridW, gridW, actW float64) bool {
 // decision for a single slot. The UI surfaces this on hover so operators
 // can see *why* the battery is (dis)charging — explainable AI at the
 // level it actually helps: per-decision.
-func reasonFor(s Slot, batteryW, meanPrice float64) string {
+//
+// Labels branch on the POST-action gridW, not just the pre-action
+// baseline. That matters when the battery action pushes grid from
+// "importing a little" into "exporting a lot" — previously labelled
+// "cover local load" because baseline was still technically positive,
+// which made it impossible for operators to tell a defensive
+// discharge from an aggressive export-for-arbitrage.
+func reasonFor(s Slot, batteryW, gridW, meanPrice float64) string {
 	baseline := s.LoadW + s.PVW // what grid would see with no battery
 	const chargeThresh = 100.0
+	const gridThresh = 100.0
 	priceTag := ""
 	if s.Confidence < 1.0 {
 		priceTag = " (predicted)"
 	}
+	// Classify the resulting grid direction — this is what the
+	// operator sees on the meter, and what matters for the label.
+	gridExports := gridW < -gridThresh
+	gridImports := gridW > gridThresh
+	priceAbove := s.PriceOre > meanPrice*1.1
+	priceBelow := s.PriceOre < meanPrice*0.9
+
 	switch {
-	case batteryW > chargeThresh && baseline < -chargeThresh:
-		// Exporting baseline, battery charging → absorbing PV surplus.
+	// --- charging branches ---
+	case batteryW > chargeThresh && baseline < -chargeThresh && !gridImports:
+		// PV-dominant baseline + battery charging + not pulling extra
+		// from grid → the battery is absorbing (part of) the PV
+		// surplus. Partial absorption (grid still exports some) still
+		// counts as "absorb PV surplus" — the operator is seeing the
+		// battery act as a sink for solar energy. Only flip to the
+		// "charge — import" branches when the battery's appetite
+		// exceeds PV output and drags grid into actual import.
 		return "absorb PV surplus" + priceTag
-	case batteryW > chargeThresh && s.PriceOre < meanPrice*0.9:
-		return "charge — price below horizon mean" + priceTag
+	case batteryW > chargeThresh && gridImports && priceBelow:
+		return "charge from cheap grid" + priceTag
+	case batteryW > chargeThresh && gridImports:
+		return "charge — import" + priceTag
 	case batteryW > chargeThresh:
 		return "charge" + priceTag
+
+	// --- discharging branches ---
+	case batteryW < -chargeThresh && gridExports && priceAbove:
+		return "discharge — export at peak" + priceTag
+	case batteryW < -chargeThresh && gridExports:
+		return "discharge — export" + priceTag
+	case batteryW < -chargeThresh && priceAbove:
+		// Reducing import during a high-price slot — even if it
+		// doesn't push grid negative, the motive is peak-shaving.
+		return "discharge — price above horizon mean" + priceTag
 	case batteryW < -chargeThresh && baseline > chargeThresh:
 		return "discharge — cover local load" + priceTag
-	case batteryW < -chargeThresh && s.PriceOre > meanPrice*1.1:
-		return "discharge — price above horizon mean" + priceTag
 	case batteryW < -chargeThresh:
 		return "discharge" + priceTag
+
+	// --- idle branches ---
 	default:
-		if baseline > chargeThresh {
+		if gridImports {
 			return "idle — import to cover load" + priceTag
 		}
-		if baseline < -chargeThresh {
+		if gridExports {
 			return "idle — export PV surplus" + priceTag
 		}
 		return "idle" + priceTag

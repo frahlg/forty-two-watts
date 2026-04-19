@@ -663,3 +663,51 @@ func TestEnergyDispatchFallsBackToLegacyWhenDirectiveUnavailable(t *testing.T) {
 		t.Error("expected some dispatch under legacy fallback, got nothing")
 	}
 }
+
+// Fredrik's morning incident (2026-04-19, self_consumption): planner
+// forecasted load = 3.24 kW, actual load was ~300 W. Under the legacy
+// PI-on-grid-target path the battery command converged on whatever
+// would drive grid to 0, which after the load surprise meant a small
+// discharge that exported straight to grid at the day-ahead low price.
+// Under energy dispatch the battery follows the plan's energy
+// allocation for the slot; if reality diverges the reactive replan
+// takes over on the next cycle with updated forecasts. This test
+// confirms the battery stays on plan even when live grid swings
+// into export — i.e. "grid is the residual".
+func TestEnergyDispatchHoldsPlanWhenLoadForecastWrong(t *testing.T) {
+	now := time.Now()
+	// Plan: discharge 552 Wh this slot (covers the forecasted 3.2 kW
+	// load for 15 min minus PV generation). In W terms that's −2208.
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: -552,
+		Strategy:        "self_consumption",
+	}
+	// Grid is exporting 1.3 kW (actual load tiny, PV + plan's discharge
+	// > load). Under legacy PI chasing grid_target=0 the controller
+	// would back the battery off toward idle, missing the plan's intent.
+	store := seedStore(-1310, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", -2200, 0.5},
+	})
+	store.Update("pv-1", telemetry.DerPV, -740, nil, nil)
+	store.DriverHealthMut("pv-1").RecordSuccess()
+
+	st := newStateWithEnergyDispatch(dir, "ferroamp")
+	st.Mode = ModePlannerSelf
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	// Plan says −2208 W average over the slot. Near slot start with
+	// nothing delivered yet, the per-tick target should be close to
+	// that. Accept a ±200 W band for time drift.
+	got := targets[0].TargetW
+	if got > -1900 || got < -2500 {
+		t.Errorf("TargetW = %f W — battery should follow plan (~−2208 W) even when grid is exporting (regression: legacy PI would back off toward 0)", got)
+	}
+}

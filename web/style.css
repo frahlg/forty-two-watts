@@ -8,20 +8,9 @@
   padding: 0;
 }
 
-:root {
-  --bg: #0f0f1a;
-  --surface: #1a1a2e;
-  --surface2: #22223a;
-  --border: #2a2a44;
-  --text: #e0e0e0;
-  --text-dim: #888;
-  --green: #00cc66;
-  --red: #ee4444;
-  --yellow: #eeaa22;
-  --blue: #3388ff;
-  --accent: #5566ff;
-  --radius: 8px;
-}
+/* Design tokens live in /components/theme.css (loaded before this file).
+ * Keep them there — not here — so the whole app (light DOM + every
+ * <ftw-*> shadow root) reads from one file. */
 
 html {
   font-size: 16px;
@@ -109,7 +98,7 @@ header h1 {
   flex-direction: column;
   gap: 1rem;
   padding: 1rem 1.5rem;
-  min-height: calc(100vh - 120px);
+  height: calc(100vh - 120px);
 }
 #view-diagnose.hidden,
 #view-live.hidden { display: none; }
@@ -245,8 +234,17 @@ header h1 {
 
 .diagnose-chart-wrap {
   padding: 0.5rem 1rem;
+  position: relative;
 }
 .diagnose-chart-wrap canvas { width: 100%; }
+.diag-chart-highlight {
+  position: absolute;
+  pointer-events: none;
+  background: rgba(96, 165, 250, 0.14);
+  border-left: 1px solid rgba(96, 165, 250, 0.65);
+  border-right: 1px solid rgba(96, 165, 250, 0.65);
+}
+.diag-chart-highlight.hidden { display: none; }
 
 .diagnose-table-wrap {
   flex: 1;
@@ -282,6 +280,8 @@ header h1 {
 .diag-table td:nth-child(-n+2),
 .diag-table td:last-child { text-align: left; }
 .diag-table tbody tr:hover { background: rgba(255,255,255,0.02); }
+.diag-table tbody tr.diag-row-hover { background: rgba(96, 165, 250, 0.14); }
+.diag-table tbody tr.diag-row-hidden { display: none; }
 .diag-reason-cell { color: var(--text-dim); white-space: nowrap; max-width: 320px; overflow: hidden; text-overflow: ellipsis; }
 .conf-low { color: #fde68a; }
 

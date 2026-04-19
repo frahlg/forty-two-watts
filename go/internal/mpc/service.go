@@ -133,6 +133,29 @@ func New(st *state.Store, tl *telemetry.Store, zone string, p Params) *Service {
 	}
 }
 
+// UpdateCapacity swaps the aggregate battery capacity + charge/discharge
+// bounds on the active planner. Called from the config-reload path when
+// the operator adds or removes a driver (or promotes/demotes an EV
+// loadpoint) and the MPC battery pool changes. Without this, the
+// planner would keep optimising against its startup-time capacity
+// snapshot while the dispatch layer already saw the new numbers — the
+// plan's SoC% and terminal credit would drift from reality until the
+// next process restart. Codex P1 on PR #121.
+//
+// Caller is expected to pass the same totals buildMPC would have
+// computed from the new config: totalCap across battery drivers,
+// aggregate max charge/discharge clamped to fuse capacity.
+func (s *Service) UpdateCapacity(totalCapWh, maxChargeW, maxDischargeW float64) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.Defaults.CapacityWh = totalCapWh
+	s.Defaults.MaxChargeW = maxChargeW
+	s.Defaults.MaxDischargeW = maxDischargeW
+	s.mu.Unlock()
+}
+
 // Latest returns the most recently computed plan (nil before first run).
 func (s *Service) Latest() *Plan {
 	if s == nil {
@@ -583,11 +606,37 @@ func (s *Service) replan(_ context.Context) *Plan {
 	}
 	replanAtMs := s.lastReplanAt.UnixMilli()
 	s.mu.Unlock()
+	// Horizon statistics — surfaced in logs so operators can
+	// reconstruct "what did the DP know?" without pulling the full
+	// Diagnostic JSON. Captures the three factors most likely to
+	// explain a surprising decision: mean price level, mean data
+	// confidence (how much of the horizon is forecast vs day-ahead),
+	// and the capacity envelope.
+	var sumPrice, sumConf float64
+	for i := range slots {
+		sumPrice += slots[i].PriceOre
+		c := slots[i].Confidence
+		if c <= 0 {
+			c = 1.0
+		}
+		sumConf += c
+	}
+	var meanPrice, meanConf float64
+	if n := len(slots); n > 0 {
+		meanPrice = sumPrice / float64(n)
+		meanConf = sumConf / float64(n)
+	}
 	slog.Info("mpc: replanned",
 		"slots", len(slots),
 		"soc_start", p.InitialSoCPct,
 		"cost_ore", plan.TotalCostOre,
-		"reason", reason)
+		"reason", reason,
+		"mean_price_ore", meanPrice,
+		"mean_confidence", meanConf,
+		"terminal_soc_price_ore", p.TerminalSoCPrice,
+		"capacity_wh", p.CapacityWh,
+		"max_charge_w", p.MaxChargeW,
+		"max_discharge_w", p.MaxDischargeW)
 
 	// Persist a diagnostic snapshot so operators can time-travel to
 	// this replan later. Best-effort: errors log and continue so a
