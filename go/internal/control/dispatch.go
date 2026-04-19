@@ -5,6 +5,7 @@ import (
 	"math"
 	"time"
 
+	"github.com/frahlg/forty-two-watts/go/internal/mpc"
 	"github.com/frahlg/forty-two-watts/go/internal/telemetry"
 )
 
@@ -196,27 +197,61 @@ func ComputeDispatch(
 ) []DispatchTarget {
 	// ---- Planner modes: the plan is a scheduler, not a regulator ----
 	// The plan decides WHEN each strategy applies (self-consumption now,
-	// charge at 02:00, export at 17:00). The EMS's existing mode logic
-	// decides HOW batteries respond every 5 s based on the live meter.
+	// charge at 02:00, export at 17:00). The EMS decides HOW batteries
+	// respond every 5 s based on the live meter.
 	//
-	// Two dispatch paths are supported during the rollout:
+	// Three execution paths, selected by the operator-picked planner mode:
 	//
-	//   1. Legacy (UseEnergyDispatch=false): plan returns grid_target_w,
-	//      PI chases it, batteries absorb anything that differs — the
-	//      behavior this package has shipped since the port.
+	//   * planner_self — reactive self-consumption (PI → gridW=0) with a
+	//     per-slot idle gate from the plan. Honours the mode's contract
+	//     ("never imports to charge, never exports via the battery")
+	//     against forecast error. See docs/plan-ems-contract.md §"Exception:
+	//     planner_self" and issue #130.
 	//
-	//   2. Energy-allocation (UseEnergyDispatch=true, SlotDirective set):
-	//      plan returns battery energy for the slot; EMS converts to
-	//      instantaneous power from (remaining_wh / remaining_s); grid
-	//      flow is the residual. See docs/plan-ems-contract.md.
+	//   * planner_cheap / planner_arbitrage with UseEnergyDispatch=true
+	//     (default): energy-allocation. Plan returns battery energy for
+	//     the slot; EMS converts to instantaneous power from
+	//     (remaining_wh / remaining_s); grid flow is the residual.
 	//
-	// The two paths share all of gather-batteries → distribute → slew →
-	// fuse. They differ only in how `totalCorrection` is computed below.
+	//   * planner_cheap / planner_arbitrage with UseEnergyDispatch=false
+	//     (opt-out): legacy PI-on-grid-target path. Plan returns
+	//     grid_target_w; PI chases it.
+	//
+	// All three share gather-batteries → distribute → slew → fuse below.
+	// They differ only in how `totalCorrection` is computed and whether
+	// the deadband applies.
 	effectiveMode := state.Mode
 	useEnergyPath := false
+	// plannerSelfIdleGate is true when operator picked planner_self AND the
+	// plan allocated a below-threshold amount of battery action for the
+	// current slot — the EMS holds the battery at 0 (ramping via slew)
+	// regardless of live surplus, so the DP's decision to save SoC for a
+	// later slot is honoured.
+	plannerSelfIdleGate := false
 	var currentDirective SlotDirective
-	if state.Mode.IsPlannerMode() {
-		// Try the energy-allocation path first when enabled.
+	switch {
+	case state.Mode == ModePlannerSelf:
+		effectiveMode = ModeSelfConsumption
+		state.SetGridTarget(0)
+		planFresh := false
+		if state.SlotDirective != nil {
+			if dir, ok := state.SlotDirective(time.Now()); ok {
+				planFresh = true
+				state.PlanStale = false
+				slotH := dir.SlotEnd.Sub(dir.SlotStart).Hours()
+				if slotH > 0 && math.Abs(dir.BatteryEnergyWh)/slotH < mpc.IdleGateThresholdW {
+					plannerSelfIdleGate = true
+				}
+			}
+		}
+		if !planFresh {
+			if !state.PlanStale {
+				slog.Warn("planner_self: plan stale — reactive self_consumption, no idle gates")
+			}
+			state.PlanStale = true
+		}
+	case state.Mode.IsPlannerMode():
+		// planner_cheap / planner_arbitrage.
 		if state.UseEnergyDispatch && state.SlotDirective != nil {
 			if dir, ok := state.SlotDirective(time.Now()); ok {
 				currentDirective = dir
@@ -230,8 +265,6 @@ func ComputeDispatch(
 				state.PlanStale = false
 			}
 		}
-		// Fall through to legacy path if energy path is off or its plan
-		// is stale.
 		if !useEnergyPath {
 			var modeStr string
 			var gridW float64
@@ -333,9 +366,19 @@ func ComputeDispatch(
 		currentTotal += b.currentW
 	}
 
-	// ---- Compute totalCorrection — two paths diverge here ----
+	// ---- Compute totalCorrection — three paths diverge here ----
 	var totalCorrection float64
-	if useEnergyPath {
+	switch {
+	case plannerSelfIdleGate:
+		// planner_self + plan says idle this slot: drive the battery
+		// total toward 0 regardless of live grid flow. Slew ramps it
+		// down over several cycles; the PI stays out of it so no
+		// integral wind-up carries into the next slot.
+		state.PI.Reset()
+		totalCorrection = -currentTotal
+		// deliberately skip the deadband — it's a gridW check and
+		// doesn't see "battery wants to be at zero but isn't yet".
+	case useEnergyPath:
 		// Energy-allocation path: plan's slot directive says "this many Wh
 		// over this slot". Derive the instantaneous power needed to hit the
 		// remaining energy in the remaining time, then pass (target - currentTotal)
@@ -373,8 +416,12 @@ func ComputeDispatch(
 		state.SetGridTarget(0)
 		state.PI.Reset()
 		totalCorrection = targetTotalW - currentTotal
-	} else {
-		// Legacy path: PI on grid target.
+	default:
+		// Legacy PI-on-grid-target path. Used by:
+		//   - manual modes (self_consumption, peak_shaving, priority, weighted)
+		//   - planner_self (the "participate reactively" branch — idle-gate
+		//     already handled above)
+		//   - planner_cheap / planner_arbitrage when UseEnergyDispatch=false
 		var errW float64
 		switch effectiveMode {
 		case ModePeakShaving:

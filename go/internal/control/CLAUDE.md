@@ -28,15 +28,28 @@ Distribution (`distributeProportional`, `distributePriority`, `distributeWeighte
 
 ## How it talks to neighbors
 
-Imports `telemetry` only. Reads via `store.Get` (site meter, batteries), `store.ReadingsByType(DerPV)` (fuse guard), and `store.DriverHealth` (online check). **Does not call drivers** — `main.go` takes the returned `[]DispatchTarget` and forwards to the driver registry. `State.PlanTarget` is the only upward callback; main wires it to `mpc` so this package stays planner-agnostic. Consumers that mutate `State`: `api` (mode + grid_target changes), `ha.bridge` (Home Assistant select), `configreload.watcher` (YAML reload), `e2e` tests.
+Imports `telemetry` and `mpc` (only for the `IdleGateThresholdW` constant — no behaviour, no types). Reads via `store.Get` (site meter, batteries), `store.ReadingsByType(DerPV)` (fuse guard), and `store.DriverHealth` (online check). **Does not call drivers** — `main.go` takes the returned `[]DispatchTarget` and forwards to the driver registry. `State.PlanTarget` / `State.SlotDirective` are the only upward callbacks; main wires them to `mpc` so this package stays planner-agnostic at the behaviour level. Consumers that mutate `State`: `api` (mode + grid_target changes), `ha.bridge` (Home Assistant select), `configreload.watcher` (YAML reload), `e2e` tests.
 
 ## What to read first
 
 `dispatch.go` — `ComputeDispatch` (line 139) is the whole story in one function: planner override → idle/charge short-circuits → holdoff → read grid → pick error by mode → PI → distribute → slew → fuse guard. `pi.go` is ~60 lines; read it if you suspect integral windup.
 
+## Planner execution paths
+
+Three different execution strategies depending on the operator-selected planner mode — keep these straight:
+
+| Mode | Execution | Why |
+|---|---|---|
+| `planner_self` | Reactive PI-on-gridW=0 (same as manual `self_consumption`) + per-slot idle gate derived from `SlotDirective.BatteryEnergyWh` vs `mpc.IdleGateThresholdW`. | The mode's contract is "never imports to charge, never exports via the battery". Honouring the contract under forecast error requires reacting to the live meter, not executing planned Wh blindly. See issue #130 + `docs/plan-ems-contract.md` §"Exception: planner_self". |
+| `planner_cheap` / `planner_arbitrage` w/ `UseEnergyDispatch=true` (default) | Energy-allocation: `targetTotalW = remaining_wh × 3600 / remaining_s`. Grid is the residual. | The whole point of these modes is to cycle the battery across the zero-grid line on purpose. Wh-per-slot is the optimisation variable. |
+| `planner_cheap` / `planner_arbitrage` w/ `UseEnergyDispatch=false` (opt-out) | Legacy PI chasing `grid_target_w` returned by `PlanTarget`. | Emergency rollback only. |
+
+Stale/missing plan → fall back to manual reactive self_consumption with `grid_target=0` (identical across all planner modes).
+
 ## What NOT to do
 
-- **Do NOT expect planner modes to stay distinct inside `ComputeDispatch`.** They collapse to `self_consumption` right after setting `grid_target` from the plan (dispatch.go:170–173). The operator-visible mode is preserved on `state.Mode`; the local `effectiveMode` is what drives behavior.
+- **Do NOT expect planner_cheap / planner_arbitrage modes to stay distinct inside `ComputeDispatch`.** They collapse to `self_consumption` right after setting `grid_target` from the plan (dispatch.go legacy branch). The operator-visible mode is preserved on `state.Mode`; the local `effectiveMode` is what drives behaviour.
+- **Do NOT switch `planner_self` back to the energy-allocation path.** That would re-introduce issue #130: the battery follows planned Wh blindly and crosses the zero-grid line whenever the forecast is wrong. The test `TestPlannerSelfReactsToForecastOverestimate` is the regression guard.
 - **Do NOT distribute from the delta.** `distributeProportional` + `distributeWeighted` split the TOTAL desired site battery power (`currentTotal + totalCorrection`), not the correction alone. This is the fix for the "batteries drift apart" bug — keep it that way (dispatch.go:317, 368).
 - **Do NOT issue charge commands when SoC < 5 % and target < 0.** `clampWithSoC` (dispatch.go:410) blocks discharge of an empty battery. Per-command cap is hard-coded to 5 kW.
 - **Do NOT flip signs.** Everything in this package is site convention: `+` = charge (import), `−` = discharge (export). `applyFuseGuard` reads `|battery discharge| + |PV|` as total generation; that's correct because PV is always `−` at the meter.

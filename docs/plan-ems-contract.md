@@ -4,11 +4,14 @@ Design note for the dispatch-layer rework. Three principles, the mode
 taxonomy they imply, the wire contract between the planner and the EMS,
 and the migration plan.
 
-**Status: shipped (2026-04-19).** Energy-allocation dispatch is the
-default path for every planner mode. The legacy PI-on-grid-target
-path remains as `planner.legacy_dispatch: true` for emergency rollback
-and as the plan-stale fallback. See `go/internal/control/dispatch.go`
-(energy branch at line 338) and `go/internal/mpc/service.go:185`
+**Status: shipped (2026-04-19), with a `planner_self` exception (2026-04-19,
+issue #130).** Energy-allocation dispatch is the default for
+`planner_cheap` and `planner_arbitrage`. `planner_self` is a reactive
+self-consumption controller with a plan-driven idle gate — see the
+"Exception" section below. The legacy PI-on-grid-target path remains as
+`planner.legacy_dispatch: true` for emergency rollback (applies to
+cheap/arbitrage only) and as the plan-stale fallback. See
+`go/internal/control/dispatch.go` and `go/internal/mpc/service.go`
 (`SlotDirectiveAt`).
 
 ## Motivating incident
@@ -87,6 +90,43 @@ grid flow.
 What the plan no longer commands directly:
 - Instantaneous grid flow
 - Instantaneous battery power
+
+## Exception: planner_self
+
+The "grid is the residual" principle assumes the planner mode *wants*
+the battery to cross the zero-grid line on purpose (arbitrage, cheap
+charge). `planner_self` doesn't — its contract is "never imports to
+charge, never exports via the battery" (UI tooltip + docs/mpc-planner.md).
+
+Under pure energy-allocation dispatch that contract breaks as soon as
+the forecast is wrong:
+
+- Forecast said 5 kW PV, reality is 2 kW. Plan allocated `battery_energy_wh
+  = +1000` for this slot. Dispatch commands +4 kW charge → grid imports
+  2 kW to make up the shortfall. (Issue #130 — operator report 2026-04-19.)
+- Forecast said 3 kW load, reality is 300 W. Plan allocated `−552 Wh`.
+  Dispatch commands −2.2 kW discharge → grid exports 2 kW via the
+  battery. (Symmetric failure — same bug, other direction.)
+
+The DP enforces `ModeSelfConsumption`'s grid-crossing invariant only on
+forecast. The EMS must enforce it on the live meter.
+
+`planner_self` therefore executes as **reactive self-consumption**:
+
+- PI loop on `gridW → 0` (identical to manual `self_consumption`).
+- The plan contributes a per-slot **idle gate**: if
+  `|SlotDirective.BatteryEnergyWh| / slot_hours < mpc.IdleGateThresholdW`
+  the EMS holds the battery at 0 for that slot — honouring the DP's
+  decision to save SoC for a later, more profitable slot. Otherwise the
+  battery participates reactively (absorbs whatever surplus actually
+  exists, covers whatever load actually exists).
+- When the plan is stale (`MaxPlanAge` exceeded) the idle gate is
+  disabled and execution is indistinguishable from manual
+  `self_consumption`.
+
+The plan becomes a **participation schedule** for this mode, not a
+power trajectory. The three principles still hold for the other planner
+modes where they make sense.
 
 ## Mode taxonomy
 

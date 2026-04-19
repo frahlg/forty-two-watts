@@ -30,6 +30,20 @@ Adding a new device? See [Writing a driver](docs/writing-a-driver.md) or the [Cl
 
 ## Quick start
 
+### Option A — one-shot Docker installer (recommended for Raspberry Pi)
+
+Works on a freshly-installed Raspberry Pi OS (arm64) and most Debian/Ubuntu
+machines. Installs Docker + compose, pulls the multi-arch image from GHCR,
+and starts the container. Idempotent — re-run to upgrade.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/frahlg/forty-two-watts/master/scripts/install.sh | bash
+```
+
+Then open `http://<your-pi>:8080/setup` to run the first-time wizard.
+
+### Option B — build from source
+
 **Prerequisites:** Go 1.25+, a Raspberry Pi (or any `linux/arm64` machine), and at least one supported inverter/battery on your LAN.
 
 ```bash

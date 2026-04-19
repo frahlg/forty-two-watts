@@ -28,6 +28,25 @@ A one-sentence description refreshes every 5 seconds.
 Legacy modes (`idle` / manual `self_consumption` / `peak_shaving` /
 `charge`) remain available under the `Manual…` toggle.
 
+### Execution differs by strategy
+
+| Strategy | Dispatch layer |
+|---|---|
+| Self-consumption (Smart) | Reactive PI-on-gridW=0 + per-slot idle gate. The plan tells the EMS **whether** to participate this slot — the battery's power is still driven by the live meter, never by the plan's Wh allocation. This keeps the "never import / never export via battery" contract honest when the forecast is wrong. |
+| Cheap charging | Energy-allocation (default). Plan emits Wh-per-slot; EMS converts to W in real time; grid is the residual. See `docs/plan-ems-contract.md`. |
+| Arbitrage | Same as Cheap charging — energy-allocation. |
+
+When the plan is stale (> 30 min old) or absent, every strategy falls
+back to manual reactive self-consumption. Operators see `plan_stale: true`
+in the status endpoint.
+
+Under Self-consumption, a slot where the DP allocated `|battery_energy_wh|
+/ slot_hours < 100 W` (avg) is interpreted as **idle**: the EMS holds the
+battery at 0 even when live PV surplus exists, deferring absorption to a
+later slot the DP judged more profitable. Any larger allocation flips the
+slot to **participate reactively** — i.e. behave exactly like manual
+self-consumption.
+
 ---
 
 ## How it thinks
