@@ -1010,9 +1010,44 @@ func driverCapacitiesFrom(drivers []config.Driver, loadpoints []config.Loadpoint
 			// (Value remains in cfg.Drivers for any driver-side use.)
 			continue
 		}
+		// Fallback detection: operators who haven't migrated to a
+		// `loadpoints:` config block still have EV drivers with
+		// `battery_capacity_wh` pointing at vehicle capacity. Match
+		// on Lua filename prefix — narrow allowlist of known EV
+		// charger drivers so we don't accidentally exclude a battery
+		// driver whose name happens to share a substring.
+		if isLikelyEVDriver(d.Lua) {
+			continue
+		}
 		out[d.Name] = d.BatteryCapacityWh
 	}
 	return out
+}
+
+// isLikelyEVDriver classifies a Lua path as pointing at an EV charger
+// driver based on the filename prefix. Kept narrow + allowlist-style —
+// a battery driver named "easy_battery.lua" would be wrongly excluded
+// by a broader regex, so we only match EV chargers we actually ship.
+func isLikelyEVDriver(luaPath string) bool {
+	if luaPath == "" {
+		return false
+	}
+	base := strings.ToLower(luaPath)
+	if i := strings.LastIndex(base, "/"); i >= 0 {
+		base = base[i+1:]
+	}
+	base = strings.TrimSuffix(base, ".lua")
+	for _, p := range []string{
+		"easee",       // easee_cloud.lua, easee.lua
+		"ocpp",        // ocpp_cp.lua, ocpp_csms.lua
+		"ctek",        // ctek.lua, ctek_mqtt.lua, ctek_v2.lua
+		"chargestorm", // CTEK Chargestorm variants
+	} {
+		if strings.HasPrefix(base, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // warnIfEVHasBatteryCapacity surfaces operator mis-config where an EV
@@ -1032,14 +1067,21 @@ func warnIfEVHasBatteryCapacity(drivers []config.Driver, loadpoints []config.Loa
 		if d.BatteryCapacityWh <= 0 {
 			continue
 		}
-		if _, isEV := evDrivers[d.Name]; !isEV {
+		_, isEVByLoadpoint := evDrivers[d.Name]
+		isEVByFilename := isLikelyEVDriver(d.Lua)
+		if !isEVByLoadpoint && !isEVByFilename {
 			continue
 		}
-		slog.Warn("driver is referenced by a loadpoint — battery_capacity_wh "+
-			"is being ignored for MPC battery-pool sizing. Move the value "+
-			"to loadpoints[].vehicle_capacity_wh to keep EV SoC inference "+
+		reason := "driver is referenced by a loadpoint"
+		if !isEVByLoadpoint && isEVByFilename {
+			reason = "driver's Lua filename matches a known EV charger"
+		}
+		slog.Warn(reason+" — battery_capacity_wh is being ignored for MPC "+
+			"battery-pool sizing. Move the value to "+
+			"loadpoints[].vehicle_capacity_wh to keep EV SoC inference "+
 			"working.",
 			"driver", d.Name,
+			"lua", d.Lua,
 			"battery_capacity_wh", d.BatteryCapacityWh)
 	}
 }
