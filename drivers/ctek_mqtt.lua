@@ -86,6 +86,13 @@
 --                                 # leave empty to accept the first one seen
 --         outlet:     1           # 1 = EVSE1, 2 = EVSE2 (dual-outlet)
 --         phases:     3
+--         min_a:      6           # IEC 61851 floor (clamped ≥ 6)
+--         max_a:      16          # fuse-limited ceiling; used as ev.max_a
+--                                 # when no EV session is active (the CTEK
+--                                 # MQTT namespace doesn't publish
+--                                 # FuseRating, only CCU/.../Configuration
+--                                 # does — and this driver stays out of the
+--                                 # CCU tree).
 
 DRIVER = {
   id           = "ctek-chargestorm-mqtt",
@@ -114,6 +121,16 @@ local base_topic = "CTEK"
 local cbid       = nil   -- snap to first seen CBID when not configured
 local outlet     = 1
 local phases     = 3
+-- Fuse-limited maximum current the charger is allowed to deliver at this
+-- site. The CTEK topic namespace doesn't publish this (FuseRating lives
+-- only under the CCU/NG-V1/... tree, which this driver stays out of by
+-- design), so we take it from config and fall back on it when no EV is
+-- plugged — otherwise ev.max_a reads 0 whenever the station is idle and
+-- the UI shows "0 A max" which looks broken. Matches the Modbus driver's
+-- max_a config key exactly so a site running both drivers has the same
+-- ceiling.
+local max_a      = 16
+local min_a      = 6
 
 -- Cached last known values — emitted every poll even if no fresh MQTT
 -- message arrived, so the dispatch + Kalman layers see a steady stream.
@@ -198,7 +215,11 @@ function driver_init(config)
             local p = math.floor(tonumber(config.phases))
             if p == 1 or p == 3 then phases = p end
         end
+        if tonumber(config.max_a) then max_a = math.floor(tonumber(config.max_a)) end
+        if tonumber(config.min_a) then min_a = math.floor(tonumber(config.min_a)) end
     end
+    if min_a < 6 then min_a = 6 end        -- IEC 61851 floor
+    if max_a < min_a then max_a = min_a end
 
     -- Wildcard on the CBID segment so we don't force the operator to
     -- hard-code the charger's serial. If they pinned one in config we
@@ -275,7 +296,16 @@ function driver_poll()
 
     local state_code = nil
     if last_status then
-        ev.max_a = safe_num(last_status.assigned) or 0
+        -- `assigned` in the CTEK status payload is the current the
+        -- station is currently offering to an EV session — zero when
+        -- no car is plugged (state=AVAL) or paused (state=PAUS). The
+        -- UI's "max current" field expects the ceiling the charger is
+        -- *willing* to deliver right now, so report the configured
+        -- fuse-limited max whenever assigned is unhelpful (0 / nil) —
+        -- a plain mirror of `assigned` reads "0 A max" in the idle
+        -- state which looks like a config error.
+        local assigned = safe_num(last_status.assigned) or 0
+        ev.max_a = assigned > 0 and assigned or max_a
         state_code = last_status.state
         local flags = state_code and STATE_FLAGS[state_code]
         if flags then
@@ -291,6 +321,9 @@ function driver_poll()
     elseif last_em then
         ev.charging  = (ev.w or 0) > 100
         ev.connected = ev.charging
+        ev.max_a     = max_a
+    else
+        ev.max_a = max_a
     end
 
     host.emit("ev", ev)
