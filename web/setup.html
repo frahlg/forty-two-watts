@@ -5,14 +5,36 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Setup — forty-two-watts</title>
   <link rel="icon" type="image/jpeg" href="/logo.jpg">
+  <!-- Inter + JetBrains Mono — same pairing as /next.html and the
+       landing page (fortytwowatts.com). Preconnect first so the
+       critical chrome lands without a round-trip stall on cold starts. -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/components/theme.css">
   <link rel="stylesheet" href="/style.css">
   <style>
+    /* Setup wizard styling — matches the /next UI tokens
+       (components/theme.css) and the look of fortytwowatts.com:
+       dark ink canvas, hairline 1px borders, flat cards, warm amber
+       single-accent, Inter body + JetBrains Mono eyebrows. Kept inline
+       so the wizard's chrome is self-contained and doesn't cross into
+       legacy style.css rules on the dashboard. */
+
+    body {
+      background: var(--ink);
+      color: var(--fg);
+      font-family: var(--sans);
+      font-feature-settings: 'cv11', 'ss01';
+      -webkit-font-smoothing: antialiased;
+      line-height: 1.58;
+    }
+
     /* ---- Wizard layout ---- */
     .wizard {
-      max-width: 600px;
+      max-width: 620px;
       margin: 0 auto;
-      padding: 2rem 1rem;
+      padding: 3rem 1.25rem;
       min-height: 100vh;
       display: flex;
       flex-direction: column;
@@ -24,9 +46,9 @@
     }
 
     .wizard-logo {
-      height: 64px;
+      height: 56px;
       width: auto;
-      border-radius: 8px;
+      border-radius: 7px;
     }
 
     .wizard-title {
@@ -34,12 +56,14 @@
       align-items: center;
       justify-content: center;
       gap: 12px;
-      margin-bottom: 0.5rem;
+      margin-bottom: 0.25rem;
     }
 
     .wizard-title h1 {
-      font-size: 1.3rem;
-      font-weight: 600;
+      font-size: 1.15rem;
+      font-weight: 700;
+      letter-spacing: -0.01em;
+      color: var(--fg);
     }
 
     /* ---- Step indicator ---- */
@@ -47,23 +71,24 @@
       display: flex;
       justify-content: center;
       gap: 8px;
-      margin-bottom: 2rem;
+      margin-bottom: 2.5rem;
     }
 
     .step-dot {
-      width: 10px;
-      height: 10px;
-      border-radius: 50%;
-      background: var(--border);
-      transition: background 0.3s;
+      width: 6px;
+      height: 6px;
+      border-radius: 999px;
+      background: var(--line);
+      transition: background 0.3s, box-shadow 0.3s;
     }
 
     .step-dot.active {
-      background: var(--green);
+      background: var(--accent-e);
+      box-shadow: 0 0 10px var(--accent-e);
     }
 
     .step-dot.done {
-      background: var(--accent);
+      background: var(--fg-muted);
     }
 
     /* ---- Step panels ---- */
@@ -78,27 +103,33 @@
     }
 
     .step h2 {
-      font-size: 1.1rem;
-      margin-bottom: 0.75rem;
+      font-size: 1.35rem;
+      font-weight: 700;
+      letter-spacing: -0.015em;
+      color: var(--fg);
+      margin-bottom: 0.5rem;
     }
 
     .step p {
-      color: var(--text-dim);
-      font-size: 0.9rem;
-      margin-bottom: 1rem;
-      line-height: 1.5;
+      color: var(--fg-dim);
+      font-size: 0.92rem;
+      margin-bottom: 1.25rem;
+      line-height: 1.58;
     }
 
     /* ---- Form elements ---- */
     .form-group {
-      margin-bottom: 1rem;
+      margin-bottom: 1.1rem;
     }
 
     .form-group label {
       display: block;
-      font-size: 0.8rem;
-      color: var(--text-dim);
-      margin-bottom: 4px;
+      font-family: var(--mono);
+      font-size: 0.7rem;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      color: var(--fg-muted);
+      margin-bottom: 6px;
     }
 
     .form-group input[type="text"],
@@ -106,13 +137,26 @@
     .form-group input[type="password"],
     .form-group select {
       width: 100%;
-      padding: 8px 10px;
-      background: var(--surface2);
-      border: 1px solid var(--border);
-      border-radius: 4px;
-      color: var(--text);
-      font-family: inherit;
-      font-size: 0.85rem;
+      padding: 10px 12px;
+      background: var(--ink-raised);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      color: var(--fg);
+      font-family: var(--sans);
+      font-size: 0.9rem;
+      transition: border-color 0.15s;
+    }
+
+    .form-group input:focus,
+    .form-group select:focus {
+      outline: none;
+      border-color: var(--accent-e);
+    }
+
+    .form-group input:disabled,
+    .form-group select:disabled {
+      opacity: 0.55;
+      cursor: not-allowed;
     }
 
     .form-row {
@@ -130,13 +174,14 @@
     .form-check {
       display: flex;
       align-items: center;
-      gap: 8px;
-      margin: 0.75rem 0;
-      font-size: 0.85rem;
+      gap: 10px;
+      margin: 0.9rem 0;
+      font-size: 0.88rem;
+      color: var(--fg);
     }
 
     .form-check input[type="checkbox"] {
-      accent-color: var(--green);
+      accent-color: var(--accent-e);
       width: 16px;
       height: 16px;
     }
@@ -147,49 +192,53 @@
       justify-content: space-between;
       align-items: center;
       margin-top: auto;
-      padding-top: 1.5rem;
+      padding-top: 2rem;
       gap: 12px;
     }
 
     .btn-primary {
-      padding: 10px 24px;
+      padding: 11px 18px;
       border: none;
-      border-radius: var(--radius);
-      background: var(--green);
-      color: #fff;
-      font-size: 0.9rem;
-      font-weight: 600;
+      border-radius: 8px;
+      background: var(--accent-e);
+      color: #0a0a0a;
+      font-family: var(--sans);
+      font-size: 14px;
+      font-weight: 500;
       cursor: pointer;
-      transition: opacity 0.2s;
+      transition: transform 0.12s, opacity 0.2s;
     }
 
-    .btn-primary:hover { opacity: 0.85; }
+    .btn-primary:hover:not(:disabled) { transform: translateY(-1px); }
     .btn-primary:disabled { opacity: 0.4; cursor: not-allowed; }
 
     .btn-secondary {
-      padding: 8px 18px;
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      background: var(--surface2);
-      color: var(--text);
-      font-size: 0.85rem;
+      padding: 10px 18px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: transparent;
+      color: var(--fg);
+      font-family: var(--sans);
+      font-size: 14px;
       cursor: pointer;
-      transition: background 0.2s;
+      transition: border-color 0.15s;
     }
 
-    .btn-secondary:hover { background: var(--border); }
+    .btn-secondary:hover { border-color: var(--fg-dim); }
 
     .btn-skip {
       background: none;
       border: none;
-      color: var(--text-dim);
+      color: var(--fg-muted);
       cursor: pointer;
-      font-size: 0.8rem;
-      text-decoration: underline dotted;
-      padding: 4px 8px;
+      font-family: var(--mono);
+      font-size: 0.75rem;
+      letter-spacing: 0.08em;
+      padding: 6px 10px;
+      transition: color 0.15s;
     }
 
-    .btn-skip:hover { color: var(--text); }
+    .btn-skip:hover { color: var(--fg); }
 
     /* ---- Welcome step ---- */
     .welcome-center {
@@ -203,7 +252,14 @@
     }
 
     .welcome-center h2 {
-      font-size: 1.4rem;
+      font-size: clamp(1.7rem, 3vw, 2.1rem);
+      font-weight: 700;
+      letter-spacing: -0.025em;
+      line-height: 1.1;
+    }
+
+    .welcome-center p {
+      max-width: 420px;
     }
 
     /* When <ftw-update-check> has something to show (banner or update
@@ -223,62 +279,60 @@
       width: 100%;
       border-collapse: collapse;
       margin: 1rem 0;
-      font-size: 0.82rem;
     }
 
     .scan-table th {
       text-align: left;
-      padding: 6px 8px;
-      font-size: 0.72rem;
-      color: var(--text-dim);
+      padding: 10px 10px;
+      font-family: var(--mono);
+      font-size: 0.68rem;
+      color: var(--fg-muted);
       text-transform: uppercase;
-      letter-spacing: 0.05em;
-      border-bottom: 1px solid var(--border);
+      letter-spacing: 0.18em;
+      border-bottom: 1px solid var(--line);
+      font-weight: 500;
     }
 
     .scan-table td {
-      padding: 8px;
-      border-bottom: 1px solid var(--border);
-      font-family: monospace;
+      padding: 10px;
+      border-bottom: 1px solid var(--line);
+      font-family: var(--mono);
       font-size: 0.82rem;
+      color: var(--fg);
     }
 
-    .scan-table tr:hover {
-      background: rgba(255,255,255,0.03);
-    }
+    .scan-table tr:hover td { background: var(--ink-raised); }
 
     .scan-table .btn-use {
-      padding: 4px 12px;
-      border: 1px solid var(--green);
-      border-radius: 4px;
+      padding: 5px 12px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
       background: transparent;
-      color: var(--green);
+      color: var(--accent-e);
       cursor: pointer;
-      font-size: 0.75rem;
+      font-family: var(--sans);
+      font-size: 0.78rem;
+      transition: border-color 0.15s;
     }
 
-    .scan-table .btn-use:hover {
-      background: rgba(0,204,102,0.1);
-    }
+    .scan-table .btn-use:hover { border-color: var(--accent-e); }
 
     .spinner {
       display: inline-block;
       width: 18px;
       height: 18px;
-      border: 2px solid var(--border);
-      border-top-color: var(--green);
+      border: 2px solid var(--line);
+      border-top-color: var(--accent-e);
       border-radius: 50%;
-      animation: spin 0.6s linear infinite;
+      animation: spin 0.7s linear infinite;
       vertical-align: middle;
-      margin-right: 8px;
+      margin-right: 10px;
     }
 
-    @keyframes spin {
-      to { transform: rotate(360deg); }
-    }
+    @keyframes spin { to { transform: rotate(360deg); } }
 
     .scan-status {
-      color: var(--text-dim);
+      color: var(--fg-dim);
       font-size: 0.85rem;
       margin: 1rem 0;
     }
@@ -286,13 +340,13 @@
     /* ---- Driver picker ---- */
     .driver-desc {
       margin-top: 0.5rem;
-      padding: 10px 12px;
-      background: rgba(255,255,255,0.03);
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      font-size: 0.82rem;
-      color: var(--text-dim);
-      line-height: 1.4;
+      padding: 12px 14px;
+      background: var(--ink-raised);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      font-size: 0.85rem;
+      color: var(--fg-dim);
+      line-height: 1.55;
     }
 
     /* ---- Configured drivers summary ---- */
@@ -304,11 +358,11 @@
     }
 
     .driver-summary-item {
-      background: var(--surface2);
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      padding: 10px 14px;
-      font-size: 0.85rem;
+      background: var(--ink-raised);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 12px 14px;
+      font-size: 0.88rem;
       display: flex;
       justify-content: space-between;
       align-items: center;
@@ -322,62 +376,72 @@
 
     .driver-summary-item .driver-info .driver-label {
       font-weight: 600;
+      color: var(--fg);
     }
 
     .driver-summary-item .driver-info .driver-detail {
       font-size: 0.75rem;
-      color: var(--text-dim);
-      font-family: monospace;
+      color: var(--fg-dim);
+      font-family: var(--mono);
     }
 
     .btn-remove-sm {
       background: transparent;
-      border: 1px solid var(--border);
-      color: var(--red);
-      padding: 4px 10px;
-      border-radius: 4px;
-      font-size: 0.72rem;
+      border: 1px solid var(--line);
+      color: var(--red-e);
+      padding: 5px 12px;
+      border-radius: 6px;
+      font-family: var(--sans);
+      font-size: 0.74rem;
       cursor: pointer;
+      transition: border-color 0.15s;
     }
 
-    .btn-remove-sm:hover {
-      background: rgba(239,68,68,0.1);
-    }
+    .btn-remove-sm:hover { border-color: var(--red-e); }
 
     /* ---- Review summary ---- */
     .review-section {
-      margin-bottom: 1rem;
+      margin-bottom: 1.25rem;
     }
 
     .review-section h3 {
-      font-size: 0.85rem;
-      color: var(--text-dim);
+      font-family: var(--mono);
+      font-size: 0.68rem;
+      color: var(--accent-e);
       text-transform: uppercase;
-      letter-spacing: 0.05em;
-      margin-bottom: 6px;
+      letter-spacing: 0.18em;
+      font-weight: 500;
+      margin-bottom: 8px;
     }
 
     .review-item {
-      background: var(--surface2);
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      padding: 10px 14px;
-      font-size: 0.85rem;
+      background: var(--ink-raised);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 12px 14px;
+      font-size: 0.88rem;
       margin-bottom: 6px;
       line-height: 1.5;
+      color: var(--fg);
     }
 
     /* ---- Integration fieldset ---- */
     .integration-section {
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      padding: 14px 16px;
+      background: var(--ink-raised);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 16px 18px;
       margin-bottom: 1rem;
     }
 
     .integration-section h3 {
-      font-size: 0.9rem;
-      margin-bottom: 0.75rem;
+      font-family: var(--mono);
+      font-size: 0.7rem;
+      color: var(--accent-e);
+      text-transform: uppercase;
+      letter-spacing: 0.18em;
+      font-weight: 500;
+      margin-bottom: 1rem;
     }
 
     /* ---- Success screen ---- */
@@ -388,24 +452,24 @@
 
     .success-screen .checkmark {
       font-size: 3rem;
-      color: var(--green);
+      color: var(--accent-e);
       margin-bottom: 1rem;
     }
 
     .error-msg {
-      color: var(--red);
+      color: var(--red-e);
       font-size: 0.85rem;
       margin-top: 0.5rem;
-      padding: 8px 10px;
-      background: rgba(239,68,68,0.1);
-      border: 1px solid rgba(239,68,68,0.3);
-      border-radius: 4px;
+      padding: 10px 12px;
+      background: color-mix(in srgb, var(--red-e) 10%, transparent);
+      border: 1px solid color-mix(in srgb, var(--red-e) 35%, var(--line));
+      border-radius: 8px;
     }
 
     @media (max-width: 480px) {
-      .wizard { padding: 1rem 0.75rem; }
+      .wizard { padding: 2rem 0.9rem; }
       .form-row, .form-row-3 { grid-template-columns: 1fr; }
-      .wizard-logo { height: 48px; }
+      .wizard-logo { height: 44px; }
     }
   </style>
 </head>

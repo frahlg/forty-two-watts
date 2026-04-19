@@ -47,29 +47,36 @@ class FtwUpdateCheck extends FtwElement {
     }
     :host(.hidden) { display: none; }
 
+    /* Tokens resolved against /components/theme.css — amber single-
+       accent palette (--accent-e), oklch ink canvas, hairline 1px
+       borders. The component looks native to /setup (legacy page
+       wrapper re-skinned onto the same tokens) and /next (dashboard). */
     .banner {
       display: flex;
       flex-direction: column;
       gap: 10px;
       padding: 14px 16px;
-      background: var(--surface2, var(--surface));
-      border: 1px solid var(--accent);
-      border-radius: var(--radius);
+      background: var(--ink-raised);
+      border: 1px solid color-mix(in srgb, var(--accent-e) 40%, var(--line));
+      border-radius: 10px;
       text-align: left;
     }
     .banner-title {
-      font-weight: 600;
-      color: var(--accent);
-      font-size: 0.9rem;
+      font-family: var(--mono, ui-monospace, monospace);
+      font-weight: 500;
+      color: var(--accent-e);
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.18em;
     }
     .banner-detail {
-      font-size: 0.82rem;
+      font-size: 0.85rem;
       font-family: var(--mono, ui-monospace, monospace);
-      color: var(--text);
+      color: var(--fg);
     }
     .banner-notes {
       font-size: 0.78rem;
-      color: var(--accent);
+      color: var(--accent-e);
       text-decoration: none;
       align-self: flex-start;
     }
@@ -81,42 +88,42 @@ class FtwUpdateCheck extends FtwElement {
       flex-wrap: wrap;
     }
 
-    /* Match the setup wizard's existing button vocabulary so the card
-       looks native to /setup. All three button classes fall back to
-       theme tokens if host page hasn't declared a green/red accent. */
     button {
-      font-family: inherit;
+      font-family: var(--sans, system-ui, sans-serif);
       cursor: pointer;
     }
     .btn-primary {
-      padding: 10px 24px;
+      padding: 11px 18px;
       border: none;
-      border-radius: var(--radius);
-      background: var(--green, var(--accent));
-      color: #fff;
-      font-size: 0.9rem;
-      font-weight: 600;
-      transition: opacity 0.2s;
+      border-radius: 8px;
+      background: var(--accent-e);
+      color: #0a0a0a;
+      font-size: 14px;
+      font-weight: 500;
+      transition: transform 0.12s;
     }
-    .btn-primary:hover { opacity: 0.85; }
+    .btn-primary:hover { transform: translateY(-1px); }
     .btn-secondary {
-      padding: 8px 18px;
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      background: var(--surface2, var(--surface));
-      color: var(--text);
-      font-size: 0.85rem;
+      padding: 10px 18px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: transparent;
+      color: var(--fg);
+      font-size: 14px;
+      transition: border-color 0.15s;
     }
-    .btn-secondary:hover { background: var(--border); }
+    .btn-secondary:hover { border-color: var(--fg-dim); }
     .btn-skip {
       background: none;
       border: none;
-      color: var(--text-dim);
-      font-size: 0.8rem;
-      text-decoration: underline dotted;
-      padding: 4px 8px;
+      color: var(--fg-muted);
+      font-family: var(--mono, ui-monospace, monospace);
+      font-size: 0.75rem;
+      letter-spacing: 0.08em;
+      padding: 6px 10px;
+      transition: color 0.15s;
     }
-    .btn-skip:hover { color: var(--text); }
+    .btn-skip:hover { color: var(--fg); }
 
     /* Progress overlay content — lives inside <ftw-modal>. The modal
        owns the backdrop, positioning, and ESC/click-close. We drive
@@ -127,8 +134,8 @@ class FtwUpdateCheck extends FtwElement {
       display: inline-block;
       width: 28px;
       height: 28px;
-      border: 3px solid var(--border);
-      border-top-color: var(--accent);
+      border: 3px solid var(--line);
+      border-top-color: var(--accent-e);
       border-radius: 50%;
       animation: spin 0.9s linear infinite;
       margin-bottom: 0.75rem;
@@ -136,15 +143,16 @@ class FtwUpdateCheck extends FtwElement {
     .progress h3 {
       margin: 0 0 0.4rem;
       font-size: 1rem;
+      color: var(--fg);
     }
     .progress .msg {
       font-size: 0.88rem;
-      color: var(--text);
+      color: var(--fg);
       margin: 0 0 0.3rem;
     }
     .progress .hint {
       font-size: 0.78rem;
-      color: var(--text-dim);
+      color: var(--fg-dim);
       margin: 0;
     }
     @keyframes spin { to { transform: rotate(360deg); } }
