@@ -232,6 +232,12 @@ func main() {
 		slog.Info("loadpoints configured", "count", len(cfg.Loadpoints))
 	}
 
+	// Forward-declared so the hot-reload closure below can push
+	// capacity changes into the running planner. Assigned at line
+	// ~450 after all its dependencies (pvSvc, loadSvc, priceFc) are
+	// wired up. nil until that point — the reload closure guards.
+	var mpcSvc *mpc.Service
+
 	// ---- Config hot-reload watcher ----
 	watcher, err := configreload.New(*configPath, cfgMu, cfg, ctrlMu, ctrl,
 		func(newCfg, oldCfg *config.Config) {
@@ -254,6 +260,19 @@ func main() {
 				capacities[k] = v
 			}
 			capMu.Unlock()
+
+			// Push the new pool totals into the planner so its next
+			// replan uses the right CapacityWh / MaxChargeW /
+			// MaxDischargeW. Without this the MPC keeps the snapshot
+			// it took at buildMPC time; SoC % and terminal credit go
+			// stale after an EV loadpoint is added/removed. Codex P1
+			// on PR #121.
+			if mpcSvc != nil {
+				totalCap, maxChg, maxDis := aggregateBatteryLimits(newCfg, capacities)
+				mpcSvc.UpdateCapacity(totalCap, maxChg, maxDis)
+				slog.Info("mpc: capacity updated via hot-reload",
+					"capacity_wh", totalCap, "max_charge_w", maxChg, "max_discharge_w", maxDis)
+			}
 
 			// Hot-reload EV loadpoints so operators can add / remove /
 			// retune them without restarting. Manager preserves
@@ -430,7 +449,7 @@ func main() {
 	slog.Info("loadmodel started", "peak_w", loadPeakW, "quality", loadSvc.Model().Quality())
 
 	// ---- Start MPC planner (optional) ----
-	mpcSvc := buildMPC(cfg, st, tel, capacities)
+	mpcSvc = buildMPC(cfg, st, tel, capacities)
 	if mpcSvc != nil {
 		if pvSvc != nil {
 			mpcSvc.PV = pvSvc.Predict
@@ -530,7 +549,19 @@ func main() {
 		// telemetry, not plan forecasts). See docs/plan-ems-contract.md.
 		// `planner.legacy_dispatch: true` opts back to the old
 		// PI-on-grid-target path for emergency rollback.
+		//
+		// Back-compat: honor the deprecated `use_energy_dispatch`
+		// key when explicitly set. An operator who had
+		// `use_energy_dispatch: false` in their config before v0.27.0
+		// chose legacy on purpose — don't silently flip them.
 		ctrl.UseEnergyDispatch = cfg.Planner == nil || !cfg.Planner.LegacyDispatch
+		if cfg.Planner != nil && cfg.Planner.UseEnergyDispatch != nil {
+			v := *cfg.Planner.UseEnergyDispatch
+			slog.Warn("planner.use_energy_dispatch is deprecated — use planner.legacy_dispatch: "+
+				"true to opt out of the energy path instead. Honored for this run.",
+				"value", v)
+			ctrl.UseEnergyDispatch = v
+		}
 		// If the restored control mode is a planner variant, push the
 		// corresponding mpc.Mode so the plan is built with the strategy
 		// the user actually picked — not whatever cfg.planner.mode says.
@@ -1002,9 +1033,16 @@ func registerAllDevices(st *state.Store, reg *drivers.Registry) {
 func driverCapacitiesFrom(drivers []config.Driver, loadpoints []config.Loadpoint) map[string]float64 {
 	evDrivers := make(map[string]struct{}, len(loadpoints))
 	for _, lp := range loadpoints {
-		if lp.DriverName != "" {
-			evDrivers[lp.DriverName] = struct{}{}
+		// Only treat a loadpoint row as authoritative when it's
+		// valid enough for loadpoint.Manager to actually load it.
+		// An entry with an empty id is rejected by the manager (see
+		// loadpoint.Manager.Load) — accepting it here would silently
+		// drop a real battery from the MPC pool on nothing but
+		// config noise.
+		if lp.ID == "" || lp.DriverName == "" {
+			continue
 		}
+		evDrivers[lp.DriverName] = struct{}{}
 	}
 	out := make(map[string]float64, len(drivers))
 	for _, d := range drivers {
@@ -1065,9 +1103,10 @@ func isLikelyEVDriver(luaPath string) bool {
 func warnIfEVHasBatteryCapacity(drivers []config.Driver, loadpoints []config.Loadpoint) {
 	evDrivers := make(map[string]struct{}, len(loadpoints))
 	for _, lp := range loadpoints {
-		if lp.DriverName != "" {
-			evDrivers[lp.DriverName] = struct{}{}
+		if lp.ID == "" || lp.DriverName == "" {
+			continue
 		}
+		evDrivers[lp.DriverName] = struct{}{}
 	}
 	for _, d := range drivers {
 		if d.BatteryCapacityWh <= 0 {
@@ -1111,17 +1150,12 @@ func buildLoadpointConfigs(src []config.Loadpoint) []loadpoint.Config {
 	return out
 }
 
-// buildMPC constructs a planner from config. Returns nil if disabled,
-// if prices aren't configured, or if there are no batteries with capacity.
-func buildMPC(cfg *config.Config, st *state.Store, tel *telemetry.Store, capacities map[string]float64) *mpc.Service {
-	if cfg.Planner == nil || !cfg.Planner.Enabled {
-		return nil
-	}
-	if cfg.Price == nil || cfg.Price.Provider == "" || cfg.Price.Provider == "none" {
-		slog.Warn("mpc requires price provider — skipping")
-		return nil
-	}
-	var totalCap, maxChg, maxDis float64
+// aggregateBatteryLimits sums capacity + max charge/discharge across
+// battery drivers the MPC should plan for, applying fuse-capacity
+// clamps. Returned values are what buildMPC used to compute inline at
+// startup — hoisted into a helper so the config-reload path can call
+// it and push the new totals into an already-running mpc.Service.
+func aggregateBatteryLimits(cfg *config.Config, capacities map[string]float64) (totalCap, maxChg, maxDis float64) {
 	for _, d := range cfg.Drivers {
 		cap := capacities[d.Name]
 		if cap <= 0 {
@@ -1165,10 +1199,6 @@ func buildMPC(cfg *config.Config, st *state.Store, tel *telemetry.Store, capacit
 		maxChg += chg
 		maxDis += dis
 	}
-	if totalCap <= 0 {
-		slog.Warn("mpc: no battery capacity — skipping")
-		return nil
-	}
 	// Clamp aggregate charge/discharge to the grid fuse capacity. The
 	// control loop's fuse guard enforces this per-tick anyway, but a
 	// planner that schedules 45 kW of charge through a 16 A fuse (11 kW)
@@ -1188,6 +1218,24 @@ func buildMPC(cfg *config.Config, st *state.Store, tel *telemetry.Store, capacit
 				"requested_w", maxDis, "fuse_w", fuseMaxW)
 			maxDis = fuseMaxW
 		}
+	}
+	return totalCap, maxChg, maxDis
+}
+
+// buildMPC constructs a planner from config. Returns nil if disabled,
+// if prices aren't configured, or if there are no batteries with capacity.
+func buildMPC(cfg *config.Config, st *state.Store, tel *telemetry.Store, capacities map[string]float64) *mpc.Service {
+	if cfg.Planner == nil || !cfg.Planner.Enabled {
+		return nil
+	}
+	if cfg.Price == nil || cfg.Price.Provider == "" || cfg.Price.Provider == "none" {
+		slog.Warn("mpc requires price provider — skipping")
+		return nil
+	}
+	totalCap, maxChg, maxDis := aggregateBatteryLimits(cfg, capacities)
+	if totalCap <= 0 {
+		slog.Warn("mpc: no battery capacity — skipping")
+		return nil
 	}
 	pl := cfg.Planner
 	zone := "SE3"

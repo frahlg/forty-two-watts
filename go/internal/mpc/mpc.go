@@ -392,14 +392,22 @@ func Optimize(slots []Slot, p Params) Plan {
 						// Strict self-consumption bias. When the mode
 						// is self_consumption and the battery has
 						// headroom above the SoC floor + 20 %, we
-						// triple the cost the DP sees for any grid-
-						// import slot. That makes discharge (which
-						// avoids the tripled cost) strictly cheaper
-						// than idle whenever the battery can
-						// physically supply the load — even after
-						// accounting for the terminal-SoC credit
-						// the DP would otherwise use to justify
-						// preserving SoC for later.
+						// add a penalty equal to 2× effPrice per kWh
+						// of HOUSE-driven grid import — so the total
+						// house-import cost the DP sees is tripled.
+						// That makes discharge strictly cheaper than
+						// idle whenever the battery can physically
+						// supply house load.
+						//
+						// The penalty applies only to the house
+						// portion of the import (gridW minus EV). EV
+						// charging has its own deadline-shortfall
+						// penalty (below, 4× meanPrice per kWh of
+						// shortfall); applying the SC bias on top
+						// would let the DP prefer missing an EV
+						// deadline over charging it whenever the
+						// slot price exceeded ~4/3 of the horizon
+						// mean — Codex P1 on PR #122.
 						//
 						// Rationale: operator picked self_consumption
 						// because they want "use my battery before
@@ -411,16 +419,13 @@ func Optimize(slots []Slot, p Params) Plan {
 						// The 20-% floor stops the DP from draining
 						// a nearly-empty battery on a cloudy
 						// morning; above it, discharge wins.
-						//
-						// Factor 3 chosen so: (import_cost × 3) beats
-						// (terminal_credit × discharge_wh) on any
-						// reasonable TerminalSoCPrice ≤ retail_mean.
-						// Above that terminal value the DP is
-						// probably misconfigured anyway.
 						if p.Mode == ModeSelfConsumption &&
-							gridKWh > 0 &&
 							soc > p.SoCMinPct+20 {
-							cost *= 3.0
+							houseGridW := slot.LoadW + slot.PVW + battW
+							if houseGridW > 0 {
+								houseKWh := houseGridW * dtH / 1000.0
+								cost += 2.0 * effPrice(slot) * houseKWh
+							}
 						}
 
 						// Deadline slot: if this slot is the EV's
@@ -746,8 +751,14 @@ func reasonFor(s Slot, batteryW, gridW, meanPrice float64) string {
 
 	switch {
 	// --- charging branches ---
-	case batteryW > chargeThresh && baseline < -chargeThresh && !gridExports:
-		// PV surplus fully absorbed into the battery.
+	case batteryW > chargeThresh && baseline < -chargeThresh && !gridImports:
+		// PV-dominant baseline + battery charging + not pulling extra
+		// from grid → the battery is absorbing (part of) the PV
+		// surplus. Partial absorption (grid still exports some) still
+		// counts as "absorb PV surplus" — the operator is seeing the
+		// battery act as a sink for solar energy. Only flip to the
+		// "charge — import" branches when the battery's appetite
+		// exceeds PV output and drags grid into actual import.
 		return "absorb PV surplus" + priceTag
 	case batteryW > chargeThresh && gridImports && priceBelow:
 		return "charge from cheap grid" + priceTag

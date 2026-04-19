@@ -92,6 +92,30 @@ func TestDriverCapacitiesFromLuaFilenameFallback(t *testing.T) {
 	}
 }
 
+// TestDriverCapacitiesFromIgnoresInvalidLoadpoints covers the
+// Codex P2 on PR #121: loadpoint entries with missing id are
+// rejected by loadpoint.Manager but were silently excluding their
+// driver from the MPC pool anyway. A malformed config row should
+// never cause a real battery to vanish from the planner.
+func TestDriverCapacitiesFromIgnoresInvalidLoadpoints(t *testing.T) {
+	drivers := []config.Driver{
+		{Name: "ferroamp", BatteryCapacityWh: 15200},
+		{Name: "sungrow", BatteryCapacityWh: 9600},
+	}
+	// Malformed loadpoint row: no id. Manager would reject this.
+	// Must NOT cause ferroamp to be excluded from MPC capacity.
+	loadpoints := []config.Loadpoint{
+		{ID: "", DriverName: "ferroamp"},
+	}
+	got := driverCapacitiesFrom(drivers, loadpoints)
+	if got["ferroamp"] != 15200 {
+		t.Errorf("ferroamp dropped by invalid loadpoint row: %v", got)
+	}
+	if got["sungrow"] != 9600 {
+		t.Errorf("sungrow missing: %v", got)
+	}
+}
+
 func TestIsLikelyEVDriver(t *testing.T) {
 	cases := []struct {
 		in   string

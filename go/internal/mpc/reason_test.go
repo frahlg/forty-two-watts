@@ -70,6 +70,29 @@ func TestReasonForLabelsBranchOnGridW(t *testing.T) {
 			batteryW: 0, gridW: 2500,
 			wantContain: "import to cover",
 		},
+		// Codex P2 on PR #119 — the "absorb PV surplus" branch used
+		// !gridExports which broke both edges.
+		{
+			// Partial PV absorption: battery charges, takes some of
+			// the surplus, rest still exports to grid. Operator is
+			// seeing the battery act as a solar sink, so the label
+			// should reflect that — not generic "charge".
+			name:        "partial PV absorption — battery charging, grid still exporting",
+			loadW:       1000, pvW: -4000,
+			priceOre: 100, meanPrice: 180,
+			batteryW: 2000, gridW: -1000, // baseline=-3000, grid exports 1kW residual
+			wantContain: "absorb PV surplus",
+		},
+		{
+			// Over-charging: battery charges harder than PV provides,
+			// dragging the grid into actual import. Should NOT be
+			// labelled PV absorption — it's grid-charging.
+			name:        "over-charging — battery takes more than PV, grid imports",
+			loadW:       1000, pvW: -1500,
+			priceOre: 100, meanPrice: 180,
+			batteryW: 3000, gridW: 2500, // baseline=-500, battery > PV → import 2.5kW
+			wantContain: "cheap grid", // 100 < 180*0.9 → priceBelow branch
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
