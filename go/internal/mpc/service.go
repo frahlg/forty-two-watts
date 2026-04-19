@@ -133,6 +133,29 @@ func New(st *state.Store, tl *telemetry.Store, zone string, p Params) *Service {
 	}
 }
 
+// UpdateCapacity swaps the aggregate battery capacity + charge/discharge
+// bounds on the active planner. Called from the config-reload path when
+// the operator adds or removes a driver (or promotes/demotes an EV
+// loadpoint) and the MPC battery pool changes. Without this, the
+// planner would keep optimising against its startup-time capacity
+// snapshot while the dispatch layer already saw the new numbers — the
+// plan's SoC% and terminal credit would drift from reality until the
+// next process restart. Codex P1 on PR #121.
+//
+// Caller is expected to pass the same totals buildMPC would have
+// computed from the new config: totalCap across battery drivers,
+// aggregate max charge/discharge clamped to fuse capacity.
+func (s *Service) UpdateCapacity(totalCapWh, maxChargeW, maxDischargeW float64) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.Defaults.CapacityWh = totalCapWh
+	s.Defaults.MaxChargeW = maxChargeW
+	s.Defaults.MaxDischargeW = maxDischargeW
+	s.mu.Unlock()
+}
+
 // Latest returns the most recently computed plan (nil before first run).
 func (s *Service) Latest() *Plan {
 	if s == nil {

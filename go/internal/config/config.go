@@ -95,6 +95,14 @@ type Planner struct {
 	// live data" and is the correct architecture (see
 	// docs/plan-ems-contract.md).
 	LegacyDispatch bool `yaml:"legacy_dispatch,omitempty" json:"legacy_dispatch,omitempty"`
+
+	// UseEnergyDispatch is the deprecated inverse of LegacyDispatch.
+	// Pointer so we can distinguish "unset" (nil) from "explicitly
+	// false" (*false) — the latter matters because an operator who
+	// previously picked legacy dispatch must not be silently flipped
+	// to the energy path on upgrade. Honored with a startup WARN
+	// and will be removed after one release.
+	UseEnergyDispatch *bool `yaml:"use_energy_dispatch,omitempty" json:"use_energy_dispatch,omitempty"`
 }
 
 // Site is the top-level control loop config.
