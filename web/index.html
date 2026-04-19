@@ -124,25 +124,54 @@
         <div class="card-value val-neutral" id="load-w">-- W</div>
         <div class="card-sub">house</div>
       </div>
-      <div class="card summary-card" id="card-soc">
-        <div class="card-label">SoC</div>
-        <div class="card-value" id="bat-soc">-- %</div>
-        <ftw-progress-bar id="soc-fill" mode="gradient" value="0" max="100"
-                          style="margin-top:0.5rem; --ftw-progress-height:10px"></ftw-progress-bar>
+    </section>
+
+    <!-- History cards — daily kWh bars per metric. Toggle Week (last 7 days)
+         vs Month (so far this month). Data fetched from /api/energy/daily. -->
+    <section class="history-cards">
+      <div class="card history-card" data-metric="import">
+        <div class="history-head">
+          <div class="card-label">Imported</div>
+          <div class="history-toggle" role="tablist">
+            <button data-range="week" class="active" role="tab">Week</button>
+            <button data-range="month" role="tab">Month</button>
+          </div>
+        </div>
+        <div class="history-total val-import" data-role="total">— kWh</div>
+        <div class="history-bars" data-role="bars"></div>
       </div>
-      <div class="card summary-card" id="card-fuse">
+      <div class="card history-card" data-metric="load">
+        <div class="history-head">
+          <div class="card-label">Consumed</div>
+          <div class="history-toggle" role="tablist">
+            <button data-range="week" class="active" role="tab">Week</button>
+            <button data-range="month" role="tab">Month</button>
+          </div>
+        </div>
+        <div class="history-total val-neutral" data-role="total">— kWh</div>
+        <div class="history-bars" data-role="bars"></div>
+      </div>
+      <div class="card history-card" data-metric="export">
+        <div class="history-head">
+          <div class="card-label">Exported</div>
+          <div class="history-toggle" role="tablist">
+            <button data-range="week" class="active" role="tab">Week</button>
+            <button data-range="month" role="tab">Month</button>
+          </div>
+        </div>
+        <div class="history-total val-export" data-role="total">— kWh</div>
+        <div class="history-bars" data-role="bars"></div>
+      </div>
+    </section>
+
+    <!-- Fuse — own row, one box per phase. Falls back to a single bar when
+         site meter doesn't report per-phase amperage. -->
+    <section class="fuse-row">
+      <div class="card fuse-card" id="card-fuse">
         <div class="card-label">Fuse</div>
-        <!-- Per-phase bars, populated dynamically from fuse.phases + phase_amps. -->
-        <div class="fuse-phases" id="fuse-phases"></div>
-        <!-- Fallback for single-phase or when site meter has no per-phase data. -->
+        <div class="fuse-phase-boxes" id="fuse-phases"></div>
         <div class="fuse-bar" id="fuse-bar-fallback"><div class="fuse-fill" id="fuse-fill"></div></div>
         <div class="card-value fuse-fallback-value" id="fuse-use">-- A</div>
-      </div>
-      <div class="card summary-card" id="card-ev" style="cursor:pointer"
-           role="button" tabindex="0" aria-label="Open EV charger details">
-        <div class="card-label">EV</div>
-        <div class="card-value" id="ev-w">-- W</div>
-        <div class="card-sub" id="ev-status">--</div>
       </div>
     </section>
 

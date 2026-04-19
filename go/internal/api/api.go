@@ -147,6 +147,7 @@ func (s *Server) routes() {
 	s.handle("GET  /api/self_tune/status", s.handleSelfTuneStatus)
 	s.handle("POST /api/self_tune/cancel", s.handleSelfTuneCancel)
 	s.handle("GET  /api/history", s.handleHistory)
+	s.handle("GET  /api/energy/daily", s.handleEnergyDaily)
 	s.handle("GET  /api/prices", s.handlePrices)
 	s.handle("GET  /api/forecast", s.handleForecast)
 	s.handle("GET  /api/mpc/plan", s.handleMPCPlan)
@@ -999,6 +1000,84 @@ func parseRange(s string) int64 {
 		return 3 * 24 * 60 * 60 * 1000
 	}
 	return 5 * 60 * 1000
+}
+
+// ---- /api/energy/daily ----
+//
+// Query params: days=N (default 7, capped at 90)
+// Response: {"days": [{"day":"YYYY-MM-DD","import_wh":..., "export_wh":...,
+//                      "pv_wh":..., "bat_charged_wh":..., "bat_discharged_wh":...,
+//                      "load_wh":...}], "tz": "Local"}
+//
+// Buckets are local-day. Today is the last entry. Mirrors the integration
+// loop in handleStatus's energy-today block — same site convention, same
+// W*dt math — but per local day across the requested range. Designed for
+// the dashboard's history cards (Imported / Consumed / Exported).
+func (s *Server) handleEnergyDaily(w http.ResponseWriter, r *http.Request) {
+	if s.deps.State == nil {
+		writeJSON(w, 200, map[string]any{"days": []any{}})
+		return
+	}
+	days := 7
+	if v := r.URL.Query().Get("days"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			days = n
+		}
+	}
+	if days > 90 {
+		days = 90
+	}
+	now := time.Now()
+	loc := now.Location()
+	todayMidnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
+
+	out := make([]map[string]any, 0, days)
+	for i := days - 1; i >= 0; i-- {
+		dayStart := todayMidnight.AddDate(0, 0, -i)
+		var dayEnd time.Time
+		if i == 0 {
+			dayEnd = now
+		} else {
+			dayEnd = dayStart.AddDate(0, 0, 1)
+		}
+		pts, err := s.deps.State.LoadHistory(dayStart.UnixMilli(), dayEnd.UnixMilli(), 0)
+		entry := map[string]any{
+			"day":               dayStart.Format("2006-01-02"),
+			"import_wh":         0.0,
+			"export_wh":         0.0,
+			"pv_wh":             0.0,
+			"bat_charged_wh":    0.0,
+			"bat_discharged_wh": 0.0,
+			"load_wh":           0.0,
+		}
+		if err == nil && len(pts) > 1 {
+			var importWh, exportWh, pvWh, chargedWh, dischargedWh, loadWh float64
+			for j := 1; j < len(pts); j++ {
+				dtH := float64(pts[j].TsMs-pts[j-1].TsMs) / 3_600_000.0
+				g := pts[j].GridW
+				if g > 0 {
+					importWh += g * dtH
+				} else {
+					exportWh += -g * dtH
+				}
+				pvWh += -pts[j].PVW * dtH
+				if pts[j].BatW > 0 {
+					chargedWh += pts[j].BatW * dtH
+				} else {
+					dischargedWh += -pts[j].BatW * dtH
+				}
+				loadWh += pts[j].LoadW * dtH
+			}
+			entry["import_wh"] = importWh
+			entry["export_wh"] = exportWh
+			entry["pv_wh"] = pvWh
+			entry["bat_charged_wh"] = chargedWh
+			entry["bat_discharged_wh"] = dischargedWh
+			entry["load_wh"] = loadWh
+		}
+		out = append(out, entry)
+	}
+	writeJSON(w, 200, map[string]any{"days": out, "tz": loc.String()})
 }
 
 // ---- /api/prices ----

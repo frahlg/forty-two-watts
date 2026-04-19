@@ -235,6 +235,12 @@ body.ftw-next .flow-hero {
 }
 body.ftw-next .flow-hero ftw-energy-flow {
   display: block;
+  /* Extra breathing room under the planets on desktop so the hero
+     doesn't crowd the cards directly below it. Mobile stays tight. */
+  padding-bottom: 40px;
+}
+@media (max-width: 900px) {
+  body.ftw-next .flow-hero ftw-energy-flow { padding-bottom: 0; }
 }
 
 /* ---- Hero / numbers mode switch ---- */
@@ -245,6 +251,12 @@ body.ftw-next .flow-hero ftw-energy-flow {
    charts) stay visible in both modes. */
 body.ftw-next.mode-hero    .ftw-hide-in-hero { display: none !important; }
 body.ftw-next.mode-numbers .flow-hero        { display: none !important; }
+/* In hero mode the summary-cards row only holds .ftw-hide-in-hero tiles
+   (SoC/EV/Fuse moved out), so the section collapses to zero height but
+   still claims a flex gap slot — visible as an extra ~16 px between the
+   hero and the history-cards row. Hide the empty section to keep all
+   inter-section gaps uniform. */
+body.ftw-next.mode-hero    .summary-cards    { display: none !important; }
 
 /* ---- Summary tiles ---- */
 body.ftw-next .summary-cards {
@@ -305,22 +317,199 @@ body.ftw-next .val-neutral     { color: var(--fg); }
 body.ftw-next .val-ev-charging { color: var(--green-e); }
 body.ftw-next .val-ev-connected{ color: var(--amber); }
 
-/* Fuse bars — taller, colored background fits the tile style. */
-body.ftw-next .fuse-phases { gap: 5px; }
-body.ftw-next .fuse-phase-bar,
-body.ftw-next .fuse-bar {
+/* Fuse — own row, one box per phase. */
+body.ftw-next .fuse-row {
+  display: block;
+  margin: 12px 0;
+}
+body.ftw-next .fuse-card {
+  background: var(--ink-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  padding: 14px 16px;
+}
+body.ftw-next .fuse-card .card-label {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--fg-muted);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  margin-bottom: 10px;
+}
+body.ftw-next .fuse-phase-boxes {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 10px;
+}
+body.ftw-next .fuse-phase-box {
+  background: var(--ink-base, oklch(0.18 0.015 250));
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  padding: 10px 12px;
+  display: grid;
+  grid-template-rows: auto auto auto;
+  gap: 6px;
+}
+body.ftw-next .fuse-phase-box .fuse-phase-label {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--fg-muted);
+  letter-spacing: 0.1em;
+}
+body.ftw-next .fuse-phase-box .fuse-phase-val {
+  font-family: var(--mono);
+  font-size: 1.35rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+  color: var(--fg);
+  text-align: left;
+  line-height: 1.1;
+}
+body.ftw-next .fuse-phase-box .fuse-phase-bar {
+  height: 8px;
   background: oklch(0.22 0.015 250);
-  border-radius: 3px;
+  border-radius: 4px;
+  overflow: hidden;
 }
 body.ftw-next .fuse-phase-fill,
-body.ftw-next .fuse-fill { background: var(--green-e); }
+body.ftw-next .fuse-fill {
+  height: 100%;
+  background: var(--green-e);
+  transition: width 0.3s, background 0.3s;
+}
 body.ftw-next .fuse-phase-fill.warn,
 body.ftw-next .fuse-fill.warn { background: var(--amber); }
 body.ftw-next .fuse-phase-fill.crit,
 body.ftw-next .fuse-fill.crit { background: var(--red-e); }
 body.ftw-next .fuse-phase-fill.export { background: var(--cyan); }
-body.ftw-next .fuse-phase-label,
-body.ftw-next .fuse-phase-val { font-family: var(--mono); }
+body.ftw-next .fuse-bar {
+  background: oklch(0.22 0.015 250);
+  border-radius: 3px;
+  height: 8px;
+  overflow: hidden;
+  margin-top: 8px;
+}
+body.ftw-next .fuse-fallback-value {
+  font-family: var(--mono);
+  font-size: 1.2rem;
+  font-weight: 700;
+  margin-top: 6px;
+}
+
+/* ---- History cards (Imported / Consumed / Exported, daily bars) ---- */
+body.ftw-next .history-cards {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+  margin-top: 12px;
+}
+body.ftw-next .history-card {
+  background: var(--ink-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+body.ftw-next .history-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+body.ftw-next .history-card .card-label {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--fg-muted);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+body.ftw-next .history-toggle {
+  display: inline-flex;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm, 4px);
+  overflow: hidden;
+}
+body.ftw-next .history-toggle button {
+  background: transparent;
+  border: 0;
+  color: var(--fg-muted);
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 4px 8px;
+  cursor: pointer;
+}
+body.ftw-next .history-toggle button.active {
+  background: var(--accent, oklch(0.55 0.15 240));
+  color: var(--fg);
+}
+body.ftw-next .history-total {
+  font-family: var(--mono);
+  font-size: 1.05rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+body.ftw-next .history-bars {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
+  align-items: end;
+  gap: 4px;
+  height: 96px;
+  padding-top: 4px;
+}
+body.ftw-next .history-bars.loading,
+body.ftw-next .history-bars:empty {
+  color: var(--fg-muted);
+  font-family: var(--mono);
+  font-size: 11px;
+  align-items: center;
+  justify-content: center;
+  display: flex;
+  height: 96px;
+}
+body.ftw-next .history-bar-col {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: end;
+  height: 100%;
+  min-width: 0;
+}
+body.ftw-next .history-bar-val {
+  font-family: var(--mono);
+  font-size: 9px;
+  color: var(--fg-muted);
+  margin-bottom: 2px;
+  line-height: 1;
+  white-space: nowrap;
+}
+body.ftw-next .history-bar {
+  width: 100%;
+  max-width: 28px;
+  background: var(--cyan, #38bdf8);
+  border-radius: 2px 2px 0 0;
+  min-height: 1px;
+  transition: height 0.3s;
+}
+body.ftw-next .history-card[data-metric="import"] .history-bar { background: var(--red-e); }
+body.ftw-next .history-card[data-metric="export"] .history-bar { background: var(--green-e); }
+body.ftw-next .history-card[data-metric="load"]   .history-bar { background: var(--fg); opacity: 0.7; }
+body.ftw-next .history-bar-label {
+  font-family: var(--mono);
+  font-size: 9px;
+  color: var(--fg-muted);
+  margin-top: 4px;
+  white-space: nowrap;
+}
+@media (max-width: 900px) {
+  body.ftw-next .history-cards { grid-template-columns: 1fr; }
+  body.ftw-next .history-bars { height: 72px; }
+}
 
 /* ---- Energy cards (today) ---- */
 body.ftw-next .energy-cards {
