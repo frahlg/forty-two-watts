@@ -69,8 +69,14 @@
   --hero-sub-text:     oklch(0.5 0.015 250);
   --hero-soc-track:    oklch(0.25 0.015 250);
 
-  --sans: 'Inter', -apple-system, 'Segoe UI', Roboto, sans-serif;
-  --mono: 'JetBrains Mono', 'SF Mono', Menlo, ui-monospace, monospace;
+  /* No external font CDN — all fallbacks are either shipped with the
+     OS (system-ui, Segoe UI, Roboto, Helvetica Neue) or resolved by
+     the browser's native UI-font alias (-apple-system, ui-monospace).
+     'Inter' and 'JetBrains Mono' stay at the front of the stack so
+     they pick up automatically if the operator has them installed
+     locally (or if we later self-host via @font-face). */
+  --sans: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
 
   --radius-lg: 18px;
   --radius-md: 14px;

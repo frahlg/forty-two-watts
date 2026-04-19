@@ -11,11 +11,11 @@
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
           integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
           crossorigin=""></script>
-  <!-- Type: Inter for UI, JetBrains Mono for tabular numerics. Preconnect
-       first so the /next first-paint isn't held up by DNS + handshake. -->
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <!-- Type: Inter preferred for UI, JetBrains Mono for tabular numerics.
+       No external font CDN — the Pi has to boot + render even without
+       internet; theme.css's --sans / --mono stacks fall back to the OS's
+       native UI + mono fonts. -->
+
   <!-- Apply the saved theme BEFORE any stylesheet resolves so light-mode
        users don't see a dark-to-light flash on reload. The full toggle
        handler is at the bottom of <body>; this stub just sets the attr. -->

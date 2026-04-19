@@ -5,12 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Setup — forty-two-watts</title>
   <link rel="icon" type="image/jpeg" href="/logo.jpg">
-  <!-- Inter + JetBrains Mono — same pairing as /next.html and the
-       landing page (fortytwowatts.com). Preconnect first so the
-       critical chrome lands without a round-trip stall on cold starts. -->
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <!-- No external font CDN — the wizard has to boot on a fresh Pi
+       that may not have internet yet. theme.css's --sans / --mono
+       stacks fall back to the OS's system fonts. -->
   <link rel="stylesheet" href="/components/theme.css">
   <link rel="stylesheet" href="/style.css">
   <style>
