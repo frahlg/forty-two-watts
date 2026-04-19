@@ -59,6 +59,15 @@ const (
 	ModeArbitrage Mode = "arbitrage"
 )
 
+// IdleGateThresholdW is the per-slot average battery power below which the
+// plan is treated as "idle this slot" by the planner_self control branch.
+// Mirrors the chargeThresh used by reasonFor — a slot averaging less than
+// this much battery action is interpreted as the DP declining to
+// participate (e.g. saving surplus for a later slot with a richer price/PV
+// mix). The control package duplicates this constant (same import-avoidance
+// trick as SlotDirective) — keep the two in sync.
+const IdleGateThresholdW = 100.0
+
 // Slot is one input time slot for the optimizer.
 type Slot struct {
 	StartMs  int64
@@ -736,7 +745,7 @@ func modeAllows(m Mode, baselineGridW, gridW, actW float64) bool {
 // discharge from an aggressive export-for-arbitrage.
 func reasonFor(s Slot, batteryW, gridW, meanPrice float64) string {
 	baseline := s.LoadW + s.PVW // what grid would see with no battery
-	const chargeThresh = 100.0
+	const chargeThresh = IdleGateThresholdW
 	const gridThresh = 100.0
 	priceTag := ""
 	if s.Confidence < 1.0 {

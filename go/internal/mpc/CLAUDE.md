@@ -72,6 +72,9 @@ Core optimizer (`mpc.go`):
 
 - `Optimize(slots []Slot, p Params) Plan`
 - `Mode` + constants `ModeSelfConsumption` / `ModeCheapCharge` / `ModeArbitrage`
+- `IdleGateThresholdW` — constant consumed by `control` to decide whether
+  a `planner_self` slot's `BatteryEnergyWh` counts as "DP picked idle".
+  Mirrors the `chargeThresh` used by `reasonFor`; keep the two in sync.
 - Types `Slot`, `Params`, `Action`, `Plan`.
 
 Service (`service.go`):
@@ -85,9 +88,15 @@ Service (`service.go`):
 
 ## How it talks to neighbors
 
-- `control/dispatch.go:42` injects `Service.GridTargetAt` as `PlanTargetFunc`.
-  Control loop consults it each cycle; falls back to self-consumption when
-  `(_, false)` is returned.
+- `control/dispatch.go` injects `Service.SlotAt` as `PlanTargetFunc` and
+  `Service.SlotDirectiveAt` as `SlotDirectiveFunc`. Control loop consults
+  them each cycle; falls back to self-consumption when `(_, false)` is
+  returned. For `planner_self` the dispatch reads `BatteryEnergyWh` out of
+  `SlotDirective` only as an "idle-gate" signal (below `IdleGateThresholdW`
+  average power ⇒ hold battery at 0); actual power is still driven by
+  reactive PI-on-gridW=0. For `planner_cheap` / `planner_arbitrage` the
+  dispatch follows the Wh allocation directly. See issue #130 +
+  `docs/plan-ems-contract.md`.
 - Reads price history via `state.Store.LoadPrices` and forecast via
   `LoadForecasts` (`service.go:324,343`).
 - Reads live PV / battery / meter via `telemetry.Store` for SoC + divergence
