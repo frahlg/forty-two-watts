@@ -13,6 +13,7 @@ import (
 
 	"github.com/frahlg/forty-two-watts/go/internal/config"
 	"github.com/frahlg/forty-two-watts/go/internal/drivers"
+	"github.com/frahlg/forty-two-watts/go/internal/evcloud"
 	"github.com/frahlg/forty-two-watts/go/internal/scanner"
 	"github.com/frahlg/forty-two-watts/go/internal/selfupdate"
 )
@@ -134,6 +135,45 @@ func runBootstrap(configPath, webDir, driverDir string) {
 			return
 		}
 		writeBootstrapJSON(w, 200, selfUpdater.Status())
+	})
+
+	// POST /api/ev/chargers — authenticate with an EV cloud provider and
+	// list chargers. Mirror of the full-app handler so the setup wizard
+	// can offer a picker instead of asking the operator to transcribe a
+	// serial. No state store here, so password comes only from the body
+	// (no fallback to the persisted ev_charger.password).
+	mux.HandleFunc("POST /api/ev/chargers", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Provider string `json:"provider"`
+			Email    string `json:"email"`
+			Password string `json:"password"`
+		}
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+			writeBootstrapJSON(w, 400, map[string]string{"error": "invalid request"})
+			return
+		}
+		if req.Provider == "" {
+			req.Provider = "easee"
+		}
+		if req.Email == "" {
+			writeBootstrapJSON(w, 400, map[string]string{"error": "email required"})
+			return
+		}
+		if req.Password == "" {
+			writeBootstrapJSON(w, 400, map[string]string{"error": "password required"})
+			return
+		}
+		p, err := evcloud.Get(req.Provider)
+		if err != nil {
+			writeBootstrapJSON(w, 400, map[string]string{"error": err.Error()})
+			return
+		}
+		chargers, err := p.ListChargers(req.Email, req.Password)
+		if err != nil {
+			writeBootstrapJSON(w, 502, map[string]string{"error": err.Error()})
+			return
+		}
+		writeBootstrapJSON(w, 200, chargers)
 	})
 
 	// POST /api/config → validate, write, restart

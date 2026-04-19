@@ -631,8 +631,12 @@
           <input type="password" id="ev-password">
         </div>
         <div class="form-group">
-          <label for="ev-serial">Serial number</label>
-          <input type="text" id="ev-serial" placeholder="EHHZBKPF">
+          <button type="button" class="btn-secondary" id="ev-load-chargers" onclick="loadEVChargers()">Load chargers</button>
+          <span id="ev-chargers-status" class="scan-status" style="display:none; margin-left: 10px;"></span>
+        </div>
+        <div class="form-group" id="ev-serial-group" style="display:none">
+          <label for="ev-serial">Charger</label>
+          <select id="ev-serial"></select>
         </div>
       </div>
     </div>
