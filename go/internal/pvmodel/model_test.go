@@ -176,3 +176,51 @@ func TestCapsAtDoubleRated(t *testing.T) {
 		t.Errorf("should cap at 1.3× rated, got %f", got)
 	}
 }
+
+// Night-time gate (issue #133). Any clear-sky below the Update-side
+// threshold must yield 0 W regardless of Beta drift. Covers the
+// operator-reported case where the planner showed −1.1 kW of PV at
+// 02:00 because Beta[0] (intercept) had drifted during daytime training.
+func TestPredictAtNightReturnsZero(t *testing.T) {
+	m := NewModel(10000)
+	// Force Beta[0] to a large positive value as if RLS had drifted
+	// the intercept during training. Without the gate, Predict at
+	// clearSky=0 would return this value.
+	m.Beta[0] = 1100
+	m.Samples = 100 // past warmup → full trust on learned model
+
+	t02 := time.Date(2026, 4, 20, 2, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name       string
+		clearSkyW  float64
+	}{
+		{"pitch-dark-midnight", 0},
+		{"astronomical-twilight", 10},
+		{"civil-twilight-just-below-gate", 49},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := m.Predict(c.clearSkyW, 50, t02)
+			if got != 0 {
+				t.Errorf("night (clearSky=%.0f, Beta[0]=%.0f) must return 0, got %.2f W",
+					c.clearSkyW, m.Beta[0], got)
+			}
+		})
+	}
+}
+
+// Sunrise transition: the moment clearSky crosses the gate threshold the
+// model is live again. Anchors the gate boundary so it doesn't silently
+// creep upward.
+func TestPredictAtGateThresholdBoundary(t *testing.T) {
+	m := NewModel(10000)
+	// Reasonable sunrise instant; exact time-of-day doesn't matter
+	// because we vary clearSky directly.
+	tt := time.Date(2026, 4, 20, 5, 0, 0, 0, time.UTC)
+	if got := m.Predict(49, 0, tt); got != 0 {
+		t.Errorf("clearSky=49 should be gated to 0, got %.2f", got)
+	}
+	if got := m.Predict(50, 0, tt); got <= 0 {
+		t.Errorf("clearSky=50 should be above the gate and produce nonzero, got %.2f", got)
+	}
+}
