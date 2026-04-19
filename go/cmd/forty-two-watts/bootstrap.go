@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -13,6 +14,7 @@ import (
 	"github.com/frahlg/forty-two-watts/go/internal/config"
 	"github.com/frahlg/forty-two-watts/go/internal/drivers"
 	"github.com/frahlg/forty-two-watts/go/internal/scanner"
+	"github.com/frahlg/forty-two-watts/go/internal/selfupdate"
 )
 
 // runBootstrap starts a minimal HTTP server that serves the setup wizard.
@@ -21,6 +23,30 @@ import (
 // process so the normal startup path takes over.
 func runBootstrap(configPath, webDir, driverDir string) {
 	slog.Info("no config found — starting setup wizard", "url", "http://localhost:8080/setup")
+
+	// Self-update checker runs here too — <ftw-update-check> on the setup
+	// welcome step is useless without /api/version/check, and the whole
+	// point of that banner is to let the operator pull-and-refresh BEFORE
+	// committing config on an outdated release. Store is nil because there
+	// is no SQLite yet; skip persistence falls back to no-op which is fine
+	// for one-shot setup (dismiss is session-only anyway).
+	var selfUpdater *selfupdate.Checker
+	if envBool("FTW_SELFUPDATE_ENABLED") {
+		current := Version
+		if v, ok := os.LookupEnv("FTW_SELFUPDATE_CURRENT_VERSION"); ok && v != "" {
+			current = v
+			slog.Warn("selfupdate: CurrentVersion overridden for testing",
+				"real_version", Version, "reported_version", current,
+				"env", "FTW_SELFUPDATE_CURRENT_VERSION")
+		}
+		selfUpdater = selfupdate.New(selfupdate.Config{
+			CurrentVersion: current,
+			SocketPath:     envOr("FTW_UPDATER_SOCKET", "/run/ftw-update/sock"),
+			StatusPath:     envOr("FTW_UPDATER_STATUS", "/run/ftw-update/state.json"),
+		}, nil)
+		selfUpdater.Start(context.Background())
+		slog.Info("selfupdate enabled in bootstrap", "socket", envOr("FTW_UPDATER_SOCKET", "/run/ftw-update/sock"))
+	}
 
 	mux := http.NewServeMux()
 
@@ -66,6 +92,48 @@ func runBootstrap(configPath, webDir, driverDir string) {
 			return
 		}
 		writeBootstrapJSON(w, 200, devices)
+	})
+
+	// Self-update routes — mirror the subset of /api/version/* that the
+	// setup-wizard's <ftw-update-check> component needs: check, update,
+	// status. Skip/unskip/restart aren't needed from the wizard (dismiss
+	// is session-only; Restart is a dashboard affordance) so we don't
+	// register them — POST hits land on the default 404 path.
+	mux.HandleFunc("GET /api/version/check", func(w http.ResponseWriter, r *http.Request) {
+		if selfUpdater == nil {
+			writeBootstrapJSON(w, 503, map[string]string{"error": "self-update disabled"})
+			return
+		}
+		if r.URL.Query().Get("force") == "1" {
+			info, err := selfUpdater.Check(r.Context(), true)
+			if err != nil {
+				info.Err = err.Error()
+				writeBootstrapJSON(w, 502, info)
+				return
+			}
+		}
+		writeBootstrapJSON(w, 200, selfUpdater.Info())
+	})
+
+	mux.HandleFunc("POST /api/version/update", func(w http.ResponseWriter, r *http.Request) {
+		if selfUpdater == nil {
+			writeBootstrapJSON(w, 503, map[string]string{"error": "self-update disabled"})
+			return
+		}
+		info := selfUpdater.Info()
+		if err := selfUpdater.Trigger(r.Context(), "update", info.Latest); err != nil {
+			writeBootstrapJSON(w, 502, map[string]string{"error": err.Error()})
+			return
+		}
+		writeBootstrapJSON(w, 202, map[string]any{"status": "started", "action": "update", "target": info.Latest})
+	})
+
+	mux.HandleFunc("GET /api/version/update/status", func(w http.ResponseWriter, r *http.Request) {
+		if selfUpdater == nil {
+			writeBootstrapJSON(w, 503, map[string]string{"error": "self-update disabled"})
+			return
+		}
+		writeBootstrapJSON(w, 200, selfUpdater.Status())
 	})
 
 	// POST /api/config → validate, write, restart
