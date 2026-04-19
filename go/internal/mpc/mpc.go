@@ -389,6 +389,40 @@ func Optimize(slots []Slot, p Params) Plan {
 							cost = -slotExportOre(slot) * (-gridKWh)
 						}
 
+						// Strict self-consumption bias. When the mode
+						// is self_consumption and the battery has
+						// headroom above the SoC floor + 20 %, we
+						// triple the cost the DP sees for any grid-
+						// import slot. That makes discharge (which
+						// avoids the tripled cost) strictly cheaper
+						// than idle whenever the battery can
+						// physically supply the load — even after
+						// accounting for the terminal-SoC credit
+						// the DP would otherwise use to justify
+						// preserving SoC for later.
+						//
+						// Rationale: operator picked self_consumption
+						// because they want "use my battery before
+						// grid." Pure cost-minimisation over a long
+						// horizon with a high horizon-mean will
+						// sometimes prefer importing today to
+						// preserve SoC for tomorrow's peak — that's
+						// arbitrage behaviour, not self-consumption.
+						// The 20-% floor stops the DP from draining
+						// a nearly-empty battery on a cloudy
+						// morning; above it, discharge wins.
+						//
+						// Factor 3 chosen so: (import_cost × 3) beats
+						// (terminal_credit × discharge_wh) on any
+						// reasonable TerminalSoCPrice ≤ retail_mean.
+						// Above that terminal value the DP is
+						// probably misconfigured anyway.
+						if p.Mode == ModeSelfConsumption &&
+							gridKWh > 0 &&
+							soc > p.SoCMinPct+20 {
+							cost *= 3.0
+						}
+
 						// Deadline slot: if this slot is the EV's
 						// deadline AND target isn't met with this
 						// action's evSoc2, add a shortfall penalty.
