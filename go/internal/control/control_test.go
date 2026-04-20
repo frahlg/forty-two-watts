@@ -948,8 +948,12 @@ func TestPlannerSelfIdleGateRampsBatteryToZeroOverCycles(t *testing.T) {
 		BatteryEnergyWh: 0, // idle-gated
 		Strategy:        "self_consumption",
 	}
-	// Battery at -2000 W (discharging), live grid exporting 4 kW.
-	store := seedStore(-4000, []struct {
+	// Battery at -2000 W (discharging), live grid exporting 500 W — under
+	// the #153 idle-gate-override threshold, so the gate truly holds and
+	// this test exercises the ramp-to-zero behaviour it was written to
+	// guard. Heavier export would correctly trigger the override and
+	// invalidate the assumption.
+	store := seedStore(-500, []struct {
 		name          string
 		currentW, soc float64
 	}{
@@ -1258,6 +1262,118 @@ func TestInverterAffinity_EndToEndViaComputeDispatch(t *testing.T) {
 	}
 	if got["ferroamp"] <= 0 {
 		t.Errorf("ferroamp target = %f — should be charging since export + local PV = local routing opportunity", got["ferroamp"])
+	}
+}
+
+// Issue #153: when planner_self's plan wants idle but live conditions
+// are exporting well beyond any plausible forecast error, the gate
+// flips off and reactive PI kicks in to absorb the unused surplus.
+// Operator scenario that prompted this: forecast said 3.4 kW surplus,
+// reality 10 kW; plan idled, batteries sat while 8 kW flowed out to
+// grid at curtail pricing.
+func TestPlannerSelfIdleGateOverridesOnLargeLiveSurplus(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: 0, // plan wants idle
+		Strategy:        "self_consumption",
+	}
+	// Live: grid exporting 3 kW — well over the 1 kW override threshold.
+	store := seedStore(-3000, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	st := NewState(0, 0, "ferroamp")
+	st.Mode = ModePlannerSelf
+	st.UseEnergyDispatch = true
+	st.SlewRateW = 100000
+	st.MinDispatchIntervalS = 0
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) { return dir, true }
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	// With the override, reactive PI sees grid=-3000 and commands positive
+	// charge to drive toward zero. Specifically NOT at 0 (which would be
+	// the idle-gate behaviour).
+	if targets[0].TargetW <= 200 {
+		t.Errorf("TargetW = %f — expected positive charge from reactive PI after override, not idle-held at ~0", targets[0].TargetW)
+	}
+}
+
+// The override must NOT fire when the forecast and reality roughly
+// agree — plans can legitimately choose idle even with small live
+// export (e.g., 500 W slack between PV and load), and the override
+// flipping there would steamroll the DP's optimisation.
+func TestPlannerSelfIdleGateHoldsWhenLiveSurplusUnderThreshold(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: 0,
+		Strategy:        "self_consumption",
+	}
+	// Live: grid exporting 500 W — below the 1 kW override threshold.
+	store := seedStore(-500, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	st := NewState(0, 0, "ferroamp")
+	st.Mode = ModePlannerSelf
+	st.UseEnergyDispatch = true
+	st.SlewRateW = 100000
+	st.MinDispatchIntervalS = 0
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) { return dir, true }
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	// Idle-gate held → totalCorrection = -currentTotal. Battery at 0 →
+	// desired 0, no charge command.
+	if math.Abs(targets[0].TargetW) > 1 {
+		t.Errorf("TargetW = %f — idle-gate should hold with export below override threshold, want ~0", targets[0].TargetW)
+	}
+}
+
+// Idle-gate override is one-directional — triggers only on export
+// (negative grid). If live grid is importing, there's no unused surplus
+// and the gate's "hold SoC for later" reasoning still applies.
+func TestPlannerSelfIdleGateHoldsDuringImport(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: 0,
+		Strategy:        "self_consumption",
+	}
+	// Live: grid importing 2 kW (load-dominated evening).
+	store := seedStore(2000, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	st := NewState(0, 0, "ferroamp")
+	st.Mode = ModePlannerSelf
+	st.UseEnergyDispatch = true
+	st.SlewRateW = 100000
+	st.MinDispatchIntervalS = 0
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) { return dir, true }
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	// Import side: override does nothing, idle-gate drives battery to 0.
+	if math.Abs(targets[0].TargetW) > 1 {
+		t.Errorf("TargetW = %f — override must not fire on import; idle-gate should hold at 0", targets[0].TargetW)
 	}
 }
 
