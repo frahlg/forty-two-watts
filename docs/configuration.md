@@ -69,6 +69,8 @@ drivers:
     lua: drivers/ferroamp.lua     # path to driver script
     is_site_meter: true           # exactly one driver must have this
     battery_capacity_wh: 15200    # 0 if not a battery
+    max_charge_w: 10000           # per-driver cap; 0/unset → 5 kW default
+    max_discharge_w: 10000
     inverter_group: ferroamp      # optional — see "Inverter affinity" below
     mqtt:
       host: 192.168.1.153
@@ -87,6 +89,31 @@ drivers:
 ```
 
 Each driver must have **either** `mqtt` or `modbus` (not both, not neither). Adding/removing/changing a driver hot-reloads — the matching thread spawns or stops within a few seconds.
+
+#### Per-driver power limits (`max_charge_w`, `max_discharge_w`)
+
+Both are optional. When unset (or set to `0`), the dispatcher uses the
+**5 kW default** (`MaxCommandW`) — the conservative floor the EMS
+shipped with during early v0.x. Lift these per driver once you know
+the real hardware capability:
+
+- Ferroamp EnergyHub commonly delivers 10–15 kW continuous charge.
+- Sungrow SH10RT-V13 is rated ~10 kW hybrid.
+- Pixii EssLi is ~5–7 kW.
+
+The two directions are independent — hybrid inverters frequently have
+asymmetric charge/discharge rating, so set both explicitly for any
+driver you tune.
+
+Regardless of how high you set the per-driver caps, the site
+fuse-guard (derived from `fuse.max_amps × voltage × phases`) stays the
+non-negotiable ceiling: it protects both the import (charge-heavy) and
+export (discharge+PV-heavy) sides of the grid boundary, scaling
+targets down in the direction that would otherwise blow the fuse.
+
+Planned follow-up (#145 Phase B/C): observed rolling maxima + self-tune
+probing so the UI can suggest the right value from measurement rather
+than operator guesswork.
 
 #### Inverter affinity (`inverter_group`)
 

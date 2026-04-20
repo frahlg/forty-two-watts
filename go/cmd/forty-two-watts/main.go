@@ -122,6 +122,7 @@ func main() {
 	ctrl.SlewRateW = cfg.Site.SlewRateW
 	ctrl.MinDispatchIntervalS = cfg.Site.MinDispatchIntervalS
 	ctrl.InverterGroups = inverterGroupsFrom(cfg.Drivers)
+	ctrl.DriverLimits = driverLimitsFrom(cfg.Drivers)
 	// Restore persisted mode + target if present. The planner variants
 	// have to be listed too — without them the strategy the user picked in
 	// the UI (planner_self / planner_cheap / planner_arbitrage) is silently
@@ -262,11 +263,13 @@ func main() {
 			}
 			capMu.Unlock()
 
-			// Swap inverter-group tags (#143). Taken under ctrlMu because
-			// ComputeDispatch reads State.InverterGroups; a bare replace
-			// would race with the control loop's 5 s tick.
+			// Swap inverter-group tags (#143) and per-driver power
+			// limits (#145) together. Taken under ctrlMu because
+			// ComputeDispatch reads State.InverterGroups + .DriverLimits;
+			// a bare replace would race with the control loop's 5 s tick.
 			ctrlMu.Lock()
 			ctrl.InverterGroups = inverterGroupsFrom(newCfg.Drivers)
+			ctrl.DriverLimits = driverLimitsFrom(newCfg.Drivers)
 			ctrlMu.Unlock()
 
 			// Push the new pool totals into the planner so its next
@@ -1090,6 +1093,27 @@ func driverCapacitiesFrom(drivers []config.Driver, loadpoints []config.Loadpoint
 			continue
 		}
 		out[d.Name] = d.BatteryCapacityWh
+	}
+	return out
+}
+
+// driverLimitsFrom builds the driver-name → per-battery PowerLimits map
+// used by control.State for per-battery charge/discharge caps (#145).
+// Drivers without an explicit `max_charge_w` / `max_discharge_w` are
+// omitted from the map, so the dispatcher falls through to the global
+// MaxCommandW default for those drivers — same behaviour as before the
+// per-driver feature shipped. Config-reload calls this again and swaps
+// the map atomically in the control state.
+func driverLimitsFrom(drivers []config.Driver) map[string]control.PowerLimits {
+	out := map[string]control.PowerLimits{}
+	for _, d := range drivers {
+		if d.MaxChargeW == 0 && d.MaxDischargeW == 0 {
+			continue
+		}
+		out[d.Name] = control.PowerLimits{
+			MaxChargeW:    d.MaxChargeW,
+			MaxDischargeW: d.MaxDischargeW,
+		}
 	}
 	return out
 }
