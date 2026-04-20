@@ -761,6 +761,27 @@ func main() {
 		return dev.DeviceID, dev.Make, dev.Serial, true
 	})
 	notifSvc.Subscribe(bus)
+	// Persist every dispatch to state.notification_log via a bus
+	// subscriber so the notifications package stays free of storage
+	// logic. The UI reads this table through /api/notifications/history.
+	bus.Subscribe(events.KindNotificationDispatched, func(e events.Event) {
+		ev, ok := e.(events.NotificationDispatched)
+		if !ok {
+			return
+		}
+		if err := st.RecordNotification(state.NotificationEntry{
+			TsMs:      ev.Time.UnixMilli(),
+			EventType: ev.EventType,
+			Driver:    ev.Driver,
+			Title:     ev.Title,
+			Body:      ev.Body,
+			Priority:  ev.Priority,
+			Status:    ev.Status,
+			Error:     ev.Error,
+		}); err != nil {
+			slog.Warn("notification_log: record failed", "err", err)
+		}
+	})
 	// Late-bind onto the Deps literal that was built earlier with a nil
 	// notifSvc (the deps struct is assembled before this block runs).
 	// Same pattern haBridge uses a few lines below.

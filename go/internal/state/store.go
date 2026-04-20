@@ -221,6 +221,25 @@ func (s *Store) migrate() error {
 		// DER. The Nova-generated der_id is stored purely for diagnostics
 		// and future control-topic subscriptions; the publish path uses
 		// (hardware_id, der_name) which are client-owned.
+		// Notification history — one row per attempted push. Populated by
+		// a bus subscriber in main.go (see events.NotificationDispatched)
+		// so the notifications service itself stays free of storage logic.
+		// Retention is unbounded for now; volumes are small (operators
+		// configure a threshold + cooldown, not per-tick events) so a
+		// house would take years to accumulate even 100k rows.
+		`CREATE TABLE IF NOT EXISTS notification_log (
+			id         INTEGER PRIMARY KEY AUTOINCREMENT,
+			ts_ms      INTEGER NOT NULL,
+			event_type TEXT NOT NULL,
+			driver     TEXT NOT NULL DEFAULT '',
+			title      TEXT NOT NULL DEFAULT '',
+			body       TEXT NOT NULL DEFAULT '',
+			priority   INTEGER NOT NULL DEFAULT 0,
+			status     TEXT NOT NULL,
+			error      TEXT NOT NULL DEFAULT ''
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_notification_log_ts ON notification_log(ts_ms DESC)`,
+
 		`CREATE TABLE IF NOT EXISTS nova_ders (
 			device_id   TEXT NOT NULL,
 			der_type    TEXT NOT NULL,

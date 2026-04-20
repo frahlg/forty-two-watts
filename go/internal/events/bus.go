@@ -61,10 +61,11 @@ func (b *Bus) Publish(e Event) {
 // ---- event kinds ----
 
 const (
-	KindHealthTick       = "health.tick"
-	KindDriverLost       = "driver.lost"
-	KindDriverRecovered  = "driver.recovered"
-	KindNotificationTest = "notifications.test"
+	KindHealthTick             = "health.tick"
+	KindDriverLost             = "driver.lost"
+	KindDriverRecovered        = "driver.recovered"
+	KindNotificationTest       = "notifications.test"
+	KindNotificationDispatched = "notifications.dispatched"
 )
 
 // HealthTick is fired every control-loop tick with the current telemetry
@@ -97,6 +98,23 @@ type DriverRecovered struct {
 }
 
 func (DriverRecovered) Kind() string { return KindDriverRecovered }
+
+// NotificationDispatched is emitted by the notifications service after
+// every publish attempt — success or failure. Subscribers (history
+// log, future audit/webhook sinks) consume it without needing a direct
+// reference to the notifications package.
+type NotificationDispatched struct {
+	Time      time.Time
+	EventType string
+	Driver    string
+	Title     string
+	Body      string
+	Priority  int
+	Status    string // "sent" | "failed"
+	Error     string // empty when Status=="sent"
+}
+
+func (NotificationDispatched) Kind() string { return KindNotificationDispatched }
 
 // NotificationTest is emitted by the API "Send test" endpoint. Reply
 // receives the dispatch result so the HTTP handler can surface any

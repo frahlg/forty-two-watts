@@ -160,6 +160,7 @@ func (s *Server) routes() {
 	s.handle("GET  /api/ha/status", s.handleHAStatus)
 	s.handle("GET  /api/notifications/status", s.handleNotificationsStatus)
 	s.handle("GET  /api/notifications/defaults", s.handleNotificationsDefaults)
+	s.handle("GET  /api/notifications/history", s.handleNotificationsHistory)
 	s.handle("POST /api/notifications/test", s.handleNotificationsTest)
 	s.handle("GET  /api/battery_models", s.handleGetModels)
 	s.handle("POST /api/battery_models/reset", s.handleResetModel)
@@ -1852,4 +1853,29 @@ func (s *Server) handleNotificationsTest(w http.ResponseWriter, r *http.Request)
 // backend renders when the operator leaves a custom template blank.
 func (s *Server) handleNotificationsDefaults(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, notifications.EventDefaults())
+}
+
+// GET /api/notifications/history?limit=N — recent notification dispatches
+// persisted to state.notification_log. limit is clamped to [1, 500];
+// defaults to 100.
+func (s *Server) handleNotificationsHistory(w http.ResponseWriter, r *http.Request) {
+	if s.deps.State == nil {
+		writeJSON(w, 200, []any{})
+		return
+	}
+	limit := 100
+	if q := r.URL.Query().Get("limit"); q != "" {
+		if n, err := strconv.Atoi(q); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	if limit > 500 {
+		limit = 500
+	}
+	rows, err := s.deps.State.RecentNotifications(limit)
+	if err != nil {
+		writeJSON(w, 500, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, 200, rows)
 }

@@ -135,6 +135,7 @@ type Service struct {
 	cfg          *config.Notifications
 	pub          Publisher
 	lookup       DeviceLookup
+	bus          *events.Bus
 	lastFired    map[string]time.Time
 	alreadyFired map[string]bool
 	activeAlert  map[string]bool
@@ -190,10 +191,15 @@ func (s *Service) Reload(cfg *config.Notifications) {
 // Subscribe wires this service onto a shared event bus. The core control
 // loop publishes HealthTick each tick; the API's /test endpoint publishes
 // NotificationTest. Neither producer knows about notifications internals.
+// The bus is also retained on the Service so dispatch() can emit
+// NotificationDispatched events for downstream subscribers (history log).
 func (s *Service) Subscribe(bus *events.Bus) {
 	if s == nil || bus == nil {
 		return
 	}
+	s.mu.Lock()
+	s.bus = bus
+	s.mu.Unlock()
 	bus.Subscribe(events.KindHealthTick, func(e events.Event) {
 		ev, ok := e.(events.HealthTick)
 		if !ok {
@@ -377,6 +383,11 @@ func (s *Service) SendTest() error {
 		s.sent++
 	}
 	s.mu.Unlock()
+	if err != nil {
+		s.emitDispatched("test", "", msg, "failed", err.Error())
+	} else {
+		s.emitDispatched("test", "", msg, "sent", "")
+	}
 	return err
 }
 
@@ -446,10 +457,33 @@ func (s *Service) dispatch(cfg *config.Notifications, rule config.NotificationRu
 	if err := s.pub.Publish(ctx, msg); err != nil {
 		slog.Warn("notifications: publish failed", "event", rule.Type, "driver", data.Device, "err", err)
 		s.bumpFailed()
+		s.emitDispatched(rule.Type, data.Device, msg, "failed", err.Error())
 		return
 	}
 	slog.Info("notifications: sent", "event", rule.Type, "driver", data.Device)
 	s.bumpSent()
+	s.emitDispatched(rule.Type, data.Device, msg, "sent", "")
+}
+
+// emitDispatched publishes a NotificationDispatched event for history
+// loggers + future audit subscribers. Safe when the bus is nil.
+func (s *Service) emitDispatched(eventType, driver string, m Message, status, errStr string) {
+	s.mu.Lock()
+	bus := s.bus
+	s.mu.Unlock()
+	if bus == nil {
+		return
+	}
+	bus.Publish(events.NotificationDispatched{
+		Time:      time.Now(),
+		EventType: eventType,
+		Driver:    driver,
+		Title:     m.Title,
+		Body:      m.Body,
+		Priority:  m.Priority,
+		Status:    status,
+		Error:     errStr,
+	})
 }
 
 func (s *Service) bumpSent() {
