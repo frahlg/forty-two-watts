@@ -507,3 +507,69 @@ func TestUpdateAvailableDispatches(t *testing.T) {
 		t.Fatalf("cooldown did not dedupe: got %d msgs", len(pub.Messages()))
 	}
 }
+
+func TestFuseOverLimitFiresAfterThresholdAndResets(t *testing.T) {
+	cfg := baseCfg()
+	cfg.Events = append(cfg.Events, config.NotificationRule{
+		Type: EventFuseOverLimit, Enabled: true, ThresholdS: 30, Priority: 5, CooldownS: 900,
+	})
+	pub := &fakePub{}
+	svc, clk := newSvc(cfg, pub)
+	bus := events.NewBus()
+	svc.Subscribe(bus)
+
+	// Reader starts with L1 at 20 A, limit 16 A.
+	var l1 float64 = 20.0
+	svc.SetFuseReader(func() (map[string]float64, float64, bool) {
+		return map[string]float64{"L1": l1, "L2": 10, "L3": 11}, 16.0, true
+	})
+
+	// First tick: over the limit, but threshold hasn't sustained.
+	bus.Publish(events.HealthTick{Health: map[string]telemetry.DriverHealth{}, Now: clk.now()})
+	time.Sleep(20 * time.Millisecond)
+	if n := len(pub.Messages()); n != 0 {
+		t.Fatalf("before threshold: got %d msgs", n)
+	}
+
+	// Advance past threshold — should fire once.
+	clk.advance(40 * time.Second)
+	bus.Publish(events.HealthTick{Health: map[string]telemetry.DriverHealth{}, Now: clk.now()})
+	deadline := time.Now().Add(time.Second)
+	for len(pub.Messages()) < 1 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	msgs := pub.Messages()
+	if len(msgs) != 1 {
+		t.Fatalf("after threshold: got %d msgs", len(msgs))
+	}
+	if !strings.Contains(msgs[0].Title, "L1") {
+		t.Errorf("title missing phase: %q", msgs[0].Title)
+	}
+	if !strings.Contains(msgs[0].Body, "20.0") || !strings.Contains(msgs[0].Body, "16") {
+		t.Errorf("body missing amps/limit: %q", msgs[0].Body)
+	}
+
+	// Still over — latch prevents a second fire in the same outage.
+	clk.advance(5 * time.Second)
+	bus.Publish(events.HealthTick{Health: map[string]telemetry.DriverHealth{}, Now: clk.now()})
+	time.Sleep(20 * time.Millisecond)
+	if n := len(pub.Messages()); n != 1 {
+		t.Fatalf("still-over: expected 1, got %d", n)
+	}
+
+	// Back under: the window + latch reset.
+	l1 = 12
+	bus.Publish(events.HealthTick{Health: map[string]telemetry.DriverHealth{}, Now: clk.now()})
+	time.Sleep(20 * time.Millisecond)
+
+	// New outage — cooldown still blocks a quick refire.
+	l1 = 20
+	clk.advance(40 * time.Second)
+	bus.Publish(events.HealthTick{Health: map[string]telemetry.DriverHealth{}, Now: clk.now()})
+	clk.advance(60 * time.Second)
+	bus.Publish(events.HealthTick{Health: map[string]telemetry.DriverHealth{}, Now: clk.now()})
+	time.Sleep(20 * time.Millisecond)
+	if n := len(pub.Messages()); n != 1 {
+		t.Fatalf("cooldown did not block refire: got %d msgs", n)
+	}
+}

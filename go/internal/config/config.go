@@ -704,6 +704,7 @@ func applyDefaults(c *Config) {
 				{Type: "driver_offline", Enabled: false, ThresholdS: 600, Priority: 4, CooldownS: 3600},
 				{Type: "driver_recovered", Enabled: false, Priority: 3},
 				{Type: "update_available", Enabled: false, Priority: 3, CooldownS: 3600},
+				{Type: "fuse_over_limit", Enabled: false, ThresholdS: 30, Priority: 5, CooldownS: 900},
 			},
 		}
 	}
@@ -715,6 +716,7 @@ func applyDefaults(c *Config) {
 			{Type: "driver_offline", Enabled: false, ThresholdS: 600, Priority: 4, CooldownS: 3600},
 			{Type: "driver_recovered", Enabled: false, Priority: 3},
 			{Type: "update_available", Enabled: false, Priority: 3, CooldownS: 3600},
+			{Type: "fuse_over_limit", Enabled: false, ThresholdS: 30, Priority: 5, CooldownS: 900},
 		}
 		have := make(map[string]bool, len(c.Notifications.Events))
 		for _, r := range c.Notifications.Events {

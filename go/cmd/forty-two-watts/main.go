@@ -764,6 +764,30 @@ func main() {
 		}
 		return dev.DeviceID, dev.Make, dev.Serial, true
 	})
+	// FuseReader: on each HealthTick the fuse_over_limit rule reads
+	// the site meter's live per-phase currents from telemetry and
+	// compares against cfg.Fuse.MaxAmps. Closes over cfg + cfgMu so
+	// hot-reloaded fuse changes take effect without restart; closes
+	// over tel so new metric emits are picked up immediately.
+	notifSvc.SetFuseReader(func() (map[string]float64, float64, bool) {
+		cfgMu.RLock()
+		siteMeter := cfg.SiteMeterDriver()
+		limitA := cfg.Fuse.MaxAmps
+		cfgMu.RUnlock()
+		if siteMeter == "" || limitA <= 0 {
+			return nil, 0, false
+		}
+		amps := map[string]float64{}
+		for _, phase := range []string{"l1", "l2", "l3"} {
+			if v, _, ok := tel.LatestMetric(siteMeter, "meter_"+phase+"_a"); ok {
+				amps[strings.ToUpper(phase)] = v
+			}
+		}
+		if len(amps) == 0 {
+			return nil, limitA, false
+		}
+		return amps, limitA, true
+	})
 	notifSvc.Subscribe(bus)
 	// Persist every dispatch to state.notification_log via a bus
 	// subscriber so the notifications package stays free of storage

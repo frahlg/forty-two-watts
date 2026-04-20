@@ -35,6 +35,7 @@ const (
 	EventDriverOffline   = "driver_offline"
 	EventDriverRecovered = "driver_recovered"
 	EventUpdateAvailable = "update_available"
+	EventFuseOverLimit   = "fuse_over_limit"
 )
 
 // Defaults for a freshly-seeded rule.
@@ -49,15 +50,22 @@ func DefaultRules() []config.NotificationRule {
 	return []config.NotificationRule{
 		{Type: EventDriverOffline, Enabled: false, ThresholdS: DefaultThresholdS, Priority: 4, CooldownS: DefaultCooldownS},
 		{Type: EventDriverRecovered, Enabled: false, Priority: 3, CooldownS: 0},
-		// New releases are infrequent — cooldown keeps us from re-firing
-		// if a probe flaps the same tag after a brief network blip.
 		{Type: EventUpdateAvailable, Enabled: false, Priority: 3, CooldownS: 3600},
+		// Default threshold 30 s — brief inrush / dryer starts shouldn't
+		// page the operator. Cooldown 15 min per phase.
+		{Type: EventFuseOverLimit, Enabled: false, ThresholdS: 30, Priority: 5, CooldownS: 900},
 	}
 }
 
 // DeviceLookup resolves a driver name to its hardware-stable identity.
 // Returns ok=false when no device has been registered yet (cold start).
 type DeviceLookup = func(name string) (deviceID, makeStr, serial string, ok bool)
+
+// FuseReader is a live snapshot of per-phase currents and the site fuse
+// rating, used by the fuse_over_limit rule. Returns ok=false when the
+// site meter hasn't emitted phase currents yet or no fuse is configured.
+// main.go wires this against telemetry.Store.LatestMetric + cfg.Fuse.
+type FuseReader = func() (amps map[string]float64, limitA float64, ok bool)
 
 // Message is a rendered notification payload.
 type Message struct {
@@ -139,26 +147,45 @@ type Service struct {
 	cfg          *config.Notifications
 	pub          Publisher
 	lookup       DeviceLookup
+	fuseReader   FuseReader
 	bus          *events.Bus
 	lastFired    map[string]time.Time
 	alreadyFired map[string]bool
 	activeAlert  map[string]bool
-	sent         uint64
-	failed       uint64
-	now          func() time.Time
+	// fuseFirstOverAt[phase] is the tick we first saw a phase over its
+	// limit. Cleared on tick that observes the phase back under limit.
+	// Used by the fuse_over_limit rule to enforce the threshold_s
+	// sustained-over check, analogous to driver_offline's threshold.
+	fuseFirstOverAt map[string]time.Time
+	sent            uint64
+	failed          uint64
+	now             func() time.Time
 }
 
 // New constructs a Service. cfg may be nil (no-op until Reload is called).
 func New(cfg *config.Notifications, pub Publisher, lookup DeviceLookup) *Service {
 	return &Service{
-		cfg:          cfg,
-		pub:          pub,
-		lookup:       lookup,
-		lastFired:    map[string]time.Time{},
-		alreadyFired: map[string]bool{},
-		activeAlert:  map[string]bool{},
-		now:          time.Now,
+		cfg:             cfg,
+		pub:             pub,
+		lookup:          lookup,
+		lastFired:       map[string]time.Time{},
+		alreadyFired:    map[string]bool{},
+		activeAlert:     map[string]bool{},
+		fuseFirstOverAt: map[string]time.Time{},
+		now:             time.Now,
 	}
+}
+
+// SetFuseReader wires the per-tick phase-current snapshot fn used by
+// the fuse_over_limit rule. Safe to call at any point; nil disables
+// the rule (the evaluator short-circuits).
+func (s *Service) SetFuseReader(fr FuseReader) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.fuseReader = fr
+	s.mu.Unlock()
 }
 
 // SetPublisher swaps the transport. Used by main.go's reload applier to
@@ -214,6 +241,9 @@ func (s *Service) Subscribe(bus *events.Bus) {
 		// 10 s HTTP Publish inside dispatch(). Without this, a slow
 		// ntfy server would stall the next control tick.
 		go s.observeAt(ev.Health, ev.Now)
+		// Fuse rule runs off the same HealthTick cadence so brief
+		// inrush currents don't fire without the threshold sustaining.
+		go s.evaluateFuse(ev.Now)
 	})
 	bus.Subscribe(events.KindNotificationTest, func(e events.Event) {
 		ev, ok := e.(events.NotificationTest)
@@ -277,6 +307,92 @@ func (s *Service) handleUpdateAvailable(ev events.UpdateAvailable) {
 		ReleaseURL:      ev.ReleaseNotesURL,
 	}
 	s.dispatch(cfg, rule, data)
+}
+
+// evaluateFuse reads the live per-phase current snapshot and fires the
+// fuse_over_limit rule when a phase has been over its rating for at
+// least threshold_s. State is per-phase: firstOverAt records when the
+// over-window started, alreadyFired latches to fire once per outage,
+// and cooldownS (shared lastFired map) rate-limits re-fires across
+// quick recover/over cycles.
+func (s *Service) evaluateFuse(now time.Time) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	if s.cfg == nil || !s.cfg.Enabled {
+		s.mu.Unlock()
+		return
+	}
+	rule, ok := findRule(s.cfg.Events, EventFuseOverLimit)
+	if !ok || !rule.Enabled {
+		s.mu.Unlock()
+		return
+	}
+	reader := s.fuseReader
+	if reader == nil {
+		s.mu.Unlock()
+		return
+	}
+	amps, limitA, ok := reader()
+	if !ok || limitA <= 0 {
+		s.mu.Unlock()
+		return
+	}
+	cfg := s.cfg
+	threshold := time.Duration(rule.ThresholdS) * time.Second
+	if threshold == 0 {
+		threshold = 30 * time.Second
+	}
+	type toFire struct {
+		rule config.NotificationRule
+		data templateData
+	}
+	var pending []toFire
+	for phase, a := range amps {
+		key := EventFuseOverLimit + "|" + phase
+		if a <= limitA {
+			// Back under: reset the over-window and per-outage latch.
+			delete(s.fuseFirstOverAt, phase)
+			delete(s.alreadyFired, key)
+			continue
+		}
+		first, ok := s.fuseFirstOverAt[phase]
+		if !ok {
+			s.fuseFirstOverAt[phase] = now
+			continue
+		}
+		if now.Sub(first) < threshold {
+			continue
+		}
+		if s.alreadyFired[key] {
+			continue
+		}
+		if rule.CooldownS > 0 {
+			if last, ok := s.lastFired[key]; ok && now.Sub(last) < time.Duration(rule.CooldownS)*time.Second {
+				continue
+			}
+		}
+		s.alreadyFired[key] = true
+		s.lastFired[key] = now
+		pending = append(pending, toFire{
+			rule: rule,
+			data: templateData{
+				EventType: EventFuseOverLimit,
+				Timestamp: now.UTC().Format(time.RFC3339),
+				Duration:  humanDuration(now.Sub(first)),
+				DurationS: int(now.Sub(first) / time.Second),
+				Phase:     phase,
+				Amps:      a,
+				LimitA:    limitA,
+			},
+		})
+	}
+	s.mu.Unlock()
+
+	for _, f := range pending {
+		s.dispatch(cfg, f.rule, f.data)
+	}
 }
 
 func findRule(rules []config.NotificationRule, eventType string) (config.NotificationRule, bool) {
@@ -497,6 +613,10 @@ type templateData struct {
 	Version         string
 	PreviousVersion string
 	ReleaseURL      string
+	// Populated for fuse_over_limit events only.
+	Phase  string  // "L1" | "L2" | "L3"
+	Amps   float64 // current reading on that phase
+	LimitA float64 // fuse rating (site.fuse.max_amps)
 }
 
 func (s *Service) buildData(driver, eventType string, since time.Duration, now time.Time) templateData {
@@ -624,7 +744,7 @@ func EventDefaults() map[string]struct {
 	Title string `json:"title"`
 	Body  string `json:"body"`
 } {
-	types := []string{EventDriverOffline, EventDriverRecovered, EventUpdateAvailable}
+	types := []string{EventDriverOffline, EventDriverRecovered, EventUpdateAvailable, EventFuseOverLimit}
 	out := make(map[string]struct {
 		Title string `json:"title"`
 		Body  string `json:"body"`
@@ -646,6 +766,8 @@ func defaultTitleFor(eventType string) string {
 		return "forty-two-watts: {{.Device}} recovered"
 	case EventUpdateAvailable:
 		return "forty-two-watts: update {{.Version}} available"
+	case EventFuseOverLimit:
+		return "forty-two-watts: {{.Phase}} over fuse limit"
 	}
 	return "forty-two-watts: {{.EventType}}"
 }
@@ -658,6 +780,8 @@ func defaultBodyFor(eventType string) string {
 		return "{{.Device}} is reporting telemetry again."
 	case EventUpdateAvailable:
 		return "Version {{.Version}} is available (running {{.PreviousVersion}}). {{.ReleaseURL}}"
+	case EventFuseOverLimit:
+		return "{{.Phase}} draw {{printf \"%.1f\" .Amps}} A exceeded the {{printf \"%.0f\" .LimitA}} A fuse for {{.Duration}}."
 	}
 	return "{{.EventType}} for {{.Device}}"
 }

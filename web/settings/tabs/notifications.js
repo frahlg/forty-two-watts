@@ -96,12 +96,11 @@
       for (var ei = 0; ei < nc.events.length; ei++) {
         var rule = nc.events[ei];
         var def = defaults[rule.type] || {};
-        // Only driver_offline uses threshold_s on the backend. Other
-        // event types (driver_recovered fires within 30 s of telemetry
-        // resuming; update_available fires when a new release is
-        // discovered) would show a field that does nothing — skip it
-        // and add a small note instead.
-        var usesThreshold = rule.type === "driver_offline";
+        // Types that use threshold_s (sustained-over window):
+        // driver_offline and fuse_over_limit. Others (driver_recovered,
+        // update_available) would render a dead field — skip with a
+        // clarifying note.
+        var usesThreshold = rule.type === "driver_offline" || rule.type === "fuse_over_limit";
         var noThresholdNote = rule.type === "driver_recovered"
           ? "Fires within 30 s of telemetry resuming — no threshold configurable."
           : rule.type === "update_available"
@@ -150,6 +149,7 @@
         '<p style="color:var(--text-dim);font-size:0.8rem;margin-top:8px">' +
         'Template fields — driver events: {{.Device}}, {{.Make}}, {{.Serial}}, {{.Duration}}, {{.DurationS}}. ' +
         'update_available: {{.Version}}, {{.PreviousVersion}}, {{.ReleaseURL}}. ' +
+        'fuse_over_limit: {{.Phase}}, {{.Amps}}, {{.LimitA}}, {{.Duration}}. ' +
         'Always: {{.EventType}}, {{.Timestamp}}.' +
         '</p>';
       return html;

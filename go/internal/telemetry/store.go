@@ -147,6 +147,17 @@ type Store struct {
 	// the (potentially blocking) DB writer.
 	pendingMu sync.Mutex
 	pending   []MetricSample
+
+	// Live cache of latest value per (driver, metric). Lets consumers
+	// (e.g. the fuse-over-limit notification rule) read a metric without
+	// waiting for the control loop to flush it to the TS DB.
+	latestMu     sync.RWMutex
+	latestMetric map[string]metricSnap
+}
+
+type metricSnap struct {
+	Value     float64
+	UpdatedAt time.Time
 }
 
 // NewStore creates an empty telemetry store with default Kalman params.
@@ -155,6 +166,7 @@ func NewStore() *Store {
 		readings:         make(map[string]*DerReading),
 		filters:          make(map[string]*KalmanFilter1D),
 		health:           make(map[string]*DriverHealth),
+		latestMetric:     make(map[string]metricSnap),
 		processNoise:     100, // W of expected change between samples
 		measurementNoise: 50,  // W of sensor noise
 		// Load: slow filter (process 20 — load changes slowly, measurement 500 — noisy)
@@ -218,11 +230,28 @@ func (s *Store) Update(driver string, t DerType, rawW float64, soc *float64, dat
 // pv/battery/meter shape (temperatures, voltages, frequencies, etc.).
 // Drained by the control loop via FlushSamples.
 func (s *Store) EmitMetric(driver, name string, value float64) {
+	now := time.Now()
 	s.pendingMu.Lock()
 	s.pending = append(s.pending, MetricSample{
-		Driver: driver, Metric: name, TsMs: time.Now().UnixMilli(), Value: value,
+		Driver: driver, Metric: name, TsMs: now.UnixMilli(), Value: value,
 	})
 	s.pendingMu.Unlock()
+	s.latestMu.Lock()
+	s.latestMetric[driver+":"+name] = metricSnap{Value: value, UpdatedAt: now}
+	s.latestMu.Unlock()
+}
+
+// LatestMetric returns the most recent value for a given (driver, metric).
+// ok=false when nothing has been emitted yet. Used by consumers that need
+// live values (e.g. fuse-over-limit rule reading meter_l1_a) without
+// waiting for the control loop's flush to the TS DB.
+func (s *Store) LatestMetric(driver, name string) (float64, time.Time, bool) {
+	s.latestMu.RLock()
+	defer s.latestMu.RUnlock()
+	if snap, ok := s.latestMetric[driver+":"+name]; ok {
+		return snap.Value, snap.UpdatedAt, true
+	}
+	return 0, time.Time{}, false
 }
 
 // FlushSamples returns + clears all buffered metric samples. The control
