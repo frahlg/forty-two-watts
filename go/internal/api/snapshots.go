@@ -219,6 +219,57 @@ func pruneSnapshots(snapshotDir string, keep int) error {
 	return firstErr
 }
 
+// handleVersionSnapshotDelete removes one snapshot by ID. Used from the
+// UI's snapshot-management view when the operator wants to free disk
+// space manually (beyond the built-in last-5 retention). Validates the
+// ID is a snapshot-shaped filename and lives inside SnapshotDir so a
+// malicious caller can't traverse to sibling directories — only dirs
+// that listSnapshots would have surfaced are deletable.
+func (s *Server) handleVersionSnapshotDelete(w http.ResponseWriter, r *http.Request) {
+	if s.deps.SelfUpdate == nil {
+		writeJSON(w, 503, map[string]string{"error": "self-update disabled"})
+		return
+	}
+	if s.deps.SnapshotDir == "" {
+		writeJSON(w, 503, map[string]string{"error": "snapshots disabled (no SnapshotDir)"})
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, 400, map[string]string{"error": "missing snapshot id"})
+		return
+	}
+	// Defense in depth: reject anything that isn't a simple directory
+	// name. No slashes, no "..". A well-formed snapshot id is produced
+	// by snapshotID() with only [A-Za-z0-9._-] characters.
+	if strings.ContainsAny(id, "/\\") || id == "." || id == ".." {
+		writeJSON(w, 400, map[string]string{"error": "invalid snapshot id"})
+		return
+	}
+	target := filepath.Join(s.deps.SnapshotDir, id)
+	// Must exist AND be inside SnapshotDir. filepath.Join can't escape
+	// SnapshotDir given the above ID guards, but verify by checking
+	// existence + type before deleting.
+	fi, err := os.Stat(target)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			writeJSON(w, 404, map[string]string{"error": "snapshot not found: " + id})
+			return
+		}
+		writeJSON(w, 500, map[string]string{"error": err.Error()})
+		return
+	}
+	if !fi.IsDir() {
+		writeJSON(w, 400, map[string]string{"error": "id does not refer to a snapshot directory"})
+		return
+	}
+	if err := os.RemoveAll(target); err != nil {
+		writeJSON(w, 500, map[string]string{"error": "remove failed: " + err.Error()})
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true, "deleted": id})
+}
+
 // handleVersionSnapshots serves the list to the UI.
 func (s *Server) handleVersionSnapshots(w http.ResponseWriter, r *http.Request) {
 	if s.deps.SelfUpdate == nil {

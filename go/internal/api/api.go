@@ -183,6 +183,7 @@ func (s *Server) routes() {
 	s.handle("POST /api/version/restart", s.handleVersionRestart)
 	s.handle("GET  /api/version/update/status", s.handleVersionUpdateStatus)
 	s.handle("GET  /api/version/snapshots", s.handleVersionSnapshots)
+	s.handle("DELETE /api/version/snapshots/{id}", s.handleVersionSnapshotDelete)
 
 	// ---- Static web UI ----
 	// Everything not matched above falls through to the static server.

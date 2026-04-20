@@ -28,6 +28,8 @@
       this._statusTimer = null;
       this._disabled = false;         // set true on 503 (feature gated off)
       this._skipSnapshot = false;     // per-session opt-out toggle (#149)
+      this._snapshots = null;         // last /api/version/snapshots payload (#150)
+      this._deletingSnapshot = null;  // id being deleted right now (#150)
       this._render();
     }
 
@@ -49,6 +51,34 @@
       this._phase = "dialog";
       this._render();
       this._refresh(false); // surface the freshest info when opened
+      this._refreshSnapshots(); // pull the list for the Snapshots accordion
+    }
+
+    // Fetch the snapshot list so the operator sees the retained set and
+    // can delete entries without SSH. Tolerates 503 (feature off) and
+    // 404s silently — the UI simply hides the section.
+    _refreshSnapshots() {
+      if (this._disabled) return;
+      fetch("/api/version/snapshots")
+        .then((r) => (r.ok ? r.json() : null))
+        .then((body) => {
+          if (!body) return;
+          this._snapshots = body;
+          this._render();
+        })
+        .catch(() => { /* silent */ });
+    }
+
+    _deleteSnapshot(id) {
+      if (!id) return;
+      // Guard against rapid double-clicks while the request is pending.
+      if (this._deletingSnapshot) return;
+      this._deletingSnapshot = id;
+      fetch("/api/version/snapshots/" + encodeURIComponent(id), { method: "DELETE" })
+        .finally(() => {
+          this._deletingSnapshot = null;
+          this._refreshSnapshots();
+        });
     }
 
     // Permanently shut the element down: stop polling, clear shadow DOM, hide
@@ -280,11 +310,50 @@
             </dl>
             ${bodyHTML}
             ${snapshotHint}
+            ${this._snapshotsSectionHTML()}
             ${info.err ? `<p class="err">Last check failed: ${escapeHTML(info.err)}</p>` : ""}
           </div>
           <footer>${actions}</footer>
         </div>
       `;
+    }
+
+    _snapshotsSectionHTML() {
+      const payload = this._snapshots;
+      if (!payload || !payload.enabled) return "";
+      const snaps = Array.isArray(payload.snapshots) ? payload.snapshots : [];
+      if (!snaps.length) {
+        return `<details class="snapshots">
+                  <summary>Backup snapshots (0)</summary>
+                  <p class="dim snapshots-empty">No backups on disk yet. One is created before every update unless you opt out.</p>
+                </details>`;
+      }
+      const rows = snaps.map((s) => this._snapshotRowHTML(s)).join("");
+      return `<details class="snapshots">
+                <summary>Backup snapshots (${snaps.length})</summary>
+                <table class="snapshots-table">
+                  <thead>
+                    <tr><th>Created</th><th>From → To</th><th>Size</th><th></th></tr>
+                  </thead>
+                  <tbody>${rows}</tbody>
+                </table>
+              </details>`;
+    }
+
+    _snapshotRowHTML(s) {
+      const when = s.created_at ? new Date(s.created_at).toLocaleString() : "?";
+      const range = (s.from_version || "?") + " → " + (s.to_version || "?");
+      const sizeMB = s.size_bytes ? (s.size_bytes / (1024 * 1024)).toFixed(1) + " MB" : "?";
+      const deleting = this._deletingSnapshot === s.id;
+      const deleteBtn = deleting
+        ? `<span class="dim">deleting…</span>`
+        : `<button class="btn btn-ghost btn-small" data-action="delete-snapshot" data-id="${escapeHTML(s.id)}" title="Delete this backup">Delete</button>`;
+      return `<tr>
+                <td class="nowrap">${escapeHTML(when)}</td>
+                <td class="mono">${escapeHTML(range)}</td>
+                <td class="nowrap">${escapeHTML(sizeMB)}</td>
+                <td>${deleteBtn}</td>
+              </tr>`;
     }
 
     _updatingModalHTML() {
@@ -355,6 +424,17 @@
               // its own state and a full render would reset focus.
               this._skipSnapshot = !!e.currentTarget.checked;
               break;
+            case "delete-snapshot": {
+              const id = e.currentTarget.dataset.id;
+              // Simple confirm — this is a destructive operation but a
+              // recoverable one (the retention/prune logic will regenerate
+              // on future updates). Don't over-engineer the dialog.
+              if (id && window.confirm(`Delete snapshot ${id}? This can't be undone.`)) {
+                this._deleteSnapshot(id);
+                this._render(); // reflect the "deleting…" state immediately
+              }
+              break;
+            }
           }
         });
       });
@@ -516,6 +596,55 @@
         .snapshot-skip input[type="checkbox"] {
           margin: 0;
           cursor: pointer;
+        }
+        .snapshots {
+          margin-top: 0.75rem;
+          border: 1px solid var(--border, #334155);
+          border-radius: 4px;
+          background: rgba(255,255,255,0.02);
+        }
+        .snapshots > summary {
+          padding: 0.5rem 0.75rem;
+          cursor: pointer;
+          font-weight: 600;
+          font-size: 0.85rem;
+          color: var(--text-dim, #94a3b8);
+          list-style: none;
+        }
+        .snapshots > summary::-webkit-details-marker { display: none; }
+        .snapshots > summary::before {
+          content: "▸";
+          display: inline-block;
+          margin-right: 0.4rem;
+          transition: transform 0.15s;
+        }
+        .snapshots[open] > summary::before { transform: rotate(90deg); }
+        .snapshots-empty {
+          margin: 0.25rem 0.9rem 0.6rem;
+          font-size: 0.78rem;
+        }
+        .snapshots-table {
+          width: 100%;
+          border-collapse: collapse;
+          font-size: 0.78rem;
+          color: var(--text-dim, #94a3b8);
+        }
+        .snapshots-table th,
+        .snapshots-table td {
+          padding: 0.3rem 0.75rem;
+          text-align: left;
+          border-top: 1px solid var(--border, #334155);
+        }
+        .snapshots-table th {
+          font-weight: 600;
+          border-top: none;
+          color: var(--text, #e2e8f0);
+        }
+        .snapshots-table .nowrap { white-space: nowrap; }
+        .snapshots-table .mono { font-family: ui-monospace, monospace; }
+        .btn-small {
+          padding: 0.2rem 0.55rem;
+          font-size: 0.75rem;
         }
         .err {
           margin-top: 0.75rem;

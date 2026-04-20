@@ -312,6 +312,64 @@ func TestSnapshotsPruneToKeepNewest(t *testing.T) {
 	}
 }
 
+// Delete by id removes the directory + returns 200. Guards #150's
+// operator-self-service promise: "I see these snapshots in the UI and
+// can reclaim disk from them without SSH."
+func TestVersionSnapshots_DeleteByID(t *testing.T) {
+	c := newCheckerAgainst(t, "v1.5.0", "v1.4.0")
+	dir := t.TempDir()
+	st, _ := state.Open(filepath.Join(dir, "state.db"))
+	t.Cleanup(func() { st.Close() })
+	snapDir := filepath.Join(dir, "snapshots")
+	srv := New(&Deps{SelfUpdate: c, State: st, SnapshotDir: snapDir})
+	snap, err := srv.createPreUpdateSnapshot("update", "v0.0.0", "v0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/version/snapshots/"+snap.ID, nil)
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != 200 {
+		t.Fatalf("DELETE = %d body=%s", rr.Code, rr.Body.String())
+	}
+	if _, err := os.Stat(snap.Path); !os.IsNotExist(err) {
+		t.Errorf("snapshot dir should be gone after DELETE, stat err = %v", err)
+	}
+}
+
+// Traversal + missing-id guards. A rogue client can't escape SnapshotDir
+// or delete arbitrary files via the endpoint.
+func TestVersionSnapshots_DeleteRejectsInvalidID(t *testing.T) {
+	c := newCheckerAgainst(t, "v1.5.0", "v1.4.0")
+	dir := t.TempDir()
+	st, _ := state.Open(filepath.Join(dir, "state.db"))
+	t.Cleanup(func() { st.Close() })
+	snapDir := filepath.Join(dir, "snapshots")
+	srv := New(&Deps{SelfUpdate: c, State: st, SnapshotDir: snapDir})
+
+	// Non-existent id: handler hits the stat check, returns 404.
+	req := httptest.NewRequest(http.MethodDelete, "/api/version/snapshots/no-such-snapshot", nil)
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != 404 {
+		t.Errorf("missing snapshot: want 404, got %d (body=%s)", rr.Code, rr.Body.String())
+	}
+
+	// Traversal attempts: Go's ServeMux cleans paths and redirects
+	// anything containing `..`, so our handler is never reached — but
+	// that's the outcome we want (no delete, no 500, no information
+	// leak). Accept any non-200 outcome.
+	for _, evilID := range []string{"..", "../etc/passwd"} {
+		req := httptest.NewRequest(http.MethodDelete, "/api/version/snapshots/"+evilID, nil)
+		rr := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rr, req)
+		if rr.Code == 200 {
+			t.Errorf("DELETE %q returned 200 — traversal reached the handler", evilID)
+		}
+	}
+}
+
 func TestVersionSnapshots_ListsNewestFirst(t *testing.T) {
 	c := newCheckerAgainst(t, "v1.5.0", "v1.4.0")
 	dir := t.TempDir()
