@@ -147,21 +147,22 @@ body.ftw-next .version {
   border-radius: 8px;
 }
 
-/* Green connection dot — wrap it in a white circular chip so the
-   small ● character doesn't get lost against the translucent header.
-   Using white in both themes gives the dot a consistent "status
-   light" affordance; a thin --line outline keeps it readable on
-   paper mode where the header background is almost-white too. */
+/* Green connection dot — the element itself is the colored disc
+   (background: currentColor picks up .connected/.disconnected from
+   style.css), wrapped in a 2px white ring + hairline --line outer
+   outline via layered box-shadows so it reads as a "status light"
+   on both dark and paper themes. The ● glyph is hidden (font-size 0)
+   since the background is doing the drawing now. */
 body.ftw-next .conn-status {
   display: inline-grid;
   place-items: center;
-  width: 18px;
-  height: 18px;
+  width: 14px;
+  height: 14px;
   padding: 0;
   border-radius: 999px;
-  background: #fff;
-  box-shadow: 0 0 0 1px var(--line);
-  font-size: 10px;
+  background: currentColor;
+  box-shadow: 0 0 0 2px #fff, 0 0 0 3px var(--line);
+  font-size: 0;
   line-height: 1;
 }
 
