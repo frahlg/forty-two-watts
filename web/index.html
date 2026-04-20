@@ -34,6 +34,19 @@
   <!-- /next-only visual redesign — layered on top of style.css and scoped
        to body.ftw-next so legacy /index.html is untouched. -->
   <link rel="stylesheet" href="/next.css?v=next2">
+  <!-- Three.js bare-specifier resolution. The modules themselves are
+       only fetched when something imports them (today: the Settings
+       Weather tab's 3D PV-array preview via ftw-pv-arrays-3d.js,
+       lazy-imported from settings.js). Declared here because
+       importmaps must land before any <script type="module">. -->
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+    }
+  }
+  </script>
   <script type="module" src="/components/index.js"></script>
 </head>
 <body class="ftw-next">

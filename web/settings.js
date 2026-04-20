@@ -805,6 +805,23 @@
     return div.innerHTML;
   }
 
+  // Lazy-load the 3D PV-array preview component the first time the
+  // Weather tab shows at least one array. Cached on the window to
+  // survive re-mounts of the tab; three.js itself caches through the
+  // browser's module graph so this only actually fetches the
+  // ~160 KB of three + OrbitControls once per page session.
+  var pvArraysModulePromise = null;
+  function ensurePvArraysComponent() {
+    if (window.customElements.get("ftw-pv-arrays-3d")) return Promise.resolve();
+    if (pvArraysModulePromise) return pvArraysModulePromise;
+    pvArraysModulePromise = import("/components/ftw-pv-arrays-3d.js")
+      .catch(function (e) {
+        pvArraysModulePromise = null; // allow retry if first load failed
+        throw e;
+      });
+    return pvArraysModulePromise;
+  }
+
   // Render the PV-arrays list inside #pv-arrays-list. Each row is an
   // independent panel plane (tilt + azimuth + kWp). Entries write back
   // to currentConfig.weather.pv_arrays by index so the global save
@@ -817,6 +834,13 @@
       host.innerHTML = '<p style="color:var(--text-dim);font-size:0.75rem;margin:4px 0 8px">No arrays defined — model will learn orientation from telemetry.</p>';
       return;
     }
+    // 3D preview slot — rendered above the list only when at least
+    // one array exists. Inserted as a placeholder first; the real
+    // element is upgraded once the lazy module load resolves, so
+    // the settings modal paints immediately instead of blocking on
+    // three.js.
+    var previewHtml = '<div class="pv-arrays-3d-slot" ' +
+      'style="margin:4px 0 10px"><ftw-pv-arrays-3d></ftw-pv-arrays-3d></div>';
     var rows = arrays.map(function (a, i) {
       return '<fieldset style="margin:6px 0;padding:8px 10px">' +
         '<div class="field-row" style="gap:8px;align-items:flex-end">' +
@@ -835,7 +859,24 @@
           '<button class="btn-remove" data-pv-arr-remove="' + i + '" type="button" title="Remove">✕</button>' +
         '</div></fieldset>';
     });
-    host.innerHTML = rows.join("");
+    host.innerHTML = previewHtml + rows.join("");
+    // Upgrade the 3D preview slot once the lazy-loaded module
+    // resolves, then push the current array list at it. Kept outside
+    // the change listener so the initial render + every subsequent
+    // renderPVArrays() call flows through the same path.
+    var pushArraysToPreview = function () {
+      var el = host.querySelector("ftw-pv-arrays-3d");
+      if (el && typeof el.setArrays === "function") {
+        el.setArrays(currentConfig.weather.pv_arrays || []);
+      }
+    };
+    ensurePvArraysComponent().then(pushArraysToPreview).catch(function () {
+      // If the 3D preview fails to load (offline, CDN blocked, etc.)
+      // leave the placeholder slot in place but hide it — the config
+      // rows still work without the visualisation.
+      var slot = host.querySelector(".pv-arrays-3d-slot");
+      if (slot) slot.style.display = "none";
+    });
     // Wire handlers — delegation off host so re-renders don't leak listeners.
     host.onchange = function (e) {
       var idx = e.target && e.target.dataset && e.target.dataset.pvArr;
@@ -849,6 +890,10 @@
         var v = parseFloat(e.target.value);
         if (!isNaN(v)) arr[idx][field] = v;
       }
+      // Live refresh of the 3D preview — avoids a full re-render of
+      // the rows (which would blur the input mid-edit) but keeps the
+      // visualisation in sync as the operator scrubs numbers.
+      pushArraysToPreview();
     };
     host.onclick = function (e) {
       var idx = e.target && e.target.dataset && e.target.dataset.pvArrRemove;
