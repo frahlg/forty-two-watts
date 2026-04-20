@@ -959,3 +959,64 @@ func TestPlannerSelfWithoutPlanActsLikeManual(t *testing.T) {
 		t.Error("expected PlanStale=true when planner_self sees no directive")
 	}
 }
+
+// Codex P2 on PR #131: planner_cheap → planner_self → planner_cheap within
+// the same 15-minute slot must not let the energy path read stale
+// `slotDelivered` accumulated before the planner_self hop. If that leak
+// happens, the second cheap cycle computes `remainingWh` off the pre-hop
+// delivery number and over-commands battery for the rest of the slot.
+func TestPlannerSelfResetsEnergyBookkeepingOnEntry(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: 200,
+		Strategy:        "arbitrage",
+	}
+	store := seedStore(0, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 800, 0.5}, // mid-charge so cheap path accumulates delivery
+	})
+	st := NewState(0, 0, "ferroamp")
+	st.Mode = ModePlannerArbitrage
+	st.UseEnergyDispatch = true
+	st.SlewRateW = 100000
+	st.MinDispatchIntervalS = 0
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) { return dir, true }
+
+	// 1. Run arbitrage — primes state.currentDirective / slotDelivered / lastTickTs.
+	_ = ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if st.currentDirective.SlotStart.IsZero() {
+		t.Fatal("precondition: arbitrage cycle should have set currentDirective")
+	}
+
+	// 2. Operator flips to planner_self inside the same slot.
+	st.Mode = ModePlannerSelf
+	_ = ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+
+	// After planner_self runs the energy-path bookkeeping must be
+	// cleared so a future cheap/arbitrage cycle can't read stale state.
+	if !st.currentDirective.SlotStart.IsZero() {
+		t.Errorf("currentDirective.SlotStart = %v after planner_self, want zero", st.currentDirective.SlotStart)
+	}
+	if st.slotDelivered != 0 {
+		t.Errorf("slotDelivered = %f after planner_self, want 0", st.slotDelivered)
+	}
+	if !st.lastTickTs.IsZero() {
+		t.Errorf("lastTickTs = %v after planner_self, want zero", st.lastTickTs)
+	}
+
+	// 3. Flip back to arbitrage — the SlotStart-equality branch should
+	// no longer match, so the code takes the rollover-reset path
+	// cleanly rather than accumulating off a frozen baseline.
+	st.Mode = ModePlannerArbitrage
+	_ = ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	// The re-primed directive should equal the fresh one exactly (reset
+	// branch fires), which implies slotDelivered starts from 0 again.
+	if !st.currentDirective.SlotStart.Equal(dir.SlotStart) {
+		t.Errorf("arbitrage cycle after planner_self didn't re-prime directive; SlotStart=%v want %v",
+			st.currentDirective.SlotStart, dir.SlotStart)
+	}
+}

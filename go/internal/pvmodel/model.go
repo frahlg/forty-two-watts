@@ -227,11 +227,19 @@ func (m *Model) Update(clearSkyW, cloudPct float64, t time.Time, actualPVW float
 	}
 
 	// P = (P − K·xᵀ·P) / λ
+	//
+	// Skip row/column 0 entirely: the intercept feature is hardcoded to 0
+	// (see Features() — a dead slot since #134), so no information flows
+	// into it. Letting the standard update run would still divide P[0][0]
+	// by λ every tick — growth ~1.005× per sample compounds to Inf after
+	// ~140k samples, after which Px[0] = Inf*0 = NaN poisons K, β, and
+	// all predictions. Freezing row/column 0 at zero keeps the
+	// dead-slot invariant numerically stable forever. Codex P1 on PR #136.
 	var newP [NFeat][NFeat]float64
-	for i := 0; i < NFeat; i++ {
-		for j := 0; j < NFeat; j++ {
+	for i := 1; i < NFeat; i++ {
+		for j := 1; j < NFeat; j++ {
 			var kxTP float64
-			for k := 0; k < NFeat; k++ {
+			for k := 1; k < NFeat; k++ {
 				kxTP += K[i] * x[k] * m.P[k][j]
 			}
 			newP[i][j] = (m.P[i][j] - kxTP) / m.Forgetting

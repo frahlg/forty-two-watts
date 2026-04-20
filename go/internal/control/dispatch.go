@@ -233,6 +233,17 @@ func ComputeDispatch(
 	case state.Mode == ModePlannerSelf:
 		effectiveMode = ModeSelfConsumption
 		state.SetGridTarget(0)
+		// Reset the energy-allocation bookkeeping so a future switch to
+		// planner_cheap / planner_arbitrage within the same 15-minute
+		// slot can't read stale `slotDelivered` accumulated before the
+		// operator hopped through planner_self. Without this reset, the
+		// `SlotStart` comparison in the energy path would match (still
+		// the same clock-aligned slot) and skip its own rollover reset
+		// — reading the pre-hop delivered-Wh number and over-commanding
+		// charge/discharge for the rest of the slot. Codex P2 on PR #131.
+		state.currentDirective = SlotDirective{}
+		state.slotDelivered = 0
+		state.lastTickTs = time.Time{}
 		planFresh := false
 		if state.SlotDirective != nil {
 			if dir, ok := state.SlotDirective(time.Now()); ok {
