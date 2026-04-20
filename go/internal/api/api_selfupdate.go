@@ -71,23 +71,48 @@ func (s *Server) handleVersionUnskip(w http.ResponseWriter, r *http.Request) {
 // (state.db + config.yaml) into SnapshotDir. A failed snapshot aborts
 // the update — the whole point of offering "Update" is that the user
 // knows they can back out, and shipping without the safety net breaks
-// that promise. The one exception is an explicitly-disabled snapshot
-// dir, where the operator opted out at deploy time.
+// that promise. Two exceptions skip the snapshot:
+//
+//   - SnapshotDir is empty (operator opted out at deploy time).
+//   - The request body sets {"skip_snapshot": true} (operator opted
+//     out for this specific update via the UI checkbox, typically
+//     because the existing 5 retained snapshots already cover them).
+//
+// Both exceptions return \`snapshot_skipped: true\` in the response so
+// the UI can differentiate "no snapshot taken on purpose" from "no
+// snapshot field because the field was elided".
 func (s *Server) handleVersionUpdate(w http.ResponseWriter, r *http.Request) {
 	if s.deps.SelfUpdate == nil {
 		writeJSON(w, 503, map[string]string{"error": "self-update disabled"})
 		return
 	}
+
+	// Body is optional — empty body / null JSON yields the zero value
+	// (SkipSnapshot false), so pre-checkbox UIs keep getting the snapshot.
+	var body struct {
+		SkipSnapshot bool `json:"skip_snapshot,omitempty"`
+	}
+	// readJSON caps at 1 MB (api.go:153). Errors here include EOF on an
+	// empty body, which we treat as the operator using the legacy no-body
+	// path.
+	if r.ContentLength > 0 {
+		if err := readJSON(r, &body); err != nil {
+			writeJSON(w, 400, map[string]string{"error": "bad json: " + err.Error()})
+			return
+		}
+	}
+
 	info := s.deps.SelfUpdate.Info()
 
 	var snap SnapshotInfo
-	if s.deps.SnapshotDir != "" {
+	snapshotSkipped := body.SkipSnapshot || s.deps.SnapshotDir == ""
+	if !snapshotSkipped {
 		var err error
 		snap, err = s.createPreUpdateSnapshot("update", info.Current, info.Latest)
 		if err != nil {
 			writeJSON(w, 500, map[string]string{
 				"error":   "snapshot failed: " + err.Error(),
-				"hint":    "Update aborted so you keep a rollback point. Check SnapshotDir permissions or free space.",
+				"hint":    "Update aborted so you keep a rollback point. Check SnapshotDir permissions or free space — or re-submit with skip_snapshot=true if you accept the risk.",
 				"snapshot_dir": s.deps.SnapshotDir,
 			})
 			return
@@ -101,6 +126,9 @@ func (s *Server) handleVersionUpdate(w http.ResponseWriter, r *http.Request) {
 	resp := map[string]any{"status": "started", "action": "update", "target": info.Latest}
 	if snap.ID != "" {
 		resp["snapshot"] = snap
+	}
+	if snapshotSkipped {
+		resp["snapshot_skipped"] = true
 	}
 	writeJSON(w, 202, resp)
 }

@@ -195,6 +195,35 @@ func TestVersionUpdate_CreatesSnapshotBeforeTrigger(t *testing.T) {
 	snap.Close()
 }
 
+// Operator opt-out: POST {skip_snapshot: true} skips the snapshot
+// capture step and the handler proceeds to trigger the sidecar without
+// creating a rollback point. Used when the retained set already covers
+// the operator or when they consciously want to save the ~200 MB per
+// snapshot on a constrained SD card. Issue #149.
+func TestVersionUpdate_SkipSnapshotOptOut(t *testing.T) {
+	c := newCheckerAgainst(t, "v1.5.0", "v1.4.0")
+	dir := t.TempDir()
+	st, _ := state.Open(filepath.Join(dir, "state.db"))
+	t.Cleanup(func() { st.Close() })
+	snapDir := filepath.Join(dir, "snapshots")
+	srv := New(&Deps{SelfUpdate: c, State: st, SnapshotDir: snapDir})
+
+	body := strings.NewReader(`{"skip_snapshot":true}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/version/update", body)
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+
+	// Sidecar trigger still fails (no socket), but the handler must
+	// first have honoured the skip — i.e. the snapshots dir stays empty.
+	if rr.Code != http.StatusBadGateway {
+		t.Errorf("want 502 from missing sidecar, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	if entries, _ := os.ReadDir(snapDir); len(entries) != 0 {
+		t.Errorf("snapshots dir should be empty after skip_snapshot=true, found %d entries", len(entries))
+	}
+}
+
 // With ConfigPath set the snapshot must also copy config.yaml so a
 // rollback can restore the exact YAML the operator was running.
 func TestVersionUpdate_SnapshotIncludesConfigWhenPathSet(t *testing.T) {

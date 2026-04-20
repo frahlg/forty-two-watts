@@ -27,6 +27,7 @@
       this._checkTimer = null;
       this._statusTimer = null;
       this._disabled = false;         // set true on 503 (feature gated off)
+      this._skipSnapshot = false;     // per-session opt-out toggle (#149)
       this._render();
     }
 
@@ -126,7 +127,14 @@
       this._render();
 
       const url = action === "restart" ? "/api/version/restart" : "/api/version/update";
-      this._postJSON(url, null)
+      // For /update we ship a body so the operator can opt out of the
+      // pre-update snapshot (retained set already covers them / tight
+      // on disk). Restart doesn't snapshot anyway, so keep its body nil.
+      let body = null;
+      if (action === "update" && this._skipSnapshot) {
+        body = { skip_snapshot: true };
+      }
+      this._postJSON(url, body)
         .then((resp) => {
           if (!resp.ok) {
             this._sidecarState = { state: "failed", action, message: (resp.body && resp.body.error) || "failed to start" };
@@ -242,11 +250,18 @@
         : (hasUpdate && notesLink ? `<p class="changelog-link">${notesLink}</p>` : "");
 
       // Reassure the operator that a rollback point will be captured
-      // before the update runs. Shown only when there's something to
-      // update to — no need to mention the snapshot on the "you're
-      // up to date" path.
+      // before the update runs — and let them opt out for this update
+      // via a checkbox (the retained 5 older snapshots usually cover
+      // them; power-users on small SD cards may not want another
+      // ~200 MB). Default unchecked (safety first).
       const snapshotHint = hasUpdate
-        ? `<p class="snapshot-hint">🛟 A snapshot of your data and config is saved before each update so you can roll back if needed.</p>`
+        ? `<div class="snapshot-hint">
+             <p>🛟 A snapshot of your data and config is saved before each update so you can roll back if needed.</p>
+             <label class="snapshot-skip">
+               <input type="checkbox" data-action="toggle-skip-snapshot" ${this._skipSnapshot ? "checked" : ""}>
+               Skip backup for this update
+             </label>
+           </div>`
         : "";
 
       return `
@@ -334,6 +349,11 @@
               break;
             case "reload":
               this._attemptReload();
+              break;
+            case "toggle-skip-snapshot":
+              // Don't re-render — the <input> element already reflects
+              // its own state and a full render would reset focus.
+              this._skipSnapshot = !!e.currentTarget.checked;
               break;
           }
         });
@@ -481,6 +501,21 @@
           color: var(--text-dim, #94a3b8);
           font-size: 0.78rem;
           line-height: 1.4;
+        }
+        .snapshot-hint p { margin: 0; }
+        .snapshot-skip {
+          display: flex;
+          align-items: center;
+          gap: 0.4rem;
+          margin-top: 0.4rem;
+          font-size: 0.76rem;
+          color: var(--text-dim, #94a3b8);
+          cursor: pointer;
+          user-select: none;
+        }
+        .snapshot-skip input[type="checkbox"] {
+          margin: 0;
+          cursor: pointer;
         }
         .err {
           margin-top: 0.75rem;
