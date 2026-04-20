@@ -226,9 +226,20 @@
           `;
 
       const notesHref = safeHref(info.release_notes_url);
-      const notes = hasUpdate && notesHref
-        ? `<a class="notes" href="${escapeHTML(notesHref)}" target="_blank" rel="noopener">Release notes ↗</a>`
+      const notesLink = hasUpdate && notesHref
+        ? `<a class="notes-link" href="${escapeHTML(notesHref)}" target="_blank" rel="noopener">Open on GitHub ↗</a>`
         : "";
+      // Render the release body inline so the operator can read what's
+      // about to be applied without opening a tab. Markdown is a small
+      // subset (headings, lists, code, strong, safe links) — anything
+      // else stays as plain escaped text. See renderReleaseBody.
+      const bodyHTML = hasUpdate && info.release_body
+        ? `<details class="changelog" open>
+             <summary>What's in ${escapeHTML(info.latest || "this release")}</summary>
+             <div class="changelog-body">${renderReleaseBody(info.release_body)}</div>
+             ${notesLink ? `<p class="changelog-link">${notesLink}</p>` : ""}
+           </details>`
+        : (hasUpdate && notesLink ? `<p class="changelog-link">${notesLink}</p>` : "");
 
       return `
         <div class="backdrop" data-action="close"></div>
@@ -244,7 +255,7 @@
               ${info.latest ? `<div><dt>Latest</dt><dd>${escapeHTML(info.latest)}</dd></div>` : ""}
               ${info.skipped_version ? `<div><dt>Skipped</dt><dd>${escapeHTML(info.skipped_version)}</dd></div>` : ""}
             </dl>
-            ${notes}
+            ${bodyHTML}
             ${info.err ? `<p class="err">Last check failed: ${escapeHTML(info.err)}</p>` : ""}
           </div>
           <footer>${actions}</footer>
@@ -385,12 +396,73 @@
         dl > div { display: contents; }
         dt { color: var(--text-dim, #94a3b8); font-size: 0.8rem; }
         dd { margin: 0; font-variant-numeric: tabular-nums; }
-        .notes {
-          display: inline-block; margin-top: 0.75rem;
-          color: var(--accent, #f59e0b);
-          text-decoration: none; font-size: 0.85rem;
+        .changelog {
+          margin-top: 0.75rem;
+          border: 1px solid var(--border, #334155);
+          border-radius: 4px;
+          background: rgba(255,255,255,0.02);
         }
-        .notes:hover { text-decoration: underline; }
+        .changelog > summary {
+          padding: 0.5rem 0.75rem;
+          cursor: pointer;
+          font-weight: 600;
+          font-size: 0.85rem;
+          color: var(--text-dim, #94a3b8);
+          list-style: none;
+        }
+        .changelog > summary::-webkit-details-marker { display: none; }
+        .changelog > summary::before {
+          content: "▸";
+          display: inline-block;
+          margin-right: 0.4rem;
+          transition: transform 0.15s;
+        }
+        .changelog[open] > summary::before { transform: rotate(90deg); }
+        .changelog-body {
+          padding: 0.25rem 0.9rem 0.5rem;
+          max-height: 40vh;
+          overflow-y: auto;
+          font-size: 0.85rem;
+          line-height: 1.45;
+        }
+        .changelog-body h4 {
+          margin: 0.75rem 0 0.3rem;
+          font-size: 0.9rem;
+          color: var(--text, #e2e8f0);
+        }
+        .changelog-body h5 {
+          margin: 0.6rem 0 0.25rem;
+          font-size: 0.8rem;
+          color: var(--text-dim, #94a3b8);
+          text-transform: uppercase;
+          letter-spacing: 0.03em;
+        }
+        .changelog-body ul {
+          margin: 0.25rem 0 0.25rem;
+          padding-left: 1.1rem;
+        }
+        .changelog-body li { margin-bottom: 0.2rem; }
+        .changelog-body p { margin: 0.35rem 0; }
+        .changelog-body code {
+          background: rgba(255,255,255,0.08);
+          padding: 0.05rem 0.25rem;
+          border-radius: 3px;
+          font-size: 0.82rem;
+        }
+        .changelog-body a {
+          color: var(--accent, #f59e0b);
+          text-decoration: none;
+        }
+        .changelog-body a:hover { text-decoration: underline; }
+        .changelog-link {
+          margin: 0.4rem 0.9rem 0.6rem;
+          font-size: 0.8rem;
+        }
+        .notes-link {
+          color: var(--accent, #f59e0b);
+          text-decoration: none;
+        }
+        .notes-link:hover { text-decoration: underline; }
         .err {
           margin-top: 0.75rem;
           color: #f87171; font-size: 0.85rem;
@@ -471,6 +543,86 @@
       .replace(/>/g, "&gt;")
       .replace(/"/g, "&quot;")
       .replace(/'/g, "&#39;");
+  }
+
+  // renderReleaseBody turns GitHub-flavored markdown (as emitted by
+  // semantic-release: headings, bullet lists, links, `code`, **bold**)
+  // into a safe HTML subset. Strategy: escape everything first, then
+  // rewrite a short whitelist of markdown tokens. Untrusted content —
+  // link URLs — is routed through safeHref so a `javascript:` href
+  // can't sneak in.
+  //
+  // What we handle (enough for conventional-commits changelogs):
+  //   ##, ###           → h4, h5
+  //   - x / * x         → unordered list (adjacent bullets grouped)
+  //   **bold**          → <strong>
+  //   `code`            → <code>
+  //   [text](url)       → <a href=...>   (url filtered)
+  //   blank line        → paragraph break
+  //
+  // What we deliberately drop: images, tables, raw HTML, setext
+  // headings, nested lists, numbered lists. They're rare in release
+  // notes and the operator still has the "Open on GitHub ↗" link for
+  // the full formatted version.
+  function renderReleaseBody(md) {
+    const escaped = escapeHTML(String(md || "").trim());
+    const lines = escaped.split(/\r?\n/);
+    const out = [];
+    let inList = false;
+    const flushList = () => {
+      if (inList) {
+        out.push("</ul>");
+        inList = false;
+      }
+    };
+    for (let raw of lines) {
+      const line = raw.replace(/\s+$/, "");
+      if (!line) {
+        flushList();
+        continue;
+      }
+      // Bullet: "- text" or "* text" (leading spaces tolerated for
+      // semantic-release which indents scope details).
+      const bullet = line.match(/^\s*[*-]\s+(.*)$/);
+      if (bullet) {
+        if (!inList) {
+          out.push("<ul>");
+          inList = true;
+        }
+        out.push("<li>" + renderInline(bullet[1]) + "</li>");
+        continue;
+      }
+      flushList();
+      // Headings
+      const h3 = line.match(/^###\s+(.*)$/);
+      if (h3) { out.push("<h5>" + renderInline(h3[1]) + "</h5>"); continue; }
+      const h2 = line.match(/^##\s+(.*)$/);
+      if (h2) { out.push("<h4>" + renderInline(h2[1]) + "</h4>"); continue; }
+      // Paragraph fallback.
+      out.push("<p>" + renderInline(line) + "</p>");
+    }
+    flushList();
+    return out.join("");
+  }
+
+  // renderInline handles **bold**, `code`, and [text](url) on an
+  // already-HTML-escaped line. Order matters: code first so backticks
+  // can't eat a `**bold**` marker that happened to be inside code.
+  function renderInline(s) {
+    // Inline code: backticks are already literal in the escaped text.
+    s = s.replace(/`([^`]+)`/g, (_m, code) => "<code>" + code + "</code>");
+    // Bold: **text**
+    s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+    // Links: [text](url). The URL has been HTML-escaped already (amp →
+    // &amp;), so decode just the &amp; inside the href before running
+    // safeHref — otherwise a legitimate query-string URL gets rejected.
+    s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_m, text, url) => {
+      const clean = String(url).replace(/&amp;/g, "&");
+      const safe = safeHref(clean);
+      if (!safe) return text; // drop the link, keep the visible text
+      return '<a href="' + escapeHTML(safe) + '" target="_blank" rel="noopener">' + text + "</a>";
+    });
+    return s;
   }
 
   customElements.define("ftw-update-badge", FtwUpdateBadge);
