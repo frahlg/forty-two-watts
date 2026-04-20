@@ -169,29 +169,23 @@ class FtwBarChart extends FtwElement {
       text-align: center;
       white-space: nowrap;
     }
-    /* Horizontal dashed line marking the arithmetic mean of the series.
-       Positioned from the bottom of .bar-area so \`bottom: N%\` tracks
-       exactly the same reference as every bar's \`height: N%\`. */
+    /* Horizontal dashed line marking the arithmetic mean of the
+       series. Positioned from the bottom of .bar-area so
+       \`bottom: N%\` tracks exactly the same reference as every bar's
+       \`height: N%\`. Color sits at --fg-dim (one step brighter than
+       --fg-muted) with opacity 0.85, which gives enough contrast to
+       read against both an empty baseline and a tall active bar
+       without becoming a second visual focal point next to the bars.
+       The numeric value lives next to the card total (e.g.
+       "41.7 kWh total (5.9 kWh avg)") so there's no separate tag in
+       the plot area anymore. */
     .avg-line {
       position: absolute;
       left: 0;
       right: 0;
       height: 0;
-      border-top: 1px dashed var(--fg-muted);
-      opacity: 0.55;
-      pointer-events: none;
-    }
-    .avg-tag {
-      position: absolute;
-      right: 0;
-      transform: translateY(-100%);
-      font-family: var(--mono);
-      font-size: 9px;
-      color: var(--fg-muted);
-      background: var(--ink-raised);
-      padding: 0 4px;
-      border-radius: 2px;
-      letter-spacing: 0.04em;
+      border-top: 1px dashed var(--fg-dim);
+      opacity: 0.85;
       pointer-events: none;
     }
   `;
@@ -296,11 +290,14 @@ class FtwBarChart extends FtwElement {
     let avgOverlay = "";
     if (avgOn && max > 0 && avg > 0 && count > 1) {
       const avgPct = Math.min(100, (avg / max) * 100);
+      // Numeric value is shown in the card header (next to the
+      // total), not in the plot area — so all we need here is the
+      // line itself. A title attribute on the line gives a cursor
+      // tooltip for anyone who wants to confirm the exact number.
       const display = shortNum(avg);
       avgOverlay =
-        `<div class="avg-line" style="bottom:${avgPct}%"></div>` +
-        `<span class="avg-tag" style="bottom:${avgPct}%" ` +
-        `title="average ${display}">avg ${escapeHtml(display)}</span>`;
+        `<div class="avg-line" style="bottom:${avgPct}%" ` +
+        `title="average ${display}"></div>`;
     }
 
     return `

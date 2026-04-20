@@ -132,6 +132,19 @@ class FtwHistoryCard extends FtwElement {
       letter-spacing: -0.01em;
       color: var(--ftw-history-accent, var(--fg));
     }
+    /* The "(X avg)" annotation next to the total. Rendered as a
+       trailing span so we can dial it back visually — one step
+       smaller than the total and tinted with --fg-muted so the
+       primary number (total for the range) reads first and the avg
+       is available as secondary context without competing for
+       attention. */
+    .total .avg-mini {
+      font-size: 0.82rem;
+      font-weight: 500;
+      color: var(--fg-muted);
+      margin-left: 6px;
+      letter-spacing: 0;
+    }
     @media (max-width: 900px) {
       .card-inner { padding: var(--card-pad-tight, 12px 14px); }
     }
@@ -286,9 +299,22 @@ class FtwHistoryCard extends FtwElement {
         });
         const apply = () => {
           if (seq !== this._reqSeq) return;
-          this._totalEl.textContent = data.length
-            ? fmtKwh(sum) + " total"
-            : "— kWh";
+          // "41.7 kWh total (5.9 kWh avg)" — the avg used to live as
+          // a tag next to the dashed line inside the chart, but the
+          // number is more scannable up here next to the total. The
+          // line stays in the chart as a visual reference. Styled
+          // via a trailing <span class="avg-mini"> so the avg reads
+          // as secondary text (smaller, muted) instead of a second
+          // prominent number.
+          if (data.length) {
+            const avgWh = sum / data.length;
+            this._totalEl.innerHTML =
+              escapeHtml(fmtKwh(sum) + " total") +
+              ' <span class="avg-mini">(' +
+              escapeHtml(fmtKwh(avgWh) + " avg") + ")</span>";
+          } else {
+            this._totalEl.textContent = "— kWh";
+          }
           this._chart.data = data;
         };
         // `?delay=N` — hold in the skeleton state for N ms after the
