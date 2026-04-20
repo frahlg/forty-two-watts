@@ -137,6 +137,16 @@ type Driver struct {
 	Lua                string  `yaml:"lua,omitempty" json:"lua,omitempty"` // path to .lua file
 	IsSiteMeter        bool    `yaml:"is_site_meter,omitempty" json:"is_site_meter,omitempty"`
 	BatteryCapacityWh  float64 `yaml:"battery_capacity_wh,omitempty" json:"battery_capacity_wh,omitempty"`
+	// MaxChargeW + MaxDischargeW set this driver's per-command power
+	// ceiling (site-signed +/-). Both optional; zero = fall through to
+	// the global MaxCommandW = 5 kW default the dispatcher has shipped
+	// with since v0.x. On a hybrid inverter that can actually deliver
+	// more (e.g. Ferroamp 10-15 kW, Sungrow 8-10 kW on 32 A), lifting
+	// the per-driver cap is the right move — site-wide fuse protection
+	// (applyFuseGuard) still enforces the grid-boundary budget above
+	// whatever per-battery cap you set. Issue #145.
+	MaxChargeW    float64 `yaml:"max_charge_w,omitempty" json:"max_charge_w,omitempty"`
+	MaxDischargeW float64 `yaml:"max_discharge_w,omitempty" json:"max_discharge_w,omitempty"`
 	// InverterGroup tags this driver as belonging to a shared
 	// inverter+battery unit (e.g. set `inverter_group: ferroamp` on
 	// both the Ferroamp battery driver and anything publishing its PV
