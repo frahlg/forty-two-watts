@@ -147,6 +147,7 @@ func (s *Server) routes() {
 	s.handle("GET  /api/self_tune/status", s.handleSelfTuneStatus)
 	s.handle("POST /api/self_tune/cancel", s.handleSelfTuneCancel)
 	s.handle("GET  /api/history", s.handleHistory)
+	s.handle("GET  /api/energy/daily", s.handleEnergyDaily)
 	s.handle("GET  /api/prices", s.handlePrices)
 	s.handle("GET  /api/forecast", s.handleForecast)
 	s.handle("GET  /api/mpc/plan", s.handleMPCPlan)
@@ -1001,6 +1002,99 @@ func parseRange(s string) int64 {
 	return 5 * 60 * 1000
 }
 
+// ---- /api/energy/daily ----
+//
+// Query params: days=N (default 7, capped at 90)
+// Response: {"days": [{"day":"YYYY-MM-DD","import_wh":..., "export_wh":...,
+//                      "pv_wh":..., "bat_charged_wh":..., "bat_discharged_wh":...,
+//                      "load_wh":...}], "tz": "Local"}
+//
+// Buckets are local-day. Today is the last entry. Mirrors the integration
+// loop in handleStatus's energy-today block — same site convention, same
+// W*dt math — but per local day across the requested range. Designed for
+// the dashboard's history cards (Imported / Consumed / Exported).
+func (s *Server) handleEnergyDaily(w http.ResponseWriter, r *http.Request) {
+	if s.deps.State == nil {
+		writeJSON(w, 200, map[string]any{"days": []any{}})
+		return
+	}
+	days := 7
+	if v := r.URL.Query().Get("days"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			days = n
+		}
+	}
+	if days > 90 {
+		days = 90
+	}
+	now := time.Now()
+	loc := now.Location()
+	todayMidnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
+	firstDayStart := todayMidnight.AddDate(0, 0, -(days - 1))
+
+	// One range scan across the whole window; buckets are pre-seeded so
+	// gap-days render as zeros and are distinguishable from a DB failure
+	// (which returns 500 below instead of a silently empty payload).
+	pts, err := s.deps.State.LoadHistory(firstDayStart.UnixMilli(), now.UnixMilli(), 0)
+	if err != nil {
+		slog.Error("handleEnergyDaily: LoadHistory failed", "err", err, "days", days)
+		http.Error(w, "history load failed", http.StatusInternalServerError)
+		return
+	}
+
+	type dayTotals struct {
+		importWh, exportWh, pvWh, chargedWh, dischargedWh, loadWh float64
+	}
+	buckets := make(map[string]*dayTotals, days)
+	order := make([]string, 0, days)
+	for i := 0; i < days; i++ {
+		key := todayMidnight.AddDate(0, 0, -(days-1-i)).Format("2006-01-02")
+		buckets[key] = &dayTotals{}
+		order = append(order, key)
+	}
+
+	// Attribute each (pts[j-1], pts[j]) slice to the day of pts[j], matching
+	// the right-hand-sample attribution used by handleStatus's today-block
+	// integration. Points before firstDayStart are filtered out below in the
+	// LoadHistory range, so j==0 is always at/after firstDayStart.
+	for j := 1; j < len(pts); j++ {
+		dtH := float64(pts[j].TsMs-pts[j-1].TsMs) / 3_600_000.0
+		key := time.UnixMilli(pts[j].TsMs).In(loc).Format("2006-01-02")
+		b := buckets[key]
+		if b == nil {
+			continue
+		}
+		g := pts[j].GridW
+		if g > 0 {
+			b.importWh += g * dtH
+		} else {
+			b.exportWh += -g * dtH
+		}
+		b.pvWh += -pts[j].PVW * dtH
+		if pts[j].BatW > 0 {
+			b.chargedWh += pts[j].BatW * dtH
+		} else {
+			b.dischargedWh += -pts[j].BatW * dtH
+		}
+		b.loadWh += pts[j].LoadW * dtH
+	}
+
+	out := make([]map[string]any, 0, days)
+	for _, key := range order {
+		b := buckets[key]
+		out = append(out, map[string]any{
+			"day":               key,
+			"import_wh":         b.importWh,
+			"export_wh":         b.exportWh,
+			"pv_wh":             b.pvWh,
+			"bat_charged_wh":    b.chargedWh,
+			"bat_discharged_wh": b.dischargedWh,
+			"load_wh":           b.loadWh,
+		})
+	}
+	writeJSON(w, 200, map[string]any{"days": out, "tz": loc.String()})
+}
+
 // ---- /api/prices ----
 //
 // Query params:
@@ -1439,6 +1533,11 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 }
 
 // GET /api/ev/status — detailed EV charger state for the dashboard modal.
+//
+// Accepts an optional ?driver= to target a specific charger on multi-EV
+// sites. When unset, falls back to the first DerEV reading. A named driver
+// that isn't currently reporting telemetry returns 404 so the UI can
+// distinguish "charger temporarily offline" from "no EV charger configured".
 func (s *Server) handleEVStatus(w http.ResponseWriter, r *http.Request) {
 	readings := s.deps.Tel.ReadingsByType(telemetry.DerEV)
 	if len(readings) == 0 {
@@ -1446,6 +1545,20 @@ func (s *Server) handleEVStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rd := readings[0]
+	if want := r.URL.Query().Get("driver"); want != "" {
+		found := false
+		for _, candidate := range readings {
+			if candidate.Driver == want {
+				rd = candidate
+				found = true
+				break
+			}
+		}
+		if !found {
+			writeJSON(w, 404, map[string]string{"error": "unknown ev driver"})
+			return
+		}
+	}
 	resp := map[string]any{
 		"driver":  rd.Driver,
 		"w":       rd.RawW,
@@ -1477,6 +1590,7 @@ var validEVActions = map[string]bool{
 func (s *Server) handleEVCommand(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Action string `json:"action"`
+		Driver string `json:"driver"`
 	}
 	if err := readJSON(r, &req); err != nil {
 		writeJSON(w, 400, map[string]string{"error": "invalid request"})
@@ -1486,8 +1600,12 @@ func (s *Server) handleEVCommand(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]string{"error": "unsupported action"})
 		return
 	}
-	if s.deps.Registry == nil {
-		writeJSON(w, 503, map[string]string{"error": "driver registry not available"})
+	// Validate the request against telemetry (is the driver known?) before
+	// checking Registry availability. Request-validation errors (400/404)
+	// should win over service-readiness errors (503) so the client can tell
+	// "you sent a bad name" apart from "the backend isn't wired up yet".
+	if s.deps.Tel == nil {
+		writeJSON(w, 503, map[string]string{"error": "telemetry not available"})
 		return
 	}
 	readings := s.deps.Tel.ReadingsByType(telemetry.DerEV)
@@ -1496,6 +1614,24 @@ func (s *Server) handleEVCommand(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	driverName := readings[0].Driver
+	if req.Driver != "" {
+		found := false
+		for _, rd := range readings {
+			if rd.Driver == req.Driver {
+				driverName = req.Driver
+				found = true
+				break
+			}
+		}
+		if !found {
+			writeJSON(w, 404, map[string]string{"error": "unknown ev driver"})
+			return
+		}
+	}
+	if s.deps.Registry == nil {
+		writeJSON(w, 503, map[string]string{"error": "driver registry not available"})
+		return
+	}
 	payload, _ := json.Marshal(map[string]any{"action": req.Action})
 	if err := s.deps.Registry.Send(r.Context(), driverName, payload); err != nil {
 		writeJSON(w, 500, map[string]string{"error": err.Error()})

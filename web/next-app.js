@@ -128,8 +128,6 @@
   const pvW = $("pv-w");
   const batW = $("bat-w");
   const batDir = $("bat-dir");
-  const batSoc = $("bat-soc");
-  const socFill = $("soc-fill");
   const connStatus = $("conn-status");
   const driversGrid = $("drivers-grid");
   const dispatchList = $("dispatch-list");
@@ -145,8 +143,6 @@
   const evSend = $("ev-send");
   const fuseUse = $("fuse-use");
   const fuseFill = $("fuse-fill");
-  const evW = $("ev-w");
-  const evStatus = $("ev-status");
   const fusePhases = $("fuse-phases");
   const eImport = $("e-import");
   const eExport = $("e-export");
@@ -262,11 +258,6 @@
       batW.className = "card-value val-neutral";
     }
 
-    // SoC
-    var socPct = Math.round(data.bat_soc * 100);
-    batSoc.textContent = socPct + "%";
-    socFill.setAttribute("value", socPct);
-
     // Hero energy-flow diagram — build a flat "planets" list where each
     // entry declares which corner it orbits (top-left=PV, top-right=
     // battery, bottom-left=grid, bottom-right=EV). The component knows
@@ -282,7 +273,7 @@
       var gkw = (data.grid_w || 0) / 1000;
       var gAbs = Math.abs(gkw);
       planets.push({
-        id: "grid", corner: "bottom-left", title: "GRID",
+        id: "grid", corner: "bottom-left", title: "GRID", role: "grid",
         kw: gkw, toHub: gkw >= 0,
         color: gAbs < 0.05 ? "var(--fg-muted)" :
                (gkw >= 0 ? "var(--red-e)" : "var(--green-e)"),
@@ -301,7 +292,7 @@
           var pvKw = -d.pv_w / 1000;
           var pvGen = pvKw > 0.05;
           planets.push({
-            id: "pv-" + name, corner: "top-left", title: "SOLAR", name: name,
+            id: "pv-" + name, corner: "top-left", title: "SOLAR", name: name, role: "pv",
             kw: pvKw, toHub: true,
             color: pvGen ? "var(--amber)" : "var(--fg-muted)",
             sub: pvGen ? "generating" : "idle",
@@ -313,7 +304,7 @@
           var bKw = d.bat_w / 1000;
           var bAbs = Math.abs(bKw);
           planets.push({
-            id: "bat-" + name, corner: "top-right", title: "BATTERY", name: name,
+            id: "bat-" + name, corner: "top-right", title: "BATTERY", name: name, role: "battery",
             kw: bKw, toHub: bKw < 0,
             color: "var(--cyan)",
             sub: bAbs < 0.05 ? "idle" :
@@ -326,7 +317,7 @@
           var eKw = d.ev_w / 1000;
           var eActive = eKw > 0.05;
           planets.push({
-            id: "ev-" + name, corner: "bottom-right", title: "EV CHARGER", name: name,
+            id: "ev-" + name, corner: "bottom-right", title: "EV CHARGER", name: name, role: "ev",
             kw: eKw, toHub: false,
             color: eActive ? "var(--green-e)" : "var(--white-s)",
             sub: eActive ? "charging" : "idle",
@@ -400,10 +391,13 @@
       var phaseI = Array.isArray(data.phase_amps) ? data.phase_amps : [];
       var hasPhaseData = phaseI.length > 0;
 
-      // Show fallback (single bar + headline amps) only when no per-phase data.
+      // Hide the per-phase box row entirely when no phase data, otherwise
+      // we'd render `phases` boxes populated with 0 A alongside the
+      // aggregate fallback and the two cards would double up.
       var fallbackBar = $("fuse-bar-fallback");
       if (fallbackBar) fallbackBar.style.display = hasPhaseData ? "none" : "block";
       fuseUse.style.display = hasPhaseData ? "none" : "block";
+      if (fusePhases) fusePhases.style.display = hasPhaseData ? "" : "none";
 
       if (!hasPhaseData) {
         var totalDischarge = 0;
@@ -415,64 +409,43 @@
         var totalFusePct = Math.min(100, (peakA / maxAmps) * 100);
         fuseFill.style.width = totalFusePct + "%";
         fuseFill.className = "fuse-fill" + (totalFusePct > 85 ? " crit" : totalFusePct > 65 ? " warn" : "");
-      }
-
-      // Per-phase bars: create/update one row per configured phase.
-      if (fusePhases) {
-        // Rebuild if phase count changed (first render, or config reload).
+      } else if (fusePhases) {
+        // Per-phase boxes: one tile per configured phase, side-by-side.
         if (fusePhases.childElementCount !== phases) {
           fusePhases.innerHTML = "";
           for (var p = 0; p < phases; p++) {
-            var row = document.createElement("div");
-            row.className = "fuse-phase-row";
-            var label = document.createElement("span");
-            label.className = "fuse-phase-label";
-            label.textContent = "L" + (p + 1);
+            var box = document.createElement("div");
+            box.className = "fuse-phase-box";
+            var lab = document.createElement("div");
+            lab.className = "fuse-phase-label";
+            lab.textContent = "L" + (p + 1);
+            var v = document.createElement("div");
+            v.className = "fuse-phase-val";
+            v.textContent = "-- A";
             var bar = document.createElement("div");
             bar.className = "fuse-phase-bar";
             var fill = document.createElement("div");
             fill.className = "fuse-phase-fill";
             bar.appendChild(fill);
-            var val = document.createElement("span");
-            val.className = "fuse-phase-val";
-            val.textContent = "-- A";
-            row.appendChild(label);
-            row.appendChild(bar);
-            row.appendChild(val);
-            fusePhases.appendChild(row);
+            box.appendChild(lab);
+            box.appendChild(v);
+            box.appendChild(bar);
+            fusePhases.appendChild(box);
           }
         }
-        // Populate current values. If fewer phase_amps than phases
-        // configured, any missing entries fall back to 0.
-        var rows = fusePhases.querySelectorAll(".fuse-phase-row");
-        for (var r = 0; r < rows.length; r++) {
-          var rawA = r < phaseI.length ? phaseI[r] : 0;
+        var boxes = fusePhases.querySelectorAll(".fuse-phase-box");
+        for (var rb = 0; rb < boxes.length; rb++) {
+          var rawA = rb < phaseI.length ? phaseI[rb] : 0;
           var magA = Math.abs(rawA);
           var pct = Math.min(100, (magA / maxAmps) * 100);
-          var fill = rows[r].querySelector(".fuse-phase-fill");
-          var val  = rows[r].querySelector(".fuse-phase-val");
-          fill.style.width = pct + "%";
-          fill.className = "fuse-phase-fill"
+          var bf = boxes[rb].querySelector(".fuse-phase-fill");
+          var bv = boxes[rb].querySelector(".fuse-phase-val");
+          bf.style.width = pct + "%";
+          bf.className = "fuse-phase-fill"
             + (pct > 85 ? " crit" : pct > 65 ? " warn" : "")
             + (rawA < -0.1 ? " export" : "");
-          val.textContent = magA.toFixed(1) + " A";
+          bv.textContent = magA.toFixed(1) + " A";
         }
-      }
-    }
-
-    // EV status card
-    if (evW && evStatus) {
-      var evPower = data.ev_charging_w || 0;
-      evW.textContent = formatW(evPower);
-      if (evPower > 100) {
-        evStatus.textContent = "charging";
-        evW.className = "card-value val-ev-charging";
-      } else if (evPower > 0) {
-        evStatus.textContent = "connected";
-        evW.className = "card-value val-ev-connected";
-      } else {
-        evStatus.textContent = "idle";
-        evW.className = "card-value val-neutral";
       }
     }
 
@@ -1469,10 +1442,12 @@
   });
 
   // EV detail modal — <ftw-modal> handles ESC / backdrop / close button;
-  // we only drive open()/close() and refresh the body on a timer.
+  // we only drive open()/close() and refresh the body on a timer. Opened
+  // by clicking an EV planet in the energy-flow hero (no card-ev tile).
   var evModal = document.getElementById("ev-modal");
   var evModalBody = document.getElementById("ev-modal-body");
-  var cardEv = document.getElementById("card-ev");
+  var evModalDriver = null; // captured from the planet click; sent on commands
+  var energyFlowEl = document.getElementById("energy-flow");
 
   // Render the EV modal by building DOM nodes (textContent) rather than
   // concatenating strings into innerHTML — d.driver comes from driver
@@ -1517,7 +1492,11 @@
   }
 
   function refreshEvModal() {
-    fetch("/api/ev/status").then(function (r) { return r.json(); }).then(function (d) {
+    // Pass driver query if known so the backend can scope the response
+    // to the clicked planet (multi-EV setups). Falls back to whatever
+    // the backend returns when no driver filter is honored.
+    var url = "/api/ev/status" + (evModalDriver ? "?driver=" + encodeURIComponent(evModalDriver) : "");
+    fetch(url).then(function (r) { return r.json(); }).then(function (d) {
       if (!d || d.connected === false) {
         setEvModalMessage("No EV charger connected");
         return;
@@ -1530,41 +1509,39 @@
   }
 
   var evRefreshTimer = null;
-  if (cardEv && evModal) {
+  if (evModal) {
     var evBtnStart = document.getElementById("ev-btn-start");
     var evBtnPause = document.getElementById("ev-btn-pause");
     var evBtnResume = document.getElementById("ev-btn-resume");
     var evActionBtns = [evBtnStart, evBtnPause, evBtnResume];
 
-    function openEvModal() {
+    function openEvModal(driver) {
+      evModalDriver = driver || null;
       evModal.open();
       refreshEvModal();
-      // Guard against stacked timers if the card is clicked while the
-      // modal is still open (e.g. background click that didn't close).
+      // Guard against stacked timers if the modal opens again while a
+      // previous timer is still alive.
       if (evRefreshTimer) { clearInterval(evRefreshTimer); }
       evRefreshTimer = setInterval(refreshEvModal, 5000);
     }
-    // Fires when the user closes via ESC, backdrop, or the × button.
     evModal.addEventListener("ftw-modal-close", function () {
       if (evRefreshTimer) { clearInterval(evRefreshTimer); evRefreshTimer = null; }
+      evModalDriver = null;
     });
 
-    cardEv.addEventListener("click", openEvModal);
-    // The card has role="button" + tabindex="0" so it's keyboard-focusable;
-    // WAI-ARIA requires Enter + Space to activate a role="button" element.
-    cardEv.addEventListener("keydown", function (e) {
-      if (e.key === "Enter" || e.key === " ") {
-        e.preventDefault();
-        openEvModal();
-      }
-    });
+    // EV planet click → open modal scoped to that driver.
+    if (energyFlowEl) {
+      energyFlowEl.addEventListener("ftw-planet-click", function (e) {
+        var d = (e && e.detail) || {};
+        if (d.role === "ev") openEvModal(d.name || null);
+      });
+    }
 
     function evCommand(action) {
-      // Disable all three action buttons while any command is inflight so
-      // a Pause→Resume double-click can't send both. The close button
-      // stays enabled so the user can always dismiss the modal.
       evActionBtns.forEach(function (b) { b.disabled = true; });
-      postJson("/api/ev/command", { action: action })
+      var body = { action: action };
+      if (evModalDriver) body.driver = evModalDriver;
+      postJson("/api/ev/command", body)
         .catch(function () { /* postJson already logs */ })
         .finally(function () {
           refreshEvModal();

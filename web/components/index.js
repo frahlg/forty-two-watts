@@ -12,4 +12,6 @@ import "./ftw-card.js";
 import "./ftw-tabs.js";
 import "./ftw-legend.js";
 import "./ftw-energy-flow.js";
+import "./ftw-bar-chart.js";
+import "./ftw-history-card.js";
 import "./ftw-update-check.js";

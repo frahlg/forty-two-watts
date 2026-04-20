@@ -128,6 +128,8 @@ class FtwEnergyFlow extends FtwElement {
     .sv-node-sub   { font-family: var(--mono); font-size: 10px; letter-spacing: 0.04em; }
     .sv-hub-value  { font-family: var(--mono); font-size: 18px; font-weight: 700; font-variant-numeric: tabular-nums; }
     .sv-hub-label  { font-family: var(--mono); font-size: 9px; letter-spacing: 0.1em; }
+    .ef-clickable { cursor: pointer; outline: none; }
+    .ef-clickable:focus-visible > circle { stroke-width: 3; filter: drop-shadow(0 0 4px var(--accent, #6cf)); }
     /* One dash cycle advances by exactly (dash + gap). The fwd/rev pair
        keeps direction declarative — we flip the animation-name, not the
        path, so swapping a source→sink edge (grid export, battery
@@ -274,6 +276,30 @@ class FtwEnergyFlow extends FtwElement {
     if (this._rafId) {
       cancelAnimationFrame(this._rafId);
       this._rafId = null;
+    }
+    // Delegated click on the SVG — one listener per render covers every
+    // planet group that opted in via data-role. The handler dispatches
+    // `ftw-planet-click` so callers (next-app.js) can route per-role
+    // (e.g. ev → open EV modal scoped to this driver).
+    const svg = this.shadowRoot.querySelector('svg');
+    if (svg) {
+      const fire = (g) => {
+        const role = g.getAttribute('data-role') || '';
+        const name = g.getAttribute('data-name') || '';
+        const id   = g.getAttribute('data-id')   || '';
+        this.dispatchEvent(new CustomEvent('ftw-planet-click', {
+          detail: { role, name, id }, bubbles: true, composed: true,
+        }));
+      };
+      svg.addEventListener('click', (e) => {
+        const g = e.target.closest && e.target.closest('.ef-clickable');
+        if (g) fire(g);
+      });
+      svg.addEventListener('keydown', (e) => {
+        if (e.key !== 'Enter' && e.key !== ' ') return;
+        const g = e.target.closest && e.target.closest('.ef-clickable');
+        if (g) { e.preventDefault(); fire(g); }
+      });
     }
     const nodes = this.shadowRoot.querySelectorAll('.ef-p');
     if (!nodes.length || !this._particles.length) return;
@@ -486,6 +512,8 @@ class FtwEnergyFlow extends FtwElement {
 
     // Nodes. The driver name only appears (as a second title line) when
     // >1 planet shares the corner — keeps single-device rigs clean.
+    // Clickable planets are tagged with data-* attrs picked up by the
+    // delegated SVG click listener wired in afterRender().
     const nodesSvg = placed.map(p =>
       renderCircleNode({
         pos: p._pos,
@@ -496,6 +524,10 @@ class FtwEnergyFlow extends FtwElement {
         color: p.color,
         soc: p.placeholder ? null : p.soc,
         radius: p._r,
+        clickable: !p.placeholder && !!p.role,
+        role: p.role || "",
+        name: p.name || "",
+        id: p.id,
       })
     ).join("");
 
@@ -782,9 +814,19 @@ function hashStr(s) {
 // a multi-device 55 px circle both read proportionally. Stroke is the
 // accent color so each node carries its identity on the edge of the
 // circle — no separate stripe needed the way rectangular boxes have.
-function renderCircleNode({ pos, title, nameLabel, value, sub, color, soc, radius = 86 }) {
+function renderCircleNode({ pos, title, nameLabel, value, sub, color, soc, radius = 86,
+                            clickable = false, role = "", name = "", id = "" }) {
   const r = radius;
   const { x, y } = pos;
+  // Clickable planets must advertise themselves to assistive tech:
+  // role=button so screen readers announce "button", and aria-label
+  // derived from the visible title/name so the announcement names
+  // what activating this node will open.
+  const nodeLabel = [title, nameLabel].filter(Boolean).join(" ");
+  const ariaLabel = nodeLabel ? `Open ${nodeLabel}` : "Open node";
+  const groupAttrs = clickable
+    ? ` class="ef-node ef-clickable" data-role="${escapeXml(role)}" data-name="${escapeXml(name)}" data-id="${escapeXml(id)}" tabindex="0" role="button" aria-label="${escapeXml(ariaLabel)}"`
+    : ` class="ef-node"`;
   // When a per-device name suffix is present, the title becomes two
   // stacked lines ("SOLAR" / "SUNGROW"). That preserves more horizontal
   // room inside the disk than a single "SOLAR · SUNGROW" line.
@@ -808,7 +850,7 @@ function renderCircleNode({ pos, title, nameLabel, value, sub, color, soc, radiu
              fill="var(--cyan)" class="sv-node-sub">SoC ${Math.round(soc)}%</text>`
     : "";
   return `
-    <g>
+    <g${groupAttrs}>
       <circle cx="${x}" cy="${y}" r="${r}"
               fill="var(--hero-box-fill)" stroke="${color}" stroke-width="2"/>
       ${titleSvg}

@@ -81,6 +81,12 @@
   --radius-lg: 18px;
   --radius-md: 14px;
   --radius-sm: 10px;
+
+  /* Shared card padding — every <ftw-*> card surface and every
+     .summary-card / .fuse-card / .energy-card declaration reads from
+     these so a single bump propagates everywhere. */
+  --card-pad:       14px 16px;
+  --card-pad-tight: 12px 14px;
 }
 
 /* ----- Light theme — applied when <html data-theme="light"> is set.

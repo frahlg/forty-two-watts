@@ -124,25 +124,17 @@
         <div class="card-value val-neutral" id="load-w">-- W</div>
         <div class="card-sub">house</div>
       </div>
-      <div class="card summary-card" id="card-soc">
-        <div class="card-label">SoC</div>
-        <div class="card-value" id="bat-soc">-- %</div>
-        <ftw-progress-bar id="soc-fill" mode="gradient" value="0" max="100"
-                          style="margin-top:0.5rem; --ftw-progress-height:10px"></ftw-progress-bar>
-      </div>
-      <div class="card summary-card" id="card-fuse">
+    </section>
+
+
+    <!-- Fuse — own row, one box per phase. Falls back to a single bar when
+         site meter doesn't report per-phase amperage. -->
+    <section class="fuse-row">
+      <div class="card fuse-card" id="card-fuse">
         <div class="card-label">Fuse</div>
-        <!-- Per-phase bars, populated dynamically from fuse.phases + phase_amps. -->
-        <div class="fuse-phases" id="fuse-phases"></div>
-        <!-- Fallback for single-phase or when site meter has no per-phase data. -->
+        <div class="fuse-phase-boxes" id="fuse-phases"></div>
         <div class="fuse-bar" id="fuse-bar-fallback"><div class="fuse-fill" id="fuse-fill"></div></div>
         <div class="card-value fuse-fallback-value" id="fuse-use">-- A</div>
-      </div>
-      <div class="card summary-card" id="card-ev" style="cursor:pointer"
-           role="button" tabindex="0" aria-label="Open EV charger details">
-        <div class="card-label">EV</div>
-        <div class="card-value" id="ev-w">-- W</div>
-        <div class="card-sub" id="ev-status">--</div>
       </div>
     </section>
 
@@ -172,6 +164,15 @@
         <div class="card-label">Load today</div>
         <div class="card-value val-neutral" id="e-load">-- kWh</div>
       </div>
+    </section>
+
+    <!-- History cards — three daily kWh stats with Week/Month toggle.
+         Each <ftw-history-card> owns its own fetch/state — no wiring
+         needed in next-app.js. -->
+    <section class="history-cards">
+      <ftw-history-card metric="import" label="Imported"></ftw-history-card>
+      <ftw-history-card metric="load"   label="Consumed"></ftw-history-card>
+      <ftw-history-card metric="export" label="Exported"></ftw-history-card>
     </section>
 
     <!-- Controls — two-tier: primary strategy + manual advanced -->

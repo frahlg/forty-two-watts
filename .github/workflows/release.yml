@@ -234,3 +234,75 @@ jobs:
           # Per-target scope keeps main + updater from evicting each other.
           cache-from: type=gha,scope=${{ matrix.target }}
           cache-to:   type=gha,mode=max,scope=${{ matrix.target }}
+
+  discord:
+    name: announce release on Discord
+    runs-on: ubuntu-latest
+    # Wait for binaries + docker so the message links to assets that
+    # actually exist. semantic-release output gates the whole job —
+    # nothing to announce when no version was cut.
+    needs: [release, binaries, docker]
+    if: needs.release.outputs.new_release_published == 'true'
+    permissions:
+      contents: read   # gh release view needs read access
+    steps:
+      - name: Post release announcement
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          GITHUB_TOKEN:    ${{ secrets.GITHUB_TOKEN }}
+          REPO:            ${{ github.repository }}
+          VERSION:         v${{ needs.release.outputs.new_release_version }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DISCORD_WEBHOOK:-}" ]; then
+            echo "DISCORD_WEBHOOK secret not set — skipping announcement."
+            exit 0
+          fi
+
+          RELEASE_URL="https://github.com/${REPO}/releases/tag/${VERSION}"
+          IMAGE_MAIN="ghcr.io/${REPO}:${VERSION}"
+          IMAGE_UPDATER="ghcr.io/${REPO}-updater:${VERSION}"
+
+          # Pull the release body (changelog) semantic-release wrote.
+          # Truncated to 3500 chars so the embed description stays under
+          # Discord's 4096-char limit even after we add the trailer.
+          BODY="$(gh release view "${VERSION}" --repo "${REPO}" --json body --jq .body || echo '')"
+          if [ "${#BODY}" -gt 3500 ]; then
+            BODY="${BODY:0:3500}"$'\n\n…truncated. Full notes: '"${RELEASE_URL}"
+          fi
+          if [ -z "${BODY}" ]; then
+            BODY="Release ${VERSION} is live. See ${RELEASE_URL} for details."
+          fi
+
+          # jq builds the JSON so embedded backticks / newlines / quotes
+          # in the changelog can't break out of the payload string.
+          # Code-fence the image refs with a literal backtick char (\u0060)
+          # so the markdown renders as inline code in Discord.
+          PAYLOAD="$(jq -n \
+            --arg title "🚀 forty-two-watts ${VERSION}" \
+            --arg url   "${RELEASE_URL}" \
+            --arg desc  "${BODY}" \
+            --arg main  "${IMAGE_MAIN}" \
+            --arg upd   "${IMAGE_UPDATER}" \
+            '{
+              username: "forty-two-watts",
+              embeds: [{
+                title: $title,
+                url:   $url,
+                color: 16753920,
+                description: $desc,
+                fields: [
+                  { name: "Main image",    value: ("\u0060" + $main + "\u0060"), inline: false },
+                  { name: "Updater image", value: ("\u0060" + $upd  + "\u0060"), inline: false }
+                ],
+                footer: { text: ("github.com/" + env.REPO) },
+                timestamp: (now | todateiso8601)
+              }]
+            }')"
+
+          # Post — fail the step on non-2xx so a broken webhook doesn't
+          # silently swallow an announcement.
+          curl -sS -f -X POST \
+            -H "Content-Type: application/json" \
+            -d "${PAYLOAD}" \
+            "${DISCORD_WEBHOOK}"
