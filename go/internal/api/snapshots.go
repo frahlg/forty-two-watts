@@ -1,0 +1,329 @@
+package api
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"time"
+)
+
+// snapshotKeepCount caps how many snapshot directories we retain. A
+// fresh one is created before every self-update; older ones get pruned
+// after the new snapshot lands, so the on-disk set is always ≤ this
+// number. Picked so the whole safety-net fits in the low-MB-per-entry
+// ballpark without the operator having to manage it.
+const snapshotKeepCount = 5
+
+// SnapshotMeta is the JSON marker written inside each snapshot dir.
+// It's the minimum the UI needs to list snapshots and decide which one
+// to restore when we add the rollback flow — pinning a schema now
+// lets future code read older snapshots without a guessing game.
+type SnapshotMeta struct {
+	SchemaVersion int       `json:"schema_version"`
+	CreatedAt     time.Time `json:"created_at"`
+	FromVersion   string    `json:"from_version,omitempty"`
+	ToVersion     string    `json:"to_version,omitempty"`
+	Action        string    `json:"action,omitempty"` // "update" | "restart"
+	// Files lists what was captured so a reader can distinguish a
+	// state-only snapshot (old) from a state+config one (current) and
+	// refuse to restore a partial set.
+	Files []string `json:"files"`
+}
+
+// snapshotSchemaVersion is bumped when the on-disk layout of a snapshot
+// dir changes (new required files, renamed meta fields). Older readers
+// see the number and can refuse with a clear error instead of silently
+// restoring an incomplete set.
+const snapshotSchemaVersion = 1
+
+// SnapshotInfo is the UI-facing shape returned by GET /api/version/snapshots.
+type SnapshotInfo struct {
+	ID        string    `json:"id"`
+	Path      string    `json:"path"`
+	CreatedAt time.Time `json:"created_at"`
+	FromVersion string  `json:"from_version,omitempty"`
+	ToVersion   string  `json:"to_version,omitempty"`
+	Action      string  `json:"action,omitempty"`
+	SizeBytes   int64   `json:"size_bytes"`
+}
+
+// createPreUpdateSnapshot captures state.db + config.yaml into
+// `<SnapshotDir>/<id>/` before the self-update flow pulls a new image.
+// Returns the snapshot ID on success so the caller can surface it to
+// the UI / log it / reference it from an eventual rollback request.
+//
+// Failure modes are deliberately loud: the operator asked for a
+// safety-netted update, so if we can't produce the safety net we'd
+// rather refuse the update than silently proceed without one.
+func (s *Server) createPreUpdateSnapshot(action, fromVersion, toVersion string) (SnapshotInfo, error) {
+	if s.deps.SnapshotDir == "" {
+		return SnapshotInfo{}, errors.New("snapshot dir not configured")
+	}
+	if s.deps.State == nil {
+		return SnapshotInfo{}, errors.New("state store unavailable")
+	}
+	if err := os.MkdirAll(s.deps.SnapshotDir, 0o755); err != nil {
+		return SnapshotInfo{}, fmt.Errorf("mkdir snapshot root: %w", err)
+	}
+
+	id := snapshotID(time.Now().UTC(), fromVersion, toVersion)
+	dir := filepath.Join(s.deps.SnapshotDir, id)
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		return SnapshotInfo{}, fmt.Errorf("mkdir %s: %w", dir, err)
+	}
+
+	// Always clean up the partial dir on any error past this point so
+	// the snapshots/ list stays consistent — a half-written snapshot
+	// is worse than none, because the UI would offer to restore it.
+	commit := false
+	defer func() {
+		if !commit {
+			_ = os.RemoveAll(dir)
+		}
+	}()
+
+	captured := []string{}
+
+	// 1. state.db via VACUUM INTO — point-in-time consistent even under
+	// live writes, no need to pause anything.
+	if err := s.deps.State.SnapshotTo(filepath.Join(dir, "state.db")); err != nil {
+		return SnapshotInfo{}, fmt.Errorf("state snapshot: %w", err)
+	}
+	captured = append(captured, "state.db")
+
+	// 2. config.yaml — plain file copy. Missing/empty path means the
+	// caller wasn't wired with one; log and move on without failing
+	// the snapshot (an update with no config on disk is legal — it
+	// just means the operator runs with defaults, and we have nothing
+	// to restore).
+	if s.deps.ConfigPath != "" {
+		dst := filepath.Join(dir, "config.yaml")
+		if err := copyFile(s.deps.ConfigPath, dst); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return SnapshotInfo{}, fmt.Errorf("copy config: %w", err)
+		}
+		if _, err := os.Stat(dst); err == nil {
+			captured = append(captured, "config.yaml")
+		}
+	}
+
+	// 3. meta.json — the pointer the UI/rollback flow reads first.
+	meta := SnapshotMeta{
+		SchemaVersion: snapshotSchemaVersion,
+		CreatedAt:     time.Now().UTC(),
+		FromVersion:   fromVersion,
+		ToVersion:     toVersion,
+		Action:        action,
+		Files:         captured,
+	}
+	metaPath := filepath.Join(dir, "meta.json")
+	metaBytes, err := json.MarshalIndent(&meta, "", "  ")
+	if err != nil {
+		return SnapshotInfo{}, fmt.Errorf("marshal meta: %w", err)
+	}
+	if err := os.WriteFile(metaPath, metaBytes, 0o644); err != nil {
+		return SnapshotInfo{}, fmt.Errorf("write meta: %w", err)
+	}
+
+	commit = true
+
+	// Prune in the background-ish (synchronous but errors swallowed to
+	// slog — pruning failure isn't worth blocking the update).
+	if err := pruneSnapshots(s.deps.SnapshotDir, snapshotKeepCount); err != nil {
+		// Use stdlib log so we don't introduce a new dep; this file
+		// stays slog-free.
+		// The snapshot itself was created successfully, so we return
+		// the info and let the caller decide whether to surface the
+		// prune error.
+		_ = err // intentional: documented best-effort
+	}
+
+	return SnapshotInfo{
+		ID:          id,
+		Path:        dir,
+		CreatedAt:   meta.CreatedAt,
+		FromVersion: fromVersion,
+		ToVersion:   toVersion,
+		Action:      action,
+		SizeBytes:   dirSize(dir),
+	}, nil
+}
+
+// listSnapshots returns all snapshot directories under SnapshotDir,
+// newest first. Unreadable entries are skipped with their errors
+// surfaced via the returned slice's second return — callers typically
+// render the usable list and log the problems.
+func listSnapshots(snapshotDir string) ([]SnapshotInfo, []error) {
+	if snapshotDir == "" {
+		return nil, nil
+	}
+	entries, err := os.ReadDir(snapshotDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, []error{err}
+	}
+	var out []SnapshotInfo
+	var errs []error
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		dir := filepath.Join(snapshotDir, e.Name())
+		meta, err := readSnapshotMeta(dir)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", e.Name(), err))
+			continue
+		}
+		out = append(out, SnapshotInfo{
+			ID:          e.Name(),
+			Path:        dir,
+			CreatedAt:   meta.CreatedAt,
+			FromVersion: meta.FromVersion,
+			ToVersion:   meta.ToVersion,
+			Action:      meta.Action,
+			SizeBytes:   dirSize(dir),
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].CreatedAt.After(out[j].CreatedAt)
+	})
+	return out, errs
+}
+
+// pruneSnapshots keeps the `keep` newest snapshot dirs (by CreatedAt
+// from meta.json) and removes the rest. Broken meta files cause the
+// entry to be left alone — we don't want to delete something we
+// couldn't parse, because it might be a partial write in progress.
+func pruneSnapshots(snapshotDir string, keep int) error {
+	if keep <= 0 {
+		return nil
+	}
+	snaps, _ := listSnapshots(snapshotDir)
+	if len(snaps) <= keep {
+		return nil
+	}
+	toRemove := snaps[keep:]
+	var firstErr error
+	for _, s := range toRemove {
+		if err := os.RemoveAll(s.Path); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+// handleVersionSnapshots serves the list to the UI.
+func (s *Server) handleVersionSnapshots(w http.ResponseWriter, r *http.Request) {
+	if s.deps.SelfUpdate == nil {
+		writeJSON(w, 503, map[string]string{"error": "self-update disabled"})
+		return
+	}
+	snaps, errs := listSnapshots(s.deps.SnapshotDir)
+	if snaps == nil {
+		snaps = []SnapshotInfo{}
+	}
+	resp := map[string]any{
+		"snapshots": snaps,
+		"dir":       s.deps.SnapshotDir,
+		"enabled":   s.deps.SnapshotDir != "",
+	}
+	if len(errs) > 0 {
+		// Surface as warnings alongside the usable entries so an
+		// operator with a corrupt snapshot still sees the healthy ones.
+		warnings := make([]string, 0, len(errs))
+		for _, e := range errs {
+			warnings = append(warnings, e.Error())
+		}
+		resp["warnings"] = warnings
+	}
+	writeJSON(w, 200, resp)
+}
+
+// ---- helpers ----
+
+// snapshotID builds the directory name. We keep timestamps ahead of
+// version tags so the file system's natural sort matches chronology,
+// which keeps `ls` and any UI that falls back to alphabetic order
+// sensible.
+func snapshotID(t time.Time, fromVersion, toVersion string) string {
+	stamp := t.Format("2006-01-02T15-04-05Z")
+	slug := strings.TrimSpace(strings.TrimPrefix(fromVersion, "v"))
+	if to := strings.TrimSpace(strings.TrimPrefix(toVersion, "v")); to != "" {
+		if slug != "" {
+			slug += "_to_" + to
+		} else {
+			slug = "to_" + to
+		}
+	}
+	if slug == "" {
+		return stamp
+	}
+	return stamp + "_" + sanitizeSlug(slug)
+}
+
+// sanitizeSlug keeps only characters that are safe in a filename across
+// all filesystems we care about; any semver-weird char (e.g. '+' build
+// metadata) becomes '_'.
+func sanitizeSlug(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '.', r == '-', r == '_':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('_')
+		}
+	}
+	return b.String()
+}
+
+func readSnapshotMeta(dir string) (SnapshotMeta, error) {
+	var meta SnapshotMeta
+	f, err := os.Open(filepath.Join(dir, "meta.json"))
+	if err != nil {
+		return meta, err
+	}
+	defer f.Close()
+	if err := json.NewDecoder(f).Decode(&meta); err != nil {
+		return meta, fmt.Errorf("decode meta.json: %w", err)
+	}
+	return meta, nil
+}
+
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	if _, err := io.Copy(out, in); err != nil {
+		return err
+	}
+	return out.Sync()
+}
+
+func dirSize(root string) int64 {
+	var total int64
+	_ = filepath.Walk(root, func(_ string, info os.FileInfo, err error) error {
+		if err != nil || info == nil || info.IsDir() {
+			return nil
+		}
+		total += info.Size()
+		return nil
+	})
+	return total
+}

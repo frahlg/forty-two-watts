@@ -69,6 +69,13 @@ type Deps struct {
 	SaveConfig func(path string, c *config.Config) error // injection for testability
 	WebDir     string                                    // static assets root (default "web")
 	ColdDir    string                                    // cold-storage root for parquet rolloff; empty disables cold fallback
+	// SnapshotDir is where pre-update snapshots of state.db + config.yaml
+	// are written by the self-update flow. Defaults to
+	// `<cold_dir_parent>/snapshots`; main.go is responsible for passing
+	// an absolute, writable path. Empty disables the snapshot step —
+	// updates proceed as before, the UI surfaces that no rollback point
+	// was captured so the operator can decide whether to continue.
+	SnapshotDir string
 
 	// Optional: spot prices + weather forecast services. Nil if disabled.
 	Prices   *prices.Service
@@ -175,6 +182,7 @@ func (s *Server) routes() {
 	s.handle("POST /api/version/update", s.handleVersionUpdate)
 	s.handle("POST /api/version/restart", s.handleVersionRestart)
 	s.handle("GET  /api/version/update/status", s.handleVersionUpdateStatus)
+	s.handle("GET  /api/version/snapshots", s.handleVersionSnapshots)
 
 	// ---- Static web UI ----
 	// Everything not matched above falls through to the static server.

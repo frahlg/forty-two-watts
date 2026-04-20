@@ -206,3 +206,64 @@ func TestHistoryMultiTierMerge(t *testing.T) {
 		}
 	}
 }
+
+func TestSnapshotToCapturesLiveState(t *testing.T) {
+	s := freshStore(t)
+	// Seed content that must survive the snapshot — value rows across
+	// a couple of tables so we verify VACUUM INTO copied more than an
+	// empty schema.
+	if err := s.SaveConfig("mode", "planner_self"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveTelemetry("ferroamp:battery", `{"w":1500,"soc":0.42}`); err != nil {
+		t.Fatal(err)
+	}
+
+	dst := filepath.Join(t.TempDir(), "snap.db")
+	if err := s.SnapshotTo(dst); err != nil {
+		t.Fatalf("SnapshotTo: %v", err)
+	}
+
+	// Source DB still works after snapshot (no locks / corruption).
+	if err := s.SaveConfig("post_snap", "ok"); err != nil {
+		t.Errorf("source DB unusable after snapshot: %v", err)
+	}
+
+	// Snapshot DB opens cleanly and contains the seeded rows.
+	snap, err := Open(dst)
+	if err != nil {
+		t.Fatalf("open snapshot: %v", err)
+	}
+	t.Cleanup(func() { snap.Close() })
+
+	if v, ok := snap.LoadConfig("mode"); !ok || v != "planner_self" {
+		t.Errorf("snapshot missing config row: got %q ok=%v", v, ok)
+	}
+	if v, ok := snap.LoadTelemetry("ferroamp:battery"); !ok || v != `{"w":1500,"soc":0.42}` {
+		t.Errorf("snapshot missing telemetry row: got %q ok=%v", v, ok)
+	}
+	// Snapshot was taken BEFORE post_snap was saved — it must NOT be
+	// present, proving the snapshot is point-in-time.
+	if _, ok := snap.LoadConfig("post_snap"); ok {
+		t.Error("snapshot contains row written after snapshot — VACUUM INTO isn't point-in-time as assumed")
+	}
+}
+
+func TestSnapshotToRefusesExistingFile(t *testing.T) {
+	s := freshStore(t)
+	dst := filepath.Join(t.TempDir(), "snap.db")
+	// First snapshot succeeds.
+	if err := s.SnapshotTo(dst); err != nil {
+		t.Fatalf("first snapshot: %v", err)
+	}
+	// Second snapshot to the SAME path must fail — SQLite refuses to
+	// overwrite. This is intentional so a caller can't accidentally
+	// stomp on a prior snapshot by reusing a timestamp or pathbuilder
+	// bug.
+	if err := s.SnapshotTo(dst); err == nil {
+		t.Error("second SnapshotTo to existing path should fail")
+	}
+}
+
+// avoid unused import if context not used
+var _ = context.Canceled

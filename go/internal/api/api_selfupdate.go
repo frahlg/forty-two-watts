@@ -66,17 +66,43 @@ func (s *Server) handleVersionUnskip(w http.ResponseWriter, r *http.Request) {
 // handleVersionUpdate signals the sidecar to pull the latest image + compose
 // up the main service. Returns as soon as the sidecar acknowledges; the UI
 // polls /api/version/update/status for progress.
+//
+// Before handing off to the sidecar we capture a rollback-point snapshot
+// (state.db + config.yaml) into SnapshotDir. A failed snapshot aborts
+// the update — the whole point of offering "Update" is that the user
+// knows they can back out, and shipping without the safety net breaks
+// that promise. The one exception is an explicitly-disabled snapshot
+// dir, where the operator opted out at deploy time.
 func (s *Server) handleVersionUpdate(w http.ResponseWriter, r *http.Request) {
 	if s.deps.SelfUpdate == nil {
 		writeJSON(w, 503, map[string]string{"error": "self-update disabled"})
 		return
 	}
 	info := s.deps.SelfUpdate.Info()
+
+	var snap SnapshotInfo
+	if s.deps.SnapshotDir != "" {
+		var err error
+		snap, err = s.createPreUpdateSnapshot("update", info.Current, info.Latest)
+		if err != nil {
+			writeJSON(w, 500, map[string]string{
+				"error":   "snapshot failed: " + err.Error(),
+				"hint":    "Update aborted so you keep a rollback point. Check SnapshotDir permissions or free space.",
+				"snapshot_dir": s.deps.SnapshotDir,
+			})
+			return
+		}
+	}
+
 	if err := s.deps.SelfUpdate.Trigger(r.Context(), "update", info.Latest); err != nil {
 		writeJSON(w, 502, map[string]string{"error": err.Error()})
 		return
 	}
-	writeJSON(w, 202, map[string]any{"status": "started", "action": "update", "target": info.Latest})
+	resp := map[string]any{"status": "started", "action": "update", "target": info.Latest}
+	if snap.ID != "" {
+		resp["snapshot"] = snap
+	}
+	writeJSON(w, 202, resp)
 }
 
 // handleVersionRestart signals the sidecar to pull + force-recreate the

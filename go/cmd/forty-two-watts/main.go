@@ -634,6 +634,12 @@ func main() {
 		SaveConfig: config.SaveAtomic,
 		WebDir:     *webDir,
 		ColdDir:    coldDir,
+		// Snapshots live next to the rest of the persistent data so
+		// docker-compose deploys only need one bind (./data). Derived
+		// from the state.db path rather than the config path because
+		// `state.db` is always in the main data volume; the config
+		// can legitimately live elsewhere (e.g. mounted RO from /etc).
+		SnapshotDir: filepath.Join(filepath.Dir(statePath), "snapshots"),
 		Prices:     priceSvc,
 		Forecast:   forecastSvc,
 		MPC:        mpcSvc,
