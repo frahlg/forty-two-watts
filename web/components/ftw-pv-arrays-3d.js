@@ -50,6 +50,14 @@ const PANEL_GAP = 0.3;
 // keeps the panel visibly distinct from the centre pivot sphere.
 const MIN_ORBIT_R = 1.8;
 
+// Panels whose azimuths differ by less than this are treated as the
+// "same roof line" and laid out side-by-side (perpendicular to the
+// cluster's mean azimuth) instead of spaced radially around the
+// orbit. Spacing nearly-parallel arrays radially drives the required
+// orbit radius to +Infinity as Δθ → 0, and visually they should
+// read as neighbours on one roof anyway.
+const PANEL_CLUSTER_DEG = 15;
+
 // Ground plane half-size relative to the placement radius, so the
 // ground always extends past the outer edge of the arrays by a
 // healthy margin regardless of kWp totals.
@@ -323,14 +331,23 @@ class FtwPvArrays3d extends FtwElement {
   _rebuild() {
     const t = this._three;
     if (!t) return;
-    // Dispose old meshes.
-    while (t.arrayRoot.children.length) {
-      const c = t.arrayRoot.children.pop();
+    // Dispose old meshes. Detach via the public remove() API so the
+    // child's .parent bookkeeping stays consistent (popping .children
+    // directly leaves stale parent pointers — a Three.js footgun).
+    // Also dispose any texture maps attached to sprite materials
+    // (CanvasTexture from makeLabelSprite) — repeated setArrays()
+    // calls would otherwise leak GPU memory per rebuild.
+    const children = t.arrayRoot.children.slice();
+    for (const c of children) {
+      t.arrayRoot.remove(c);
       c.traverse((o) => {
         if (o.geometry) o.geometry.dispose();
         if (o.material) {
           const mats = Array.isArray(o.material) ? o.material : [o.material];
-          mats.forEach((m) => m.dispose());
+          mats.forEach((m) => {
+            if (m.map) m.map.dispose();
+            m.dispose();
+          });
         }
       });
     }
@@ -350,47 +367,101 @@ class FtwPvArrays3d extends FtwElement {
       const kwp = Math.max(0.1, Number(a.kwp) || 0.1);
       const edge = Math.max(PANEL_EDGE_MIN,
         Math.min(PANEL_EDGE_MAX, Math.sqrt(kwp * AREA_PER_KWP)));
-      const azimuth = Number.isFinite(a.azimuth_deg) ? a.azimuth_deg : 180;
+      // Normalize into [0, 360). Otherwise a user-entered 360 (or
+      // a negative) would survive into the neighbour-collision math
+      // below as Δθ = 360°, collapsing sin(Δθ/2) to 0 and blowing
+      // needR to +Infinity — same failure mode as the single-panel
+      // wraparound bug, via a different input path.
+      const rawAz = Number.isFinite(a.azimuth_deg) ? a.azimuth_deg : 180;
+      const azimuth = ((rawAz % 360) + 360) % 360;
       const tilt = Number.isFinite(a.tilt_deg) ? a.tilt_deg : 35;
       return { edge, azimuth, tilt, name: a.name || "" };
     });
 
-    // Orbit radius must be big enough that two adjacent panels
-    // don't collide. The "edge/2 tangent" bound underestimated
-    // overlap because each square can be tilted or oriented so its
-    // diagonal points at its neighbour — the safe bound is the
-    // bounding-circle radius, which for a square of side e is
-    // e·√2/2 (the half-diagonal). So the chord between two centres
-    // must exceed the sum of their half-diagonals + gap:
-    //   2·r·sin(Δθ/2) >= eᵢ/√2 + eⱼ/√2 + gap
+    // Cluster panels by azimuth proximity. Panels within
+    // PANEL_CLUSTER_DEG of their left-hand neighbour in the sorted
+    // order belong to the same cluster and get laid out side-by-
+    // side (perpendicular to the cluster's mean azimuth) rather
+    // than spaced radially around the orbit. A long south-facing
+    // house with three arrays at ~170°/180°/190° then reads as a
+    // row along the ridge, instead of three panels sitting on top
+    // of each other because Δθ is too small to separate radially.
     const sorted = panels.slice().sort((a, b) => a.azimuth - b.azimuth);
+    const clusters = [];
+    for (const p of sorted) {
+      const cur = clusters[clusters.length - 1];
+      const last = cur && cur.panels[cur.panels.length - 1];
+      if (cur && (p.azimuth - last.azimuth) < PANEL_CLUSTER_DEG) {
+        cur.panels.push(p);
+      } else {
+        clusters.push({ panels: [p] });
+      }
+    }
+    // Wrap-around: if the first and last clusters are close across
+    // the 360°/0° seam (e.g. panels at 355° and 5°), merge them.
+    // Prepend the high-azimuth cluster's panels so left-to-right
+    // order within the merged cluster follows increasing azimuth
+    // modulo 360 (east-of-north on one side, west-of-north on the
+    // other).
+    if (clusters.length >= 2) {
+      const first = clusters[0];
+      const last = clusters[clusters.length - 1];
+      const wrapGap = (first.panels[0].azimuth + 360) -
+                      last.panels[last.panels.length - 1].azimuth;
+      if (wrapGap < PANEL_CLUSTER_DEG) {
+        first.panels = last.panels.concat(first.panels);
+        clusters.pop();
+      }
+    }
+
+    // Compute each cluster's aggregate geometry:
+    //   - meanAz:   circular mean of its panels' azimuths.
+    //   - totalW:   side-by-side row width along the tangent.
+    //   - maxEdge:  depth along the radial (tilt footprint).
+    //   - boundR:   bounding-circle radius used for cluster↔cluster
+    //               collision math (sqrt((W/2)^2 + (e/2)^2)).
+    for (const c of clusters) {
+      const ps = c.panels;
+      let sx = 0, sy = 0;
+      for (const p of ps) {
+        const rad = THREE.MathUtils.degToRad(p.azimuth);
+        sx += Math.cos(rad); sy += Math.sin(rad);
+      }
+      c.meanAz = (THREE.MathUtils.radToDeg(Math.atan2(sy, sx)) + 360) % 360;
+      c.totalW = ps.reduce((acc, p) => acc + p.edge, 0) +
+                 (ps.length - 1) * PANEL_GAP;
+      c.maxEdge = ps.reduce((m, p) => Math.max(m, p.edge), 0);
+      const halfW = c.totalW / 2;
+      const halfD = c.maxEdge / 2;
+      c.boundR = Math.sqrt(halfW * halfW + halfD * halfD);
+    }
+    clusters.sort((a, b) => a.meanAz - b.meanAz);
+
+    // Cluster↔cluster collision math. The chord between two cluster
+    // centres on the orbit circle must exceed the sum of their
+    // bounding-circle radii + gap:
+    //   2·r·sin(Δθ/2) >= boundR_i + boundR_j + PANEL_GAP
     let needR = MIN_ORBIT_R;
-    if (sorted.length === 1) {
-      // Single-panel short-circuit. The neighbour-collision loop
-      // below wraps around and collapses to sin(π) = 0, blowing
-      // needR to +Infinity — the panel then lands at the edge of
-      // float space and the whole scene vanishes. With one array
-      // there is no neighbour to clear, so floor at MIN_ORBIT_R
-      // plus the panel's own half-diagonal + gap so it sits a
-      // sensible distance off the pivot.
-      needR = Math.max(MIN_ORBIT_R, sorted[0].edge / Math.SQRT2 + PANEL_GAP);
+    if (clusters.length === 1) {
+      // No neighbour to clear — the cluster's own bounding radius
+      // (which subsumes the single-panel case) determines the floor.
+      needR = Math.max(MIN_ORBIT_R, clusters[0].boundR + PANEL_GAP);
     } else {
-      for (let i = 0; i < sorted.length; i++) {
-        const a = sorted[i];
-        const b = sorted[(i + 1) % sorted.length];
-        let dth = b.azimuth - a.azimuth;
-        if (i === sorted.length - 1) dth += 360;
+      for (let i = 0; i < clusters.length; i++) {
+        const a = clusters[i];
+        const b = clusters[(i + 1) % clusters.length];
+        let dth = b.meanAz - a.meanAz;
+        if (i === clusters.length - 1) dth += 360;
         const dRad = THREE.MathUtils.degToRad(Math.max(1, dth));
-        const span = a.edge / Math.SQRT2 + b.edge / Math.SQRT2 + PANEL_GAP;
+        const span = a.boundR + b.boundR + PANEL_GAP;
         const req = span / (2 * Math.sin(dRad / 2));
         if (req > needR) needR = req;
       }
     }
-    // Hard floor so a single small array doesn't sit on top of the pivot.
     const r = Math.max(needR, MIN_ORBIT_R);
 
-    for (const p of panels) {
-      const mesh = this._buildPanel(p, r);
+    for (const c of clusters) {
+      const mesh = this._buildCluster(c, r);
       t.arrayRoot.add(mesh);
     }
 
@@ -409,27 +480,51 @@ class FtwPvArrays3d extends FtwElement {
     this._prevCount = panels.length;
   }
 
-  _buildPanel(p, radius) {
-    const aRad = THREE.MathUtils.degToRad(p.azimuth);
-    const tRad = THREE.MathUtils.degToRad(p.tilt);
-
-    // Centre of the array (world). Azimuth convention:
-    //   N = 0 → -Z, E = 90 → +X, S = 180 → +Z, W = 270 → -X.
-    const cx = Math.sin(aRad) * radius;
-    const cz = -Math.cos(aRad) * radius;
-
-    // The panel is a Group with two transforms stacked: the outer
-    // group rotates around the pivot's Y axis to face the azimuth,
-    // the inner mesh sits at local (radius, 0, 0) and is tilted
-    // around local Z. Using the group keeps the local axes meaningful
-    // so "tilt" and "azimuth" stay independent of their numeric
-    // values instead of crossing into Euler-angle interaction.
+  // Build a cluster group — a row of panels sharing a mean azimuth,
+  // laid out side-by-side along the cluster's tangent to the orbit
+  // circle. The outer Y-rotation (previously per-panel in
+  // _buildPanel) lives here so the cluster orients as a unit; each
+  // inner panel only needs a tangent-offset + tilt.
+  _buildCluster(cluster, radius) {
+    const meanRad = THREE.MathUtils.degToRad(cluster.meanAz);
     const group = new THREE.Group();
-    // Face the azimuth: rotate the group so its local +X axis points
-    // in the azimuth direction. Three.js Y-rotation is CCW when
-    // viewed from +Y looking down, which aligns with our
-    // N→E→S→W = CW-from-above convention when we negate.
-    group.rotation.y = -aRad + Math.PI / 2;
+    // Rotate local +X to point toward the cluster's mean azimuth.
+    // Three.js Y-rotation is CCW viewed from +Y looking down; our
+    // N→E→S→W = CW-from-above, hence the -az + π/2.
+    group.rotation.y = -meanRad + Math.PI / 2;
+
+    // Distribute panels along local +Z (perpendicular to the radial
+    // direction). zCursor runs from -totalW/2 to +totalW/2 so the
+    // row is centred on the cluster's mean-azimuth spoke. Panels
+    // are already sorted by azimuth, so lower-azimuth panels land
+    // at -Z — which for a south cluster is world +X (east) — i.e.
+    // east-to-west visual order matches east-to-west azimuth order.
+    let zCursor = -cluster.totalW / 2;
+    for (const p of cluster.panels) {
+      zCursor += p.edge / 2;
+      const panel = this._buildPanel(p, radius, zCursor);
+      group.add(panel);
+      zCursor += p.edge / 2 + PANEL_GAP;
+    }
+    return group;
+  }
+
+  _buildPanel(p, radius, zOffset) {
+    const tRad = THREE.MathUtils.degToRad(p.tilt);
+    const offset = zOffset || 0;
+
+    // The panel is a single inner group positioned at
+    //   (radius, PANEL_ELEV + tiltLift, zOffset)
+    // inside the cluster group's already-azimuth-rotated frame.
+    // Tilt is around local Z; that lifts the +X-local edge up (the
+    // edge pointing "away from the pivot" in cluster-local space),
+    // which after the cluster's Y rotation leans the normal in the
+    // cluster's mean-azimuth direction. Panels whose azimuths differ
+    // from the mean but stay within PANEL_CLUSTER_DEG are drawn
+    // tilted along the mean — a small visual fib that is
+    // imperceptible within that window and keeps the code from
+    // having to unwind per-panel azimuth deltas inside the cluster.
+    //
     // Inner group positions + tilts the panel. The Y offset grows
     // with tilt so the panel's lower edge never clips through the
     // ground. At tilt=0 the panel sits at PANEL_ELEV; at tilt=90
@@ -441,7 +536,7 @@ class FtwPvArrays3d extends FtwElement {
     // off" for a wall-mount — visually correct + never clips.
     const tiltLift = (p.edge / 2) * Math.sin(tRad);
     const tiltGroup = new THREE.Group();
-    tiltGroup.position.set(radius, PANEL_ELEV + tiltLift, 0);
+    tiltGroup.position.set(radius, PANEL_ELEV + tiltLift, offset);
     // Tilt: rotate around local Z so the panel's TOP surface (its
     // original +Y normal) tips to face local +X — which, after the
     // outer Y-rotation, is the azimuth direction. This matches the
@@ -500,11 +595,9 @@ class FtwPvArrays3d extends FtwElement {
       tiltGroup.add(sprite);
     }
 
-    group.add(tiltGroup);
-    group.position.x = 0; // pivot around origin
-    group.userData = { azimuth: p.azimuth, tilt: p.tilt, edge: p.edge,
-                       name: p.name, center: new THREE.Vector3(cx, PANEL_ELEV, cz) };
-    return group;
+    tiltGroup.userData = { azimuth: p.azimuth, tilt: p.tilt,
+                           edge: p.edge, name: p.name };
+    return tiltGroup;
   }
 
   _resizeGroundAndCompass(radius) {

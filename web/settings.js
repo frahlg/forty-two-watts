@@ -806,17 +806,27 @@
   }
 
   // Lazy-load the 3D PV-array preview component the first time the
-  // Weather tab shows at least one array. Cached on the window to
-  // survive re-mounts of the tab; three.js itself caches through the
-  // browser's module graph so this only actually fetches the
-  // ~160 KB of three + OrbitControls once per page session.
+  // Weather tab shows at least one array. Cached in this IIFE scope
+  // (not on window — settings.js is re-evaluated on a hard reload
+  // anyway, so module-scope caching matches reality). three.js itself
+  // caches through the browser's module graph so we only fetch the
+  // ~1.2 MB of three + OrbitControls once per page session.
+  //
+  // If the import resolves to a browser that can't handle module
+  // imports / importmaps (or an ad-blocker swallows the bundle) we
+  // latch a permanent failure for the session instead of retrying
+  // on every renderPVArrays() call — that used to re-attempt and
+  // re-fail on legacy pages that don't ship the importmap.
   var pvArraysModulePromise = null;
+  var pvArraysModuleFailed = false;
   function ensurePvArraysComponent() {
     if (window.customElements.get("ftw-pv-arrays-3d")) return Promise.resolve();
+    if (pvArraysModuleFailed) return Promise.reject(new Error("pv-arrays-3d unavailable"));
     if (pvArraysModulePromise) return pvArraysModulePromise;
     pvArraysModulePromise = import("/components/ftw-pv-arrays-3d.js")
       .catch(function (e) {
-        pvArraysModulePromise = null; // allow retry if first load failed
+        pvArraysModulePromise = null;
+        pvArraysModuleFailed = true;
         throw e;
       });
     return pvArraysModulePromise;
@@ -877,8 +887,14 @@
       var slot = host.querySelector(".pv-arrays-3d-slot");
       if (slot) slot.style.display = "none";
     });
-    // Wire handlers — delegation off host so re-renders don't leak listeners.
-    host.onchange = function (e) {
+    // Wire handlers — delegation off host so re-renders don't leak
+    // listeners. Using 'input' (not 'change') so the 3D preview
+    // updates on every keystroke: change only fires on blur for
+    // text inputs, which meant the Name label wouldn't appear in
+    // the preview until the operator tabbed away. parseFloat's NaN
+    // guard already tolerates intermediate invalid states from
+    // number inputs (e.g. a lone "-" or "1.").
+    host.oninput = function (e) {
       var idx = e.target && e.target.dataset && e.target.dataset.pvArr;
       if (idx == null || idx === "") return;
       var field = e.target.dataset.field;
@@ -892,7 +908,7 @@
       }
       // Live refresh of the 3D preview — avoids a full re-render of
       // the rows (which would blur the input mid-edit) but keeps the
-      // visualisation in sync as the operator scrubs numbers.
+      // visualisation in sync as the operator types.
       pushArraysToPreview();
     };
     host.onclick = function (e) {
