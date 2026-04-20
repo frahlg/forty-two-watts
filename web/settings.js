@@ -643,6 +643,24 @@
         break;
 
       case "notifications":
+        // Fetch the backend's built-in templates once per tab render so
+        // operator-facing inputs show exactly what the server would send
+        // on a blank custom template. If the fetch fails the inputs stay
+        // with whatever's in currentConfig.
+        if (!window._notifDefaults) {
+          fetch("/api/notifications/defaults")
+            .then(function (r) { return r.ok ? r.json() : null; })
+            .then(function (d) {
+              if (!d) return;
+              window._notifDefaults = d;
+              // Re-render if user is still on this tab.
+              if (document.querySelector("#settings-tabs .active") &&
+                  document.querySelector("#settings-tabs .active").dataset.tab === "notifications") {
+                renderTab("notifications");
+              }
+            }).catch(function () {});
+        }
+        var defaults = window._notifDefaults || {};
         if (!currentConfig.notifications) {
           currentConfig.notifications = {
             enabled: false,
@@ -664,6 +682,17 @@
           ];
         }
         var nc = currentConfig.notifications;
+        // Pre-fill blank template fields with the backend defaults so the
+        // operator can see exactly what will be sent and tweak in place.
+        // Non-blank (already customized) fields are left untouched.
+        for (var _ei = 0; _ei < nc.events.length; _ei++) {
+          var _ev = nc.events[_ei];
+          var _d = defaults[_ev.type];
+          if (_d) {
+            if (!_ev.title_template) _ev.title_template = _d.title;
+            if (!_ev.body_template) _ev.body_template = _d.body;
+          }
+        }
         html = '<ftw-notif-status interval-ms="5000" style="margin-bottom:10px"></ftw-notif-status>' +
           '<fieldset><legend>Transport</legend>' +
           '<label><input type="checkbox" data-checkbox-path="notifications.enabled"' + (nc.enabled ? ' checked' : '') + '> Enabled</label>' +
@@ -685,14 +714,15 @@
           field("Topic", "notifications.ntfy.topic", "text", "",
             "The ntfy topic (subscribe to it in the ntfy app).") +
           '</div></div>' +
-          '<div class="field-row"><div>' +
-          field("Access token", "notifications.ntfy.access_token", "password", "",
-            "Bearer token (preferred for self-hosted ntfy with auth).") +
-          '</div><div>' +
-          field("Username", "notifications.ntfy.username", "text", "") +
-          '</div></div>' +
-          field("Password", "notifications.ntfy.password", "password", "",
-            "Only used if access token is empty.") +
+          // Access token uses the same masked-placeholder pattern as the
+          // EV charger password: when a token is already stored on the
+          // server the input is blank with a "configured" hint; typing
+          // replaces the saved value, leaving it blank preserves it.
+          '<label>Access token ' + help("Bearer token issued by your ntfy server (or ntfy.sh reserved topic).") + '</label>' +
+          '<input type="password" data-path="notifications.ntfy.access_token" value="" ' +
+          'placeholder="' + (nc.ntfy && nc.ntfy.has_access_token
+            ? "configured — hidden, type to replace"
+            : "paste token") + '">' +
           '</fieldset>';
         // Render each event rule.
         for (var ei = 0; ei < nc.events.length; ei++) {

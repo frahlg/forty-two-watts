@@ -159,6 +159,7 @@ func (s *Server) routes() {
 	s.handle("POST /api/drivers/{name}/enable", s.handleDriverEnable)
 	s.handle("GET  /api/ha/status", s.handleHAStatus)
 	s.handle("GET  /api/notifications/status", s.handleNotificationsStatus)
+	s.handle("GET  /api/notifications/defaults", s.handleNotificationsDefaults)
 	s.handle("POST /api/notifications/test", s.handleNotificationsTest)
 	s.handle("GET  /api/battery_models", s.handleGetModels)
 	s.handle("POST /api/battery_models/reset", s.handleResetModel)
@@ -1844,4 +1845,11 @@ func (s *Server) handleNotificationsTest(w http.ResponseWriter, r *http.Request)
 	case <-time.After(11 * time.Second):
 		writeJSON(w, 504, map[string]string{"error": "notification timeout"})
 	}
+}
+
+// GET /api/notifications/defaults — exposes the built-in template
+// strings so the settings UI can pre-fill inputs with exactly what the
+// backend renders when the operator leaves a custom template blank.
+func (s *Server) handleNotificationsDefaults(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, 200, notifications.EventDefaults())
 }

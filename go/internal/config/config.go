@@ -53,6 +53,12 @@ type NtfyConfig struct {
 	AccessToken string `yaml:"access_token,omitempty" json:"access_token,omitempty"`
 	Username    string `yaml:"username,omitempty" json:"username,omitempty"`
 	Password    string `yaml:"password,omitempty" json:"password,omitempty"`
+
+	// HasAccessToken is a JSON-only signal for the UI: true means a
+	// token exists on disk. Set by MaskSecrets before AccessToken is
+	// blanked so the Settings form can render "configured — hidden"
+	// instead of an empty input. Never written to YAML.
+	HasAccessToken bool `yaml:"-" json:"has_access_token,omitempty"`
 }
 
 // NotificationRule is one event type the operator can toggle.
@@ -399,6 +405,7 @@ func (c Config) MaskSecrets() Config {
 		cp := *out.Notifications
 		if cp.Ntfy != nil {
 			nc := *cp.Ntfy
+			nc.HasAccessToken = strings.TrimSpace(nc.AccessToken) != ""
 			nc.AccessToken = ""
 			nc.Password = ""
 			cp.Ntfy = &nc
@@ -648,6 +655,22 @@ func applyDefaults(c *Config) {
 		}
 		if c.HomeAssistant.PublishIntervalS == 0 {
 			c.HomeAssistant.PublishIntervalS = 5
+		}
+	}
+	// Backfill for configs that predate notifications: — lands a
+	// populated-but-disabled stub so upgrading an existing install
+	// lights up the Notifications tab with the defaults instead of an
+	// empty form. Nothing is written to disk until the operator Saves.
+	if c.Notifications == nil {
+		c.Notifications = &Notifications{
+			Enabled:         false,
+			Provider:        "ntfy",
+			DefaultPriority: 3,
+			Ntfy:            &NtfyConfig{Server: "https://ntfy.sh"},
+			Events: []NotificationRule{
+				{Type: "driver_offline", Enabled: false, ThresholdS: 600, Priority: 4, CooldownS: 3600},
+				{Type: "driver_recovered", Enabled: false, Priority: 3},
+			},
 		}
 	}
 	if c.Notifications != nil {

@@ -156,6 +156,18 @@ func New(cfg *config.Notifications, pub Publisher, lookup DeviceLookup) *Service
 	}
 }
 
+// SetPublisher swaps the transport. Used by main.go's reload applier to
+// install a provider built from fresh config when the notifications
+// section was absent at startup (or when the provider type changed).
+func (s *Service) SetPublisher(pub Publisher) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.pub = pub
+	s.mu.Unlock()
+}
+
 // Reload swaps the config. Preserves lastFired (cooldown must survive a
 // settings toggle) but clears per-outage state so freshly-enabled rules
 // don't fire retroactively. If the current publisher implements Provider
@@ -450,6 +462,28 @@ func (s *Service) bumpFailed() {
 	s.mu.Lock()
 	s.failed++
 	s.mu.Unlock()
+}
+
+// EventDefaults returns the built-in title/body template for every known
+// event type. Exposed via the API so the UI can pre-fill form inputs
+// with exactly what the backend will render when the operator leaves the
+// custom template blank.
+func EventDefaults() map[string]struct {
+	Title string `json:"title"`
+	Body  string `json:"body"`
+} {
+	types := []string{EventDriverOffline, EventDriverRecovered}
+	out := make(map[string]struct {
+		Title string `json:"title"`
+		Body  string `json:"body"`
+	}, len(types))
+	for _, t := range types {
+		out[t] = struct {
+			Title string `json:"title"`
+			Body  string `json:"body"`
+		}{Title: defaultTitleFor(t), Body: defaultBodyFor(t)}
+	}
+	return out
 }
 
 func defaultTitleFor(eventType string) string {

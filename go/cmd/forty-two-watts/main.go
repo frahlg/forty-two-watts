@@ -301,11 +301,18 @@ func main() {
 			// anchor, current SoC estimate) — see loadpoint.Manager.Load.
 			lpMgr.Load(buildLoadpointConfigs(newCfg.Loadpoints))
 
-			// Notifications: push fresh provider config + reset rule
-			// engine per-outage latch. Both calls are nil-safe.
-			if notifProvider != nil {
-				notifProvider.SetConfig(newCfg.Notifications)
+			// Notifications: rebuild the provider from fresh config
+			// (handles the cold-start case where the initial config
+			// had no notifications: block and notifProvider was nil),
+			// wire it onto the service, then reset the rule-engine
+			// per-outage latch. All calls are nil-safe.
+			newProv := notifications.NewProvider(newCfg.Notifications)
+			notifProvider = newProv
+			var newPub notifications.Publisher
+			if newProv != nil {
+				newPub = newProv
 			}
+			notifSvc.SetPublisher(newPub)
 			notifSvc.Reload(newCfg.Notifications)
 
 			// Weather diff → push live into the PV twin + forecast
@@ -741,6 +748,10 @@ func main() {
 		return dev.DeviceID, dev.Make, dev.Serial, true
 	})
 	notifSvc.Subscribe(bus)
+	// Late-bind onto the Deps literal that was built earlier with a nil
+	// notifSvc (the deps struct is assembled before this block runs).
+	// Same pattern haBridge uses a few lines below.
+	deps.Notifications = notifSvc
 	if cfg.Notifications != nil && cfg.Notifications.Enabled {
 		name := "ntfy"
 		if notifProvider != nil {
