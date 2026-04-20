@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -36,11 +37,17 @@ func (s *memStore) LoadConfig(k string) (string, bool) {
 
 func fakeGHServer(t *testing.T, tag, url string, published time.Time) *httptest.Server {
 	t.Helper()
+	return fakeGHServerWithBody(t, tag, url, published, "")
+}
+
+func fakeGHServerWithBody(t *testing.T, tag, url string, published time.Time, body string) *httptest.Server {
+	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"tag_name":     tag,
 			"html_url":     url,
 			"published_at": published.Format(time.RFC3339),
+			"body":         body,
 		})
 	}))
 }
@@ -263,6 +270,44 @@ func TestIsNewer(t *testing.T) {
 		if got := isNewer(tc.latest, tc.current); got != tc.want {
 			t.Errorf("isNewer(%q, %q) = %v, want %v", tc.latest, tc.current, got, tc.want)
 		}
+	}
+}
+
+func TestCheck_CapturesReleaseBody(t *testing.T) {
+	published := time.Date(2026, 4, 20, 10, 0, 0, 0, time.UTC)
+	body := "### Bug Fixes\n\n* **pvmodel:** drop intercept ([#136](https://example/pr/136))"
+	srv := fakeGHServerWithBody(t, "v1.5.0", "https://example/rel/1.5.0", published, body)
+	defer srv.Close()
+
+	c := New(Config{CurrentVersion: "v1.4.0", ReleasesURL: srv.URL}, newMemStore())
+	info, err := c.Check(context.Background(), false)
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if info.ReleaseBody != body {
+		t.Errorf("ReleaseBody = %q, want %q", info.ReleaseBody, body)
+	}
+}
+
+func TestCheck_TruncatesHugeReleaseBody(t *testing.T) {
+	// Build a body larger than the cap so we hit the truncation branch.
+	huge := strings.Repeat("* entry\n", (MaxReleaseBodyBytes/8)+200)
+	if len(huge) <= MaxReleaseBodyBytes {
+		t.Fatalf("test fixture too small: %d bytes", len(huge))
+	}
+	srv := fakeGHServerWithBody(t, "v2.0.0", "", time.Now(), huge)
+	defer srv.Close()
+
+	c := New(Config{CurrentVersion: "v1.0.0", ReleasesURL: srv.URL}, newMemStore())
+	info, err := c.Check(context.Background(), false)
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if len(info.ReleaseBody) < MaxReleaseBodyBytes || len(info.ReleaseBody) > MaxReleaseBodyBytes+200 {
+		t.Errorf("ReleaseBody length = %d, expected near %d+truncation marker", len(info.ReleaseBody), MaxReleaseBodyBytes)
+	}
+	if !strings.Contains(info.ReleaseBody, "truncated") {
+		t.Error("truncated body should carry the truncation marker")
 	}
 }
 
