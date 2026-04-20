@@ -5,12 +5,10 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>forty-two-watts — next</title>
   <link rel="icon" type="image/jpeg" href="/logo.jpg">
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
-        integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
-        crossorigin="">
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
-          integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
-          crossorigin=""></script>
+  <!-- Leaflet is lazy-loaded by settings.js when the Weather tab opens
+       the OSM picker — it's not needed on the main dashboard and
+       shipping ~150 KB of JS + CSS to every /status-poll tab is a
+       waste. See web/settings.js::loadLeaflet(). -->
   <!-- Type: Inter preferred for UI, JetBrains Mono for tabular numerics.
        No external font CDN — the Pi has to boot + render even without
        internet; theme.css's --sans / --mono stacks fall back to the OS's
@@ -57,7 +55,7 @@
       <button data-view="live" class="drawer-nav-btn" data-menu-label="Live view">&#9654;</button>
       <button data-view="diagnose" class="drawer-nav-btn" data-menu-label="Diagnose">&#9202;</button>
       <button id="hero-toggle" class="icon-btn" data-menu-label="Hero / tiles" title="Switch between hero diagram and numeric tiles">&#9638;</button>
-      <button id="theme-toggle" class="icon-btn" data-menu-label="Theme" title="Toggle light / dark theme">&#9790;</button>
+      <button id="theme-toggle" class="icon-btn" data-menu-label="Dark mode" title="Toggle light / dark theme">&#9790;</button>
       <button id="ui-mode-toggle" class="btn-link" title="Show advanced controls + diagnostics">Advanced</button>
       <button id="settings-btn" class="settings-btn" data-menu-label="Settings" title="Settings">⚙</button>
       <ftw-update-badge></ftw-update-badge>
@@ -152,11 +150,11 @@
         <div class="card-label">PV today</div>
         <div class="card-value val-generation" id="e-pv">-- kWh</div>
       </div>
-      <div class="card energy-card">
+      <div class="card energy-card bat-only">
         <div class="card-label">Bat charged</div>
         <div class="card-value val-charging" id="e-charged">-- kWh</div>
       </div>
-      <div class="card energy-card">
+      <div class="card energy-card bat-only">
         <div class="card-label">Bat discharged</div>
         <div class="card-value val-discharging" id="e-discharged">-- kWh</div>
       </div>
@@ -270,9 +268,9 @@
           <span class="legend-item"><span class="legend-color legend-ghost"></span> Predicted (ML)</span>
           <span class="legend-item"><span class="legend-color" style="background:#22c55e"></span> PV fc</span>
           <span class="legend-item"><span class="legend-color legend-dash" style="border-color:#fde68a"></span> Load fc</span>
-          <span class="legend-item"><span class="legend-color" style="background:#f59e0b"></span> Charge</span>
-          <span class="legend-item"><span class="legend-color" style="background:#8b5cf6"></span> Discharge</span>
-          <span class="legend-item"><span class="legend-color" style="background:#60a5fa"></span> SoC</span>
+          <span class="legend-item bat-only"><span class="legend-color" style="background:#f59e0b"></span> Charge</span>
+          <span class="legend-item bat-only"><span class="legend-color" style="background:#8b5cf6"></span> Discharge</span>
+          <span class="legend-item bat-only"><span class="legend-color" style="background:#60a5fa"></span> SoC</span>
         </div>
       </section>
     </section>
@@ -450,6 +448,12 @@
         if (btn) {
           btn.textContent = iconFor(theme);
           btn.title = 'Switch to ' + (theme === 'light' ? 'dark' : 'light') + ' theme';
+          // The mobile drawer label reflects the CURRENT theme so the
+          // menu reads as a status line ("Dark mode" while dark is
+          // active, "Light mode" when light is) rather than a generic
+          // "Theme" heading. Tap still flips to the other.
+          btn.setAttribute('data-menu-label',
+            theme === 'light' ? 'Light mode' : 'Dark mode');
         }
       }
       var saved = localStorage.getItem(KEY);

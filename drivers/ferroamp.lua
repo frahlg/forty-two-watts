@@ -44,6 +44,12 @@ local ehub_data = nil
 local eso_data = nil
 local sso_data = nil
 
+-- Optional config knob: when `skip_battery` is true the driver will
+-- NOT emit battery telemetry even when the ESO/pbat fields are
+-- present on the wire. Useful for dev setups that want a PV-only
+-- dashboard fed by the otherwise full-featured Ferroamp sim.
+local SKIP_BATTERY = false
+
 ----------------------------------------------------------------------------
 -- Helpers
 ----------------------------------------------------------------------------
@@ -105,6 +111,15 @@ end
 
 function driver_init(config)
     host.set_make("Ferroamp")
+
+    -- Honour the `skip_battery` config knob if set — the driver stays
+    -- otherwise unchanged, but host.emit("battery", …) is skipped so
+    -- the rest of the stack (dashboard, models, planner) sees no
+    -- battery capability from this instance.
+    if config and config.skip_battery then
+        SKIP_BATTERY = true
+        host.log("info", "Ferroamp: skip_battery=true — battery emission disabled")
+    end
 
     -- Subscribe to telemetry topics
     host.mqtt_subscribe("extapi/data/ehub")
@@ -213,7 +228,7 @@ function driver_poll()
     --------------------------------------------------------------------------
     -- Battery
     --------------------------------------------------------------------------
-    if ehub_data then
+    if ehub_data and not SKIP_BATTERY then
         local pbat = extract_val(ehub_data, "pbat")
         if pbat then
             local battery = {}

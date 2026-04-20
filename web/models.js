@@ -99,9 +99,7 @@
       '<span class="model-stat-label">calibrated</span>' +
       '<span class="model-stat-value">' + (m.last_calibrated_ts_ms ? humanAge((Date.now() - m.last_calibrated_ts_ms) / 1000) : "never") + '</span>' +
       '</div>' +
-      '<button class="btn-reset-model" data-reset-battery="' + esc(name) + '" ' +
-      'style="margin-top:6px;padding:4px 10px;font-size:0.7rem;background:var(--surface2);' +
-      'border:1px solid var(--border);color:var(--text-dim);border-radius:3px;cursor:pointer;width:100%">' +
+      '<button class="btn-reset-model" data-reset-battery="' + esc(name) + '">' +
       '↻ Reset model' +
       '</button>';
 
@@ -171,9 +169,7 @@
       '<span class="model-stat-label">calibrated</span>' +
       '<span class="model-stat-value">' + calibratedAgo + '</span>' +
       '</div>' +
-      '<button class="btn-reset-model" data-reset-battery="' + esc(name) + '" ' +
-      'style="margin-top:8px;padding:4px 10px;font-size:0.7rem;background:var(--surface2);' +
-      'border:1px solid var(--border);color:var(--text-dim);border-radius:3px;cursor:pointer;width:100%">' +
+      '<button class="btn-reset-model" data-reset-battery="' + esc(name) + '">' +
       '↻ Reset model' +
       '</button>';
 

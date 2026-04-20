@@ -858,9 +858,50 @@
     };
   }
 
+  // Lazy-load Leaflet the first time the Weather tab mounts its map.
+  // Cached via a single promise so repeat tab-opens reuse the same
+  // load. The CSS + JS hashes match what index.html used to ship
+  // globally; moving them here saves ~150 KB on every dashboard
+  // poll-tab that never opens Settings.
+  var leafletLoading = null;
+  function loadLeaflet() {
+    if (window.L) return Promise.resolve();
+    if (leafletLoading) return leafletLoading;
+    leafletLoading = new Promise(function (resolve, reject) {
+      var css = document.createElement("link");
+      css.rel = "stylesheet";
+      css.href = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.css";
+      css.integrity = "sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=";
+      css.crossOrigin = "";
+      document.head.appendChild(css);
+
+      var script = document.createElement("script");
+      script.src = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js";
+      script.integrity = "sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=";
+      script.crossOrigin = "";
+      script.async = true;
+      script.onload = function () { resolve(); };
+      script.onerror = function () {
+        // null so a retry on the next tab-open can try again.
+        leafletLoading = null;
+        reject(new Error("Leaflet failed to load"));
+      };
+      document.head.appendChild(script);
+    });
+    return leafletLoading;
+  }
+
   function initWeatherMap() {
     var container = document.getElementById("weather-map");
-    if (!container || !window.L) return;
+    if (!container) return;
+    loadLeaflet().then(function () { _mountWeatherMap(container); })
+                 .catch(function (e) {
+                   container.textContent = "map unavailable: " + e.message;
+                 });
+  }
+
+  function _mountWeatherMap(container) {
+    if (!window.L) return;
     var latInput = bodyEl.querySelector('[data-path="weather.latitude"]');
     var lonInput = bodyEl.querySelector('[data-path="weather.longitude"]');
     if (!latInput || !lonInput) return;

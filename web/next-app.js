@@ -161,6 +161,33 @@
     return Math.round(w) + " W";
   }
 
+  // Fuse bar color — smooth green→yellow→orange→red gradient across
+  // 0 %→100 %. Anchors land at the named color at each zone
+  // boundary: 0 %=green, 50 %=yellow, 75 %=orange, 90 %+=red. Between
+  // them the hue interpolates linearly so a bar at 45 % already reads
+  // yellow-leaning (h ≈ 100, close to yellow's 95), not solid green —
+  // matches the "45 % is more towards yellow than green" spec. Oklch
+  // holds lightness + chroma constant so the transitions don't muddy.
+  function fuseFillColor(pct) {
+    var c = Math.max(0, Math.min(100, pct));
+    var h;
+    if (c < 50) {
+      // 0 → 50 : 150 (green) → 95 (yellow)
+      h = 150 - (c / 50) * (150 - 95);
+    } else if (c < 75) {
+      // 50 → 75 : 95 (yellow) → 50 (orange)
+      h = 95 - ((c - 50) / 25) * (95 - 50);
+    } else if (c < 90) {
+      // 75 → 90 : 50 (orange) → 22 (red)
+      h = 50 - ((c - 75) / 15) * (50 - 22);
+    } else {
+      // 90 → 100: solid red. Saturate rather than continue shifting
+      // hue — operators just need to see "DANGER", not a hue delta.
+      h = 22;
+    }
+    return "oklch(0.78 0.18 " + h.toFixed(1) + ")";
+  }
+
   // Snap an axis range to "nice" round numbers. Returns { min, max, step }
   // where step is a 1/2/5 × 10^k value chosen so the axis spans `count`
   // ticks across roughly the original range. Guarantees that 0 lands on
@@ -199,6 +226,23 @@
 
   // ---- Render ----
   function render(data) {
+    // Battery presence → body.no-battery toggle. Drives visibility of
+    // the "Bat charged" / "Bat discharged" tiles and the Plan chart's
+    // Charge / Discharge / SoC legend + drawing layers. Any driver
+    // exposing bat_w counts; if the current tick has zero such
+    // drivers the class goes on and the CSS in next.css hides
+    // everything tagged .bat-only. Re-evaluated every /api/status
+    // poll so plugging in a battery lights everything back up
+    // without a reload.
+    var hasBattery = false;
+    var drvMap = data.drivers || {};
+    for (var drvName in drvMap) {
+      if (drvMap[drvName] && drvMap[drvName].bat_w != null) {
+        hasBattery = true; break;
+      }
+    }
+    document.body.classList.toggle("no-battery", !hasBattery);
+
     // PUSH CHART DATA FIRST — never let a DOM render error somewhere below
     // silently kill the chart-update path. (Prior bug: missing #dispatch-list
     // threw inside renderDispatch, which is between renderDrivers and
@@ -408,7 +452,8 @@
         fuseUse.textContent = peakA.toFixed(1) + " A";
         var totalFusePct = Math.min(100, (peakA / maxAmps) * 100);
         fuseFill.style.width = totalFusePct + "%";
-        fuseFill.className = "fuse-fill" + (totalFusePct > 85 ? " crit" : totalFusePct > 65 ? " warn" : "");
+        fuseFill.style.backgroundColor = fuseFillColor(totalFusePct);
+        fuseFill.className = "fuse-fill";
       } else if (fusePhases) {
         // Per-phase boxes: one tile per configured phase, side-by-side.
         if (fusePhases.childElementCount !== phases) {
@@ -440,10 +485,19 @@
           var pct = Math.min(100, (magA / maxAmps) * 100);
           var bf = boxes[rb].querySelector(".fuse-phase-fill");
           var bv = boxes[rb].querySelector(".fuse-phase-val");
-          bf.style.width = pct + "%";
-          bf.className = "fuse-phase-fill"
-            + (pct > 85 ? " crit" : pct > 65 ? " warn" : "")
-            + (rawA < -0.1 ? " export" : "");
+          // CSS custom property so the same value drives both the
+          // horizontal bar (desktop) and the vertical bar (mobile)
+          // without the inline width overriding the mobile media
+          // query. The two orientations are pure CSS flips below.
+          bf.style.setProperty("--fill-pct", pct + "%");
+          // Smooth gradient instead of the old .warn/.crit buckets:
+          // fuseFillColor() interpolates green→yellow→orange→red
+          // across 50%/75%/90% knees so a bar at 45 % already leans
+          // yellow, 55 % is clearly yellow, 82 % is firmly orange, etc.
+          // Export (negative current, PV backfeed) keeps its own cool
+          // cyan via the .export class.
+          bf.style.backgroundColor = (rawA < -0.1) ? "" : fuseFillColor(pct);
+          bf.className = "fuse-phase-fill" + (rawA < -0.1 ? " export" : "");
           bv.textContent = magA.toFixed(1) + " A";
         }
       }

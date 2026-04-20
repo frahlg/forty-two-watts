@@ -11,9 +11,13 @@
 (function () {
   "use strict";
 
-  const CHECK_INTERVAL_MS = 10 * 60 * 1000; // /api/version/check cadence
-  const STATUS_INTERVAL_MS = 2000;           // during updates
-  const UPDATE_SOFT_TIMEOUT_MS = 180 * 1000; // after this we stop auto-reloading
+  // Upstream version checks don't change often; 3 h is plenty of
+  // headroom to surface a new release on a normal workday without
+  // hammering /api/version/check (which can hit GitHub each tick if
+  // the local cache is stale).
+  const CHECK_INTERVAL_MS = 3 * 60 * 60 * 1000; // /api/version/check cadence
+  const STATUS_INTERVAL_MS = 2000;               // during updates
+  const UPDATE_SOFT_TIMEOUT_MS = 180 * 1000;     // after this we stop auto-reloading
 
   class FtwUpdateBadge extends HTMLElement {
     constructor() {
@@ -255,6 +259,15 @@
     _render() {
       const info = this._info || {};
       const showDot = info.update_available && !info.skipped && this._phase !== "updating";
+
+      // Surface to the rest of the page via body class: the header's
+      // green #conn-status dot sits right next to this badge, and
+      // having both visible at once clutters the corner. CSS in
+      // next.css hides #conn-status when .has-update is on, so the
+      // two dots swap instead of stacking.
+      if (typeof document !== "undefined" && document.body) {
+        document.body.classList.toggle("has-update", !!showDot);
+      }
 
       this._shadow.innerHTML = `
         <style>${this._styles()}</style>
@@ -505,15 +518,19 @@
         :host { all: initial; font-family: inherit; }
         .hidden { display: none !important; }
         .badge {
+          /* Blue blinking dot so it's unmistakably "this is the
+             update indicator" and not confused with the green
+             connection dot next door. Pulsing animation stays so
+             it reads as actionable, not a static state. */
           appearance: none;
           background: transparent;
-          color: var(--accent, #f59e0b);
+          color: #3b82f6;
           border: none;
           cursor: pointer;
           font-size: 1.1rem;
           line-height: 1;
           padding: 0 0.3rem;
-          animation: pulse 2s ease-in-out infinite;
+          animation: pulse 1.4s ease-in-out infinite;
         }
         @keyframes pulse {
           0%, 100% { opacity: 1; }
