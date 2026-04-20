@@ -104,11 +104,15 @@ class FtwPvArrays3d extends FtwElement {
     this._three = null;
     this._raf = 0;
     this._ro = null;
-    // Camera auto-fits on the FIRST successful rebuild and never
-    // again in the same mount session — keeps the operator's
-    // rotation/pan stable while they scrub kWp / tilt / azimuth
-    // values from the form below.
+    // Camera auto-fits on the first successful rebuild and
+    // whenever the array count changes. Scrubbing kWp / tilt /
+    // azimuth on a stable count keeps the operator's rotation/pan.
     this._cameraFitted = false;
+    // Number of arrays at the last _rebuild(). A change in this
+    // count is the signal we use to refit the camera even after
+    // _cameraFitted — adding or removing arrays is a structural
+    // change the operator expects the viewport to follow.
+    this._prevCount = 0;
   }
 
   disconnectedCallback() {
@@ -335,6 +339,7 @@ class FtwPvArrays3d extends FtwElement {
       if (!this._cameraFitted) {
         this._fitCamera(MIN_ORBIT_R + 2);
       }
+      this._prevCount = 0;
       return;
     }
 
@@ -360,15 +365,26 @@ class FtwPvArrays3d extends FtwElement {
     //   2·r·sin(Δθ/2) >= eᵢ/√2 + eⱼ/√2 + gap
     const sorted = panels.slice().sort((a, b) => a.azimuth - b.azimuth);
     let needR = MIN_ORBIT_R;
-    for (let i = 0; i < sorted.length; i++) {
-      const a = sorted[i];
-      const b = sorted[(i + 1) % sorted.length];
-      let dth = b.azimuth - a.azimuth;
-      if (i === sorted.length - 1) dth += 360;
-      const dRad = THREE.MathUtils.degToRad(Math.max(1, dth));
-      const span = a.edge / Math.SQRT2 + b.edge / Math.SQRT2 + PANEL_GAP;
-      const req = span / (2 * Math.sin(dRad / 2));
-      if (req > needR) needR = req;
+    if (sorted.length === 1) {
+      // Single-panel short-circuit. The neighbour-collision loop
+      // below wraps around and collapses to sin(π) = 0, blowing
+      // needR to +Infinity — the panel then lands at the edge of
+      // float space and the whole scene vanishes. With one array
+      // there is no neighbour to clear, so floor at MIN_ORBIT_R
+      // plus the panel's own half-diagonal + gap so it sits a
+      // sensible distance off the pivot.
+      needR = Math.max(MIN_ORBIT_R, sorted[0].edge / Math.SQRT2 + PANEL_GAP);
+    } else {
+      for (let i = 0; i < sorted.length; i++) {
+        const a = sorted[i];
+        const b = sorted[(i + 1) % sorted.length];
+        let dth = b.azimuth - a.azimuth;
+        if (i === sorted.length - 1) dth += 360;
+        const dRad = THREE.MathUtils.degToRad(Math.max(1, dth));
+        const span = a.edge / Math.SQRT2 + b.edge / Math.SQRT2 + PANEL_GAP;
+        const req = span / (2 * Math.sin(dRad / 2));
+        if (req > needR) needR = req;
+      }
     }
     // Hard floor so a single small array doesn't sit on top of the pivot.
     const r = Math.max(needR, MIN_ORBIT_R);
@@ -379,14 +395,18 @@ class FtwPvArrays3d extends FtwElement {
     }
 
     this._resizeGroundAndCompass(r);
-    // Only auto-fit on the first successful rebuild — subsequent
-    // setArrays() calls (from the operator scrubbing tilt / kWp /
-    // azimuth) should keep the current camera pose so their
-    // rotation / pan isn't snapped back to the default overview.
-    if (!this._cameraFitted) {
+    // Auto-fit on the first successful rebuild, and again whenever
+    // the array count changes. Scrubbing tilt / kWp / azimuth on a
+    // stable count keeps the operator's camera pose; adding or
+    // removing arrays is a structural change where they expect the
+    // new layout to be centred (e.g. trimming 3 → 1 used to leave
+    // the single remaining panel outside the fitted frustum).
+    const countChanged = this._prevCount !== panels.length;
+    if (!this._cameraFitted || countChanged) {
       this._fitCamera(r);
       this._cameraFitted = true;
     }
+    this._prevCount = panels.length;
   }
 
   _buildPanel(p, radius) {
@@ -525,14 +545,23 @@ class FtwPvArrays3d extends FtwElement {
     const hFov = 2 * Math.atan(Math.tan(fov / 2) * t.camera.aspect);
     const effectiveFov = Math.min(vFov, hFov);
     const dist = target / Math.sin(effectiveFov / 2);
-    // Look down at ~35° above the horizon — a mid-elevation viewing
-    // angle that reads both tilt and azimuth at a glance. The
+    // Default pose: camera at southeast (azimuth 135°), looking
+    // northwest toward the origin, at ~26° above the horizon. This
+    // puts north at the far side of the frame and gives south-
+    // facing panels their natural "tilted away from the viewer"
+    // read — the standard orientation for PV layout review. The
     // operator can drag to their preferred pose afterwards.
+    //
+    // Azimuth convention (same as panels): N = 0 → -Z, E = +X,
+    // S = +Z, W = -X. Camera at SE = (+X, +Z). The orbit angle θ
+    // is measured from +Z (south); θ = π/4 yields equal sin and
+    // cos → equal east and south components → exact southeast.
     const elev = 0.45;
+    const theta = Math.PI / 4;
     t.camera.position.set(
-      dist * Math.sin(Math.PI * 0.7) * Math.cos(elev),
+      dist * Math.sin(theta) * Math.cos(elev),
       dist * Math.sin(elev),
-      dist * Math.cos(Math.PI * 0.7) * Math.cos(elev),
+      dist * Math.cos(theta) * Math.cos(elev),
     );
     t.camera.lookAt(0, 0, 0);
     t.controls.target.set(0, 0, 0);
