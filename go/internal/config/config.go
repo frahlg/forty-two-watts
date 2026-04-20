@@ -30,6 +30,41 @@ type Config struct {
 	OCPP          *OCPP              `yaml:"ocpp,omitempty" json:"ocpp,omitempty"`
 	EVCharger     *EVCharger         `yaml:"ev_charger,omitempty" json:"ev_charger,omitempty"`
 	Loadpoints    []Loadpoint        `yaml:"loadpoints,omitempty" json:"loadpoints,omitempty"`
+	Notifications *Notifications     `yaml:"notifications,omitempty" json:"notifications,omitempty"`
+}
+
+// Notifications configures outbound push notifications. Exactly one
+// transport provider is active at a time, selected by Provider. Today
+// the only implemented provider is "ntfy" (ntfy.sh or self-hosted);
+// future providers add their own nested config block and register in
+// go/internal/notifications.
+type Notifications struct {
+	Enabled         bool               `yaml:"enabled" json:"enabled"`
+	Provider        string             `yaml:"provider,omitempty" json:"provider,omitempty"`
+	DefaultPriority int                `yaml:"default_priority,omitempty" json:"default_priority,omitempty"`
+	Ntfy            *NtfyConfig        `yaml:"ntfy,omitempty" json:"ntfy,omitempty"`
+	Events          []NotificationRule `yaml:"events,omitempty" json:"events,omitempty"`
+}
+
+// NtfyConfig is the ntfy.sh transport settings.
+type NtfyConfig struct {
+	Server      string `yaml:"server,omitempty" json:"server,omitempty"`
+	Topic       string `yaml:"topic,omitempty" json:"topic,omitempty"`
+	AccessToken string `yaml:"access_token,omitempty" json:"access_token,omitempty"`
+	Username    string `yaml:"username,omitempty" json:"username,omitempty"`
+	Password    string `yaml:"password,omitempty" json:"password,omitempty"`
+}
+
+// NotificationRule is one event type the operator can toggle.
+type NotificationRule struct {
+	Type          string `yaml:"type" json:"type"`
+	Enabled       bool   `yaml:"enabled" json:"enabled"`
+	ThresholdS    int    `yaml:"threshold_s,omitempty" json:"threshold_s,omitempty"`
+	Priority      int    `yaml:"priority,omitempty" json:"priority,omitempty"`
+	Tags          string `yaml:"tags,omitempty" json:"tags,omitempty"`
+	TitleTemplate string `yaml:"title_template,omitempty" json:"title_template,omitempty"`
+	BodyTemplate  string `yaml:"body_template,omitempty" json:"body_template,omitempty"`
+	CooldownS     int    `yaml:"cooldown_s,omitempty" json:"cooldown_s,omitempty"`
 }
 
 // Loadpoint is one EV charge point the planner can reason about.
@@ -360,6 +395,21 @@ func (c Config) MaskSecrets() Config {
 		cp.APIKey = ""
 		out.Weather = &cp
 	}
+	if out.Notifications != nil {
+		cp := *out.Notifications
+		if cp.Ntfy != nil {
+			nc := *cp.Ntfy
+			nc.AccessToken = ""
+			nc.Password = ""
+			cp.Ntfy = &nc
+		}
+		if len(cp.Events) > 0 {
+			evs := make([]NotificationRule, len(cp.Events))
+			copy(evs, cp.Events)
+			cp.Events = evs
+		}
+		out.Notifications = &cp
+	}
 
 	if len(out.Drivers) > 0 {
 		drivers := make([]Driver, len(out.Drivers))
@@ -414,6 +464,15 @@ func (incoming *Config) PreserveMaskedSecrets(existing *Config) {
 	}
 	if incoming.Weather != nil && existing.Weather != nil && incoming.Weather.APIKey == "" {
 		incoming.Weather.APIKey = existing.Weather.APIKey
+	}
+	if incoming.Notifications != nil && existing.Notifications != nil &&
+		incoming.Notifications.Ntfy != nil && existing.Notifications.Ntfy != nil {
+		if incoming.Notifications.Ntfy.AccessToken == "" {
+			incoming.Notifications.Ntfy.AccessToken = existing.Notifications.Ntfy.AccessToken
+		}
+		if incoming.Notifications.Ntfy.Password == "" {
+			incoming.Notifications.Ntfy.Password = existing.Notifications.Ntfy.Password
+		}
 	}
 	for i := range incoming.Drivers {
 		for _, ed := range existing.Drivers {
@@ -591,6 +650,22 @@ func applyDefaults(c *Config) {
 			c.HomeAssistant.PublishIntervalS = 5
 		}
 	}
+	if c.Notifications != nil {
+		if c.Notifications.Provider == "" {
+			c.Notifications.Provider = "ntfy"
+		}
+		if c.Notifications.DefaultPriority == 0 {
+			c.Notifications.DefaultPriority = 3
+		}
+		if c.Notifications.Provider == "ntfy" {
+			if c.Notifications.Ntfy == nil {
+				c.Notifications.Ntfy = &NtfyConfig{}
+			}
+			if c.Notifications.Ntfy.Server == "" {
+				c.Notifications.Ntfy.Server = "https://ntfy.sh"
+			}
+		}
+	}
 }
 
 // Validate ensures the config is internally consistent and safe to run with.
@@ -631,6 +706,41 @@ func (c *Config) Validate() error {
 	}
 	if c.Fuse.MaxAmps <= 0 {
 		return errors.New("fuse.max_amps must be > 0")
+	}
+	if n := c.Notifications; n != nil {
+		if n.DefaultPriority < 0 || n.DefaultPriority > 5 {
+			return errors.New("notifications.default_priority must be in [0,5]")
+		}
+		if n.Enabled {
+			switch n.Provider {
+			case "", "ntfy":
+				if n.Ntfy == nil {
+					return errors.New("notifications.ntfy required when provider=ntfy and enabled")
+				}
+				if strings.TrimSpace(n.Ntfy.Server) == "" {
+					return errors.New("notifications.ntfy.server required when enabled")
+				}
+				if strings.TrimSpace(n.Ntfy.Topic) == "" {
+					return errors.New("notifications.ntfy.topic required when enabled")
+				}
+			default:
+				return fmt.Errorf("notifications.provider %q not supported", n.Provider)
+			}
+		}
+		for i, ev := range n.Events {
+			if strings.TrimSpace(ev.Type) == "" {
+				return fmt.Errorf("notifications.events[%d]: type required", i)
+			}
+			if ev.ThresholdS < 0 {
+				return fmt.Errorf("notifications.events[%d]: threshold_s must be >= 0", i)
+			}
+			if ev.Priority < 0 || ev.Priority > 5 {
+				return fmt.Errorf("notifications.events[%d]: priority must be in [0,5]", i)
+			}
+			if ev.CooldownS < 0 {
+				return fmt.Errorf("notifications.events[%d]: cooldown_s must be >= 0", i)
+			}
+		}
 	}
 	return nil
 }

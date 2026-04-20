@@ -642,6 +642,90 @@
         }, 0);
         break;
 
+      case "notifications":
+        if (!currentConfig.notifications) {
+          currentConfig.notifications = {
+            enabled: false,
+            provider: "ntfy",
+            default_priority: 3,
+            ntfy: { server: "https://ntfy.sh", topic: "" },
+            events: [
+              { type: "driver_offline", enabled: false, threshold_s: 600, priority: 4, cooldown_s: 3600, tags: "", title_template: "", body_template: "" },
+              { type: "driver_recovered", enabled: false, priority: 3, cooldown_s: 0, tags: "", title_template: "", body_template: "" },
+            ],
+          };
+        }
+        if (!currentConfig.notifications.provider) currentConfig.notifications.provider = "ntfy";
+        if (!currentConfig.notifications.ntfy) currentConfig.notifications.ntfy = { server: "https://ntfy.sh", topic: "" };
+        if (!currentConfig.notifications.events || !currentConfig.notifications.events.length) {
+          currentConfig.notifications.events = [
+            { type: "driver_offline", enabled: false, threshold_s: 600, priority: 4, cooldown_s: 3600, tags: "", title_template: "", body_template: "" },
+            { type: "driver_recovered", enabled: false, priority: 3, cooldown_s: 0, tags: "", title_template: "", body_template: "" },
+          ];
+        }
+        var nc = currentConfig.notifications;
+        html = '<ftw-notif-status interval-ms="5000" style="margin-bottom:10px"></ftw-notif-status>' +
+          '<fieldset><legend>Transport</legend>' +
+          '<label><input type="checkbox" data-checkbox-path="notifications.enabled"' + (nc.enabled ? ' checked' : '') + '> Enabled</label>' +
+          '<div class="field-row"><div>' +
+          '<label>Provider' +
+          '<select data-path="notifications.provider">' +
+          '<option value="ntfy"' + (nc.provider === "ntfy" ? ' selected' : '') + '>ntfy</option>' +
+          '</select></label>' +
+          '</div><div>' +
+          field("Default priority (1–5)", "notifications.default_priority", "number", 3,
+            "Used when a rule leaves priority=0. 5 = urgent, 1 = low.") +
+          '</div></div>' +
+          '</fieldset>' +
+          '<fieldset><legend>ntfy</legend>' +
+          '<div class="field-row"><div>' +
+          field("Server", "notifications.ntfy.server", "text", "https://ntfy.sh",
+            "Public ntfy.sh or your self-hosted server URL.") +
+          '</div><div>' +
+          field("Topic", "notifications.ntfy.topic", "text", "",
+            "The ntfy topic (subscribe to it in the ntfy app).") +
+          '</div></div>' +
+          '<div class="field-row"><div>' +
+          field("Access token", "notifications.ntfy.access_token", "password", "",
+            "Bearer token (preferred for self-hosted ntfy with auth).") +
+          '</div><div>' +
+          field("Username", "notifications.ntfy.username", "text", "") +
+          '</div></div>' +
+          field("Password", "notifications.ntfy.password", "password", "",
+            "Only used if access token is empty.") +
+          '</fieldset>';
+        // Render each event rule.
+        for (var ei = 0; ei < nc.events.length; ei++) {
+          var ev = nc.events[ei];
+          html += '<fieldset><legend>' + (ev.type || "event #" + ei) + '</legend>' +
+            '<label><input type="checkbox" data-checkbox-path="notifications.events.' + ei + '.enabled"' + (ev.enabled ? ' checked' : '') + '> Enabled</label>' +
+            '<div class="field-row"><div>' +
+            field("Threshold (s)", "notifications.events." + ei + ".threshold_s", "number", 600,
+              "How long the condition must hold before firing. Default 600 s (10 min). Independent of the control-loop watchdog.") +
+            '</div><div>' +
+            field("Priority (0–5)", "notifications.events." + ei + ".priority", "number", 3,
+              "0 uses the default priority above.") +
+            '</div></div>' +
+            '<div class="field-row"><div>' +
+            field("Cooldown (s)", "notifications.events." + ei + ".cooldown_s", "number", 3600,
+              "Minimum seconds between fires per driver.") +
+            '</div><div>' +
+            field("Tags (comma-separated)", "notifications.events." + ei + ".tags", "text", "") +
+            '</div></div>' +
+            field("Title template", "notifications.events." + ei + ".title_template", "text", "",
+              "Go text/template. Leave blank for default.") +
+            field("Body template", "notifications.events." + ei + ".body_template", "text", "",
+              "Go text/template. Leave blank for default.") +
+            '</fieldset>';
+        }
+        html += '<fieldset><legend>Test</legend>' +
+          '<ftw-notif-test-button label="Send test notification"></ftw-notif-test-button>' +
+          '</fieldset>' +
+          '<p style="color:var(--text-dim);font-size:0.8rem;margin-top:8px">' +
+          'Template fields: {{.Device}}, {{.Make}}, {{.Serial}}, {{.Duration}}, {{.DurationS}}, {{.EventType}}, {{.Timestamp}}.' +
+          '</p>';
+        break;
+
       case "ev":
         if (!currentConfig.ev_charger) currentConfig.ev_charger = {};
         // If ev_charger is empty but an easee driver exists with config,

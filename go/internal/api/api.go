@@ -26,8 +26,10 @@ import (
 	"github.com/frahlg/forty-two-watts/go/internal/drivers"
 	"github.com/frahlg/forty-two-watts/go/internal/evcloud"
 	"github.com/frahlg/forty-two-watts/go/internal/forecast"
+	"github.com/frahlg/forty-two-watts/go/internal/events"
 	"github.com/frahlg/forty-two-watts/go/internal/ha"
 	"github.com/frahlg/forty-two-watts/go/internal/loadmodel"
+	"github.com/frahlg/forty-two-watts/go/internal/notifications"
 	"github.com/frahlg/forty-two-watts/go/internal/loadpoint"
 	"github.com/frahlg/forty-two-watts/go/internal/mpc"
 	"github.com/frahlg/forty-two-watts/go/internal/prices"
@@ -105,6 +107,14 @@ type Deps struct {
 	// Nil disables every /api/version/* endpoint (returns 503).
 	SelfUpdate *selfupdate.Checker
 
+	// Events is the shared pub/sub bus. Nil is a safe no-op for
+	// handlers that publish (e.g. /api/notifications/test).
+	Events *events.Bus
+
+	// Optional: outbound push-notification service. Nil disables
+	// /api/notifications/* endpoints.
+	Notifications *notifications.Service
+
 	Version string
 }
 
@@ -148,6 +158,8 @@ func (s *Server) routes() {
 	s.handle("POST /api/drivers/{name}/disable", s.handleDriverDisable)
 	s.handle("POST /api/drivers/{name}/enable", s.handleDriverEnable)
 	s.handle("GET  /api/ha/status", s.handleHAStatus)
+	s.handle("GET  /api/notifications/status", s.handleNotificationsStatus)
+	s.handle("POST /api/notifications/test", s.handleNotificationsTest)
 	s.handle("GET  /api/battery_models", s.handleGetModels)
 	s.handle("POST /api/battery_models/reset", s.handleResetModel)
 	s.handle("POST /api/self_tune/start", s.handleSelfTuneStart)
@@ -1791,4 +1803,45 @@ func (s *Server) handleLoadpointSoC(w http.ResponseWriter, r *http.Request) {
 		go s.deps.MPC.Replan(r.Context())
 	}
 	writeJSON(w, 200, map[string]any{"ok": true})
+}
+
+// GET /api/notifications/status — reports enabled + counters.
+func (s *Server) handleNotificationsStatus(w http.ResponseWriter, r *http.Request) {
+	if s.deps.Notifications == nil {
+		writeJSON(w, 200, map[string]any{"enabled": false})
+		return
+	}
+	writeJSON(w, 200, s.deps.Notifications.Status())
+}
+
+// POST /api/notifications/test — dispatches a test message via the event
+// bus so the core never reaches into the notifications service directly.
+// Returns the dispatch error (if any) from the Reply channel.
+func (s *Server) handleNotificationsTest(w http.ResponseWriter, r *http.Request) {
+	if s.deps.Notifications == nil {
+		writeJSON(w, 503, map[string]string{"error": "notifications not configured"})
+		return
+	}
+	if s.deps.Events == nil {
+		// No bus wired — fall back to direct call so the endpoint is
+		// still usable in tests that don't spin up a bus.
+		if err := s.deps.Notifications.SendTest(); err != nil {
+			writeJSON(w, 400, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, 200, map[string]string{"status": "sent"})
+		return
+	}
+	reply := make(chan error, 1)
+	s.deps.Events.Publish(events.NotificationTest{Reply: reply})
+	select {
+	case err := <-reply:
+		if err != nil {
+			writeJSON(w, 400, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, 200, map[string]string{"status": "sent"})
+	case <-time.After(11 * time.Second):
+		writeJSON(w, 504, map[string]string{"error": "notification timeout"})
+	}
 }
