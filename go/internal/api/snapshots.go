@@ -242,7 +242,7 @@ func (s *Server) handleVersionSnapshotDelete(w http.ResponseWriter, r *http.Requ
 	// Defense in depth: reject anything that isn't a simple directory
 	// name. No slashes, no "..". A well-formed snapshot id is produced
 	// by snapshotID() with only [A-Za-z0-9._-] characters.
-	if strings.ContainsAny(id, "/\\") || id == "." || id == ".." {
+	if containsTraversal(id) {
 		writeJSON(w, 400, map[string]string{"error": "invalid snapshot id"})
 		return
 	}

@@ -325,6 +325,34 @@ func (c *Checker) Trigger(ctx context.Context, action, target string) error {
 		return fmt.Errorf("selfupdate: invalid action %q", action)
 	}
 	body, _ := json.Marshal(map[string]string{"action": action, "target": target})
+	return c.postSidecar(ctx, body)
+}
+
+// TriggerRollback asks the sidecar to restore a snapshot over the main
+// service's data volume (soft rollback: state.db + config.yaml only;
+// image stays). The main container will be stopped, the files copied
+// in via `docker cp`, and the service brought back up. Observe
+// progress via Status() — new states are "restoring" and "restarting".
+// Issue #152.
+func (c *Checker) TriggerRollback(ctx context.Context, snapshotID string, files []string) error {
+	if c.cfg.SocketPath == "" {
+		return errors.New("selfupdate: sidecar socket not configured")
+	}
+	if snapshotID == "" {
+		return errors.New("selfupdate: rollback requires snapshot id")
+	}
+	body, _ := json.Marshal(map[string]any{
+		"action":   "rollback",
+		"snapshot": snapshotID,
+		"files":    files,
+	})
+	return c.postSidecar(ctx, body)
+}
+
+// postSidecar wraps the Unix-socket POST to the sidecar's /update
+// endpoint. Shared by Trigger and TriggerRollback so the HTTP client
+// config (socket dialer + timeout) only lives in one place.
+func (c *Checker) postSidecar(ctx context.Context, body []byte) error {
 	cli := &http.Client{
 		Timeout: 10 * time.Second,
 		Transport: &http.Transport{

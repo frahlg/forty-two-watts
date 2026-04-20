@@ -409,6 +409,86 @@ func TestVersionSnapshots_ListsNewestFirst(t *testing.T) {
 	}
 }
 
+// Rollback creates a pre-rollback safety snapshot, then asks the sidecar
+// to restore (#152). The sidecar is absent in this test, so Trigger
+// fails with 502 — but the safety snapshot must land first, proving
+// the "we always capture current state before touching it" promise.
+func TestVersionRollback_CreatesSafetySnapshotBeforeTrigger(t *testing.T) {
+	c := newCheckerAgainst(t, "v1.5.0", "v1.4.0")
+	dir := t.TempDir()
+	st, _ := state.Open(filepath.Join(dir, "state.db"))
+	t.Cleanup(func() { st.Close() })
+	snapDir := filepath.Join(dir, "snapshots")
+	srv := New(&Deps{SelfUpdate: c, State: st, SnapshotDir: snapDir})
+
+	// Seed one snapshot so the rollback target exists.
+	seed, err := srv.createPreUpdateSnapshot("update", "v1.3.0", "v1.4.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	body := strings.NewReader(`{"snapshot_id":"` + seed.ID + `"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/version/rollback", body)
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+
+	// Sidecar trigger fails → 502. The safety snapshot should have
+	// been captured before the trigger attempt regardless.
+	if rr.Code != http.StatusBadGateway {
+		t.Errorf("want 502 from missing sidecar, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	entries, _ := os.ReadDir(snapDir)
+	// Seed + safety = 2 entries (retention is 5, way under).
+	if len(entries) < 2 {
+		t.Fatalf("want ≥ 2 snapshots on disk (seed + safety), got %d", len(entries))
+	}
+	// At least one snapshot must be tagged "pre-rollback" in meta.
+	foundSafety := false
+	for _, e := range entries {
+		meta, err := readSnapshotMeta(filepath.Join(snapDir, e.Name()))
+		if err != nil {
+			continue
+		}
+		if meta.Action == "pre-rollback" {
+			foundSafety = true
+			break
+		}
+	}
+	if !foundSafety {
+		t.Error("expected a snapshot with meta.action = pre-rollback after rollback request")
+	}
+}
+
+// Bad snapshot id → handler refuses without creating any files.
+func TestVersionRollback_ValidatesSnapshotID(t *testing.T) {
+	c := newCheckerAgainst(t, "v1.5.0", "v1.4.0")
+	dir := t.TempDir()
+	st, _ := state.Open(filepath.Join(dir, "state.db"))
+	t.Cleanup(func() { st.Close() })
+	srv := New(&Deps{SelfUpdate: c, State: st, SnapshotDir: filepath.Join(dir, "snapshots")})
+
+	cases := []struct {
+		body string
+		want int
+		desc string
+	}{
+		{`{}`, 400, "missing snapshot_id"},
+		{`{"snapshot_id":""}`, 400, "empty snapshot_id"},
+		{`{"snapshot_id":".."}`, 400, "traversal"},
+		{`{"snapshot_id":"nope"}`, 404, "nonexistent id"},
+	}
+	for _, c := range cases {
+		req := httptest.NewRequest(http.MethodPost, "/api/version/rollback", strings.NewReader(c.body))
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rr, req)
+		if rr.Code != c.want {
+			t.Errorf("%s: got %d, want %d (body=%s)", c.desc, rr.Code, c.want, rr.Body.String())
+		}
+	}
+}
+
 func TestVersionUpdateStatus_Idle(t *testing.T) {
 	c := newCheckerAgainst(t, "v1.5.0", "v1.4.0")
 	srv := New(&Deps{SelfUpdate: c})

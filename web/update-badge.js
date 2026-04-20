@@ -81,6 +81,32 @@
         });
     }
 
+    // _beginRollback kicks off a rollback-to-snapshot. Reuses the same
+    // "updating" modal skin as _beginUpdate — the sidecar emits state
+    // transitions (restoring → restarting → done) that feed straight
+    // into the existing _tickStatus → _render path. See #152.
+    _beginRollback(snapshotID) {
+      this._phase = "updating";
+      this._updateStartedAt = Date.now();
+      this._updateOriginalVersion = this._info ? this._info.current : null;
+      this._sidecarState = { state: "starting", action: "rollback", snapshot: snapshotID };
+      this._render();
+
+      this._postJSON("/api/version/rollback", { snapshot_id: snapshotID })
+        .then((resp) => {
+          if (!resp.ok) {
+            this._sidecarState = { state: "failed", action: "rollback", message: (resp.body && resp.body.error) || "failed to start" };
+            this._render();
+            return;
+          }
+          this._startStatusPolling();
+        })
+        .catch((e) => {
+          this._sidecarState = { state: "failed", action: "rollback", message: String(e) };
+          this._render();
+        });
+    }
+
     // Permanently shut the element down: stop polling, clear shadow DOM, hide
     // from layout, and fire an event so the #version bridge can drop its
     // cursor/pointer affordance. Called when the backend returns 503, which
@@ -345,14 +371,23 @@
       const range = (s.from_version || "?") + " → " + (s.to_version || "?");
       const sizeMB = s.size_bytes ? (s.size_bytes / (1024 * 1024)).toFixed(1) + " MB" : "?";
       const deleting = this._deletingSnapshot === s.id;
+      // Rollback target for a *pre-rollback* safety snapshot takes the
+      // operator forward again — the 'from' version is what was running
+      // when we captured it. For a routine pre-update snapshot the 'from'
+      // version is what was running before that update — rolling back to
+      // it reverts that update. Either way the operation is the same:
+      // restore the files from this snapshot.
       const deleteBtn = deleting
         ? `<span class="dim">deleting…</span>`
         : `<button class="btn btn-ghost btn-small" data-action="delete-snapshot" data-id="${escapeHTML(s.id)}" title="Delete this backup">Delete</button>`;
+      const rollbackBtn = deleting
+        ? ""
+        : `<button class="btn btn-small" data-action="rollback-snapshot" data-id="${escapeHTML(s.id)}" data-from="${escapeHTML(s.from_version || "")}" title="Restore this backup (service will restart)">Roll back</button>`;
       return `<tr>
                 <td class="nowrap">${escapeHTML(when)}</td>
                 <td class="mono">${escapeHTML(range)}</td>
                 <td class="nowrap">${escapeHTML(sizeMB)}</td>
-                <td>${deleteBtn}</td>
+                <td class="snapshot-actions">${rollbackBtn}${deleteBtn}</td>
               </tr>`;
     }
 
@@ -379,11 +414,18 @@
            <button class="btn btn-ghost" data-action="close">Dismiss</button>`
         : `<span class="dim">Don't close this tab.</span>`;
 
+      let title;
+      switch (action) {
+        case "restart":  title = "Restarting service"; break;
+        case "rollback": title = "Rolling back"; break;
+        default:         title = "Updating service";
+      }
+
       return `
         <div class="backdrop"></div>
         <div class="modal" role="dialog" aria-modal="true" aria-live="polite">
           <header>
-            <h3>${action === "restart" ? "Restarting service" : "Updating service"}</h3>
+            <h3>${title}</h3>
           </header>
           <div class="body center">
             ${spinner}
@@ -432,6 +474,24 @@
               if (id && window.confirm(`Delete snapshot ${id}? This can't be undone.`)) {
                 this._deleteSnapshot(id);
                 this._render(); // reflect the "deleting…" state immediately
+              }
+              break;
+            }
+            case "rollback-snapshot": {
+              const id = e.currentTarget.dataset.id;
+              const from = e.currentTarget.dataset.from || "that point";
+              // Sharper warning for rollback — it stops the service,
+              // swaps live state, and restarts. Much more visible
+              // consequence than a Delete.
+              const msg =
+                `Roll back to ${id}?\n\n` +
+                `This will stop the service, restore state.db + config.yaml ` +
+                `from the snapshot (state as of "${from}"), and restart. ` +
+                `Any data written since the snapshot will be lost.\n\n` +
+                `A pre-rollback backup of the current state is saved ` +
+                `automatically so you can roll forward again.`;
+              if (id && window.confirm(msg)) {
+                this._beginRollback(id);
               }
               break;
             }
@@ -642,6 +702,12 @@
         }
         .snapshots-table .nowrap { white-space: nowrap; }
         .snapshots-table .mono { font-family: ui-monospace, monospace; }
+        .snapshot-actions {
+          display: flex;
+          gap: 0.3rem;
+          justify-content: flex-end;
+          flex-wrap: wrap;
+        }
         .btn-small {
           padding: 0.2rem 0.55rem;
           font-size: 0.75rem;
@@ -699,10 +765,17 @@
   function actionLabel(state, action) {
     switch (state) {
       case "pulling":    return "Pulling new image";
-      case "restarting": return action === "restart" ? "Restarting service" : "Applying update";
+      case "restoring":  return "Restoring snapshot";
+      case "restarting":
+        if (action === "restart")  return "Restarting service";
+        if (action === "rollback") return "Restarting on restored state";
+        return "Applying update";
       case "done":       return "Reloading";
       case "failed":     return "Failed";
-      default:           return action === "restart" ? "Restarting" : "Starting update";
+      default:
+        if (action === "restart")  return "Restarting";
+        if (action === "rollback") return "Starting rollback";
+        return "Starting update";
     }
   }
 
