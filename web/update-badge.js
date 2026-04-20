@@ -241,6 +241,14 @@
            </details>`
         : (hasUpdate && notesLink ? `<p class="changelog-link">${notesLink}</p>` : "");
 
+      // Reassure the operator that a rollback point will be captured
+      // before the update runs. Shown only when there's something to
+      // update to — no need to mention the snapshot on the "you're
+      // up to date" path.
+      const snapshotHint = hasUpdate
+        ? `<p class="snapshot-hint">🛟 A snapshot of your data and config is saved before each update so you can roll back if needed.</p>`
+        : "";
+
       return `
         <div class="backdrop" data-action="close"></div>
         <div class="modal" role="dialog" aria-modal="true" aria-labelledby="ftw-upd-title">
@@ -256,6 +264,7 @@
               ${info.skipped_version ? `<div><dt>Skipped</dt><dd>${escapeHTML(info.skipped_version)}</dd></div>` : ""}
             </dl>
             ${bodyHTML}
+            ${snapshotHint}
             ${info.err ? `<p class="err">Last check failed: ${escapeHTML(info.err)}</p>` : ""}
           </div>
           <footer>${actions}</footer>
@@ -463,6 +472,16 @@
           text-decoration: none;
         }
         .notes-link:hover { text-decoration: underline; }
+        .snapshot-hint {
+          margin-top: 0.75rem;
+          padding: 0.5rem 0.7rem;
+          border: 1px solid var(--border, #334155);
+          border-radius: 4px;
+          background: rgba(148, 163, 184, 0.06);
+          color: var(--text-dim, #94a3b8);
+          font-size: 0.78rem;
+          line-height: 1.4;
+        }
         .err {
           margin-top: 0.75rem;
           color: #f87171; font-size: 0.85rem;

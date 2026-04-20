@@ -4,12 +4,15 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/frahlg/forty-two-watts/go/internal/selfupdate"
+	"github.com/frahlg/forty-two-watts/go/internal/state"
 )
 
 // memStore satisfies selfupdate.Store for the wiring tests.
@@ -138,6 +141,183 @@ func TestVersionUpdate_NoSidecar502(t *testing.T) {
 		srv.Handler().ServeHTTP(rr, req)
 		if rr.Code != http.StatusBadGateway {
 			t.Errorf("%s without sidecar = %d, want 502", path, rr.Code)
+		}
+	}
+}
+
+// Snapshot is captured BEFORE the handler hands off to the sidecar, so
+// an operator who hits Update always has a rollback point — even if the
+// sidecar is missing and the trigger fails. Issue #140.
+func TestVersionUpdate_CreatesSnapshotBeforeTrigger(t *testing.T) {
+	c := newCheckerAgainst(t, "v1.5.0", "v1.4.0")
+	dir := t.TempDir()
+	st, err := state.Open(filepath.Join(dir, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	_ = st.SaveConfig("mode", "planner_self")
+
+	snapDir := filepath.Join(dir, "snapshots")
+	srv := New(&Deps{SelfUpdate: c, State: st, SnapshotDir: snapDir, ConfigPath: ""})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/version/update", nil)
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+
+	// Trigger still fails (no sidecar) → 502. The snapshot must exist anyway.
+	if rr.Code != http.StatusBadGateway {
+		t.Errorf("expected 502 from missing sidecar, got %d", rr.Code)
+	}
+	entries, err := os.ReadDir(snapDir)
+	if err != nil {
+		t.Fatalf("snapshot dir not created: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("want 1 snapshot dir, got %d", len(entries))
+	}
+	// Snapshot dir should contain state.db + meta.json (no config.yaml
+	// because ConfigPath was empty).
+	snapPath := filepath.Join(snapDir, entries[0].Name())
+	for _, f := range []string{"state.db", "meta.json"} {
+		if _, err := os.Stat(filepath.Join(snapPath, f)); err != nil {
+			t.Errorf("snapshot missing %s: %v", f, err)
+		}
+	}
+	// state.db in the snapshot must be usable.
+	snap, err := state.Open(filepath.Join(snapPath, "state.db"))
+	if err != nil {
+		t.Fatalf("snapshot state.db unusable: %v", err)
+	}
+	if v, ok := snap.LoadConfig("mode"); !ok || v != "planner_self" {
+		t.Errorf("snapshot missing seeded mode config: %q ok=%v", v, ok)
+	}
+	snap.Close()
+}
+
+// With ConfigPath set the snapshot must also copy config.yaml so a
+// rollback can restore the exact YAML the operator was running.
+func TestVersionUpdate_SnapshotIncludesConfigWhenPathSet(t *testing.T) {
+	c := newCheckerAgainst(t, "v1.5.0", "v1.4.0")
+	dir := t.TempDir()
+	st, _ := state.Open(filepath.Join(dir, "state.db"))
+	t.Cleanup(func() { st.Close() })
+	cfgPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte("site:\n  name: test\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	snapDir := filepath.Join(dir, "snapshots")
+	srv := New(&Deps{SelfUpdate: c, State: st, SnapshotDir: snapDir, ConfigPath: cfgPath})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/version/update", nil)
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+
+	entries, _ := os.ReadDir(snapDir)
+	if len(entries) == 0 {
+		t.Fatal("no snapshot created")
+	}
+	copied := filepath.Join(snapDir, entries[0].Name(), "config.yaml")
+	got, err := os.ReadFile(copied)
+	if err != nil {
+		t.Fatalf("config.yaml not copied: %v", err)
+	}
+	if !strings.Contains(string(got), "name: test") {
+		t.Errorf("config.yaml contents wrong: %s", got)
+	}
+}
+
+// Snapshot failure must abort the update with 500 — we never want to
+// pull a new image without a rollback point when the operator opted in.
+func TestVersionUpdate_SnapshotFailureAborts(t *testing.T) {
+	c := newCheckerAgainst(t, "v1.5.0", "v1.4.0")
+	dir := t.TempDir()
+	st, _ := state.Open(filepath.Join(dir, "state.db"))
+	t.Cleanup(func() { st.Close() })
+
+	// Point SnapshotDir at a PATH THAT IS A FILE, not a directory.
+	// Mkdir on that path will fail and the whole update should abort.
+	badPath := filepath.Join(dir, "not-a-dir")
+	if err := os.WriteFile(badPath, []byte("block"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srv := New(&Deps{SelfUpdate: c, State: st, SnapshotDir: badPath})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/version/update", nil)
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Errorf("want 500 when snapshot fails, got %d (body=%s)", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "snapshot failed") {
+		t.Errorf("expected 'snapshot failed' in body, got %s", rr.Body.String())
+	}
+}
+
+// Retention keeps the N newest snapshots — older ones pruned after each
+// new snapshot. Exercised via direct calls to avoid running the whole
+// update pipeline five times.
+func TestSnapshotsPruneToKeepNewest(t *testing.T) {
+	dir := t.TempDir()
+	st, _ := state.Open(filepath.Join(dir, "state.db"))
+	t.Cleanup(func() { st.Close() })
+	snapDir := filepath.Join(dir, "snapshots")
+
+	srv := New(&Deps{State: st, SnapshotDir: snapDir})
+	// Create snapshotKeepCount+3 snapshots. The createPreUpdateSnapshot
+	// helper calls pruneSnapshots at the end of each, so after the
+	// loop we should have exactly snapshotKeepCount dirs.
+	for i := 0; i < snapshotKeepCount+3; i++ {
+		if _, err := srv.createPreUpdateSnapshot("update", "v0.0.0", "v0.0.1"); err != nil {
+			t.Fatalf("snapshot %d: %v", i, err)
+		}
+		// sleep a tick so the timestamp in the dir name changes —
+		// otherwise mkdir fails because the sibling dir already exists.
+		time.Sleep(1100 * time.Millisecond)
+	}
+
+	entries, _ := os.ReadDir(snapDir)
+	if len(entries) != snapshotKeepCount {
+		t.Errorf("retained %d snapshots, want %d", len(entries), snapshotKeepCount)
+	}
+}
+
+func TestVersionSnapshots_ListsNewestFirst(t *testing.T) {
+	c := newCheckerAgainst(t, "v1.5.0", "v1.4.0")
+	dir := t.TempDir()
+	st, _ := state.Open(filepath.Join(dir, "state.db"))
+	t.Cleanup(func() { st.Close() })
+	snapDir := filepath.Join(dir, "snapshots")
+	srv := New(&Deps{SelfUpdate: c, State: st, SnapshotDir: snapDir})
+
+	for i := 0; i < 3; i++ {
+		if _, err := srv.createPreUpdateSnapshot("update", "v0.0.0", "v0.0.1"); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(1100 * time.Millisecond)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/version/snapshots", nil)
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != 200 {
+		t.Fatalf("snapshots list = %d", rr.Code)
+	}
+	var out struct {
+		Snapshots []SnapshotInfo `json:"snapshots"`
+		Dir       string         `json:"dir"`
+		Enabled   bool           `json:"enabled"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if !out.Enabled || len(out.Snapshots) != 3 {
+		t.Fatalf("got %d snapshots, enabled=%v", len(out.Snapshots), out.Enabled)
+	}
+	for i := 1; i < len(out.Snapshots); i++ {
+		if !out.Snapshots[i-1].CreatedAt.After(out.Snapshots[i].CreatedAt) {
+			t.Errorf("snapshots not ordered newest-first at idx %d", i)
 		}
 	}
 }
