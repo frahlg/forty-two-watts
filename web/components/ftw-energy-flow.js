@@ -86,6 +86,39 @@ const CORNER_PLACEHOLDER_TITLE = {
   "bottom-left":  "GRID",
 };
 
+// Each corner's partner across the vertical centerline. When a corner
+// is populated but its partner is empty we collapse the populated
+// anchor to the shared top/bottom axis (top-center for the upper pair,
+// bottom-center for the lower pair) — turns a "PV + Grid only" setup
+// into a clean vertical line rather than a diagonal, and a "PV +
+// Battery + Grid" setup into a Y with Grid centered below the house.
+const PARTNER_CORNER = {
+  "top-left":     "top-right",
+  "top-right":    "top-left",
+  "bottom-left":  "bottom-right",
+  "bottom-right": "bottom-left",
+};
+// Axis angles the populated side collapses to when its partner is empty.
+const ANGLE_TOP_CENTER    = -Math.PI / 2;
+const ANGLE_BOTTOM_CENTER =  Math.PI / 2;
+
+// Role-native color used on placeholder bubbles during the loading
+// phase so the dashed rings + role icons read as colored from the
+// first paint instead of a gray "unknown" blob. Once real telemetry
+// lands, the per-driver color (set by next-app.js) overrides this.
+const CORNER_PLACEHOLDER_COLOR = {
+  "top-left":     "var(--amber)",
+  "top-right":    "var(--cyan)",
+  "bottom-right": "var(--green-e)",
+  "bottom-left":  "var(--red-e)",
+};
+const CORNER_PLACEHOLDER_ROLE = {
+  "top-left":     "pv",
+  "top-right":    "battery",
+  "bottom-right": "ev",
+  "bottom-left":  "grid",
+};
+
 // SVG icon per role, drawn at (0,0) in a ±10 unit box. The loading
 // state renders this instead of the kW/title/sub text block — stroke
 // and fill both use currentColor so the icon picks up the planet's
@@ -219,15 +252,19 @@ class FtwEnergyFlow extends FtwElement {
     }
     svg.ef-loading .ring { animation-duration: 3s; }
 
-    /* Aggregation toggle — sits in the upper-right of the hero. Only
-       rendered when the current readings have >1 planet in any corner,
-       so single-inverter setups never see the control. Amber track
+    /* Aggregation toggle — sits centred at the bottom of the hero.
+       Bottom-centre rather than upper-right so the position is stable
+       across desktop and mobile (narrow viewports would have crowded
+       the top-right cluster against the hero's title). Only rendered
+       when the current readings have >1 planet in any corner, so
+       single-inverter setups never see the control. Amber track
        (--accent-e) when ON per DESIGN.md: one accent, near-black
        on-accent fill, 999 px radius, mono eyebrow label at 0.18 em. */
     .ef-toggle {
       position: absolute;
-      top: 16px;
-      right: 20px;
+      bottom: 14px;
+      left: 50%;
+      transform: translateX(-50%);
       display: inline-flex;
       align-items: center;
       gap: 8px;
@@ -487,11 +524,12 @@ class FtwEnergyFlow extends FtwElement {
   // so afterRender() binds the <circle> DOM nodes back; each layer's
   // particles live under a unique key so both layouts can animate
   // independently when the toggle flips.
-  _buildLayer(layerGroups, P, layerClass) {
+  _buildLayer(layerGroups, P, layerClass, anchors) {
     const placed = [];
     for (const c of Object.keys(layerGroups)) {
       const g = layerGroups[c];
-      const pl = clusterArc(g.length, CX, P.cy, P.orbitR, CORNER_ANGLE[c], P.baseR);
+      if (g.length === 0) continue;
+      const pl = clusterArc(g.length, CX, P.cy, P.orbitR, anchors[c], P.baseR);
       g.forEach((planet, i) => {
         placed.push({ ...planet,
           _pos: pl.positions[i], _r: pl.r, _groupSize: g.length });
@@ -716,11 +754,30 @@ class FtwEnergyFlow extends FtwElement {
     }
     for (const c of Object.keys(groups)) {
       if (groups[c].length === 0) {
+        // Placeholders fill empty corners during the initial loading
+        // phase so the X silhouette reads complete before /api/status
+        // returns (role-native color + spinning ring). Once loaded,
+        // an empty corner is a genuine absence — but the rules
+        // differ by role:
+        //   • Grid (bottom-left) — ALWAYS rendered even when absent.
+        //     A site without a reporting grid meter is a critical
+        //     telemetry gap, and a visible "no data" bubble is the
+        //     right signal to the operator.
+        //   • PV / Battery / EV — hardware is optional. Drawing a
+        //     "— / no data" bubble for a category the user didn't
+        //     configure would misrepresent absent hardware as
+        //     present-but-idle, so those corners render nothing.
+        if (this._loaded && c !== "bottom-left") continue;
         groups[c].push({
           id: `_placeholder-${c}`, corner: c,
           title: CORNER_PLACEHOLDER_TITLE[c], name: null,
+          role: CORNER_PLACEHOLDER_ROLE[c],
           kw: 0, toHub: true,
-          color: "var(--fg-muted)", sub: "no data", soc: null,
+          // Loaded-but-empty grid reads as muted ("broken") rather
+          // than role-colored; unloaded corners keep the lively
+          // role-native color so the skeleton doesn't look dead.
+          color: this._loaded ? "var(--fg-muted)" : CORNER_PLACEHOLDER_COLOR[c],
+          sub: "no data", soc: null,
           placeholder: true,
         });
       }
@@ -766,13 +823,32 @@ class FtwEnergyFlow extends FtwElement {
     const stepActual = sizingN <= 1 ? 0 : Math.min(naturalStep, maxSpan / (sizingN - 1));
     const halfSpan = ((sizingN - 1) * stepActual) / 2;
 
-    // Worst-case x/y offsets from CX/CY across all four corners (each
-    // anchor ± halfSpan). Whichever planet sits closest to the
-    // top/bottom/left/right of the world drives the container size.
+    // Effective anchor per corner. A corner collapses to the shared
+    // top/bottom axis when it's populated and its partner is empty —
+    // turns "PV only" into PV-at-top-center and "Grid only" into
+    // Grid-at-bottom-center so the silhouette stays symmetric.
+    const effAnchor = {};
+    const populated = [];
+    for (const c of Object.keys(CORNER_ANGLE)) {
+      const partner = PARTNER_CORNER[c];
+      const mine = groups[c] && groups[c].length > 0;
+      const partnerEmpty = !groups[partner] || groups[partner].length === 0;
+      if (mine && partnerEmpty) {
+        effAnchor[c] = (c === "top-left" || c === "top-right")
+          ? ANGLE_TOP_CENTER : ANGLE_BOTTOM_CENTER;
+      } else {
+        effAnchor[c] = CORNER_ANGLE[c];
+      }
+      if (mine) populated.push(c);
+    }
+
+    // Worst-case x/y offsets from CX/CY, measured only across the
+    // corners we actually render. Empty corners contribute nothing —
+    // a PV-only setup doesn't need to reserve battery/EV space.
     const margin = 12;
-    const corners = Object.values(CORNER_ANGLE);
     let maxYOff = 0, maxXOff = 0;
-    for (const a0 of corners) {
+    for (const c of populated) {
+      const a0 = effAnchor[c];
       for (const da of [-halfSpan, +halfSpan]) {
         const ay = Math.abs(orbitR * Math.sin(a0 + da));
         const ax = Math.abs(orbitR * Math.cos(a0 + da));
@@ -815,8 +891,8 @@ class FtwEnergyFlow extends FtwElement {
     this._particles = [];
     const hasMultipleType = hasMultipleOfAnyType(this._readings.planets);
     const aggGroups = aggregateGroups(groups);
-    const indLayerSvg = this._buildLayer(groups, P, "ind");
-    const aggLayerSvg = this._buildLayer(aggGroups, P, "agg");
+    const indLayerSvg = this._buildLayer(groups, P, "ind", effAnchor);
+    const aggLayerSvg = this._buildLayer(aggGroups, P, "agg", effAnchor);
 
     const aggAttr = this._aggregated ? "on" : "off";
 
