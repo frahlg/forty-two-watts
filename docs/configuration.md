@@ -69,6 +69,7 @@ drivers:
     lua: drivers/ferroamp.lua     # path to driver script
     is_site_meter: true           # exactly one driver must have this
     battery_capacity_wh: 15200    # 0 if not a battery
+    inverter_group: ferroamp      # optional — see "Inverter affinity" below
     mqtt:
       host: 192.168.1.153
       port: 1883
@@ -78,6 +79,7 @@ drivers:
   - name: sungrow
     lua: drivers/sungrow.lua
     battery_capacity_wh: 9600
+    inverter_group: sungrow
     modbus:
       host: 192.168.1.10
       port: 502
@@ -85,6 +87,30 @@ drivers:
 ```
 
 Each driver must have **either** `mqtt` or `modbus` (not both, not neither). Adding/removing/changing a driver hot-reloads — the matching thread spawns or stops within a few seconds.
+
+#### Inverter affinity (`inverter_group`)
+
+Tag drivers that share a single physical inverter unit with the same
+`inverter_group` string. The dispatcher uses this to keep charging flows
+DC-coupled: PV surplus on inverter A is routed to battery A via A's own
+DC path, avoiding the DC→AC→AC→DC round-trip that cross-charging
+(PV on A → AC bus → B → battery B) would incur. Typical site layout:
+
+- A hybrid inverter like Ferroamp with its own PV strings *and* a battery
+  gets `inverter_group: ferroamp` on its driver entry.
+- A Sungrow hybrid gets `inverter_group: sungrow`.
+- A separate PV-only driver reading a string on the Ferroamp side should
+  share its tag: `inverter_group: ferroamp`.
+- A standalone AC-coupled battery (no local PV) can either leave the tag
+  unset or use a unique group — both keep that battery in the "overflow"
+  pool that accepts cross-routed energy when PV-local capacity is
+  exhausted.
+
+When no drivers carry the tag, or only one group exists, the dispatcher
+falls back to its capacity-proportional split (the default through
+v0.27). See issue #143 for the design rationale. Estimated benefit on a
+two-inverter site with balanced PV strings: ~3-4 % round-trip efficiency
+improvement during the hours when the plan chooses to charge from PV.
 
 ### `api` — REST + web UI
 

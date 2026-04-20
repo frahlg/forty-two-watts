@@ -121,6 +121,7 @@ func main() {
 	ctrl := control.NewState(cfg.Site.GridTargetW, cfg.Site.GridToleranceW, cfg.SiteMeterDriver())
 	ctrl.SlewRateW = cfg.Site.SlewRateW
 	ctrl.MinDispatchIntervalS = cfg.Site.MinDispatchIntervalS
+	ctrl.InverterGroups = inverterGroupsFrom(cfg.Drivers)
 	// Restore persisted mode + target if present. The planner variants
 	// have to be listed too — without them the strategy the user picked in
 	// the UI (planner_self / planner_cheap / planner_arbitrage) is silently
@@ -260,6 +261,13 @@ func main() {
 				capacities[k] = v
 			}
 			capMu.Unlock()
+
+			// Swap inverter-group tags (#143). Taken under ctrlMu because
+			// ComputeDispatch reads State.InverterGroups; a bare replace
+			// would race with the control loop's 5 s tick.
+			ctrlMu.Lock()
+			ctrl.InverterGroups = inverterGroupsFrom(newCfg.Drivers)
+			ctrlMu.Unlock()
 
 			// Push the new pool totals into the planner so its next
 			// replan uses the right CapacityWh / MaxChargeW /
@@ -1082,6 +1090,27 @@ func driverCapacitiesFrom(drivers []config.Driver, loadpoints []config.Loadpoint
 			continue
 		}
 		out[d.Name] = d.BatteryCapacityWh
+	}
+	return out
+}
+
+// inverterGroupsFrom builds the driver-name → inverter-group map used by
+// control.State for DC-local charge routing (see issue #143). Only
+// drivers that set an explicit `inverter_group` make the map; untagged
+// drivers inherit today's capacity-proportional behaviour.
+//
+// A PV-only driver and a battery driver on the same physical inverter
+// should both set the same group (e.g. both `inverter_group: ferroamp`)
+// so distributeProportional can link PV output to the co-located
+// battery's charge target. Config-reload calls this again and swaps the
+// map atomically in the control state.
+func inverterGroupsFrom(drivers []config.Driver) map[string]string {
+	out := map[string]string{}
+	for _, d := range drivers {
+		if d.InverterGroup == "" {
+			continue
+		}
+		out[d.Name] = d.InverterGroup
 	}
 	return out
 }

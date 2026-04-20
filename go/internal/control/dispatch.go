@@ -144,6 +144,16 @@ type State struct {
 	// PlanStale tracks whether the last cycle fell back to self_consumption
 	// because the plan was missing. Surfaced via the API for the UI.
 	PlanStale bool
+
+	// InverterGroups maps driver name → inverter-group tag (e.g.
+	// "ferroamp", "sungrow"). Drivers sharing a tag are assumed to
+	// share a single inverter unit: their PV readings feed DC-direct
+	// into the same-group battery. During charging, `distributeProportional`
+	// prefers routing the total first to batteries whose group also
+	// has live PV output, so a kWh doesn't cross inverters through
+	// the AC bus (DC→AC→AC→DC ≈ 3-4 pp loss vs DC-local). Nil or empty
+	// preserves the capacity-proportional default. Issue #143.
+	InverterGroups map[string]string
 }
 
 // NewState creates default control state (port of Rust ControlState::new).
@@ -180,6 +190,7 @@ type batteryInfo struct {
 	currentW   float64
 	soc        float64
 	online     bool
+	group      string // inverter-affinity tag; empty = untagged (#143)
 }
 
 // ComputeDispatch runs one cycle of the control loop and returns the targets
@@ -356,6 +367,7 @@ func ComputeDispatch(
 			currentW:   r.SmoothedW,
 			soc:        soc,
 			online:     h.IsOnline(),
+			group:      state.InverterGroups[name],
 		})
 	}
 	onlineBats := make([]batteryInfo, 0, len(batteries))
@@ -470,11 +482,27 @@ func ComputeDispatch(
 		totalCorrection = out.Output
 	}
 
+	// ---- Per-group PV surplus for DC-local charge routing (#143) ----
+	// Empty when no drivers carry an inverter-group tag → distributeProportional
+	// falls through to its capacity-only split (today's behavior).
+	groupPV := map[string]float64{}
+	if len(state.InverterGroups) > 0 {
+		for _, r := range store.ReadingsByType(telemetry.DerPV) {
+			group := state.InverterGroups[r.Driver]
+			if group == "" {
+				continue // untagged PV: no locality signal, treat as AC-bus
+			}
+			// PV is site-signed (negative = generating). Magnitude = surplus
+			// potentially routable DC-direct to the same-group battery.
+			groupPV[group] += math.Abs(r.SmoothedW)
+		}
+	}
+
 	// ---- Distribute across batteries ----
 	var raw []DispatchTarget
 	switch effectiveMode {
 	case ModeSelfConsumption, ModePeakShaving:
-		raw = distributeProportional(onlineBats, totalCorrection)
+		raw = distributeProportional(onlineBats, totalCorrection, groupPV)
 	case ModePriority:
 		raw = distributePriority(onlineBats, totalCorrection, state.PriorityOrder)
 	case ModeWeighted:
@@ -550,14 +578,75 @@ func ComputeDispatch(
 // available batteries by capacity. Each battery gets its share of the TOTAL
 // desired site battery power — not its share of the delta. This prevents the
 // "drift" bug where each battery drifts independently under prolonged error.
-func distributeProportional(bats []batteryInfo, totalCorrection float64) []DispatchTarget {
+//
+// When `groupPV` is non-empty AND the fleet is charging (desiredTotal > 0),
+// the algorithm first routes up to `min(desiredTotal, ΣPV_g)` preferentially
+// to batteries whose inverter-group also reports live PV output — keeping
+// the flow DC-coupled on the same inverter avoids the ~3-4 pp round-trip
+// loss of cross-inverter AC routing. Any remaining correction is then
+// spread proportionally across all batteries (capacity-weighted), identical
+// to today. With no `groupPV` info or during discharge, the algorithm
+// collapses to a single capacity-proportional split. Issue #143.
+func distributeProportional(bats []batteryInfo, totalCorrection float64, groupPV map[string]float64) []DispatchTarget {
 	var totalCap float64
-	for _, b := range bats { totalCap += b.capacityWh }
-	if totalCap <= 0 { return nil }
+	for _, b := range bats {
+		totalCap += b.capacityWh
+	}
+	if totalCap <= 0 {
+		return nil
+	}
 	var currentTotal float64
-	for _, b := range bats { currentTotal += b.currentW }
+	for _, b := range bats {
+		currentTotal += b.currentW
+	}
 	desiredTotal := currentTotal + totalCorrection
 
+	// Discharge, idle, or no PV locality info → capacity-only split.
+	// Discharge energy flows to the AC bus regardless of where it
+	// originated, so DC-locality has no win for the negative branch.
+	var totalPV float64
+	for _, w := range groupPV {
+		totalPV += w
+	}
+	if desiredTotal <= 0 || totalPV <= 0 {
+		return distributeByCapacity(bats, desiredTotal, totalCap)
+	}
+
+	// Charging with PV locality info: prefer DC-local routing.
+	//   localCap  = min(desiredTotal, totalPV)  — how much of the total
+	//               fleet charge can be kept DC-coupled
+	//   overflow  = desiredTotal - localCap     — excess that has to cross
+	//               inverters via the AC bus; no locality benefit, so
+	//               it's allocated by capacity like today.
+	//
+	// Within the local pool, each group gets a share of localCap
+	// proportional to its PV output; within a group, that share is split
+	// by capacity (same rule as the fleet-wide split).
+	localCap := math.Min(desiredTotal, totalPV)
+	overflow := desiredTotal - localCap
+
+	capByGroup := map[string]float64{}
+	for _, b := range bats {
+		capByGroup[b.group] += b.capacityWh
+	}
+
+	out := make([]DispatchTarget, 0, len(bats))
+	for _, b := range bats {
+		var localShare float64
+		if capG := capByGroup[b.group]; capG > 0 && groupPV[b.group] > 0 {
+			localShare = (groupPV[b.group] / totalPV) * localCap * (b.capacityWh / capG)
+		}
+		overflowShare := overflow * (b.capacityWh / totalCap)
+		target := localShare + overflowShare
+		clamped, was := clampWithSoC(target, b.soc)
+		out = append(out, DispatchTarget{Driver: b.driver, TargetW: clamped, Clamped: was})
+	}
+	return out
+}
+
+// distributeByCapacity is the legacy capacity-proportional split, extracted
+// so both the discharge path and the no-groupPV fallback share the same code.
+func distributeByCapacity(bats []batteryInfo, desiredTotal, totalCap float64) []DispatchTarget {
 	out := make([]DispatchTarget, 0, len(bats))
 	for _, b := range bats {
 		target := desiredTotal * (b.capacityWh / totalCap)

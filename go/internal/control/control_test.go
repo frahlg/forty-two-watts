@@ -152,7 +152,7 @@ func TestProportionalSplitByCapacity(t *testing.T) {
 		{driver: "big", capacityWh: 15000, currentW: 0, soc: 0.5, online: true},
 		{driver: "small", capacityWh: 5000, currentW: 0, soc: 0.5, online: true},
 	}
-	targets := distributeProportional(bats, -1000) // want -1000W total discharge
+	targets := distributeProportional(bats, -1000, nil) // want -1000W total discharge; nil groupPV → capacity-only split
 	var big, small float64
 	for _, tg := range targets {
 		if tg.Driver == "big" { big = tg.TargetW }
@@ -170,7 +170,7 @@ func TestProportionalUsesTotalDesired(t *testing.T) {
 		{driver: "a", capacityWh: 10000, currentW: 500, soc: 0.5, online: true},
 		{driver: "b", capacityWh: 10000, currentW: 500, soc: 0.5, online: true},
 	}
-	targets := distributeProportional(bats, -200)
+	targets := distributeProportional(bats, -200, nil)
 	for _, tg := range targets {
 		if math.Abs(tg.TargetW-400) > 1 {
 			t.Errorf("%s: got %f, want 400", tg.Driver, tg.TargetW)
@@ -957,6 +957,154 @@ func TestPlannerSelfWithoutPlanActsLikeManual(t *testing.T) {
 	}
 	if !st.PlanStale {
 		t.Error("expected PlanStale=true when planner_self sees no directive")
+	}
+}
+
+// ---- Inverter-affinity routing (#143) ----
+
+// All charging flows to the group that has live PV — cross-inverter
+// DC→AC→AC→DC is avoided.
+func TestInverterAffinity_PrefersLocalBatteryForLocalSurplus(t *testing.T) {
+	bats := []batteryInfo{
+		{driver: "ferroamp", capacityWh: 15200, currentW: 0, soc: 0.5, online: true, group: "ferroamp"},
+		{driver: "sungrow", capacityWh: 9600, currentW: 0, soc: 0.5, online: true, group: "sungrow"},
+	}
+	// All surplus on Ferroamp's inverter; none on Sungrow's.
+	groupPV := map[string]float64{"ferroamp": 4000, "sungrow": 0}
+	// +3 kW correction — fits entirely inside Ferroamp's local surplus.
+	targets := distributeProportional(bats, 3000, groupPV)
+	got := map[string]float64{}
+	for _, t := range targets {
+		got[t.Driver] = t.TargetW
+	}
+	if math.Abs(got["ferroamp"]-3000) > 1 {
+		t.Errorf("ferroamp target = %f, want 3000 (all local routing)", got["ferroamp"])
+	}
+	if math.Abs(got["sungrow"]) > 1 {
+		t.Errorf("sungrow target = %f, want 0 (no local PV, correction absorbable locally)", got["sungrow"])
+	}
+}
+
+// When the operator demands more charge than the sum of local PV, the
+// overflow is routed proportionally across the whole fleet. The
+// locality bonus is exhausted first; nothing to gain after that.
+func TestInverterAffinity_FallsBackToProportionalOnOverflow(t *testing.T) {
+	bats := []batteryInfo{
+		{driver: "ferroamp", capacityWh: 15200, currentW: 0, soc: 0.5, online: true, group: "ferroamp"},
+		{driver: "sungrow", capacityWh: 9600, currentW: 0, soc: 0.5, online: true, group: "sungrow"},
+	}
+	// 4 kW of PV on ferroamp only; operator wants to charge 6 kW total.
+	groupPV := map[string]float64{"ferroamp": 4000, "sungrow": 0}
+	targets := distributeProportional(bats, 6000, groupPV)
+	got := map[string]float64{}
+	for _, t := range targets {
+		got[t.Driver] = t.TargetW
+	}
+	// Ferroamp gets full 4 kW local + its capacity share of the 2 kW
+	// overflow = 4000 + 2000 * 15200/24800 = 4000 + 1226 ≈ 5226.
+	// clampWithSoC caps at 5000 per command.
+	if got["ferroamp"] != 5000 {
+		t.Errorf("ferroamp target = %f, want 5000 (local 4000 + overflow share, clamped at MaxCommandW)", got["ferroamp"])
+	}
+	// Sungrow gets its capacity share of the 2 kW overflow = 2000 * 9600/24800 ≈ 774.
+	if math.Abs(got["sungrow"]-774) > 1 {
+		t.Errorf("sungrow target = %f, want ≈774 (overflow × capacity share)", got["sungrow"])
+	}
+}
+
+// With no inverter groups configured, the algorithm must produce
+// identical results to today's capacity-proportional split — the
+// backward-compat invariant.
+func TestInverterAffinity_UngroupedBehavesAsBefore(t *testing.T) {
+	bats := []batteryInfo{
+		{driver: "a", capacityWh: 15200, currentW: 0, soc: 0.5, online: true}, // no group
+		{driver: "b", capacityWh: 9600, currentW: 0, soc: 0.5, online: true},
+	}
+	// groupPV nil → "no locality info available" → fall back to
+	// capacity-proportional.
+	targets := distributeProportional(bats, 3000, nil)
+	got := map[string]float64{}
+	for _, t := range targets {
+		got[t.Driver] = t.TargetW
+	}
+	wantA := 3000 * 15200.0 / 24800.0 // ~1838
+	wantB := 3000 * 9600.0 / 24800.0  // ~1161
+	if math.Abs(got["a"]-wantA) > 1 {
+		t.Errorf("a = %f, want %f (proportional, no groups)", got["a"], wantA)
+	}
+	if math.Abs(got["b"]-wantB) > 1 {
+		t.Errorf("b = %f, want %f", got["b"], wantB)
+	}
+}
+
+// Discharge skips the locality math entirely — routing discharge to
+// a group with PV buys nothing (discharge energy goes on the AC bus
+// regardless of origin), and the simpler formula keeps behaviour
+// predictable for multi-battery sites running in self_consumption
+// during import peaks.
+func TestInverterAffinity_DischargeStillProportional(t *testing.T) {
+	bats := []batteryInfo{
+		{driver: "ferroamp", capacityWh: 15200, currentW: 0, soc: 0.5, online: true, group: "ferroamp"},
+		{driver: "sungrow", capacityWh: 9600, currentW: 0, soc: 0.5, online: true, group: "sungrow"},
+	}
+	// PV on ferroamp only — but it's night-time demand so we're discharging.
+	groupPV := map[string]float64{"ferroamp": 4000, "sungrow": 0}
+	targets := distributeProportional(bats, -2000, groupPV)
+	got := map[string]float64{}
+	for _, t := range targets {
+		got[t.Driver] = t.TargetW
+	}
+	wantFerro := -2000 * 15200.0 / 24800.0 // ~-1226
+	wantSun := -2000 * 9600.0 / 24800.0    // ~-774
+	if math.Abs(got["ferroamp"]-wantFerro) > 1 {
+		t.Errorf("ferroamp discharge = %f, want %f (proportional split on discharge)", got["ferroamp"], wantFerro)
+	}
+	if math.Abs(got["sungrow"]-wantSun) > 1 {
+		t.Errorf("sungrow discharge = %f, want %f", got["sungrow"], wantSun)
+	}
+}
+
+// End-to-end via ComputeDispatch: with InverterGroups wired on State
+// and PV telemetry per driver, the dispatcher computes groupPV from
+// live telemetry and routes charge preferentially. Guards against
+// wiring bugs between the per-driver PV reading, the State map, and
+// distributeProportional's input.
+func TestInverterAffinity_EndToEndViaComputeDispatch(t *testing.T) {
+	// Site exporting 3 kW surplus — PI will want to charge the fleet.
+	store := seedStore(-3000, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+		{"sungrow", 0, 0.5},
+	})
+	// All PV on Ferroamp's inverter; Sungrow's inverter has no PV right now.
+	store.Update("ferroamp", telemetry.DerPV, -3500, nil, nil)
+	store.DriverHealthMut("ferroamp").RecordSuccess()
+
+	st := NewState(0, 0, "ferroamp")
+	st.Mode = ModeSelfConsumption
+	st.SlewRateW = 100000 // unbounded so the formula is what we see
+	st.MinDispatchIntervalS = 0
+	st.InverterGroups = map[string]string{
+		"ferroamp": "ferroamp",
+		"sungrow":  "sungrow",
+	}
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200, "sungrow": 9600}), 11040)
+	got := map[string]float64{}
+	for _, t := range targets {
+		got[t.Driver] = t.TargetW
+	}
+	// Under plain proportional (no affinity) sungrow would receive
+	// ~39% of the charge command (≈600 W on a 1.5 kW correction).
+	// Under affinity sungrow gets ≈0 because ferroamp's local PV can
+	// absorb the whole correction DC-direct.
+	if got["sungrow"] > 200 {
+		t.Errorf("sungrow target = %f — affinity should keep cross-inverter charge near zero when ferroamp's PV covers the surplus", got["sungrow"])
+	}
+	if got["ferroamp"] <= 0 {
+		t.Errorf("ferroamp target = %f — should be charging since export + local PV = local routing opportunity", got["ferroamp"])
 	}
 }
 
