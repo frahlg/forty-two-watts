@@ -121,6 +121,8 @@ func main() {
 	ctrl := control.NewState(cfg.Site.GridTargetW, cfg.Site.GridToleranceW, cfg.SiteMeterDriver())
 	ctrl.SlewRateW = cfg.Site.SlewRateW
 	ctrl.MinDispatchIntervalS = cfg.Site.MinDispatchIntervalS
+	ctrl.InverterGroups = inverterGroupsFrom(cfg.Drivers)
+	ctrl.DriverLimits = driverLimitsFrom(cfg.Drivers)
 	// Restore persisted mode + target if present. The planner variants
 	// have to be listed too — without them the strategy the user picked in
 	// the UI (planner_self / planner_cheap / planner_arbitrage) is silently
@@ -260,6 +262,15 @@ func main() {
 				capacities[k] = v
 			}
 			capMu.Unlock()
+
+			// Swap inverter-group tags (#143) and per-driver power
+			// limits (#145) together. Taken under ctrlMu because
+			// ComputeDispatch reads State.InverterGroups + .DriverLimits;
+			// a bare replace would race with the control loop's 5 s tick.
+			ctrlMu.Lock()
+			ctrl.InverterGroups = inverterGroupsFrom(newCfg.Drivers)
+			ctrl.DriverLimits = driverLimitsFrom(newCfg.Drivers)
+			ctrlMu.Unlock()
 
 			// Push the new pool totals into the planner so its next
 			// replan uses the right CapacityWh / MaxChargeW /
@@ -634,6 +645,12 @@ func main() {
 		SaveConfig: config.SaveAtomic,
 		WebDir:     *webDir,
 		ColdDir:    coldDir,
+		// Snapshots live next to the rest of the persistent data so
+		// docker-compose deploys only need one bind (./data). Derived
+		// from the state.db path rather than the config path because
+		// `state.db` is always in the main data volume; the config
+		// can legitimately live elsewhere (e.g. mounted RO from /etc).
+		SnapshotDir: filepath.Join(filepath.Dir(statePath), "snapshots"),
 		Prices:     priceSvc,
 		Forecast:   forecastSvc,
 		MPC:        mpcSvc,
@@ -1076,6 +1093,48 @@ func driverCapacitiesFrom(drivers []config.Driver, loadpoints []config.Loadpoint
 			continue
 		}
 		out[d.Name] = d.BatteryCapacityWh
+	}
+	return out
+}
+
+// driverLimitsFrom builds the driver-name → per-battery PowerLimits map
+// used by control.State for per-battery charge/discharge caps (#145).
+// Drivers without an explicit `max_charge_w` / `max_discharge_w` are
+// omitted from the map, so the dispatcher falls through to the global
+// MaxCommandW default for those drivers — same behaviour as before the
+// per-driver feature shipped. Config-reload calls this again and swaps
+// the map atomically in the control state.
+func driverLimitsFrom(drivers []config.Driver) map[string]control.PowerLimits {
+	out := map[string]control.PowerLimits{}
+	for _, d := range drivers {
+		if d.MaxChargeW == 0 && d.MaxDischargeW == 0 {
+			continue
+		}
+		out[d.Name] = control.PowerLimits{
+			MaxChargeW:    d.MaxChargeW,
+			MaxDischargeW: d.MaxDischargeW,
+		}
+	}
+	return out
+}
+
+// inverterGroupsFrom builds the driver-name → inverter-group map used by
+// control.State for DC-local charge routing (see issue #143). Only
+// drivers that set an explicit `inverter_group` make the map; untagged
+// drivers inherit today's capacity-proportional behaviour.
+//
+// A PV-only driver and a battery driver on the same physical inverter
+// should both set the same group (e.g. both `inverter_group: ferroamp`)
+// so distributeProportional can link PV output to the co-located
+// battery's charge target. Config-reload calls this again and swaps the
+// map atomically in the control state.
+func inverterGroupsFrom(drivers []config.Driver) map[string]string {
+	out := map[string]string{}
+	for _, d := range drivers {
+		if d.InverterGroup == "" {
+			continue
+		}
+		out[d.Name] = d.InverterGroup
 	}
 	return out
 }

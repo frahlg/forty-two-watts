@@ -58,6 +58,29 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
+// SnapshotTo writes a self-contained, defragmented copy of the database
+// to dstPath using SQLite's VACUUM INTO. The source DB remains open for
+// the duration; readers and writers continue unimpeded. Used by the
+// self-update flow to capture state before pulling a new image, so
+// operators can roll back if the new version misbehaves.
+//
+// dstPath must not exist — SQLite refuses to overwrite an existing file.
+// Safe to call while the Store is serving live traffic.
+func (s *Store) SnapshotTo(dstPath string) error {
+	if s == nil || s.db == nil {
+		return fmt.Errorf("store: snapshot on nil store")
+	}
+	// VACUUM INTO takes a literal path string — bind parameters aren't
+	// honoured by the parser. We construct dstPath ourselves (timestamped
+	// snapshots dir), but escape single quotes defensively so a caller
+	// passing an unexpected path can't inject SQL.
+	escaped := strings.ReplaceAll(dstPath, "'", "''")
+	if _, err := s.db.Exec(fmt.Sprintf("VACUUM INTO '%s'", escaped)); err != nil {
+		return fmt.Errorf("snapshot to %s: %w", dstPath, err)
+	}
+	return nil
+}
+
 func (s *Store) migrate() error {
 	stmts := []string{
 		// config: small string key-value for mode, grid_target etc.

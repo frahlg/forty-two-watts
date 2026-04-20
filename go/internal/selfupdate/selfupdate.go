@@ -66,6 +66,13 @@ type Info struct {
 	Latest          string    `json:"latest,omitempty"`
 	PublishedAt     time.Time `json:"published_at,omitempty"`
 	ReleaseNotesURL string    `json:"release_notes_url,omitempty"`
+	// ReleaseBody is the markdown body of the GitHub release —
+	// typically the auto-generated changelog section (Features, Bug
+	// Fixes). The UI renders this inline in the update modal so
+	// operators can read what's about to be applied without opening
+	// a new tab. Capped at MaxReleaseBodyBytes to keep a pathological
+	// release note from ballooning the Info payload.
+	ReleaseBody     string    `json:"release_body,omitempty"`
 	CheckedAt       time.Time `json:"checked_at,omitempty"`
 	UpdateAvailable bool      `json:"update_available"`
 	Skipped         bool      `json:"skipped"`
@@ -79,6 +86,12 @@ type Info struct {
 	// actionable Update button vs just a notify-only indicator.
 	SidecarReady bool `json:"sidecar_ready"`
 }
+
+// MaxReleaseBodyBytes caps the persisted release body. 16 KiB covers a
+// few dozen bullets from semantic-release comfortably; anything larger
+// is truncated with a trailing marker and the operator keeps the
+// ReleaseNotesURL link for the full thing.
+const MaxReleaseBodyBytes = 16 * 1024
 
 // UpdateStatus mirrors the sidecar's state.json so handlers can pass it
 // through unchanged.
@@ -190,6 +203,7 @@ func (c *Checker) Check(ctx context.Context, force bool) (Info, error) {
 	var rel struct {
 		TagName     string    `json:"tag_name"`
 		HtmlURL     string    `json:"html_url"`
+		Body        string    `json:"body"`
 		PublishedAt time.Time `json:"published_at"`
 		Prerelease  bool      `json:"prerelease"`
 		Draft       bool      `json:"draft"`
@@ -206,6 +220,7 @@ func (c *Checker) Check(ctx context.Context, force bool) (Info, error) {
 		c.info.Latest = rel.TagName
 		c.info.PublishedAt = rel.PublishedAt
 		c.info.ReleaseNotesURL = rel.HtmlURL
+		c.info.ReleaseBody = truncateBody(rel.Body)
 		c.info.UpdateAvailable = isNewer(rel.TagName, c.info.Current)
 	}
 	c.info.CheckedAt = c.cfg.Now()
@@ -310,6 +325,34 @@ func (c *Checker) Trigger(ctx context.Context, action, target string) error {
 		return fmt.Errorf("selfupdate: invalid action %q", action)
 	}
 	body, _ := json.Marshal(map[string]string{"action": action, "target": target})
+	return c.postSidecar(ctx, body)
+}
+
+// TriggerRollback asks the sidecar to restore a snapshot over the main
+// service's data volume (soft rollback: state.db + config.yaml only;
+// image stays). The main container will be stopped, the files copied
+// in via `docker cp`, and the service brought back up. Observe
+// progress via Status() — new states are "restoring" and "restarting".
+// Issue #152.
+func (c *Checker) TriggerRollback(ctx context.Context, snapshotID string, files []string) error {
+	if c.cfg.SocketPath == "" {
+		return errors.New("selfupdate: sidecar socket not configured")
+	}
+	if snapshotID == "" {
+		return errors.New("selfupdate: rollback requires snapshot id")
+	}
+	body, _ := json.Marshal(map[string]any{
+		"action":   "rollback",
+		"snapshot": snapshotID,
+		"files":    files,
+	})
+	return c.postSidecar(ctx, body)
+}
+
+// postSidecar wraps the Unix-socket POST to the sidecar's /update
+// endpoint. Shared by Trigger and TriggerRollback so the HTTP client
+// config (socket dialer + timeout) only lives in one place.
+func (c *Checker) postSidecar(ctx context.Context, body []byte) error {
 	cli := &http.Client{
 		Timeout: 10 * time.Second,
 		Transport: &http.Transport{
@@ -404,4 +447,16 @@ func parseSemver(s string) *[3]int {
 		out[i] = n
 	}
 	return &out
+}
+
+// truncateBody caps release-body markdown to MaxReleaseBodyBytes so a
+// runaway release note (auto-generated from hundreds of commits on a
+// long-lived branch) can't inflate /api/version/check payloads. When we
+// cut, we leave a clear marker so the UI can point the operator at
+// ReleaseNotesURL for the rest.
+func truncateBody(b string) string {
+	if len(b) <= MaxReleaseBodyBytes {
+		return b
+	}
+	return b[:MaxReleaseBodyBytes] + "\n\n…(truncated — see release notes for full changelog)"
 }

@@ -137,6 +137,25 @@ type Driver struct {
 	Lua                string  `yaml:"lua,omitempty" json:"lua,omitempty"` // path to .lua file
 	IsSiteMeter        bool    `yaml:"is_site_meter,omitempty" json:"is_site_meter,omitempty"`
 	BatteryCapacityWh  float64 `yaml:"battery_capacity_wh,omitempty" json:"battery_capacity_wh,omitempty"`
+	// MaxChargeW + MaxDischargeW set this driver's per-command power
+	// ceiling (site-signed +/-). Both optional; zero = fall through to
+	// the global MaxCommandW = 5 kW default the dispatcher has shipped
+	// with since v0.x. On a hybrid inverter that can actually deliver
+	// more (e.g. Ferroamp 10-15 kW, Sungrow 8-10 kW on 32 A), lifting
+	// the per-driver cap is the right move — site-wide fuse protection
+	// (applyFuseGuard) still enforces the grid-boundary budget above
+	// whatever per-battery cap you set. Issue #145.
+	MaxChargeW    float64 `yaml:"max_charge_w,omitempty" json:"max_charge_w,omitempty"`
+	MaxDischargeW float64 `yaml:"max_discharge_w,omitempty" json:"max_discharge_w,omitempty"`
+	// InverterGroup tags this driver as belonging to a shared
+	// inverter+battery unit (e.g. set `inverter_group: ferroamp` on
+	// both the Ferroamp battery driver and anything publishing its PV
+	// telemetry). The dispatcher prefers routing charge to the battery
+	// whose group also has live PV output — staying DC-coupled on the
+	// same inverter avoids the DC→AC→AC→DC conversion overhead of
+	// cross-charging. Untagged drivers keep today's capacity-proportional
+	// behavior. See issue #143 and docs/configuration.md.
+	InverterGroup string `yaml:"inverter_group,omitempty" json:"inverter_group,omitempty"`
 	// Disabled skips this driver at startup / reload. Set via the UI when
 	// you want to temporarily take a driver out without editing yaml.
 	Disabled bool `yaml:"disabled,omitempty" json:"disabled,omitempty"`
