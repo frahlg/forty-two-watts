@@ -76,16 +76,6 @@ type SlotDirectiveFunc func(now time.Time) (SlotDirective, bool)
 // `max_discharge_w` (see PowerLimits + State.DriverLimits, issue #145).
 const MaxCommandW = 5000
 
-// plannerSelfIdleOverrideW is the live-grid export threshold at which
-// a planner_self idle-gate gets overridden back to reactive PI. Rationale
-// in issue #153: when the plan decided "idle this slot" based on a
-// forecasted surplus, and reality is exporting well beyond that amount,
-// the plan's opportunity-cost math doesn't match live conditions — we're
-// just leaking PV out the grid at curtail pricing. 1 kW is loose enough
-// to tolerate normal forecast noise but clearly catches the "plan thought
-// surplus = 3 kW, reality is 10 kW" class of error.
-const plannerSelfIdleOverrideW = 1000
-
 // PowerLimits holds the per-driver charge/discharge ceiling. Zero on
 // either field means "use the global MaxCommandW default" — the value
 // an unset config key carries through the YAML → Driver struct →
@@ -424,23 +414,7 @@ func ComputeDispatch(
 		gridW -= state.EVChargingW
 	}
 
-	// ---- planner_self idle-gate override (#153) ----
-	// The DP's decision to idle this slot assumed a forecasted surplus.
-	// If live conditions are exporting significantly beyond that —
-	// forecast error on the PV or load twin, typically — idling is just
-	// pouring free energy out the grid. Override to reactive PI so
-	// batteries absorb the unused surplus.
-	//
-	// Self-consumption invariants still hold (PI targets gridW=0; the
-	// battery can only move grid toward zero, not past it), so the
-	// override can't mutate planner_self into export.
-	if plannerSelfIdleGate && gridW < -plannerSelfIdleOverrideW {
-		slog.Info("planner_self: idle-gate overridden — live export exceeds threshold",
-			"grid_w", gridW, "threshold_w", plannerSelfIdleOverrideW)
-		plannerSelfIdleGate = false
-	}
-
-	// ---- Gather online batteries ----
+// ---- Gather online batteries ----
 	batteries := make([]batteryInfo, 0, len(driverCapacities))
 	for name, cap := range driverCapacities {
 		r := store.Get(name, telemetry.DerBattery)

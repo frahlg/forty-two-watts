@@ -1314,13 +1314,20 @@ func TestInverterAffinity_EndToEndViaComputeDispatch(t *testing.T) {
 	}
 }
 
-// Issue #153: when planner_self's plan wants idle but live conditions
-// are exporting well beyond any plausible forecast error, the gate
-// flips off and reactive PI kicks in to absorb the unused surplus.
-// Operator scenario that prompted this: forecast said 3.4 kW surplus,
-// reality 10 kW; plan idled, batteries sat while 8 kW flowed out to
-// grid at curtail pricing.
-func TestPlannerSelfIdleGateOverridesOnLargeLiveSurplus(t *testing.T) {
+// Issue #167: planner_self has two discrete per-slot states — IDLE or
+// SELF_CONSUMPTION — both picked by the plan. The dispatch does not
+// second-guess the plan with live data. When the plan says idle, the
+// gate holds at 0 regardless of live grid direction or magnitude.
+// Forecast divergence is handled by the reactive replan trigger
+// (mpc/service.go), which re-runs the DP with fresh telemetry and
+// emits a new plan that may flip the slot to self-consumption.
+//
+// Pre-#167 this scenario (large live export during a plan-idle slot)
+// used to flip the gate off via a one-directional override. That was
+// dropped because the symmetric case (large live import) was not
+// handled and a mixed live/plan control surface made the mode's
+// mental model noisy. See issue #167.
+func TestPlannerSelfIdleGateHoldsEvenOnLargeLiveSurplus(t *testing.T) {
 	now := time.Now()
 	dir := SlotDirective{
 		SlotStart:       now,
@@ -1328,7 +1335,8 @@ func TestPlannerSelfIdleGateOverridesOnLargeLiveSurplus(t *testing.T) {
 		BatteryEnergyWh: 0, // plan wants idle
 		Strategy:        "self_consumption",
 	}
-	// Live: grid exporting 3 kW — well over the 1 kW override threshold.
+	// Live: grid exporting 3 kW — pre-#167 this would have overridden
+	// the gate. Post-#167 the gate holds; a fresh replan is the fix.
 	store := seedStore(-3000, []struct {
 		name          string
 		currentW, soc float64
@@ -1346,18 +1354,19 @@ func TestPlannerSelfIdleGateOverridesOnLargeLiveSurplus(t *testing.T) {
 	if len(targets) != 1 {
 		t.Fatalf("want 1 target, got %d", len(targets))
 	}
-	// With the override, reactive PI sees grid=-3000 and commands positive
-	// charge to drive toward zero. Specifically NOT at 0 (which would be
-	// the idle-gate behaviour).
-	if targets[0].TargetW <= 200 {
-		t.Errorf("TargetW = %f — expected positive charge from reactive PI after override, not idle-held at ~0", targets[0].TargetW)
+	// Idle-gate holds → totalCorrection = -currentTotal. Battery at 0,
+	// stays at 0. Operator who wants coverage switches to manual
+	// self_consumption; replanner closes the loop automatically when
+	// forecast error accumulates past the reactive-replan threshold.
+	if math.Abs(targets[0].TargetW) > 1 {
+		t.Errorf("TargetW = %f — idle-gate must hold regardless of live grid; "+
+			"forecast divergence is the replan's job, not the dispatcher's", targets[0].TargetW)
 	}
 }
 
-// The override must NOT fire when the forecast and reality roughly
-// agree — plans can legitimately choose idle even with small live
-// export (e.g., 500 W slack between PV and load), and the override
-// flipping there would steamroll the DP's optimisation.
+// The idle gate holds on small live export (forecast and reality
+// roughly agree). Kept as a regression guard for the symmetric
+// property that the dispatch does not second-guess the plan.
 func TestPlannerSelfIdleGateHoldsWhenLiveSurplusUnderThreshold(t *testing.T) {
 	now := time.Now()
 	dir := SlotDirective{
@@ -1387,13 +1396,15 @@ func TestPlannerSelfIdleGateHoldsWhenLiveSurplusUnderThreshold(t *testing.T) {
 	// Idle-gate held → totalCorrection = -currentTotal. Battery at 0 →
 	// desired 0, no charge command.
 	if math.Abs(targets[0].TargetW) > 1 {
-		t.Errorf("TargetW = %f — idle-gate should hold with export below override threshold, want ~0", targets[0].TargetW)
+		t.Errorf("TargetW = %f — idle-gate should hold under small export; "+
+			"dispatch does not second-guess the plan, want ~0", targets[0].TargetW)
 	}
 }
 
-// Idle-gate override is one-directional — triggers only on export
-// (negative grid). If live grid is importing, there's no unused surplus
-// and the gate's "hold SoC for later" reasoning still applies.
+// Idle gate holds during import too — the dispatch does not
+// second-guess the plan regardless of live grid direction. Symmetric
+// to TestPlannerSelfIdleGateHoldsEvenOnLargeLiveSurplus: one invariant,
+// two sides. See issue #167.
 func TestPlannerSelfIdleGateHoldsDuringImport(t *testing.T) {
 	now := time.Now()
 	dir := SlotDirective{
@@ -1420,9 +1431,13 @@ func TestPlannerSelfIdleGateHoldsDuringImport(t *testing.T) {
 	if len(targets) != 1 {
 		t.Fatalf("want 1 target, got %d", len(targets))
 	}
-	// Import side: override does nothing, idle-gate drives battery to 0.
+	// Idle-gate holds; battery stays at 0 even though live grid is
+	// importing. If the forecast error is large enough, the reactive
+	// replan trigger in mpc/service.go will re-plan and potentially
+	// flip this slot to self_consumption.
 	if math.Abs(targets[0].TargetW) > 1 {
-		t.Errorf("TargetW = %f — override must not fire on import; idle-gate should hold at 0", targets[0].TargetW)
+		t.Errorf("TargetW = %f — idle-gate should hold during live import; "+
+			"dispatch does not second-guess the plan, want ~0", targets[0].TargetW)
 	}
 }
 
