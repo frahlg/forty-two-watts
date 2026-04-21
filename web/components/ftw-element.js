@@ -27,6 +27,24 @@
 // attribute-driven re-rendering, call this.update() from
 // attributeChangedCallback.
 
+// Dev-only hook — reads `?delay=N` from the page URL and returns it
+// as a milliseconds int. Components that show a loading phase (e.g.
+// ftw-energy-flow, ftw-history-card) use this to artificially hold in
+// their skeleton/shimmer state for N ms so the loading→loaded
+// transition can be inspected without hammering Refresh. Returns 0 in
+// production and whenever the param is missing or non-numeric. Cached
+// per load — the value is sticky for the whole session.
+let _debugDelay = null;
+export function ftwDebugDelay() {
+  if (_debugDelay != null) return _debugDelay;
+  try {
+    const p = new URLSearchParams(location.search);
+    const d = parseInt(p.get("delay"), 10);
+    _debugDelay = Number.isFinite(d) && d > 0 ? d : 0;
+  } catch (e) { _debugDelay = 0; }
+  return _debugDelay;
+}
+
 export class FtwElement extends HTMLElement {
   // Subclasses override. Empty default means "no local styles" — tokens
   // from :root are still visible via var(--x).

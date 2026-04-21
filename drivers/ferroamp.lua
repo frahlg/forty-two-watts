@@ -44,6 +44,12 @@ local ehub_data = nil
 local eso_data = nil
 local sso_data = nil
 
+-- Optional config knob: when `skip_battery` is true the driver will
+-- NOT emit battery telemetry even when the ESO/pbat fields are
+-- present on the wire. Useful for dev setups that want a PV-only
+-- dashboard fed by the otherwise full-featured Ferroamp sim.
+local SKIP_BATTERY = false
+
 ----------------------------------------------------------------------------
 -- Helpers
 ----------------------------------------------------------------------------
@@ -106,6 +112,15 @@ end
 function driver_init(config)
     host.set_make("Ferroamp")
 
+    -- Honour the `skip_battery` config knob if set — the driver stays
+    -- otherwise unchanged, but host.emit("battery", …) is skipped so
+    -- the rest of the stack (dashboard, models, planner) sees no
+    -- battery capability from this instance.
+    if config and config.skip_battery then
+        SKIP_BATTERY = true
+        host.log("info", "Ferroamp: skip_battery=true — battery emission disabled")
+    end
+
     -- Subscribe to telemetry topics
     host.mqtt_subscribe("extapi/data/ehub")
     host.mqtt_subscribe("extapi/data/eso")
@@ -149,7 +164,12 @@ function driver_poll()
         local pext     = extract_val(ehub_data, "pext")     -- per-phase grid power (W)
         local gridfreq = extract_val(ehub_data, "gridfreq") -- grid frequency (Hz)
         local ul       = extract_val(ehub_data, "ul")       -- per-phase voltage (V)
-        local il       = extract_val(ehub_data, "il")       -- per-phase current (A)
+        -- iext = per-phase GRID current at the service-entrance CTs, the
+        -- same source pext is derived from. NOT il (which is inverter AC
+        -- current and misses any load not routed through the Ferroamp
+        -- inverter, e.g. an EV charger on a separate breaker — that mix
+        -- made the fuse bars under-read by the EV share of total import).
+        local iext     = extract_val(ehub_data, "iext")     -- per-phase grid current (A)
         -- 3-phase energy totals in mJ
         local wextconsq3p = extract_val(ehub_data, "wextconsq3p") -- total import mJ
         local wextprodq3p = extract_val(ehub_data, "wextprodq3p") -- total export mJ
@@ -172,10 +192,12 @@ function driver_poll()
         meter.l2_v = phase_val(ul, "L2")
         meter.l3_v = phase_val(ul, "L3")
 
-        -- Per-phase current
-        meter.l1_a = phase_val(il, "L1")
-        meter.l2_a = phase_val(il, "L2")
-        meter.l3_a = phase_val(il, "L3")
+        -- Per-phase grid current (from service-entrance CTs, consistent
+        -- with pext above — previously read il by mistake, which is
+        -- inverter AC current).
+        meter.l1_a = phase_val(iext, "L1")
+        meter.l2_a = phase_val(iext, "L2")
+        meter.l3_a = phase_val(iext, "L3")
 
         -- Energy counters (mJ → Wh)
         if wextconsq3p then
@@ -213,7 +235,7 @@ function driver_poll()
     --------------------------------------------------------------------------
     -- Battery
     --------------------------------------------------------------------------
-    if ehub_data then
+    if ehub_data and not SKIP_BATTERY then
         local pbat = extract_val(ehub_data, "pbat")
         if pbat then
             local battery = {}

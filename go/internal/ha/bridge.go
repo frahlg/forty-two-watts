@@ -26,10 +26,11 @@ import (
 // CommandCallbacks is how the bridge hands received commands back to the
 // control loop. Caller provides these at construction time.
 type CommandCallbacks struct {
-	SetMode       func(string) error
-	SetGridTarget func(float64) error
-	SetPeakLimit  func(float64) error
-	SetEVCharging func(float64, bool) error
+	SetMode             func(string) error
+	SetGridTarget       func(float64) error
+	SetPeakLimit        func(float64) error
+	SetEVCharging       func(float64, bool) error
+	SetBatteryCoversEV  func(bool) error
 }
 
 // Bridge is an instance of the HA MQTT bridge.
@@ -216,6 +217,24 @@ func (b *Bridge) publishDiscovery() {
 	data, _ = json.Marshal(targetMsg)
 	b.publish(fmt.Sprintf("%s/number/%s/grid_target/config", b.discoPrefix, b.deviceID), data, true)
 
+	// ---- Battery-covers-EV as HA switch ----
+	// Operator-facing override: when ON, the control loop lets the battery
+	// discharge into the EV (price-arbitrage scenarios). Default OFF.
+	bceMsg := map[string]any{
+		"name":          "Battery Covers EV",
+		"unique_id":     b.deviceID + "_battery_covers_ev_cmd",
+		"state_topic":   b.stateTopic("battery_covers_ev"),
+		"command_topic": b.cmdTopic("battery_covers_ev"),
+		"payload_on":    "ON",
+		"payload_off":   "OFF",
+		"state_on":      "ON",
+		"state_off":     "OFF",
+		"icon":          "mdi:car-battery",
+		"device":        dev,
+	}
+	data, _ = json.Marshal(bceMsg)
+	b.publish(fmt.Sprintf("%s/switch/%s/battery_covers_ev/config", b.discoPrefix, b.deviceID), data, true)
+
 	// ---- Per-driver sensors ----
 	for _, name := range b.driverNames {
 		for _, s := range []struct{ id, label, unit, class string }{
@@ -275,6 +294,12 @@ func (b *Bridge) subscribeCommands() {
 			_ = b.cb.SetEVCharging(f, f > 0)
 		}
 	})
+	b.client.Subscribe(b.cmdTopic("battery_covers_ev"), 0, func(_ paho.Client, m paho.Message) {
+		on := string(m.Payload()) == "ON"
+		if b.cb.SetBatteryCoversEV != nil {
+			_ = b.cb.SetBatteryCoversEV(on)
+		}
+	})
 }
 
 // ---- State publish loop ----
@@ -306,6 +331,7 @@ func (b *Bridge) publishState() {
 	siteMeter := b.ctrl.SiteMeterDriver
 	mode := string(b.ctrl.Mode)
 	gridTarget := b.ctrl.GridTargetW
+	batteryCoversEV := b.ctrl.BatteryCoversEV
 	b.ctrlMu.Unlock()
 
 	gridW := 0.0
@@ -334,6 +360,11 @@ func (b *Bridge) publishState() {
 	b.publishValue("bat_soc_pct", avgSoC*100)
 	b.publishValue("grid_target_w", gridTarget)
 	b.publishString("mode", mode)
+	bceState := "OFF"
+	if batteryCoversEV {
+		bceState = "ON"
+	}
+	b.publishString("battery_covers_ev", bceState)
 
 	// Per-driver
 	for _, name := range b.driverNames {

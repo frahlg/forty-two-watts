@@ -29,6 +29,7 @@
     </nav>
     <div class="header-right">
       <button id="ui-mode-toggle" class="btn-link" title="Show advanced controls + diagnostics">Advanced</button>
+      <ftw-notif-history poll-ms="30000"></ftw-notif-history>
       <button id="settings-btn" class="settings-btn" title="Settings">⚙</button>
       <ftw-update-badge></ftw-update-badge>
       <span id="version" class="version" title="Click for version info" style="cursor:pointer">...</span>
@@ -51,6 +52,7 @@
         <button data-tab="batteries">Batteries</button>
         <button data-tab="planner">Planner</button>
         <button data-tab="ha">Home Assistant</button>
+        <button data-tab="notifications">Notifications</button>
       </div>
       <div class="modal-body" id="settings-body">
         <!-- Filled by JS -->
@@ -341,8 +343,22 @@
     </div>
   </div>
 
+  <script type="module" src="/components/ftw-element.js"></script>
+  <script type="module" src="/components/ftw-notif-status.js"></script>
+  <script type="module" src="/components/ftw-notif-test-button.js"></script>
+  <script type="module" src="/components/ftw-modal.js"></script>
+  <script type="module" src="/components/ftw-notif-history.js"></script>
   <script src="/app.js?v=soc1"></script>
   <script src="/settings.js?v=soc1"></script>
+  <script src="/settings/tabs/control.js?v=tabsplit1"></script>
+  <script src="/settings/tabs/devices.js?v=tabsplit1"></script>
+  <script src="/settings/tabs/price.js?v=tabsplit1"></script>
+  <script src="/settings/tabs/weather.js?v=tabsplit1"></script>
+  <script src="/settings/tabs/batteries.js?v=tabsplit1"></script>
+  <script src="/settings/tabs/planner.js?v=tabsplit1"></script>
+  <script src="/settings/tabs/ha.js?v=tabsplit1"></script>
+  <script src="/settings/tabs/notifications.js?v=tabsplit1"></script>
+  <script src="/settings/tabs/ev.js?v=tabsplit1"></script>
   <script src="/models.js?v=soc1"></script>
   <script src="/plan.js?v=soc1"></script>
   <script src="/twins.js?v=soc1"></script>

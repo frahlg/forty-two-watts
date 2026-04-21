@@ -26,8 +26,10 @@ import (
 	"github.com/frahlg/forty-two-watts/go/internal/drivers"
 	"github.com/frahlg/forty-two-watts/go/internal/evcloud"
 	"github.com/frahlg/forty-two-watts/go/internal/forecast"
+	"github.com/frahlg/forty-two-watts/go/internal/events"
 	"github.com/frahlg/forty-two-watts/go/internal/ha"
 	"github.com/frahlg/forty-two-watts/go/internal/loadmodel"
+	"github.com/frahlg/forty-two-watts/go/internal/notifications"
 	"github.com/frahlg/forty-two-watts/go/internal/loadpoint"
 	"github.com/frahlg/forty-two-watts/go/internal/mpc"
 	"github.com/frahlg/forty-two-watts/go/internal/prices"
@@ -69,6 +71,13 @@ type Deps struct {
 	SaveConfig func(path string, c *config.Config) error // injection for testability
 	WebDir     string                                    // static assets root (default "web")
 	ColdDir    string                                    // cold-storage root for parquet rolloff; empty disables cold fallback
+	// SnapshotDir is where pre-update snapshots of state.db + config.yaml
+	// are written by the self-update flow. Defaults to
+	// `<cold_dir_parent>/snapshots`; main.go is responsible for passing
+	// an absolute, writable path. Empty disables the snapshot step —
+	// updates proceed as before, the UI surfaces that no rollback point
+	// was captured so the operator can decide whether to continue.
+	SnapshotDir string
 
 	// Optional: spot prices + weather forecast services. Nil if disabled.
 	Prices   *prices.Service
@@ -97,6 +106,14 @@ type Deps struct {
 	// Optional: background version-check + updater-sidecar dispatch.
 	// Nil disables every /api/version/* endpoint (returns 503).
 	SelfUpdate *selfupdate.Checker
+
+	// Events is the shared pub/sub bus. Nil is a safe no-op for
+	// handlers that publish (e.g. /api/notifications/test).
+	Events *events.Bus
+
+	// Optional: outbound push-notification service. Nil disables
+	// /api/notifications/* endpoints.
+	Notifications *notifications.Service
 
 	Version string
 }
@@ -135,12 +152,17 @@ func (s *Server) routes() {
 	s.handle("POST /api/target", s.handleSetTarget)
 	s.handle("POST /api/peak_limit", s.handleSetPeakLimit)
 	s.handle("POST /api/ev_charging", s.handleSetEVCharging)
+	s.handle("POST /api/battery_covers_ev", s.handleSetBatteryCoversEV)
 	s.handle("GET  /api/drivers", s.handleDrivers)
 	s.handle("GET  /api/drivers/catalog", s.handleDriversCatalog)
 	s.handle("POST /api/drivers/{name}/restart", s.handleDriverRestart)
 	s.handle("POST /api/drivers/{name}/disable", s.handleDriverDisable)
 	s.handle("POST /api/drivers/{name}/enable", s.handleDriverEnable)
 	s.handle("GET  /api/ha/status", s.handleHAStatus)
+	s.handle("GET  /api/notifications/status", s.handleNotificationsStatus)
+	s.handle("GET  /api/notifications/defaults", s.handleNotificationsDefaults)
+	s.handle("GET  /api/notifications/history", s.handleNotificationsHistory)
+	s.handle("POST /api/notifications/test", s.handleNotificationsTest)
 	s.handle("GET  /api/battery_models", s.handleGetModels)
 	s.handle("POST /api/battery_models/reset", s.handleResetModel)
 	s.handle("POST /api/self_tune/start", s.handleSelfTuneStart)
@@ -175,6 +197,9 @@ func (s *Server) routes() {
 	s.handle("POST /api/version/update", s.handleVersionUpdate)
 	s.handle("POST /api/version/restart", s.handleVersionRestart)
 	s.handle("GET  /api/version/update/status", s.handleVersionUpdateStatus)
+	s.handle("GET  /api/version/snapshots", s.handleVersionSnapshots)
+	s.handle("DELETE /api/version/snapshots/{id}", s.handleVersionSnapshotDelete)
+	s.handle("POST /api/version/rollback", s.handleVersionRollback)
 
 	// ---- Static web UI ----
 	// Everything not matched above falls through to the static server.
@@ -470,6 +495,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"grid_target_w":    ctrl.GridTargetW,
 		"peak_limit_w":     ctrl.PeakLimitW,
 		"ev_charging_w":    ctrl.EVChargingW,
+		"battery_covers_ev": ctrl.BatteryCoversEV,
 		// True when an EV charger password is persisted in state.db. The
 		// Settings UI uses this to show a "credentials saved" badge so the
 		// operator can tell apart "never entered" from "saved but masked".
@@ -694,6 +720,33 @@ func (s *Server) handleSetEVCharging(w http.ResponseWriter, r *http.Request) {
 	}
 	s.deps.CtrlMu.Unlock()
 	writeJSON(w, 200, map[string]any{"status": "ok", "ev_charging_w": req.PowerW})
+}
+
+// ---- /api/battery_covers_ev ----
+//
+// When enabled, dispatch skips its usual subtraction of EVChargingW from
+// the meter reading so batteries discharge into the EV. Default off
+// preserves the traditional "battery never feeds the car" behaviour.
+// See control.State.BatteryCoversEV for the full rationale.
+func (s *Server) handleSetBatteryCoversEV(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeJSON(w, 400, map[string]string{"error": err.Error()})
+		return
+	}
+	s.deps.CtrlMu.Lock()
+	s.deps.Ctrl.BatteryCoversEV = req.Enabled
+	s.deps.CtrlMu.Unlock()
+	if s.deps.State != nil {
+		val := "false"
+		if req.Enabled {
+			val = "true"
+		}
+		_ = s.deps.State.SaveConfig("battery_covers_ev", val)
+	}
+	writeJSON(w, 200, map[string]any{"status": "ok", "battery_covers_ev": req.Enabled})
 }
 
 // ---- /api/drivers ----
@@ -1781,4 +1834,77 @@ func (s *Server) handleLoadpointSoC(w http.ResponseWriter, r *http.Request) {
 		go s.deps.MPC.Replan(r.Context())
 	}
 	writeJSON(w, 200, map[string]any{"ok": true})
+}
+
+// GET /api/notifications/status — reports enabled + counters.
+func (s *Server) handleNotificationsStatus(w http.ResponseWriter, r *http.Request) {
+	if s.deps.Notifications == nil {
+		writeJSON(w, 200, map[string]any{"enabled": false})
+		return
+	}
+	writeJSON(w, 200, s.deps.Notifications.Status())
+}
+
+// POST /api/notifications/test — dispatches a test message via the event
+// bus so the core never reaches into the notifications service directly.
+// Returns the dispatch error (if any) from the Reply channel.
+func (s *Server) handleNotificationsTest(w http.ResponseWriter, r *http.Request) {
+	if s.deps.Notifications == nil {
+		writeJSON(w, 503, map[string]string{"error": "notifications not configured"})
+		return
+	}
+	if s.deps.Events == nil {
+		// No bus wired — fall back to direct call so the endpoint is
+		// still usable in tests that don't spin up a bus.
+		if err := s.deps.Notifications.SendTest(); err != nil {
+			writeJSON(w, 400, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, 200, map[string]string{"status": "sent"})
+		return
+	}
+	reply := make(chan error, 1)
+	s.deps.Events.Publish(events.NotificationTest{Reply: reply})
+	select {
+	case err := <-reply:
+		if err != nil {
+			writeJSON(w, 400, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, 200, map[string]string{"status": "sent"})
+	case <-time.After(11 * time.Second):
+		writeJSON(w, 504, map[string]string{"error": "notification timeout"})
+	}
+}
+
+// GET /api/notifications/defaults — exposes the built-in template
+// strings so the settings UI can pre-fill inputs with exactly what the
+// backend renders when the operator leaves a custom template blank.
+func (s *Server) handleNotificationsDefaults(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, 200, notifications.EventDefaults())
+}
+
+// GET /api/notifications/history?limit=N — recent notification dispatches
+// persisted to state.notification_log. limit is clamped to [1, 500];
+// defaults to 100.
+func (s *Server) handleNotificationsHistory(w http.ResponseWriter, r *http.Request) {
+	if s.deps.State == nil {
+		writeJSON(w, 200, []any{})
+		return
+	}
+	limit := 100
+	if q := r.URL.Query().Get("limit"); q != "" {
+		if n, err := strconv.Atoi(q); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	if limit > 500 {
+		limit = 500
+	}
+	rows, err := s.deps.State.RecentNotifications(limit)
+	if err != nil {
+		writeJSON(w, 500, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, 200, rows)
 }

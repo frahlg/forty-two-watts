@@ -58,6 +58,29 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
+// SnapshotTo writes a self-contained, defragmented copy of the database
+// to dstPath using SQLite's VACUUM INTO. The source DB remains open for
+// the duration; readers and writers continue unimpeded. Used by the
+// self-update flow to capture state before pulling a new image, so
+// operators can roll back if the new version misbehaves.
+//
+// dstPath must not exist — SQLite refuses to overwrite an existing file.
+// Safe to call while the Store is serving live traffic.
+func (s *Store) SnapshotTo(dstPath string) error {
+	if s == nil || s.db == nil {
+		return fmt.Errorf("store: snapshot on nil store")
+	}
+	// VACUUM INTO takes a literal path string — bind parameters aren't
+	// honoured by the parser. We construct dstPath ourselves (timestamped
+	// snapshots dir), but escape single quotes defensively so a caller
+	// passing an unexpected path can't inject SQL.
+	escaped := strings.ReplaceAll(dstPath, "'", "''")
+	if _, err := s.db.Exec(fmt.Sprintf("VACUUM INTO '%s'", escaped)); err != nil {
+		return fmt.Errorf("snapshot to %s: %w", dstPath, err)
+	}
+	return nil
+}
+
 func (s *Store) migrate() error {
 	stmts := []string{
 		// config: small string key-value for mode, grid_target etc.
@@ -190,6 +213,40 @@ func (s *Store) migrate() error {
 			total_cost_ore REAL    NOT NULL,
 			horizon_slots  INTEGER NOT NULL,
 			json           TEXT    NOT NULL
+		) STRICT`,
+
+		// Nova federation: one row per local DER we've provisioned in Nova.
+		// Keyed on (device_id, der_type) so a hybrid inverter with multiple
+		// DERs (battery + pv + meter on the same device_id) has one row per
+		// DER. The Nova-generated der_id is stored purely for diagnostics
+		// and future control-topic subscriptions; the publish path uses
+		// (hardware_id, der_name) which are client-owned.
+		// Notification history — one row per attempted push. Populated by
+		// a bus subscriber in main.go (see events.NotificationDispatched)
+		// so the notifications service itself stays free of storage logic.
+		// Retention is unbounded for now; volumes are small (operators
+		// configure a threshold + cooldown, not per-tick events) so a
+		// house would take years to accumulate even 100k rows.
+		`CREATE TABLE IF NOT EXISTS notification_log (
+			id         INTEGER PRIMARY KEY AUTOINCREMENT,
+			ts_ms      INTEGER NOT NULL,
+			event_type TEXT NOT NULL,
+			driver     TEXT NOT NULL DEFAULT '',
+			title      TEXT NOT NULL DEFAULT '',
+			body       TEXT NOT NULL DEFAULT '',
+			priority   INTEGER NOT NULL DEFAULT 0,
+			status     TEXT NOT NULL,
+			error      TEXT NOT NULL DEFAULT ''
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_notification_log_ts ON notification_log(ts_ms DESC)`,
+
+		`CREATE TABLE IF NOT EXISTS nova_ders (
+			device_id   TEXT NOT NULL,
+			der_type    TEXT NOT NULL,
+			der_name    TEXT NOT NULL,
+			der_id      TEXT NOT NULL,
+			synced_ms   INTEGER NOT NULL,
+			PRIMARY KEY (device_id, der_type)
 		) STRICT`,
 	}
 	for _, stmt := range stmts {

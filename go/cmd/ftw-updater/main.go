@@ -24,6 +24,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -34,9 +35,10 @@ const mainServiceName = "forty-two-watts"
 // State mirrors selfupdate.UpdateStatus (we keep a local copy to avoid
 // importing the main module's internal package from this separate cmd).
 type State struct {
-	State     string    `json:"state"` // idle, pulling, restarting, done, failed
-	Action    string    `json:"action,omitempty"`
+	State     string    `json:"state"` // idle, pulling, restarting, restoring, done, failed
+	Action    string    `json:"action,omitempty"` // update, restart, rollback (#152)
 	Target    string    `json:"target,omitempty"`
+	Snapshot  string    `json:"snapshot,omitempty"` // snapshot id (rollback only, #152)
 	StartedAt time.Time `json:"started_at,omitempty"`
 	UpdatedAt time.Time `json:"updated_at,omitempty"`
 	Message   string    `json:"message,omitempty"`
@@ -165,15 +167,37 @@ func main() {
 
 func (s *server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Action string `json:"action"`
-		Target string `json:"target,omitempty"`
+		Action   string   `json:"action"`
+		Target   string   `json:"target,omitempty"`
+		Snapshot string   `json:"snapshot,omitempty"` // rollback-only (#152)
+		Files    []string `json:"files,omitempty"`    // rollback: basenames to restore
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<12)).Decode(&body); err != nil {
 		http.Error(w, "bad json: "+err.Error(), 400)
 		return
 	}
-	if body.Action != "update" && body.Action != "restart" {
-		http.Error(w, "action must be update or restart", 400)
+	switch body.Action {
+	case "update", "restart":
+		// existing semantics
+	case "rollback":
+		if body.Snapshot == "" {
+			http.Error(w, "rollback requires snapshot id", 400)
+			return
+		}
+		// Basename-only — never let a client traverse out of the
+		// conventional snapshots dir on the host.
+		if strings.ContainsAny(body.Snapshot, "/\\") || body.Snapshot == "." || body.Snapshot == ".." {
+			http.Error(w, "invalid snapshot id", 400)
+			return
+		}
+		for _, f := range body.Files {
+			if strings.ContainsAny(f, "/\\") || f == "." || f == ".." {
+				http.Error(w, "invalid file in rollback request", 400)
+				return
+			}
+		}
+	default:
+		http.Error(w, "action must be update, restart, or rollback", 400)
 		return
 	}
 	if !s.runMu.TryLock() {
@@ -185,11 +209,20 @@ func (s *server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	// main container's UI polls /status for progress.
 	go func() {
 		defer s.runMu.Unlock()
-		s.runJob(body.Action, body.Target)
+		if body.Action == "rollback" {
+			s.runRollback(body.Snapshot, body.Files)
+		} else {
+			s.runJob(body.Action, body.Target)
+		}
 	}()
 
 	w.WriteHeader(202)
-	_ = json.NewEncoder(w).Encode(map[string]any{"status": "started", "action": body.Action, "target": body.Target})
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"status":   "started",
+		"action":   body.Action,
+		"target":   body.Target,
+		"snapshot": body.Snapshot,
+	})
 }
 
 func (s *server) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -238,6 +271,90 @@ func (s *server) runJob(action, target string) {
 	// will read this "done" state on startup and serve it to the UI that's
 	// still polling in the browser.
 	s.writeState(State{State: "done", Action: action, Target: target, StartedAt: now, UpdatedAt: time.Now(), Message: "compose up -d completed"})
+}
+
+// runRollback restores a snapshot's files over the main container's data
+// volume, keeping the image unchanged ("soft" rollback). The sequence is
+// intentionally simple:
+//
+//  1. compose stop forty-two-watts — main releases its SQLite handle so
+//     the swap doesn't write into a live DB.
+//  2. docker cp each file from the snapshot dir on the host into the
+//     stopped container. Bind-mount semantics make this a direct write
+//     to the host-side data dir; no read-only/writable bind trick needed.
+//  3. compose up -d forty-two-watts — main comes up on the restored state.
+//
+// Paths: the snapshots live at <host_project_dir>/data/snapshots/<id>.
+// We compute host_project_dir from FTW_UPDATER_COMPOSE (an absolute host
+// path already, documented in docker-compose.yml). Operators who move
+// the data bind off the default `./data:/app/data` layout would need a
+// separate override; tracked as a follow-up if we hit that in practice.
+//
+// A failed rollback leaves state: "failed" with a descriptive message
+// and — critically — still runs compose up -d in defer so the main
+// container comes back, even if wrong. Leaving the service down would
+// strand the operator.
+func (s *server) runRollback(snapshotID string, files []string) {
+	now := time.Now()
+	base := State{Action: "rollback", Snapshot: snapshotID, StartedAt: now}
+	s.writeState(State{State: "restoring", Action: base.Action, Snapshot: base.Snapshot, StartedAt: now, UpdatedAt: now, Message: "stopping main service"})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	hostProjectDir := filepath.Dir(s.composeFile)
+	hostSnapDir := filepath.Join(hostProjectDir, "data", "snapshots", snapshotID)
+	if _, err := os.Stat(hostSnapDir); err != nil {
+		s.writeState(State{State: "failed", Action: base.Action, Snapshot: base.Snapshot, StartedAt: now, UpdatedAt: time.Now(), Message: "snapshot not readable from sidecar: " + err.Error()})
+		return
+	}
+
+	// 1. Stop the main service so SQLite isn't holding a file handle
+	// while we swap state.db under it.
+	stopArgs := s.composeArgs("stop", mainServiceName)
+	if err := s.runner(ctx, stopArgs...); err != nil {
+		s.writeState(State{State: "failed", Action: base.Action, Snapshot: base.Snapshot, StartedAt: now, UpdatedAt: time.Now(), Message: "compose stop failed: " + err.Error()})
+		return
+	}
+
+	// 2. Restore each requested file via docker cp. Defaults to the
+	// ones we always snapshot — state.db + config.yaml — when the
+	// caller left Files empty.
+	if len(files) == 0 {
+		files = []string{"state.db", "config.yaml"}
+	}
+	s.writeState(State{State: "restoring", Action: base.Action, Snapshot: base.Snapshot, StartedAt: now, UpdatedAt: time.Now(), Message: "copying snapshot files"})
+	for _, f := range files {
+		src := filepath.Join(hostSnapDir, f)
+		if _, err := os.Stat(src); err != nil {
+			// Optional files (e.g. config.yaml when the operator
+			// runs with defaults and no YAML on disk) just get
+			// skipped — not a rollback failure.
+			slog.Info("rollback: source missing, skipping", "file", f, "err", err)
+			continue
+		}
+		dst := "/app/data/" + f
+		cpArgs := []string{"cp", src, mainServiceName + ":" + dst}
+		if err := s.runner(ctx, cpArgs...); err != nil {
+			// File-swap failure is serious. Try to bring the
+			// service back anyway so the operator isn't stranded.
+			slog.Error("rollback docker cp failed", "file", f, "err", err)
+			s.writeState(State{State: "failed", Action: base.Action, Snapshot: base.Snapshot, StartedAt: now, UpdatedAt: time.Now(), Message: "docker cp " + f + " failed: " + err.Error()})
+			_ = s.runner(ctx, s.composeArgs("up", "-d", mainServiceName)...)
+			return
+		}
+	}
+
+	// 3. Start the main service again. --force-recreate so the new
+	// process certainly sees the swapped files (same semantics as the
+	// restart flow).
+	s.writeState(State{State: "restarting", Action: base.Action, Snapshot: base.Snapshot, StartedAt: now, UpdatedAt: time.Now(), Message: "starting main service on restored state"})
+	upArgs := s.composeArgs("up", "-d", "--force-recreate", mainServiceName)
+	if err := s.runner(ctx, upArgs...); err != nil {
+		s.writeState(State{State: "failed", Action: base.Action, Snapshot: base.Snapshot, StartedAt: now, UpdatedAt: time.Now(), Message: "compose up -d failed: " + err.Error()})
+		return
+	}
+	s.writeState(State{State: "done", Action: base.Action, Snapshot: base.Snapshot, StartedAt: now, UpdatedAt: time.Now(), Message: "rollback complete"})
 }
 
 func (s *server) writeState(st State) {

@@ -140,12 +140,37 @@ body.ftw-next .header-right {
 }
 body.ftw-next .version {
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: 13px;
   color: var(--fg-muted);
-  padding: 4px 8px;
-  border: 1px solid var(--line);
-  border-radius: 6px;
+  padding: 6px 12px;
+  border: 2px solid var(--fg-muted);
+  border-radius: 8px;
 }
+
+/* Green connection dot — the element itself is the colored disc
+   (background: currentColor picks up .connected/.disconnected from
+   style.css), wrapped in a 2px white ring + hairline --line outer
+   outline via layered box-shadows so it reads as a "status light"
+   on both dark and paper themes. The ● glyph is hidden (font-size 0)
+   since the background is doing the drawing now. */
+body.ftw-next .conn-status {
+  display: inline-grid;
+  place-items: center;
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  border-radius: 999px;
+  background: currentColor;
+  box-shadow: 0 0 0 2px #fff, 0 0 0 3px var(--line);
+  font-size: 0;
+  line-height: 1;
+}
+
+/* When the update badge has something to announce (see
+   update-badge.js's _render toggling body.has-update) the green
+   connection dot yields the slot to the blue blinking update dot —
+   two dots next to each other was too noisy. */
+body.ftw-next.has-update #conn-status { display: none; }
 body.ftw-next .settings-btn {
   background: transparent;
   border: 1px solid var(--line);
@@ -342,7 +367,13 @@ body.ftw-next .fuse-phase-boxes {
   gap: 10px;
 }
 body.ftw-next .fuse-phase-box {
-  background: var(--ink-base, oklch(0.18 0.015 250));
+  /* Sub-card sits INSIDE the fuse card, so pick --ink-sunken (the
+     recessed-surface token) — theme-aware: a very light gray in
+     light mode, slightly darker than --ink-raised in dark mode.
+     The old hardcoded oklch(0.18 …) locked the sub-card to a dark
+     navy regardless of theme, which rendered as a black box on
+     paper-white light mode and hid the labels. */
+  background: var(--ink-sunken);
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
   padding: 10px 12px;
@@ -368,11 +399,24 @@ body.ftw-next .fuse-phase-box .fuse-phase-val {
 }
 body.ftw-next .fuse-phase-box .fuse-phase-bar {
   height: 8px;
-  background: oklch(0.22 0.015 250);
+  /* Bar track follows --line-soft so it stays legible on both
+     themes — a slightly-darker gray on paper, a slightly-lighter
+     panel on ink. Previously hardcoded oklch(0.22 …) which was
+     nearly black on light mode. */
+  background: var(--line-soft);
   border-radius: 4px;
   overflow: hidden;
 }
-body.ftw-next .fuse-phase-fill,
+body.ftw-next .fuse-phase-fill {
+  /* Horizontal bar (default): width tracks --fill-pct set by
+     next-app.js; height fills the bar's 8 px thickness. The mobile
+     override below rotates this to width 100% + height varies so
+     the bar becomes a vertical column that fills upward. */
+  width: var(--fill-pct, 0%);
+  height: 100%;
+  background: var(--green-e);
+  transition: width 0.3s, height 0.3s, background 0.3s;
+}
 body.ftw-next .fuse-fill {
   height: 100%;
   background: var(--green-e);
@@ -384,7 +428,10 @@ body.ftw-next .fuse-phase-fill.crit,
 body.ftw-next .fuse-fill.crit { background: var(--red-e); }
 body.ftw-next .fuse-phase-fill.export { background: var(--cyan); }
 body.ftw-next .fuse-bar {
-  background: oklch(0.22 0.015 250);
+  /* Fallback single-bar track (used when the site meter doesn't
+     report per-phase amperage). Same theme-aware background as the
+     per-phase tracks so both paths read the same on light mode. */
+  background: var(--line-soft);
   border-radius: 3px;
   height: 8px;
   overflow: hidden;
@@ -462,6 +509,54 @@ body.ftw-next .control-card .card-label {
   letter-spacing: 0.1em;
   text-transform: uppercase;
   margin-bottom: 10px;
+}
+/* ftw-toggle: compact switch used inside control-cards for boolean
+   opt-ins (e.g. "Let battery cover EV"). Hides the native checkbox
+   and renders a pill + dot that slides on check. */
+body.ftw-next .ftw-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  user-select: none;
+}
+body.ftw-next .ftw-toggle input[type="checkbox"] {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+body.ftw-next .ftw-toggle-slider {
+  position: relative;
+  width: 40px;
+  height: 22px;
+  background: oklch(0.20 0.015 250);
+  border: 1px solid var(--line-soft);
+  border-radius: 999px;
+  transition: background .15s, border-color .15s;
+}
+body.ftw-next .ftw-toggle-slider::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  background: var(--fg-dim);
+  border-radius: 50%;
+  transition: transform .18s ease, background .15s;
+}
+body.ftw-next .ftw-toggle input:checked + .ftw-toggle-slider {
+  background: oklch(0.55 0.12 155);
+  border-color: oklch(0.60 0.13 155);
+}
+body.ftw-next .ftw-toggle input:checked + .ftw-toggle-slider::after {
+  transform: translateX(18px);
+  background: oklch(0.98 0 0);
+}
+body.ftw-next .ftw-toggle-label {
+  font-family: var(--sans);
+  font-size: 13px;
+  color: var(--fg-dim);
 }
 body.ftw-next .mode-buttons {
   gap: 6px;
@@ -568,7 +663,11 @@ body.ftw-next .chart-container {
   padding: 4px 0 0;
 }
 body.ftw-next .range-buttons button {
-  background: oklch(0.13 0.015 250);
+  /* Ghost secondary per DESIGN.md: transparent bg, --line border,
+     --fg text. Theme-aware so the buttons keep their chrome on both
+     light and dark without the old hardcoded navy oklch(0.13 …)
+     turning the light theme into a black-on-white lozenge. */
+  background: transparent;
   border: 1px solid var(--line);
   color: var(--fg-dim);
   font-family: var(--mono);
@@ -577,10 +676,20 @@ body.ftw-next .range-buttons button {
   border-radius: 5px;
   letter-spacing: 0.04em;
   text-transform: uppercase;
+  cursor: pointer;
+  transition: color 180ms ease, border-color 180ms ease;
+}
+body.ftw-next .range-buttons button:not(.active):hover {
+  color: var(--fg);
+  border-color: var(--fg-dim);
 }
 body.ftw-next .range-buttons button.active {
+  /* On-accent text per DESIGN.md is near-black, not white — so the
+     amber ON state is readable in both themes and stops looking
+     washed-out in light mode where the old oklch(0.15 …) barely
+     differed from pure black. */
   background: var(--accent-e);
-  color: oklch(0.15 0.02 250);
+  color: #0a0a0a;
   border-color: var(--accent-e);
   font-weight: 600;
 }
@@ -804,6 +913,28 @@ html[data-theme="light"] body.ftw-next::before {
 html[data-theme="light"] body.ftw-next > header::before {
   background: oklch(0.98 0.005 250 / 0.7);
 }
+/* Light-mode header chrome:
+   - Remove the ambient pill border: the paper body + translucent
+     ::before already carry enough separation; the hairline ring on
+     a paper-ish background read as a dark frame that competed with
+     the header content for attention.
+   - Pull every text element in the header to the full --fg (very
+     near black). In dark mode the tabs and the Advanced link use
+     --fg-dim (a 0.7 L gray) so they don't steal focus from the
+     active tab, but on paper 0.7 L is muddy — the operator
+     complained it looked washed out. Black is correct contrast
+     for light mode; the active state still has the accent tint. */
+html[data-theme="light"] body.ftw-next > header {
+  border-color: transparent;
+}
+html[data-theme="light"] body.ftw-next > header h1,
+html[data-theme="light"] body.ftw-next > header .tab-btn,
+html[data-theme="light"] body.ftw-next > header .btn-link,
+html[data-theme="light"] body.ftw-next > header .version,
+html[data-theme="light"] body.ftw-next > header .icon-btn,
+html[data-theme="light"] body.ftw-next > header .settings-btn {
+  color: var(--fg);
+}
 html[data-theme="light"] body.ftw-next .mode-buttons button.active {
   background: oklch(0.75 0.14 var(--accent-hue) / 0.25);
 }
@@ -814,3 +945,84 @@ html[data-theme="light"] body.ftw-next .status-bar {
    tokens above re-point them but a few hex fallbacks slip through in
    inline styles — use a readable dim for neutral text on light bg. */
 html[data-theme="light"] body.ftw-next .val-neutral { color: var(--fg); }
+
+/* ---- Battery-absence gating ----
+   When no driver reports bat_w, next-app.js flips body.no-battery on
+   and every element tagged .bat-only disappears: the two "Bat
+   charged" / "Bat discharged" energy tiles and the Plan chart's
+   Charge/Discharge/SoC legend entries. The plan.js canvas drawing
+   checks the same class to skip the SoC band + battery bars. */
+body.ftw-next.no-battery .bat-only { display: none !important; }
+
+/* ---- Reset-model buttons ----
+   Used by models.js (per-battery model wipe) and twins.js (PV / load
+   twin reset). Ghost secondary per DESIGN.md so the button honours
+   the active theme — the original inline style reached for the
+   legacy --surface2 / --border / --text-dim hex tokens, which don't
+   flip to the light palette and rendered as black-on-white on paper
+   mode. */
+body.ftw-next .btn-reset-model {
+  margin-top: 8px;
+  width: 100%;
+  padding: 5px 10px;
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--fg-dim);
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  transition: color 180ms ease, border-color 180ms ease;
+}
+body.ftw-next .btn-reset-model:hover {
+  color: var(--fg);
+  border-color: var(--fg-dim);
+}
+body.ftw-next .btn-reset-model:focus-visible {
+  outline: 1px solid var(--accent-e);
+  outline-offset: 2px;
+}
+
+/* ---- Fuse card — vertical bars on small screens ----
+   Desktop shows each phase as a separate card with a big current
+   read-out and a horizontal bar underneath; that stacks three tall
+   cards on phone widths, which hides the fuse row below the fold.
+   On <=600 px we collapse all three phases into a single row with
+   a tall vertical bar per phase so the whole fuse picture reads at
+   a glance without scrolling. */
+@media (max-width: 600px) {
+  body.ftw-next .fuse-phase-boxes {
+    grid-template-columns: repeat(3, 1fr);
+    gap: 8px;
+  }
+  body.ftw-next .fuse-phase-box {
+    padding: 8px 8px 10px;
+    grid-template-columns: auto 1fr;
+    grid-template-rows: auto auto;
+    gap: 4px 8px;
+    align-items: start;
+  }
+  body.ftw-next .fuse-phase-box .fuse-phase-label {
+    grid-column: 2; grid-row: 1;
+    font-size: 10px;
+  }
+  body.ftw-next .fuse-phase-box .fuse-phase-val {
+    grid-column: 2; grid-row: 2;
+    font-size: 0.95rem;
+    line-height: 1.1;
+  }
+  body.ftw-next .fuse-phase-box .fuse-phase-bar {
+    grid-column: 1; grid-row: 1 / span 2;
+    /* Vertical bar: narrow strip, tall enough to read percentage
+       differences across phases. Fill rises from the bottom. */
+    width: 10px;
+    height: 48px;
+    display: flex;
+    align-items: flex-end;
+  }
+  body.ftw-next .fuse-phase-fill {
+    width: 100%;
+    height: var(--fill-pct, 0%);
+  }
+}

@@ -303,8 +303,14 @@
     ctx.textAlign = 'left';
     ctx.fillText('Power', pad.l + 4, powerY0 + 12);
 
+    // Skip every battery-related draw layer (action band, bars, SoC
+    // line + axis labels) when the site has no battery reporter.
+    // next-app.js flips body.no-battery on the same /api/status tick
+    // that drives this chart, so the two signals stay in sync.
+    const noBattery = document.body.classList.contains('no-battery');
+
     // ---- Battery action band — colored strip showing charge/discharge/idle per slot ----
-    if (plan && plan.actions) {
+    if (!noBattery && plan && plan.actions) {
       for (const a of plan.actions) {
         if (a.slot_start_ms > tMax) break;
         const x0 = xScale(a.slot_start_ms);
@@ -323,7 +329,7 @@
     }
 
     // ---- Plan battery bars ----
-    if (plan && plan.actions) {
+    if (!noBattery && plan && plan.actions) {
       for (const a of plan.actions) {
         if (a.slot_start_ms > tMax) break;
         const x0 = xScale(a.slot_start_ms);

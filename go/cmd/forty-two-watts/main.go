@@ -27,6 +27,8 @@ import (
 	"github.com/frahlg/forty-two-watts/go/internal/configreload"
 	"github.com/frahlg/forty-two-watts/go/internal/control"
 	"github.com/frahlg/forty-two-watts/go/internal/currency"
+	"github.com/frahlg/forty-two-watts/go/internal/events"
+	"github.com/frahlg/forty-two-watts/go/internal/notifications"
 	"github.com/frahlg/forty-two-watts/go/internal/arp"
 	"github.com/frahlg/forty-two-watts/go/internal/drivers"
 	"github.com/frahlg/forty-two-watts/go/internal/forecast"
@@ -36,6 +38,7 @@ import (
 	mqttcli "github.com/frahlg/forty-two-watts/go/internal/mqtt"
 	modbuscli "github.com/frahlg/forty-two-watts/go/internal/modbus"
 	"github.com/frahlg/forty-two-watts/go/internal/mpc"
+	"github.com/frahlg/forty-two-watts/go/internal/nova"
 	"github.com/frahlg/forty-two-watts/go/internal/ocpp"
 	"github.com/frahlg/forty-two-watts/go/internal/priceforecast"
 	"github.com/frahlg/forty-two-watts/go/internal/prices"
@@ -52,6 +55,18 @@ import (
 var Version = "dev"
 
 func main() {
+	// Subcommand dispatch — a bare first non-flag argument selects one
+	// of the bootstrap CLIs, e.g. `forty-two-watts nova-claim --url=…`.
+	// Everything else is the long-running service.
+	if len(os.Args) > 1 && !strings.HasPrefix(os.Args[1], "-") {
+		switch os.Args[1] {
+		case "nova-claim":
+			// Shift os.Args so the subcommand's flag.FlagSet sees its own flags.
+			runNovaClaim(os.Args[2:])
+			return
+		}
+	}
+
 	configPath := flag.String("config", "config.yaml", "Path to config.yaml")
 	webDir := flag.String("web", "web", "Path to static web UI directory")
 	driverDirFlag := flag.String("drivers", "", "Path to drivers directory (default: <config-dir>/drivers)")
@@ -121,6 +136,8 @@ func main() {
 	ctrl := control.NewState(cfg.Site.GridTargetW, cfg.Site.GridToleranceW, cfg.SiteMeterDriver())
 	ctrl.SlewRateW = cfg.Site.SlewRateW
 	ctrl.MinDispatchIntervalS = cfg.Site.MinDispatchIntervalS
+	ctrl.InverterGroups = inverterGroupsFrom(cfg.Drivers)
+	ctrl.DriverLimits = driverLimitsFrom(cfg.Drivers)
 	// Restore persisted mode + target if present. The planner variants
 	// have to be listed too — without them the strategy the user picked in
 	// the UI (planner_self / planner_cheap / planner_arbitrage) is silently
@@ -137,6 +154,9 @@ func main() {
 		if f, err := strconv.ParseFloat(v, 64); err == nil {
 			ctrl.SetGridTarget(f)
 		}
+	}
+	if v, ok := st.LoadConfig("battery_covers_ev"); ok {
+		ctrl.BatteryCoversEV = v == "true"
 	}
 
 	// ---- Driver capacities (site, for control + fuse guard) ----
@@ -220,6 +240,14 @@ func main() {
 	// in place.
 	var pvSvc *pvmodel.Service
 	var forecastSvc *forecast.Service
+	// Notifications: pre-declared so the hot-reload Applier can push
+	// fresh config into the provider + rule engine. Constructed
+	// unconditionally below so API handlers always have a live pointer.
+	var notifProvider notifications.Provider
+	var notifSvc *notifications.Service
+	// Event bus: decouples core loops (control tick, API) from
+	// cross-cutting subscribers (notifications today, audit/webhooks later).
+	bus := events.NewBus()
 
 	// ---- EV loadpoints ----
 	// Manager is created early so the config hot-reload closure can
@@ -264,6 +292,15 @@ func main() {
 			}
 			capMu.Unlock()
 
+			// Swap inverter-group tags (#143) and per-driver power
+			// limits (#145) together. Taken under ctrlMu because
+			// ComputeDispatch reads State.InverterGroups + .DriverLimits;
+			// a bare replace would race with the control loop's 5 s tick.
+			ctrlMu.Lock()
+			ctrl.InverterGroups = inverterGroupsFrom(newCfg.Drivers)
+			ctrl.DriverLimits = driverLimitsFrom(newCfg.Drivers)
+			ctrlMu.Unlock()
+
 			// Push the new pool totals into the planner so its next
 			// replan uses the right CapacityWh / MaxChargeW /
 			// MaxDischargeW. Without this the MPC keeps the snapshot
@@ -282,6 +319,20 @@ func main() {
 			// observed state across reloads (plug status, session
 			// anchor, current SoC estimate) — see loadpoint.Manager.Load.
 			lpMgr.Load(buildLoadpointConfigs(newCfg.Loadpoints))
+
+			// Notifications: rebuild the provider from fresh config
+			// (handles the cold-start case where the initial config
+			// had no notifications: block and notifProvider was nil),
+			// wire it onto the service, then reset the rule-engine
+			// per-outage latch. All calls are nil-safe.
+			newProv := notifications.NewProvider(newCfg.Notifications)
+			notifProvider = newProv
+			var newPub notifications.Publisher
+			if newProv != nil {
+				newPub = newProv
+			}
+			notifSvc.SetPublisher(newPub)
+			notifSvc.Reload(newCfg.Notifications)
 
 			// Weather diff → push live into the PV twin + forecast
 			// fetcher without a process restart. Users adjust rated PV
@@ -614,6 +665,10 @@ func main() {
 			CurrentVersion: current,
 			SocketPath:     envOr("FTW_UPDATER_SOCKET", "/run/ftw-update/sock"),
 			StatusPath:     envOr("FTW_UPDATER_STATUS", "/run/ftw-update/state.json"),
+			// Publish events.UpdateAvailable when a new release lands so
+			// the notifications service (or any other subscriber) can act
+			// without polling the checker directly.
+			Bus: bus,
 		}, st)
 		selfUpdater.Start(ctx)
 		slog.Info("selfupdate enabled", "socket", envOr("FTW_UPDATER_SOCKET", "/run/ftw-update/sock"))
@@ -637,6 +692,12 @@ func main() {
 		SaveConfig: config.SaveAtomic,
 		WebDir:     *webDir,
 		ColdDir:    coldDir,
+		// Snapshots live next to the rest of the persistent data so
+		// docker-compose deploys only need one bind (./data). Derived
+		// from the state.db path rather than the config path because
+		// `state.db` is always in the main data volume; the config
+		// can legitimately live elsewhere (e.g. mounted RO from /etc).
+		SnapshotDir: filepath.Join(filepath.Dir(statePath), "snapshots"),
 		Prices:     priceSvc,
 		Forecast:   forecastSvc,
 		MPC:        mpcSvc,
@@ -645,6 +706,8 @@ func main() {
 		Loadpoints: lpMgr,
 		HA:         haBridge,
 		Registry:   reg,
+		Events:     bus,
+		Notifications: notifSvc,
 		SelfUpdate: selfUpdater,
 		Version:    Version,
 	}
@@ -692,6 +755,79 @@ func main() {
 		_ = httpSrv.Shutdown(shutdownCtx)
 	}()
 
+	// ---- Notifications (always constructed so API + applier hold live refs) ----
+	// Provider selection uses the strategy registry in internal/notifications;
+	// only "ntfy" is registered today, but adding a new one is drop-in.
+	notifProvider = notifications.NewProvider(cfg.Notifications)
+	var notifPub notifications.Publisher
+	if notifProvider != nil {
+		notifPub = notifProvider
+	}
+	notifSvc = notifications.New(cfg.Notifications, notifPub, func(name string) (string, string, string, bool) {
+		dev := st.LookupDeviceByDriverName(name)
+		if dev == nil {
+			return "", "", "", false
+		}
+		return dev.DeviceID, dev.Make, dev.Serial, true
+	})
+	// FuseReader: on each HealthTick the fuse_over_limit rule reads
+	// the site meter's live per-phase currents from telemetry and
+	// compares against cfg.Fuse.MaxAmps. Closes over cfg + cfgMu so
+	// hot-reloaded fuse changes take effect without restart; closes
+	// over tel so new metric emits are picked up immediately.
+	notifSvc.SetFuseReader(func() (map[string]float64, float64, bool) {
+		cfgMu.RLock()
+		siteMeter := cfg.SiteMeterDriver()
+		limitA := cfg.Fuse.MaxAmps
+		cfgMu.RUnlock()
+		if siteMeter == "" || limitA <= 0 {
+			return nil, 0, false
+		}
+		amps := map[string]float64{}
+		for _, phase := range []string{"l1", "l2", "l3"} {
+			if v, _, ok := tel.LatestMetric(siteMeter, "meter_"+phase+"_a"); ok {
+				amps[strings.ToUpper(phase)] = v
+			}
+		}
+		if len(amps) == 0 {
+			return nil, limitA, false
+		}
+		return amps, limitA, true
+	})
+	notifSvc.Subscribe(bus)
+	// Persist every dispatch to state.notification_log via a bus
+	// subscriber so the notifications package stays free of storage
+	// logic. The UI reads this table through /api/notifications/history.
+	bus.Subscribe(events.KindNotificationDispatched, func(e events.Event) {
+		ev, ok := e.(events.NotificationDispatched)
+		if !ok {
+			return
+		}
+		if err := st.RecordNotification(state.NotificationEntry{
+			TsMs:      ev.Time.UnixMilli(),
+			EventType: ev.EventType,
+			Driver:    ev.Driver,
+			Title:     ev.Title,
+			Body:      ev.Body,
+			Priority:  ev.Priority,
+			Status:    ev.Status,
+			Error:     ev.Error,
+		}); err != nil {
+			slog.Warn("notification_log: record failed", "err", err)
+		}
+	})
+	// Late-bind onto the Deps literal that was built earlier with a nil
+	// notifSvc (the deps struct is assembled before this block runs).
+	// Same pattern haBridge uses a few lines below.
+	deps.Notifications = notifSvc
+	if cfg.Notifications != nil && cfg.Notifications.Enabled {
+		name := "ntfy"
+		if notifProvider != nil {
+			name = notifProvider.Name()
+		}
+		slog.Info("notifications enabled", "provider", name)
+	}
+
 	// ---- HA MQTT bridge (optional) ----
 	if cfg.HomeAssistant != nil && cfg.HomeAssistant.Enabled {
 		cb := ha.CommandCallbacks{
@@ -724,6 +860,14 @@ func main() {
 				if active { ctrl.EVChargingW = w } else { ctrl.EVChargingW = 0 }
 				return nil
 			},
+			SetBatteryCoversEV: func(enabled bool) error {
+				ctrlMu.Lock()
+				ctrl.BatteryCoversEV = enabled
+				ctrlMu.Unlock()
+				val := "false"
+				if enabled { val = "true" }
+				return st.SaveConfig("battery_covers_ev", val)
+			},
 		}
 		bridge, err := ha.Start(cfg.HomeAssistant, tel, ctrl, ctrlMu, reg.Names(), cb)
 		if err != nil {
@@ -732,6 +876,31 @@ func main() {
 			haBridge = bridge
 			defer haBridge.Stop()
 			deps.HA = haBridge // late-binding for API
+		}
+	}
+
+	// ---- Nova Core federation (optional) ----
+	// Publishes telemetry to Sourceful Nova Core's MQTT broker (NATS
+	// MQTT adapter). Requires a one-time `forty-two-watts nova-claim`
+	// bootstrap to register the gateway's ES256 key and provision
+	// device/DER records under an org. When disabled or unconfigured,
+	// this block is a no-op.
+	if cfg.Nova != nil && cfg.Nova.Enabled {
+		keyPath := cfg.Nova.KeyPath
+		if keyPath == "" {
+			keyPath = filepath.Join(filepath.Dir(statePath), "nova.key")
+		}
+		novaID, err := nova.LoadOrCreateIdentity(keyPath)
+		if err != nil {
+			slog.Warn("nova identity load failed — federation disabled", "err", err)
+		} else if pub, err := nova.Start(cfg.Nova, novaID, st, tel); err != nil {
+			slog.Warn("nova publisher failed to start", "err", err)
+		} else if pub != nil {
+			defer pub.Stop()
+			slog.Info("nova federation enabled",
+				"mqtt", fmt.Sprintf("%s:%d", cfg.Nova.MQTTHost, cfg.Nova.MQTTPort),
+				"gateway_serial", cfg.Nova.GatewaySerial,
+				"schema_mode", cfg.Nova.SchemaMode)
 		}
 	}
 
@@ -822,10 +991,16 @@ func main() {
 					slog.Warn("driver telemetry stale — marking offline + reverting to autonomous",
 						"name", tr.Name, "timeout", watchdogTimeout)
 					_ = reg.SendDefault(ctx, tr.Name)
+					bus.Publish(events.DriverLost{Driver: tr.Name, At: time.Now()})
 				} else {
 					slog.Info("driver telemetry recovered — back online", "name", tr.Name)
+					bus.Publish(events.DriverRecovered{Driver: tr.Name, At: time.Now()})
 				}
 			}
+			// Fire a HealthTick so subscribers that track user-level
+			// thresholds (e.g. notifications) can evaluate their own
+			// rules without the control loop knowing about them.
+			bus.Publish(events.HealthTick{Health: tel.AllHealth(), Now: time.Now()})
 
 			// ---- Safety: site meter stale → idle everything this cycle ----
 			// Otherwise stale grid readings cause one battery to charge another.
@@ -1083,6 +1258,48 @@ func driverCapacitiesFrom(drivers []config.Driver, loadpoints []config.Loadpoint
 			continue
 		}
 		out[d.Name] = d.BatteryCapacityWh
+	}
+	return out
+}
+
+// driverLimitsFrom builds the driver-name → per-battery PowerLimits map
+// used by control.State for per-battery charge/discharge caps (#145).
+// Drivers without an explicit `max_charge_w` / `max_discharge_w` are
+// omitted from the map, so the dispatcher falls through to the global
+// MaxCommandW default for those drivers — same behaviour as before the
+// per-driver feature shipped. Config-reload calls this again and swaps
+// the map atomically in the control state.
+func driverLimitsFrom(drivers []config.Driver) map[string]control.PowerLimits {
+	out := map[string]control.PowerLimits{}
+	for _, d := range drivers {
+		if d.MaxChargeW == 0 && d.MaxDischargeW == 0 {
+			continue
+		}
+		out[d.Name] = control.PowerLimits{
+			MaxChargeW:    d.MaxChargeW,
+			MaxDischargeW: d.MaxDischargeW,
+		}
+	}
+	return out
+}
+
+// inverterGroupsFrom builds the driver-name → inverter-group map used by
+// control.State for DC-local charge routing (see issue #143). Only
+// drivers that set an explicit `inverter_group` make the map; untagged
+// drivers inherit today's capacity-proportional behaviour.
+//
+// A PV-only driver and a battery driver on the same physical inverter
+// should both set the same group (e.g. both `inverter_group: ferroamp`)
+// so distributeProportional can link PV output to the co-located
+// battery's charge target. Config-reload calls this again and swaps the
+// map atomically in the control state.
+func inverterGroupsFrom(drivers []config.Driver) map[string]string {
+	out := map[string]string{}
+	for _, d := range drivers {
+		if d.InverterGroup == "" {
+			continue
+		}
+		out[d.Name] = d.InverterGroup
 	}
 	return out
 }

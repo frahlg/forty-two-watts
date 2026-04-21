@@ -25,13 +25,15 @@
     return Math.round(s / 3600) + 'h ago';
   }
 
-  // Matches the battery-model reset button in models.js — same look, same
-  // inline style so advanced operators have one consistent affordance
-  // for "wipe and re-learn" across all models.
+  // Matches the battery-model reset button in models.js — same class
+  // `.btn-reset-model` so both paths share the theme-aware styling
+  // declared in next.css (ghost look per DESIGN.md: transparent bg,
+  // --line border, --fg text, theme-aware). The old inline style
+  // referenced the legacy --surface2 / --border / --text-dim hex
+  // tokens that don't flip with the light-mode switch, so this
+  // button read as a black-on-white blob on paper.
   function resetButton(endpoint, label) {
-    return `<button class="btn-reset-model" data-reset-twin="${endpoint}" ` +
-      'style="margin-top:6px;padding:4px 10px;font-size:0.7rem;background:var(--surface2);' +
-      'border:1px solid var(--border);color:var(--text-dim);border-radius:3px;cursor:pointer;width:100%">' +
+    return `<button class="btn-reset-model" data-reset-twin="${endpoint}">` +
       `↻ Reset ${label}` +
       '</button>';
   }

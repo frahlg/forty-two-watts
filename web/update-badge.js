@@ -11,9 +11,13 @@
 (function () {
   "use strict";
 
-  const CHECK_INTERVAL_MS = 10 * 60 * 1000; // /api/version/check cadence
-  const STATUS_INTERVAL_MS = 2000;           // during updates
-  const UPDATE_SOFT_TIMEOUT_MS = 180 * 1000; // after this we stop auto-reloading
+  // Upstream version checks don't change often; 3 h is plenty of
+  // headroom to surface a new release on a normal workday without
+  // hammering /api/version/check (which can hit GitHub each tick if
+  // the local cache is stale).
+  const CHECK_INTERVAL_MS = 3 * 60 * 60 * 1000; // /api/version/check cadence
+  const STATUS_INTERVAL_MS = 2000;               // during updates
+  const UPDATE_SOFT_TIMEOUT_MS = 180 * 1000;     // after this we stop auto-reloading
 
   class FtwUpdateBadge extends HTMLElement {
     constructor() {
@@ -27,6 +31,9 @@
       this._checkTimer = null;
       this._statusTimer = null;
       this._disabled = false;         // set true on 503 (feature gated off)
+      this._skipSnapshot = false;     // per-session opt-out toggle (#149)
+      this._snapshots = null;         // last /api/version/snapshots payload (#150)
+      this._deletingSnapshot = null;  // id being deleted right now (#150)
       this._render();
     }
 
@@ -48,6 +55,60 @@
       this._phase = "dialog";
       this._render();
       this._refresh(false); // surface the freshest info when opened
+      this._refreshSnapshots(); // pull the list for the Snapshots accordion
+    }
+
+    // Fetch the snapshot list so the operator sees the retained set and
+    // can delete entries without SSH. Tolerates 503 (feature off) and
+    // 404s silently — the UI simply hides the section.
+    _refreshSnapshots() {
+      if (this._disabled) return;
+      fetch("/api/version/snapshots")
+        .then((r) => (r.ok ? r.json() : null))
+        .then((body) => {
+          if (!body) return;
+          this._snapshots = body;
+          this._render();
+        })
+        .catch(() => { /* silent */ });
+    }
+
+    _deleteSnapshot(id) {
+      if (!id) return;
+      // Guard against rapid double-clicks while the request is pending.
+      if (this._deletingSnapshot) return;
+      this._deletingSnapshot = id;
+      fetch("/api/version/snapshots/" + encodeURIComponent(id), { method: "DELETE" })
+        .finally(() => {
+          this._deletingSnapshot = null;
+          this._refreshSnapshots();
+        });
+    }
+
+    // _beginRollback kicks off a rollback-to-snapshot. Reuses the same
+    // "updating" modal skin as _beginUpdate — the sidecar emits state
+    // transitions (restoring → restarting → done) that feed straight
+    // into the existing _tickStatus → _render path. See #152.
+    _beginRollback(snapshotID) {
+      this._phase = "updating";
+      this._updateStartedAt = Date.now();
+      this._updateOriginalVersion = this._info ? this._info.current : null;
+      this._sidecarState = { state: "starting", action: "rollback", snapshot: snapshotID };
+      this._render();
+
+      this._postJSON("/api/version/rollback", { snapshot_id: snapshotID })
+        .then((resp) => {
+          if (!resp.ok) {
+            this._sidecarState = { state: "failed", action: "rollback", message: (resp.body && resp.body.error) || "failed to start" };
+            this._render();
+            return;
+          }
+          this._startStatusPolling();
+        })
+        .catch((e) => {
+          this._sidecarState = { state: "failed", action: "rollback", message: String(e) };
+          this._render();
+        });
     }
 
     // Permanently shut the element down: stop polling, clear shadow DOM, hide
@@ -126,7 +187,14 @@
       this._render();
 
       const url = action === "restart" ? "/api/version/restart" : "/api/version/update";
-      this._postJSON(url, null)
+      // For /update we ship a body so the operator can opt out of the
+      // pre-update snapshot (retained set already covers them / tight
+      // on disk). Restart doesn't snapshot anyway, so keep its body nil.
+      let body = null;
+      if (action === "update" && this._skipSnapshot) {
+        body = { skip_snapshot: true };
+      }
+      this._postJSON(url, body)
         .then((resp) => {
           if (!resp.ok) {
             this._sidecarState = { state: "failed", action, message: (resp.body && resp.body.error) || "failed to start" };
@@ -192,6 +260,15 @@
       const info = this._info || {};
       const showDot = info.update_available && !info.skipped && this._phase !== "updating";
 
+      // Surface to the rest of the page via body class: the header's
+      // green #conn-status dot sits right next to this badge, and
+      // having both visible at once clutters the corner. CSS in
+      // next.css hides #conn-status when .has-update is on, so the
+      // two dots swap instead of stacking.
+      if (typeof document !== "undefined" && document.body) {
+        document.body.classList.toggle("has-update", !!showDot);
+      }
+
       this._shadow.innerHTML = `
         <style>${this._styles()}</style>
         <button part="badge" class="badge${showDot ? "" : " hidden"}" title="Update available: ${escapeHTML(info.latest || "")}" aria-label="Update available">●</button>
@@ -226,8 +303,34 @@
           `;
 
       const notesHref = safeHref(info.release_notes_url);
-      const notes = hasUpdate && notesHref
-        ? `<a class="notes" href="${escapeHTML(notesHref)}" target="_blank" rel="noopener">Release notes ↗</a>`
+      const notesLink = hasUpdate && notesHref
+        ? `<a class="notes-link" href="${escapeHTML(notesHref)}" target="_blank" rel="noopener">Open on GitHub ↗</a>`
+        : "";
+      // Render the release body inline so the operator can read what's
+      // about to be applied without opening a tab. Markdown is a small
+      // subset (headings, lists, code, strong, safe links) — anything
+      // else stays as plain escaped text. See renderReleaseBody.
+      const bodyHTML = hasUpdate && info.release_body
+        ? `<details class="changelog" open>
+             <summary>What's in ${escapeHTML(info.latest || "this release")}</summary>
+             <div class="changelog-body">${renderReleaseBody(info.release_body)}</div>
+             ${notesLink ? `<p class="changelog-link">${notesLink}</p>` : ""}
+           </details>`
+        : (hasUpdate && notesLink ? `<p class="changelog-link">${notesLink}</p>` : "");
+
+      // Reassure the operator that a rollback point will be captured
+      // before the update runs — and let them opt out for this update
+      // via a checkbox (the retained 5 older snapshots usually cover
+      // them; power-users on small SD cards may not want another
+      // ~200 MB). Default unchecked (safety first).
+      const snapshotHint = hasUpdate
+        ? `<div class="snapshot-hint">
+             <p>🛟 A snapshot of your data and config is saved before each update so you can roll back if needed.</p>
+             <label class="snapshot-skip">
+               <input type="checkbox" data-action="toggle-skip-snapshot" ${this._skipSnapshot ? "checked" : ""}>
+               Skip backup for this update
+             </label>
+           </div>`
         : "";
 
       return `
@@ -244,12 +347,61 @@
               ${info.latest ? `<div><dt>Latest</dt><dd>${escapeHTML(info.latest)}</dd></div>` : ""}
               ${info.skipped_version ? `<div><dt>Skipped</dt><dd>${escapeHTML(info.skipped_version)}</dd></div>` : ""}
             </dl>
-            ${notes}
+            ${bodyHTML}
+            ${snapshotHint}
+            ${this._snapshotsSectionHTML()}
             ${info.err ? `<p class="err">Last check failed: ${escapeHTML(info.err)}</p>` : ""}
           </div>
           <footer>${actions}</footer>
         </div>
       `;
+    }
+
+    _snapshotsSectionHTML() {
+      const payload = this._snapshots;
+      if (!payload || !payload.enabled) return "";
+      const snaps = Array.isArray(payload.snapshots) ? payload.snapshots : [];
+      if (!snaps.length) {
+        return `<details class="snapshots">
+                  <summary>Backup snapshots (0)</summary>
+                  <p class="dim snapshots-empty">No backups on disk yet. One is created before every update unless you opt out.</p>
+                </details>`;
+      }
+      const rows = snaps.map((s) => this._snapshotRowHTML(s)).join("");
+      return `<details class="snapshots">
+                <summary>Backup snapshots (${snaps.length})</summary>
+                <table class="snapshots-table">
+                  <thead>
+                    <tr><th>Created</th><th>From → To</th><th>Size</th><th></th></tr>
+                  </thead>
+                  <tbody>${rows}</tbody>
+                </table>
+              </details>`;
+    }
+
+    _snapshotRowHTML(s) {
+      const when = s.created_at ? new Date(s.created_at).toLocaleString() : "?";
+      const range = (s.from_version || "?") + " → " + (s.to_version || "?");
+      const sizeMB = s.size_bytes ? (s.size_bytes / (1024 * 1024)).toFixed(1) + " MB" : "?";
+      const deleting = this._deletingSnapshot === s.id;
+      // Rollback target for a *pre-rollback* safety snapshot takes the
+      // operator forward again — the 'from' version is what was running
+      // when we captured it. For a routine pre-update snapshot the 'from'
+      // version is what was running before that update — rolling back to
+      // it reverts that update. Either way the operation is the same:
+      // restore the files from this snapshot.
+      const deleteBtn = deleting
+        ? `<span class="dim">deleting…</span>`
+        : `<button class="btn btn-ghost btn-small" data-action="delete-snapshot" data-id="${escapeHTML(s.id)}" title="Delete this backup">Delete</button>`;
+      const rollbackBtn = deleting
+        ? ""
+        : `<button class="btn btn-small" data-action="rollback-snapshot" data-id="${escapeHTML(s.id)}" data-from="${escapeHTML(s.from_version || "")}" title="Restore this backup (service will restart)">Roll back</button>`;
+      return `<tr>
+                <td class="nowrap">${escapeHTML(when)}</td>
+                <td class="mono">${escapeHTML(range)}</td>
+                <td class="nowrap">${escapeHTML(sizeMB)}</td>
+                <td class="snapshot-actions">${rollbackBtn}${deleteBtn}</td>
+              </tr>`;
     }
 
     _updatingModalHTML() {
@@ -275,11 +427,18 @@
            <button class="btn btn-ghost" data-action="close">Dismiss</button>`
         : `<span class="dim">Don't close this tab.</span>`;
 
+      let title;
+      switch (action) {
+        case "restart":  title = "Restarting service"; break;
+        case "rollback": title = "Rolling back"; break;
+        default:         title = "Updating service";
+      }
+
       return `
         <div class="backdrop"></div>
         <div class="modal" role="dialog" aria-modal="true" aria-live="polite">
           <header>
-            <h3>${action === "restart" ? "Restarting service" : "Updating service"}</h3>
+            <h3>${title}</h3>
           </header>
           <div class="body center">
             ${spinner}
@@ -315,6 +474,40 @@
             case "reload":
               this._attemptReload();
               break;
+            case "toggle-skip-snapshot":
+              // Don't re-render — the <input> element already reflects
+              // its own state and a full render would reset focus.
+              this._skipSnapshot = !!e.currentTarget.checked;
+              break;
+            case "delete-snapshot": {
+              const id = e.currentTarget.dataset.id;
+              // Simple confirm — this is a destructive operation but a
+              // recoverable one (the retention/prune logic will regenerate
+              // on future updates). Don't over-engineer the dialog.
+              if (id && window.confirm(`Delete snapshot ${id}? This can't be undone.`)) {
+                this._deleteSnapshot(id);
+                this._render(); // reflect the "deleting…" state immediately
+              }
+              break;
+            }
+            case "rollback-snapshot": {
+              const id = e.currentTarget.dataset.id;
+              const from = e.currentTarget.dataset.from || "that point";
+              // Sharper warning for rollback — it stops the service,
+              // swaps live state, and restarts. Much more visible
+              // consequence than a Delete.
+              const msg =
+                `Roll back to ${id}?\n\n` +
+                `This will stop the service, restore state.db + config.yaml ` +
+                `from the snapshot (state as of "${from}"), and restart. ` +
+                `Any data written since the snapshot will be lost.\n\n` +
+                `A pre-rollback backup of the current state is saved ` +
+                `automatically so you can roll forward again.`;
+              if (id && window.confirm(msg)) {
+                this._beginRollback(id);
+              }
+              break;
+            }
           }
         });
       });
@@ -325,15 +518,19 @@
         :host { all: initial; font-family: inherit; }
         .hidden { display: none !important; }
         .badge {
+          /* Blue blinking dot so it's unmistakably "this is the
+             update indicator" and not confused with the green
+             connection dot next door. Pulsing animation stays so
+             it reads as actionable, not a static state. */
           appearance: none;
           background: transparent;
-          color: var(--accent, #f59e0b);
+          color: #3b82f6;
           border: none;
           cursor: pointer;
           font-size: 1.1rem;
           line-height: 1;
           padding: 0 0.3rem;
-          animation: pulse 2s ease-in-out infinite;
+          animation: pulse 1.4s ease-in-out infinite;
         }
         @keyframes pulse {
           0%, 100% { opacity: 1; }
@@ -385,12 +582,153 @@
         dl > div { display: contents; }
         dt { color: var(--text-dim, #94a3b8); font-size: 0.8rem; }
         dd { margin: 0; font-variant-numeric: tabular-nums; }
-        .notes {
-          display: inline-block; margin-top: 0.75rem;
-          color: var(--accent, #f59e0b);
-          text-decoration: none; font-size: 0.85rem;
+        .changelog {
+          margin-top: 0.75rem;
+          border: 1px solid var(--border, #334155);
+          border-radius: 4px;
+          background: rgba(255,255,255,0.02);
         }
-        .notes:hover { text-decoration: underline; }
+        .changelog > summary {
+          padding: 0.5rem 0.75rem;
+          cursor: pointer;
+          font-weight: 600;
+          font-size: 0.85rem;
+          color: var(--text-dim, #94a3b8);
+          list-style: none;
+        }
+        .changelog > summary::-webkit-details-marker { display: none; }
+        .changelog > summary::before {
+          content: "▸";
+          display: inline-block;
+          margin-right: 0.4rem;
+          transition: transform 0.15s;
+        }
+        .changelog[open] > summary::before { transform: rotate(90deg); }
+        .changelog-body {
+          padding: 0.25rem 0.9rem 0.5rem;
+          max-height: 40vh;
+          overflow-y: auto;
+          font-size: 0.85rem;
+          line-height: 1.45;
+        }
+        .changelog-body h4 {
+          margin: 0.75rem 0 0.3rem;
+          font-size: 0.9rem;
+          color: var(--text, #e2e8f0);
+        }
+        .changelog-body h5 {
+          margin: 0.6rem 0 0.25rem;
+          font-size: 0.8rem;
+          color: var(--text-dim, #94a3b8);
+          text-transform: uppercase;
+          letter-spacing: 0.03em;
+        }
+        .changelog-body ul {
+          margin: 0.25rem 0 0.25rem;
+          padding-left: 1.1rem;
+        }
+        .changelog-body li { margin-bottom: 0.2rem; }
+        .changelog-body p { margin: 0.35rem 0; }
+        .changelog-body code {
+          background: rgba(255,255,255,0.08);
+          padding: 0.05rem 0.25rem;
+          border-radius: 3px;
+          font-size: 0.82rem;
+        }
+        .changelog-body a {
+          color: var(--accent, #f59e0b);
+          text-decoration: none;
+        }
+        .changelog-body a:hover { text-decoration: underline; }
+        .changelog-link {
+          margin: 0.4rem 0.9rem 0.6rem;
+          font-size: 0.8rem;
+        }
+        .notes-link {
+          color: var(--accent, #f59e0b);
+          text-decoration: none;
+        }
+        .notes-link:hover { text-decoration: underline; }
+        .snapshot-hint {
+          margin-top: 0.75rem;
+          padding: 0.5rem 0.7rem;
+          border: 1px solid var(--border, #334155);
+          border-radius: 4px;
+          background: rgba(148, 163, 184, 0.06);
+          color: var(--text-dim, #94a3b8);
+          font-size: 0.78rem;
+          line-height: 1.4;
+        }
+        .snapshot-hint p { margin: 0; }
+        .snapshot-skip {
+          display: flex;
+          align-items: center;
+          gap: 0.4rem;
+          margin-top: 0.4rem;
+          font-size: 0.76rem;
+          color: var(--text-dim, #94a3b8);
+          cursor: pointer;
+          user-select: none;
+        }
+        .snapshot-skip input[type="checkbox"] {
+          margin: 0;
+          cursor: pointer;
+        }
+        .snapshots {
+          margin-top: 0.75rem;
+          border: 1px solid var(--border, #334155);
+          border-radius: 4px;
+          background: rgba(255,255,255,0.02);
+        }
+        .snapshots > summary {
+          padding: 0.5rem 0.75rem;
+          cursor: pointer;
+          font-weight: 600;
+          font-size: 0.85rem;
+          color: var(--text-dim, #94a3b8);
+          list-style: none;
+        }
+        .snapshots > summary::-webkit-details-marker { display: none; }
+        .snapshots > summary::before {
+          content: "▸";
+          display: inline-block;
+          margin-right: 0.4rem;
+          transition: transform 0.15s;
+        }
+        .snapshots[open] > summary::before { transform: rotate(90deg); }
+        .snapshots-empty {
+          margin: 0.25rem 0.9rem 0.6rem;
+          font-size: 0.78rem;
+        }
+        .snapshots-table {
+          width: 100%;
+          border-collapse: collapse;
+          font-size: 0.78rem;
+          color: var(--text-dim, #94a3b8);
+        }
+        .snapshots-table th,
+        .snapshots-table td {
+          padding: 0.3rem 0.75rem;
+          text-align: left;
+          border-top: 1px solid var(--border, #334155);
+        }
+        .snapshots-table th {
+          font-weight: 600;
+          border-top: none;
+          color: var(--text, #e2e8f0);
+        }
+        .snapshots-table .nowrap { white-space: nowrap; }
+        .snapshots-table .mono { font-family: ui-monospace, monospace; }
+        .snapshot-actions {
+          display: flex;
+          gap: 0.3rem;
+          justify-content: flex-end;
+          flex-wrap: wrap;
+        }
+        .btn-small {
+          padding: 0.2rem 0.55rem;
+          font-size: 0.75rem;
+        }
         .err {
           margin-top: 0.75rem;
           color: #f87171; font-size: 0.85rem;
@@ -444,10 +782,17 @@
   function actionLabel(state, action) {
     switch (state) {
       case "pulling":    return "Pulling new image";
-      case "restarting": return action === "restart" ? "Restarting service" : "Applying update";
+      case "restoring":  return "Restoring snapshot";
+      case "restarting":
+        if (action === "restart")  return "Restarting service";
+        if (action === "rollback") return "Restarting on restored state";
+        return "Applying update";
       case "done":       return "Reloading";
       case "failed":     return "Failed";
-      default:           return action === "restart" ? "Restarting" : "Starting update";
+      default:
+        if (action === "restart")  return "Restarting";
+        if (action === "rollback") return "Starting rollback";
+        return "Starting update";
     }
   }
 
@@ -471,6 +816,86 @@
       .replace(/>/g, "&gt;")
       .replace(/"/g, "&quot;")
       .replace(/'/g, "&#39;");
+  }
+
+  // renderReleaseBody turns GitHub-flavored markdown (as emitted by
+  // semantic-release: headings, bullet lists, links, `code`, **bold**)
+  // into a safe HTML subset. Strategy: escape everything first, then
+  // rewrite a short whitelist of markdown tokens. Untrusted content —
+  // link URLs — is routed through safeHref so a `javascript:` href
+  // can't sneak in.
+  //
+  // What we handle (enough for conventional-commits changelogs):
+  //   ##, ###           → h4, h5
+  //   - x / * x         → unordered list (adjacent bullets grouped)
+  //   **bold**          → <strong>
+  //   `code`            → <code>
+  //   [text](url)       → <a href=...>   (url filtered)
+  //   blank line        → paragraph break
+  //
+  // What we deliberately drop: images, tables, raw HTML, setext
+  // headings, nested lists, numbered lists. They're rare in release
+  // notes and the operator still has the "Open on GitHub ↗" link for
+  // the full formatted version.
+  function renderReleaseBody(md) {
+    const escaped = escapeHTML(String(md || "").trim());
+    const lines = escaped.split(/\r?\n/);
+    const out = [];
+    let inList = false;
+    const flushList = () => {
+      if (inList) {
+        out.push("</ul>");
+        inList = false;
+      }
+    };
+    for (let raw of lines) {
+      const line = raw.replace(/\s+$/, "");
+      if (!line) {
+        flushList();
+        continue;
+      }
+      // Bullet: "- text" or "* text" (leading spaces tolerated for
+      // semantic-release which indents scope details).
+      const bullet = line.match(/^\s*[*-]\s+(.*)$/);
+      if (bullet) {
+        if (!inList) {
+          out.push("<ul>");
+          inList = true;
+        }
+        out.push("<li>" + renderInline(bullet[1]) + "</li>");
+        continue;
+      }
+      flushList();
+      // Headings
+      const h3 = line.match(/^###\s+(.*)$/);
+      if (h3) { out.push("<h5>" + renderInline(h3[1]) + "</h5>"); continue; }
+      const h2 = line.match(/^##\s+(.*)$/);
+      if (h2) { out.push("<h4>" + renderInline(h2[1]) + "</h4>"); continue; }
+      // Paragraph fallback.
+      out.push("<p>" + renderInline(line) + "</p>");
+    }
+    flushList();
+    return out.join("");
+  }
+
+  // renderInline handles **bold**, `code`, and [text](url) on an
+  // already-HTML-escaped line. Order matters: code first so backticks
+  // can't eat a `**bold**` marker that happened to be inside code.
+  function renderInline(s) {
+    // Inline code: backticks are already literal in the escaped text.
+    s = s.replace(/`([^`]+)`/g, (_m, code) => "<code>" + code + "</code>");
+    // Bold: **text**
+    s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+    // Links: [text](url). The URL has been HTML-escaped already (amp →
+    // &amp;), so decode just the &amp; inside the href before running
+    // safeHref — otherwise a legitimate query-string URL gets rejected.
+    s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_m, text, url) => {
+      const clean = String(url).replace(/&amp;/g, "&");
+      const safe = safeHref(clean);
+      if (!safe) return text; // drop the link, keep the visible text
+      return '<a href="' + escapeHTML(safe) + '" target="_blank" rel="noopener">' + text + "</a>";
+    });
+    return s;
   }
 
   customElements.define("ftw-update-badge", FtwUpdateBadge);

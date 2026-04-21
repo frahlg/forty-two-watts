@@ -18,7 +18,7 @@
 // The card auto-fetches on connect and on range change. No external
 // JS wiring needed beyond placing the element in HTML.
 
-import { FtwElement } from "./ftw-element.js";
+import { FtwElement, ftwDebugDelay } from "./ftw-element.js";
 import "./ftw-bar-chart.js";
 
 const FIELD_BY_METRIC = {
@@ -70,26 +70,59 @@ class FtwHistoryCard extends FtwElement {
       letter-spacing: 0.1em;
       text-transform: uppercase;
     }
+    /* Week / Month toggle — a segmented pill following DESIGN.md:
+       eyebrow type (mono 0.18em, UPPERCASE, 500 weight), one accent
+       (--accent-e amber — never the legacy --accent purple), pill
+       radius 999px, near-black #0a0a0a on-accent text. The active
+       selection is a single ::before element that slides between the
+       two buttons via transform — the actual buttons carry only text,
+       which keeps the flip smooth with no background flash. */
     .toggle {
-      display: inline-flex;
+      position: relative;
+      display: inline-grid;
+      grid-auto-flow: column;
+      grid-auto-columns: minmax(0, 1fr);
       border: 1px solid var(--line);
-      border-radius: var(--radius-sm, 4px);
-      overflow: hidden;
+      border-radius: 999px;
+      background: var(--ink-sunken);
+      padding: 2px;
+      isolation: isolate;
     }
+    .toggle::before {
+      content: '';
+      position: absolute;
+      top: 2px;
+      bottom: 2px;
+      left: 2px;
+      width: calc(50% - 2px);
+      background: var(--accent-e);
+      border-radius: 999px;
+      transform: translateX(0);
+      transition: transform 260ms cubic-bezier(0.4, 0, 0.2, 1);
+      z-index: 0;
+    }
+    .toggle[data-active="month"]::before { transform: translateX(100%); }
     .toggle button {
+      position: relative;
+      z-index: 1;
       background: transparent;
       border: 0;
       color: var(--fg-muted);
       font-family: var(--mono);
       font-size: 10px;
-      letter-spacing: 0.08em;
+      font-weight: 500;
+      letter-spacing: 0.18em;
       text-transform: uppercase;
-      padding: 4px 8px;
+      padding: 4px 12px;
       cursor: pointer;
+      transition: color 220ms ease;
     }
-    .toggle button.active {
-      background: var(--accent, oklch(0.55 0.15 240));
-      color: var(--fg);
+    .toggle button.active { color: #0a0a0a; }
+    .toggle button:not(.active):hover { color: var(--fg); }
+    .toggle button:focus-visible {
+      outline: 1px solid var(--accent-e);
+      outline-offset: 2px;
+      border-radius: 999px;
     }
     .total {
       font-family: var(--mono);
@@ -98,6 +131,19 @@ class FtwHistoryCard extends FtwElement {
       font-variant-numeric: tabular-nums;
       letter-spacing: -0.01em;
       color: var(--ftw-history-accent, var(--fg));
+    }
+    /* The "(X avg)" annotation next to the total. Rendered as a
+       trailing span so we can dial it back visually — one step
+       smaller than the total and tinted with --fg-muted so the
+       primary number (total for the range) reads first and the avg
+       is available as secondary context without competing for
+       attention. */
+    .total .avg-mini {
+      font-size: 0.82rem;
+      font-weight: 500;
+      color: var(--fg-muted);
+      margin-left: 6px;
+      letter-spacing: 0;
     }
     @media (max-width: 900px) {
       .card-inner { padding: var(--card-pad-tight, 12px 14px); }
@@ -173,9 +219,9 @@ class FtwHistoryCard extends FtwElement {
       <div class="card-inner">
         <div class="head">
           <div class="label">${escapeHtml(label)}</div>
-          <div class="toggle">
-            <button type="button" data-range="week"  aria-pressed="${wk ? "true" : "false"}"${wk ? ' class="active"' : ""}>Week</button>
-            <button type="button" data-range="month" aria-pressed="${!wk ? "true" : "false"}"${!wk ? ' class="active"' : ""}>Month</button>
+          <div class="toggle" role="tablist" data-active="${wk ? "week" : "month"}">
+            <button type="button" role="tab" data-range="week"  aria-selected="${wk ? "true" : "false"}"${wk ? ' class="active"' : ""}>Week</button>
+            <button type="button" role="tab" data-range="month" aria-selected="${!wk ? "true" : "false"}"${!wk ? ' class="active"' : ""}>Month</button>
           </div>
         </div>
         <div class="total" data-role="total">— kWh</div>
@@ -237,21 +283,45 @@ class FtwHistoryCard extends FtwElement {
         if (seq !== this._reqSeq) return;
         const buckets = (resp && resp.days) || [];
         let sum = 0;
+        // Pass kWh (not Wh) as `value` so the bar-chart's avg label
+        // matches the per-bar displayValue units — otherwise the chart
+        // would show bars as "10.5" and the avg line as "10500".
         const data = buckets.map((b) => {
           const wh = Number(b[field]) || 0;
           sum += wh;
           const kwh = wh / 1000;
           return {
             label: fmtDayShort(b.day),
-            value: wh,
+            value: kwh,
             displayValue: kwh >= 100 ? kwh.toFixed(0) : kwh.toFixed(1),
             title: fmtDayShort(b.day) + ": " + fmtKwh(wh),
           };
         });
-        this._totalEl.textContent = data.length
-          ? fmtKwh(sum) + " total"
-          : "— kWh";
-        this._chart.data = data;
+        const apply = () => {
+          if (seq !== this._reqSeq) return;
+          // "41.7 kWh total (5.9 kWh avg)" — the avg used to live as
+          // a tag next to the dashed line inside the chart, but the
+          // number is more scannable up here next to the total. The
+          // line stays in the chart as a visual reference. Styled
+          // via a trailing <span class="avg-mini"> so the avg reads
+          // as secondary text (smaller, muted) instead of a second
+          // prominent number.
+          if (data.length) {
+            const avgWh = sum / data.length;
+            this._totalEl.innerHTML =
+              escapeHtml(fmtKwh(sum) + " total") +
+              ' <span class="avg-mini">(' +
+              escapeHtml(fmtKwh(avgWh) + " avg") + ")</span>";
+          } else {
+            this._totalEl.textContent = "— kWh";
+          }
+          this._chart.data = data;
+        };
+        // `?delay=N` — hold in the skeleton state for N ms after the
+        // fetch resolves, for inspecting the loading→loaded transition.
+        const delay = ftwDebugDelay();
+        if (delay > 0) setTimeout(apply, delay);
+        else apply();
       })
       .catch((err) => {
         if (err && err.name === "AbortError") return;

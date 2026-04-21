@@ -15,3 +15,6 @@ import "./ftw-energy-flow.js";
 import "./ftw-bar-chart.js";
 import "./ftw-history-card.js";
 import "./ftw-update-check.js";
+import "./ftw-notif-status.js";
+import "./ftw-notif-test-button.js";
+import "./ftw-notif-history.js";
