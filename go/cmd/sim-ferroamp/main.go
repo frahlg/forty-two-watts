@@ -188,7 +188,17 @@ func publishEhub(server *mqttserver.Server, s ferroamp.Snapshot) {
 			"L2": fmt.Sprintf("%.1f", 230.0),
 			"L3": fmt.Sprintf("%.1f", 230.0),
 		},
-		// Per-phase current (derived: W/V)
+		// Per-phase grid current at the service-entrance CTs (the
+		// quantity pext measures). In the live protocol iext is what
+		// the driver reads for fuse bars + fuse_over_limit detection
+		// (#160); il is inverter AC current and is not what we need
+		// here. Populate both at W/V so the sim stays valid for any
+		// downstream that still peeks at il.
+		"iext": map[string]string{
+			"L1": fmt.Sprintf("%.2f", s.GridW/3/230.0),
+			"L2": fmt.Sprintf("%.2f", s.GridW/3/230.0),
+			"L3": fmt.Sprintf("%.2f", s.GridW/3/230.0),
+		},
 		"il": map[string]string{
 			"L1": fmt.Sprintf("%.2f", s.GridW/3/230.0),
 			"L2": fmt.Sprintf("%.2f", s.GridW/3/230.0),
