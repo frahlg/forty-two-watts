@@ -13,8 +13,15 @@ data/
 # Local config for simulators
 config.local.yaml
 
+# Local dev playground — state.db + config.local.yaml + logs seeded by
+# `forty-two-watts -backfill N`. Per-machine, nothing here is shipped.
+dev-data/
+
 # Local dev env overrides (proxy upstream, dev toggles) — not shipped.
 .env.local
+
+# Per-user Claude Code harness settings — machine-local.
+.claude/settings.local.json
 
 # State DB
 *.db
