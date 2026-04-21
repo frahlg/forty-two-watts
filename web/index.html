@@ -233,6 +233,20 @@
       <!-- EV charging slider removed — ev_charging_w is now set
            automatically by the Easee Cloud driver (or any DerEV driver).
            The manual /api/ev_charging endpoint stays as a debug override. -->
+
+      <!-- Battery-covers-EV toggle. When ON, self-consumption lets the
+           home battery discharge into the EV — useful when grid prices
+           are high now and cheap PV/off-peak is expected later. OFF
+           (default) keeps the battery from draining to feed the car. -->
+      <div class="card control-card">
+        <div class="card-label">Let battery cover EV</div>
+        <label class="ftw-toggle">
+          <input type="checkbox" id="battery-covers-ev-toggle">
+          <span class="ftw-toggle-slider"></span>
+          <span class="ftw-toggle-label" id="battery-covers-ev-label">Off</span>
+        </label>
+        <div class="card-sub card-hint">On = home battery discharges into the EV (e.g. expensive grid now, cheap solar later). Off = battery stays out of EV charging.</div>
+      </div>
     </section>
 
     <!-- Live power + plan side-by-side -->

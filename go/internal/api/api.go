@@ -152,6 +152,7 @@ func (s *Server) routes() {
 	s.handle("POST /api/target", s.handleSetTarget)
 	s.handle("POST /api/peak_limit", s.handleSetPeakLimit)
 	s.handle("POST /api/ev_charging", s.handleSetEVCharging)
+	s.handle("POST /api/battery_covers_ev", s.handleSetBatteryCoversEV)
 	s.handle("GET  /api/drivers", s.handleDrivers)
 	s.handle("GET  /api/drivers/catalog", s.handleDriversCatalog)
 	s.handle("POST /api/drivers/{name}/restart", s.handleDriverRestart)
@@ -494,6 +495,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"grid_target_w":    ctrl.GridTargetW,
 		"peak_limit_w":     ctrl.PeakLimitW,
 		"ev_charging_w":    ctrl.EVChargingW,
+		"battery_covers_ev": ctrl.BatteryCoversEV,
 		// True when an EV charger password is persisted in state.db. The
 		// Settings UI uses this to show a "credentials saved" badge so the
 		// operator can tell apart "never entered" from "saved but masked".
@@ -718,6 +720,33 @@ func (s *Server) handleSetEVCharging(w http.ResponseWriter, r *http.Request) {
 	}
 	s.deps.CtrlMu.Unlock()
 	writeJSON(w, 200, map[string]any{"status": "ok", "ev_charging_w": req.PowerW})
+}
+
+// ---- /api/battery_covers_ev ----
+//
+// When enabled, dispatch skips its usual subtraction of EVChargingW from
+// the meter reading so batteries discharge into the EV. Default off
+// preserves the traditional "battery never feeds the car" behaviour.
+// See control.State.BatteryCoversEV for the full rationale.
+func (s *Server) handleSetBatteryCoversEV(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeJSON(w, 400, map[string]string{"error": err.Error()})
+		return
+	}
+	s.deps.CtrlMu.Lock()
+	s.deps.Ctrl.BatteryCoversEV = req.Enabled
+	s.deps.CtrlMu.Unlock()
+	if s.deps.State != nil {
+		val := "false"
+		if req.Enabled {
+			val = "true"
+		}
+		_ = s.deps.State.SaveConfig("battery_covers_ev", val)
+	}
+	writeJSON(w, 200, map[string]any{"status": "ok", "battery_covers_ev": req.Enabled})
 }
 
 // ---- /api/drivers ----

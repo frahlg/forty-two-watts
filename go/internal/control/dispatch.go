@@ -126,6 +126,16 @@ type State struct {
 	PeakLimitW float64
 	// EV charging signal — batteries won't try to cover this much of import
 	EVChargingW float64
+	// BatteryCoversEV overrides the default EV-exclusion behaviour. When
+	// false (default), EVChargingW is subtracted from the meter reading
+	// before the PI runs so batteries don't shuffle energy through the
+	// inverter to feed the EV on a normal day. When true, the subtraction
+	// is skipped and the battery is free to discharge into the EV up to
+	// its own SoC / power / fuse clamps — useful in price-arbitrage
+	// situations where the operator wants to drain the battery now and
+	// refill it later from cheap solar. Persisted in state.db via
+	// "battery_covers_ev"; toggled from HA and POST /api/battery_covers_ev.
+	BatteryCoversEV bool
 
 	// PI controller (outer, site-level)
 	PI *PIController
@@ -397,10 +407,22 @@ func ComputeDispatch(
 	if evSum > 0 {
 		state.EVChargingW = evSum
 	}
-	// EV signal: subtract EV load from grid so batteries don't try to cover it.
-	// EV is always a positive import at the meter; subtracting it makes the
-	// "effective grid" the controller works on the house-side portion only.
-	gridW := rawGridW - state.EVChargingW
+	// EV signal: subtract EV load from grid so batteries don't try to cover
+	// it. EV is always a positive import at the meter; subtracting it makes
+	// the "effective grid" the controller works on the house-side portion
+	// only — a sensible default that avoids shuffling energy through the
+	// inverter twice on a normal day.
+	//
+	// BatteryCoversEV (default false) flips this: the operator opts in to
+	// have the battery discharge into the EV. Useful when grid prices are
+	// high right now but expected to drop later (e.g. solar coming up), so
+	// it's cheaper to drain the battery now and refill it off-peak. All
+	// clamps (SoC, per-driver MaxDischargeW, fuse guard) still apply —
+	// exceeding battery capacity just means the residual comes from grid.
+	gridW := rawGridW
+	if !state.BatteryCoversEV {
+		gridW -= state.EVChargingW
+	}
 
 	// ---- planner_self idle-gate override (#153) ----
 	// The DP's decision to idle this slot assumed a forecasted surplus.

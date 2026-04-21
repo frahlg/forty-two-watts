@@ -155,6 +155,9 @@ func main() {
 			ctrl.SetGridTarget(f)
 		}
 	}
+	if v, ok := st.LoadConfig("battery_covers_ev"); ok {
+		ctrl.BatteryCoversEV = v == "true"
+	}
 
 	// ---- Driver capacities (site, for control + fuse guard) ----
 	// Loadpoint drivers are filtered out — their battery_capacity_wh
@@ -853,6 +856,14 @@ func main() {
 				defer ctrlMu.Unlock()
 				if active { ctrl.EVChargingW = w } else { ctrl.EVChargingW = 0 }
 				return nil
+			},
+			SetBatteryCoversEV: func(enabled bool) error {
+				ctrlMu.Lock()
+				ctrl.BatteryCoversEV = enabled
+				ctrlMu.Unlock()
+				val := "false"
+				if enabled { val = "true" }
+				return st.SaveConfig("battery_covers_ev", val)
 			},
 		}
 		bridge, err := ha.Start(cfg.HomeAssistant, tel, ctrl, ctrlMu, reg.Names(), cb)

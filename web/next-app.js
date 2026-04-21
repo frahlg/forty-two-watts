@@ -141,6 +141,8 @@
   const evSlider = $("ev-slider");
   const evValue = $("ev-value");
   const evSend = $("ev-send");
+  const bceToggle = $("battery-covers-ev-toggle");
+  const bceLabel = $("battery-covers-ev-label");
   const fuseUse = $("fuse-use");
   const fuseFill = $("fuse-fill");
   const fusePhases = $("fuse-phases");
@@ -411,6 +413,13 @@
     if (evSlider && document.activeElement !== evSlider && data.ev_charging_w != null) {
       evSlider.value = data.ev_charging_w;
       evValue.textContent = formatW(data.ev_charging_w);
+    }
+    // Battery-covers-EV toggle — only update DOM when not mid-click,
+    // otherwise the user's change would get overwritten by the next
+    // status poll before the POST round-trip settles.
+    if (bceToggle && document.activeElement !== bceToggle && data.battery_covers_ev != null) {
+      bceToggle.checked = !!data.battery_covers_ev;
+      if (bceLabel) bceLabel.textContent = data.battery_covers_ev ? "On" : "Off";
     }
 
     // Energy today
@@ -1424,6 +1433,10 @@
     postJson("/api/ev_charging", { power_w: w, active: w > 0 }).catch(function () {});
   }
 
+  function setBatteryCoversEV(enabled) {
+    postJson("/api/battery_covers_ev", { enabled: !!enabled }).catch(function () {});
+  }
+
   function postJson(url, body) {
     return fetch(url, {
       method: "POST",
@@ -1494,6 +1507,13 @@
   peakLimitSend.addEventListener("click", function () {
     setPeakLimit(Number(peakLimitSlider.value));
   });
+
+  if (bceToggle) {
+    bceToggle.addEventListener("change", function () {
+      if (bceLabel) bceLabel.textContent = bceToggle.checked ? "On" : "Off";
+      setBatteryCoversEV(bceToggle.checked);
+    });
+  }
 
   // EV detail modal — <ftw-modal> handles ESC / backdrop / close button;
   // we only drive open()/close() and refresh the body on a timer. Opened

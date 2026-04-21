@@ -510,6 +510,54 @@ body.ftw-next .control-card .card-label {
   text-transform: uppercase;
   margin-bottom: 10px;
 }
+/* ftw-toggle: compact switch used inside control-cards for boolean
+   opt-ins (e.g. "Let battery cover EV"). Hides the native checkbox
+   and renders a pill + dot that slides on check. */
+body.ftw-next .ftw-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  user-select: none;
+}
+body.ftw-next .ftw-toggle input[type="checkbox"] {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+body.ftw-next .ftw-toggle-slider {
+  position: relative;
+  width: 40px;
+  height: 22px;
+  background: oklch(0.20 0.015 250);
+  border: 1px solid var(--line-soft);
+  border-radius: 999px;
+  transition: background .15s, border-color .15s;
+}
+body.ftw-next .ftw-toggle-slider::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  background: var(--fg-dim);
+  border-radius: 50%;
+  transition: transform .18s ease, background .15s;
+}
+body.ftw-next .ftw-toggle input:checked + .ftw-toggle-slider {
+  background: oklch(0.55 0.12 155);
+  border-color: oklch(0.60 0.13 155);
+}
+body.ftw-next .ftw-toggle input:checked + .ftw-toggle-slider::after {
+  transform: translateX(18px);
+  background: oklch(0.98 0 0);
+}
+body.ftw-next .ftw-toggle-label {
+  font-family: var(--sans);
+  font-size: 13px;
+  color: var(--fg-dim);
+}
 body.ftw-next .mode-buttons {
   gap: 6px;
 }

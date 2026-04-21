@@ -484,6 +484,55 @@ func TestEVChargingSignalOverriddenByDerEVReading(t *testing.T) {
 	}
 }
 
+// TestBatteryCoversEV_OffExcludesEVFromGrid mirrors the existing
+// exclusion behaviour. Grid meter reads +3000 W, 2500 W is EV, so
+// the effective grid the controller sees should be 500 W — well
+// within the dead-band — and the battery should not try to cover
+// the whole 3000 W. Regression guard that the new flag's default
+// preserves current behaviour.
+func TestBatteryCoversEV_OffExcludesEVFromGrid(t *testing.T) {
+	store := seedStore(3000, []struct{ name string; currentW, soc float64 }{
+		{"ferroamp", 0, 0.5},
+	})
+	st := NewState(0, 50, "ferroamp")
+	st.Mode = ModeSelfConsumption
+	st.EVChargingW = 2500
+	st.BatteryCoversEV = false // explicit — this is the default
+	st.SlewRateW = 100000
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) > 0 && math.Abs(targets[0].TargetW) > 2000 {
+		t.Errorf("with flag off, battery must not try to cover 2500W EV draw; got target=%f", targets[0].TargetW)
+	}
+}
+
+// TestBatteryCoversEV_OnIncludesEVInGrid covers the opt-in scenario:
+// high grid prices now, cheap solar later → operator flips the
+// override and the battery discharges to cover full grid load
+// including EV. The dispatch should produce a target that actively
+// pulls the battery into discharge territory for the full 3000 W
+// import, not just the 500 W house portion.
+func TestBatteryCoversEV_OnIncludesEVInGrid(t *testing.T) {
+	store := seedStore(3000, []struct{ name string; currentW, soc float64 }{
+		{"ferroamp", 0, 0.5},
+	})
+	st := NewState(0, 50, "ferroamp")
+	st.Mode = ModeSelfConsumption
+	st.EVChargingW = 2500
+	st.BatteryCoversEV = true // opt in — battery covers everything
+	st.SlewRateW = 100000
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) == 0 {
+		t.Fatal("expected a dispatch target when grid is 3 kW over target, got none")
+	}
+	// With flag on, the full 3000 W import should drive battery toward
+	// discharge (negative target in site convention). Require at least
+	// half of the raw import as discharge command — conservative on the
+	// PI gain but clearly separates "covers EV too" from "house only".
+	if targets[0].TargetW > -1500 {
+		t.Errorf("with flag on, battery must drive toward discharge for full import; got target=%f (want <= -1500)", targets[0].TargetW)
+	}
+}
+
 func TestEVChargingManualPreservedWhenNoDriver(t *testing.T) {
 	// No DerEV reading. The manual slider value (1500W) must survive —
 	// we don't want an offline / stale driver to silently zero it out.
