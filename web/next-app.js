@@ -141,6 +141,8 @@
   const evSlider = $("ev-slider");
   const evValue = $("ev-value");
   const evSend = $("ev-send");
+  const bceToggle = $("battery-covers-ev-toggle");
+  const bceLabel = $("battery-covers-ev-label");
   const fuseUse = $("fuse-use");
   const fuseFill = $("fuse-fill");
   const fusePhases = $("fuse-phases");
@@ -159,6 +161,33 @@
       return (w / 1000).toFixed(1) + " kW";
     }
     return Math.round(w) + " W";
+  }
+
+  // Fuse bar color — smooth green→yellow→orange→red gradient across
+  // 0 %→100 %. Anchors land at the named color at each zone
+  // boundary: 0 %=green, 50 %=yellow, 75 %=orange, 90 %+=red. Between
+  // them the hue interpolates linearly so a bar at 45 % already reads
+  // yellow-leaning (h ≈ 100, close to yellow's 95), not solid green —
+  // matches the "45 % is more towards yellow than green" spec. Oklch
+  // holds lightness + chroma constant so the transitions don't muddy.
+  function fuseFillColor(pct) {
+    var c = Math.max(0, Math.min(100, pct));
+    var h;
+    if (c < 50) {
+      // 0 → 50 : 150 (green) → 95 (yellow)
+      h = 150 - (c / 50) * (150 - 95);
+    } else if (c < 75) {
+      // 50 → 75 : 95 (yellow) → 50 (orange)
+      h = 95 - ((c - 50) / 25) * (95 - 50);
+    } else if (c < 90) {
+      // 75 → 90 : 50 (orange) → 22 (red)
+      h = 50 - ((c - 75) / 15) * (50 - 22);
+    } else {
+      // 90 → 100: solid red. Saturate rather than continue shifting
+      // hue — operators just need to see "DANGER", not a hue delta.
+      h = 22;
+    }
+    return "oklch(0.78 0.18 " + h.toFixed(1) + ")";
   }
 
   // Snap an axis range to "nice" round numbers. Returns { min, max, step }
@@ -199,6 +228,23 @@
 
   // ---- Render ----
   function render(data) {
+    // Battery presence → body.no-battery toggle. Drives visibility of
+    // the "Bat charged" / "Bat discharged" tiles and the Plan chart's
+    // Charge / Discharge / SoC legend + drawing layers. Any driver
+    // exposing bat_w counts; if the current tick has zero such
+    // drivers the class goes on and the CSS in next.css hides
+    // everything tagged .bat-only. Re-evaluated every /api/status
+    // poll so plugging in a battery lights everything back up
+    // without a reload.
+    var hasBattery = false;
+    var drvMap = data.drivers || {};
+    for (var drvName in drvMap) {
+      if (drvMap[drvName] && drvMap[drvName].bat_w != null) {
+        hasBattery = true; break;
+      }
+    }
+    document.body.classList.toggle("no-battery", !hasBattery);
+
     // PUSH CHART DATA FIRST — never let a DOM render error somewhere below
     // silently kill the chart-update path. (Prior bug: missing #dispatch-list
     // threw inside renderDispatch, which is between renderDrivers and
@@ -368,6 +414,13 @@
       evSlider.value = data.ev_charging_w;
       evValue.textContent = formatW(data.ev_charging_w);
     }
+    // Battery-covers-EV toggle — only update DOM when not mid-click,
+    // otherwise the user's change would get overwritten by the next
+    // status poll before the POST round-trip settles.
+    if (bceToggle && document.activeElement !== bceToggle && data.battery_covers_ev != null) {
+      bceToggle.checked = !!data.battery_covers_ev;
+      if (bceLabel) bceLabel.textContent = data.battery_covers_ev ? "On" : "Off";
+    }
 
     // Energy today
     if (data.energy && data.energy.today) {
@@ -391,10 +444,13 @@
       var phaseI = Array.isArray(data.phase_amps) ? data.phase_amps : [];
       var hasPhaseData = phaseI.length > 0;
 
-      // Show fallback (single bar + headline amps) only when no per-phase data.
+      // Hide the per-phase box row entirely when no phase data, otherwise
+      // we'd render `phases` boxes populated with 0 A alongside the
+      // aggregate fallback and the two cards would double up.
       var fallbackBar = $("fuse-bar-fallback");
       if (fallbackBar) fallbackBar.style.display = hasPhaseData ? "none" : "block";
       fuseUse.style.display = hasPhaseData ? "none" : "block";
+      if (fusePhases) fusePhases.style.display = hasPhaseData ? "" : "none";
 
       if (!hasPhaseData) {
         var totalDischarge = 0;
@@ -405,11 +461,10 @@
         fuseUse.textContent = peakA.toFixed(1) + " A";
         var totalFusePct = Math.min(100, (peakA / maxAmps) * 100);
         fuseFill.style.width = totalFusePct + "%";
-        fuseFill.className = "fuse-fill" + (totalFusePct > 85 ? " crit" : totalFusePct > 65 ? " warn" : "");
-      }
-
-      // Per-phase boxes: one tile per configured phase, side-by-side.
-      if (fusePhases) {
+        fuseFill.style.backgroundColor = fuseFillColor(totalFusePct);
+        fuseFill.className = "fuse-fill";
+      } else if (fusePhases) {
+        // Per-phase boxes: one tile per configured phase, side-by-side.
         if (fusePhases.childElementCount !== phases) {
           fusePhases.innerHTML = "";
           for (var p = 0; p < phases; p++) {
@@ -439,10 +494,19 @@
           var pct = Math.min(100, (magA / maxAmps) * 100);
           var bf = boxes[rb].querySelector(".fuse-phase-fill");
           var bv = boxes[rb].querySelector(".fuse-phase-val");
-          bf.style.width = pct + "%";
-          bf.className = "fuse-phase-fill"
-            + (pct > 85 ? " crit" : pct > 65 ? " warn" : "")
-            + (rawA < -0.1 ? " export" : "");
+          // CSS custom property so the same value drives both the
+          // horizontal bar (desktop) and the vertical bar (mobile)
+          // without the inline width overriding the mobile media
+          // query. The two orientations are pure CSS flips below.
+          bf.style.setProperty("--fill-pct", pct + "%");
+          // Smooth gradient instead of the old .warn/.crit buckets:
+          // fuseFillColor() interpolates green→yellow→orange→red
+          // across 50%/75%/90% knees so a bar at 45 % already leans
+          // yellow, 55 % is clearly yellow, 82 % is firmly orange, etc.
+          // Export (negative current, PV backfeed) keeps its own cool
+          // cyan via the .export class.
+          bf.style.backgroundColor = (rawA < -0.1) ? "" : fuseFillColor(pct);
+          bf.className = "fuse-phase-fill" + (rawA < -0.1 ? " export" : "");
           bv.textContent = magA.toFixed(1) + " A";
         }
       }
@@ -1369,6 +1433,10 @@
     postJson("/api/ev_charging", { power_w: w, active: w > 0 }).catch(function () {});
   }
 
+  function setBatteryCoversEV(enabled) {
+    postJson("/api/battery_covers_ev", { enabled: !!enabled }).catch(function () {});
+  }
+
   function postJson(url, body) {
     return fetch(url, {
       method: "POST",
@@ -1439,6 +1507,13 @@
   peakLimitSend.addEventListener("click", function () {
     setPeakLimit(Number(peakLimitSlider.value));
   });
+
+  if (bceToggle) {
+    bceToggle.addEventListener("change", function () {
+      if (bceLabel) bceLabel.textContent = bceToggle.checked ? "On" : "Off";
+      setBatteryCoversEV(bceToggle.checked);
+    });
+  }
 
   // EV detail modal — <ftw-modal> handles ESC / backdrop / close button;
   // we only drive open()/close() and refresh the body on a timer. Opened
@@ -1738,119 +1813,9 @@
     animating = !document.hidden;
   });
 
-  // ---- History cards (Imported / Consumed / Exported, daily) ----
-  // Fetches /api/energy/daily and renders one bar per day. The user
-  // toggles Week (last 7 days) vs Month (so far this month) per card,
-  // independently — each card owns its own range state. Polled every
-  // 5 minutes; manual switch refetches immediately.
-  var HISTORY_POLL_MS = 5 * 60 * 1000;
-  var historyState = {
-    import: { range: "week" },
-    load:   { range: "week" },
-    export: { range: "week" },
-  };
-  function daysFor(range) {
-    if (range === "month") {
-      var now = new Date();
-      return now.getDate(); // 1..31, days elapsed including today
-    }
-    return 7;
-  }
-  function fmtDayShort(iso) {
-    // iso = "YYYY-MM-DD"
-    var parts = iso.split("-");
-    if (parts.length !== 3) return iso;
-    var d = new Date(+parts[0], +parts[1] - 1, +parts[2]);
-    return d.toLocaleDateString(undefined, { weekday: "short", day: "numeric" });
-  }
-  function pickValue(metric, day) {
-    switch (metric) {
-      case "import": return day.import_wh || 0;
-      case "export": return day.export_wh || 0;
-      case "load":   return day.load_wh   || 0;
-    }
-    return 0;
-  }
-  function renderHistoryCard(card) {
-    var metric = card.dataset.metric;
-    var range  = historyState[metric].range;
-    var bars   = card.querySelector('[data-role="bars"]');
-    var total  = card.querySelector('[data-role="total"]');
-    if (!bars) return;
-    bars.textContent = "";
-    bars.classList.add("loading");
-    fetch("/api/energy/daily?days=" + daysFor(range))
-      .then(function (r) { return r.json(); })
-      .then(function (resp) {
-        bars.classList.remove("loading");
-        bars.textContent = "";
-        var days = (resp && resp.days) || [];
-        if (!days.length) {
-          bars.appendChild(document.createTextNode("no data"));
-          if (total) total.textContent = "— kWh";
-          return;
-        }
-        var max = 0, sum = 0;
-        for (var i = 0; i < days.length; i++) {
-          var v = pickValue(metric, days[i]);
-          if (v > max) max = v;
-          sum += v;
-        }
-        if (total) total.textContent = formatKwh(sum) + " total";
-        for (var j = 0; j < days.length; j++) {
-          var dv = pickValue(metric, days[j]);
-          var pct = max > 0 ? Math.max(2, (dv / max) * 100) : 0;
-          var col = document.createElement("div");
-          col.className = "history-bar-col";
-          var bar = document.createElement("div");
-          bar.className = "history-bar";
-          bar.style.height = pct + "%";
-          var val = document.createElement("span");
-          val.className = "history-bar-val";
-          val.textContent = (dv / 1000).toFixed(dv >= 10000 ? 0 : 1);
-          var lbl = document.createElement("span");
-          lbl.className = "history-bar-label";
-          lbl.textContent = fmtDayShort(days[j].day);
-          col.title = fmtDayShort(days[j].day) + ": " + formatKwh(dv);
-          col.appendChild(val);
-          col.appendChild(bar);
-          col.appendChild(lbl);
-          bars.appendChild(col);
-        }
-      })
-      .catch(function () {
-        bars.classList.remove("loading");
-        bars.textContent = "";
-        bars.appendChild(document.createTextNode("failed to load"));
-      });
-  }
-  function initHistoryCards() {
-    var cards = document.querySelectorAll(".history-card");
-    cards.forEach(function (card) {
-      // Range toggle (Week / Month) — per-card, independent.
-      var toggle = card.querySelector(".history-toggle");
-      if (toggle) {
-        toggle.addEventListener("click", function (e) {
-          var btn = e.target.closest("button[data-range]");
-          if (!btn) return;
-          var metric = card.dataset.metric;
-          historyState[metric].range = btn.dataset.range;
-          toggle.querySelectorAll("button").forEach(function (b) { b.classList.remove("active"); });
-          btn.classList.add("active");
-          renderHistoryCard(card);
-        });
-      }
-      renderHistoryCard(card);
-    });
-    setInterval(function () {
-      cards.forEach(renderHistoryCard);
-    }, HISTORY_POLL_MS);
-  }
-
   // ---- Init ----
   loadHistory(chartRange);
   fetchStatus();
   setInterval(fetchStatus, POLL_INTERVAL);
   requestAnimationFrame(animationFrame);
-  initHistoryCards();
 })();

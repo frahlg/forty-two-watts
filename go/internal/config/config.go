@@ -30,6 +30,80 @@ type Config struct {
 	OCPP          *OCPP              `yaml:"ocpp,omitempty" json:"ocpp,omitempty"`
 	EVCharger     *EVCharger         `yaml:"ev_charger,omitempty" json:"ev_charger,omitempty"`
 	Loadpoints    []Loadpoint        `yaml:"loadpoints,omitempty" json:"loadpoints,omitempty"`
+	Notifications *Notifications     `yaml:"notifications,omitempty" json:"notifications,omitempty"`
+	Nova          *Nova              `yaml:"nova,omitempty" json:"nova,omitempty"`
+}
+
+// Notifications configures outbound push notifications. Exactly one
+// transport provider is active at a time, selected by Provider. Today
+// the only implemented provider is "ntfy" (ntfy.sh or self-hosted);
+// future providers add their own nested config block and register in
+// go/internal/notifications.
+type Notifications struct {
+	Enabled         bool               `yaml:"enabled" json:"enabled"`
+	Provider        string             `yaml:"provider,omitempty" json:"provider,omitempty"`
+	DefaultPriority int                `yaml:"default_priority,omitempty" json:"default_priority,omitempty"`
+	Ntfy            *NtfyConfig        `yaml:"ntfy,omitempty" json:"ntfy,omitempty"`
+	Events          []NotificationRule `yaml:"events,omitempty" json:"events,omitempty"`
+}
+
+// NtfyConfig is the ntfy.sh transport settings.
+type NtfyConfig struct {
+	Server      string `yaml:"server,omitempty" json:"server,omitempty"`
+	Topic       string `yaml:"topic,omitempty" json:"topic,omitempty"`
+	AccessToken string `yaml:"access_token,omitempty" json:"access_token,omitempty"`
+	Username    string `yaml:"username,omitempty" json:"username,omitempty"`
+	Password    string `yaml:"password,omitempty" json:"password,omitempty"`
+
+	// HasAccessToken is a JSON-only signal for the UI: true means a
+	// token exists on disk. Set by MaskSecrets before AccessToken is
+	// blanked so the Settings form can render "configured — hidden"
+	// instead of an empty input. Never written to YAML.
+	HasAccessToken bool `yaml:"-" json:"has_access_token,omitempty"`
+}
+
+// NotificationRule is one event type the operator can toggle.
+type NotificationRule struct {
+	Type          string `yaml:"type" json:"type"`
+	Enabled       bool   `yaml:"enabled" json:"enabled"`
+	ThresholdS    int    `yaml:"threshold_s,omitempty" json:"threshold_s,omitempty"`
+	Priority      int    `yaml:"priority,omitempty" json:"priority,omitempty"`
+	Tags          string `yaml:"tags,omitempty" json:"tags,omitempty"`
+	TitleTemplate string `yaml:"title_template,omitempty" json:"title_template,omitempty"`
+	BodyTemplate  string `yaml:"body_template,omitempty" json:"body_template,omitempty"`
+	CooldownS     int    `yaml:"cooldown_s,omitempty" json:"cooldown_s,omitempty"`
+}
+
+// Nova is the opt-in Sourceful Nova Core federation config. When enabled,
+// forty-two-watts publishes telemetry to Nova's MQTT broker (NATS MQTT
+// adapter) and reconciles device/DER registrations via Nova's core-api.
+//
+// Identity is an ES256 keypair generated on first run and stored at
+// KeyPath (default <state.path sibling>/nova.key). The public key is
+// registered in Nova via the claim flow; the private key signs a short-
+// lived JWT used as the MQTT password.
+//
+// SchemaMode controls the wire format sent to Nova:
+//   - "legacy"  (default): translate forty-two-watts' native clean payload
+//                to the current Nova wire shape (battery sign flip,
+//                PascalCase fields, pv→solar, ev→ev_port). The translation
+//                layer is in internal/nova and is designed to be deleted
+//                once Nova adopts the unified schema.
+//   - "unified": publish forty-two-watts' clean payload directly. Enable
+//                once the Nova schema-alignment PR lands.
+type Nova struct {
+	Enabled            bool   `yaml:"enabled" json:"enabled"`
+	URL                string `yaml:"url" json:"url"`
+	MQTTHost           string `yaml:"mqtt_host" json:"mqtt_host"`
+	MQTTPort           int    `yaml:"mqtt_port,omitempty" json:"mqtt_port,omitempty"`
+	MQTTTLS            bool   `yaml:"mqtt_tls,omitempty" json:"mqtt_tls,omitempty"`
+	GatewaySerial      string `yaml:"gateway_serial" json:"gateway_serial"`
+	OrgID              string `yaml:"org_id" json:"org_id"`
+	SiteID             string `yaml:"site_id" json:"site_id"`
+	KeyPath            string `yaml:"key_path,omitempty" json:"key_path,omitempty"`
+	SchemaMode         string `yaml:"schema_mode,omitempty" json:"schema_mode,omitempty"`
+	PublishIntervalS   int    `yaml:"publish_interval_s,omitempty" json:"publish_interval_s,omitempty"`
+	ReconcileIntervalH int    `yaml:"reconcile_interval_h,omitempty" json:"reconcile_interval_h,omitempty"`
 }
 
 // Loadpoint is one EV charge point the planner can reason about.
@@ -137,6 +211,25 @@ type Driver struct {
 	Lua                string  `yaml:"lua,omitempty" json:"lua,omitempty"` // path to .lua file
 	IsSiteMeter        bool    `yaml:"is_site_meter,omitempty" json:"is_site_meter,omitempty"`
 	BatteryCapacityWh  float64 `yaml:"battery_capacity_wh,omitempty" json:"battery_capacity_wh,omitempty"`
+	// MaxChargeW + MaxDischargeW set this driver's per-command power
+	// ceiling (site-signed +/-). Both optional; zero = fall through to
+	// the global MaxCommandW = 5 kW default the dispatcher has shipped
+	// with since v0.x. On a hybrid inverter that can actually deliver
+	// more (e.g. Ferroamp 10-15 kW, Sungrow 8-10 kW on 32 A), lifting
+	// the per-driver cap is the right move — site-wide fuse protection
+	// (applyFuseGuard) still enforces the grid-boundary budget above
+	// whatever per-battery cap you set. Issue #145.
+	MaxChargeW    float64 `yaml:"max_charge_w,omitempty" json:"max_charge_w,omitempty"`
+	MaxDischargeW float64 `yaml:"max_discharge_w,omitempty" json:"max_discharge_w,omitempty"`
+	// InverterGroup tags this driver as belonging to a shared
+	// inverter+battery unit (e.g. set `inverter_group: ferroamp` on
+	// both the Ferroamp battery driver and anything publishing its PV
+	// telemetry). The dispatcher prefers routing charge to the battery
+	// whose group also has live PV output — staying DC-coupled on the
+	// same inverter avoids the DC→AC→AC→DC conversion overhead of
+	// cross-charging. Untagged drivers keep today's capacity-proportional
+	// behavior. See issue #143 and docs/configuration.md.
+	InverterGroup string `yaml:"inverter_group,omitempty" json:"inverter_group,omitempty"`
 	// Disabled skips this driver at startup / reload. Set via the UI when
 	// you want to temporarily take a driver out without editing yaml.
 	Disabled bool `yaml:"disabled,omitempty" json:"disabled,omitempty"`
@@ -341,6 +434,22 @@ func (c Config) MaskSecrets() Config {
 		cp.APIKey = ""
 		out.Weather = &cp
 	}
+	if out.Notifications != nil {
+		cp := *out.Notifications
+		if cp.Ntfy != nil {
+			nc := *cp.Ntfy
+			nc.HasAccessToken = strings.TrimSpace(nc.AccessToken) != ""
+			nc.AccessToken = ""
+			nc.Password = ""
+			cp.Ntfy = &nc
+		}
+		if len(cp.Events) > 0 {
+			evs := make([]NotificationRule, len(cp.Events))
+			copy(evs, cp.Events)
+			cp.Events = evs
+		}
+		out.Notifications = &cp
+	}
 
 	if len(out.Drivers) > 0 {
 		drivers := make([]Driver, len(out.Drivers))
@@ -395,6 +504,15 @@ func (incoming *Config) PreserveMaskedSecrets(existing *Config) {
 	}
 	if incoming.Weather != nil && existing.Weather != nil && incoming.Weather.APIKey == "" {
 		incoming.Weather.APIKey = existing.Weather.APIKey
+	}
+	if incoming.Notifications != nil && existing.Notifications != nil &&
+		incoming.Notifications.Ntfy != nil && existing.Notifications.Ntfy != nil {
+		if incoming.Notifications.Ntfy.AccessToken == "" {
+			incoming.Notifications.Ntfy.AccessToken = existing.Notifications.Ntfy.AccessToken
+		}
+		if incoming.Notifications.Ntfy.Password == "" {
+			incoming.Notifications.Ntfy.Password = existing.Notifications.Ntfy.Password
+		}
 	}
 	for i := range incoming.Drivers {
 		for _, ed := range existing.Drivers {
@@ -572,6 +690,74 @@ func applyDefaults(c *Config) {
 			c.HomeAssistant.PublishIntervalS = 5
 		}
 	}
+	// Backfill for configs that predate notifications: — lands a
+	// populated-but-disabled stub so upgrading an existing install
+	// lights up the Notifications tab with the defaults instead of an
+	// empty form. Nothing is written to disk until the operator Saves.
+	if c.Notifications == nil {
+		c.Notifications = &Notifications{
+			Enabled:         false,
+			Provider:        "ntfy",
+			DefaultPriority: 3,
+			Ntfy:            &NtfyConfig{Server: "https://ntfy.sh"},
+			Events: []NotificationRule{
+				{Type: "driver_offline", Enabled: false, ThresholdS: 600, Priority: 4, CooldownS: 3600},
+				{Type: "driver_recovered", Enabled: false, Priority: 3},
+				{Type: "update_available", Enabled: false, Priority: 3, CooldownS: 3600},
+				{Type: "fuse_over_limit", Enabled: false, ThresholdS: 30, Priority: 5, CooldownS: 900},
+			},
+		}
+	}
+	// Rule-list migration: add new built-in event types to existing
+	// configs that predate them so upgrading lights up the toggle in
+	// Settings → Notifications instead of needing manual YAML edits.
+	if c.Notifications != nil {
+		builtins := []NotificationRule{
+			{Type: "driver_offline", Enabled: false, ThresholdS: 600, Priority: 4, CooldownS: 3600},
+			{Type: "driver_recovered", Enabled: false, Priority: 3},
+			{Type: "update_available", Enabled: false, Priority: 3, CooldownS: 3600},
+			{Type: "fuse_over_limit", Enabled: false, ThresholdS: 30, Priority: 5, CooldownS: 900},
+		}
+		have := make(map[string]bool, len(c.Notifications.Events))
+		for _, r := range c.Notifications.Events {
+			have[r.Type] = true
+		}
+		for _, b := range builtins {
+			if !have[b.Type] {
+				c.Notifications.Events = append(c.Notifications.Events, b)
+			}
+		}
+	}
+	if c.Notifications != nil {
+		if c.Notifications.Provider == "" {
+			c.Notifications.Provider = "ntfy"
+		}
+		if c.Notifications.DefaultPriority == 0 {
+			c.Notifications.DefaultPriority = 3
+		}
+		if c.Notifications.Provider == "ntfy" {
+			if c.Notifications.Ntfy == nil {
+				c.Notifications.Ntfy = &NtfyConfig{}
+			}
+			if c.Notifications.Ntfy.Server == "" {
+				c.Notifications.Ntfy.Server = "https://ntfy.sh"
+			}
+		}
+	}
+	if c.Nova != nil {
+		if c.Nova.MQTTPort == 0 {
+			c.Nova.MQTTPort = 1883
+		}
+		if c.Nova.SchemaMode == "" {
+			c.Nova.SchemaMode = "legacy"
+		}
+		if c.Nova.PublishIntervalS == 0 {
+			c.Nova.PublishIntervalS = 5
+		}
+		if c.Nova.ReconcileIntervalH == 0 {
+			c.Nova.ReconcileIntervalH = 24
+		}
+	}
 }
 
 // Validate ensures the config is internally consistent and safe to run with.
@@ -612,6 +798,63 @@ func (c *Config) Validate() error {
 	}
 	if c.Fuse.MaxAmps <= 0 {
 		return errors.New("fuse.max_amps must be > 0")
+	}
+	if n := c.Notifications; n != nil {
+		if n.DefaultPriority < 0 || n.DefaultPriority > 5 {
+			return errors.New("notifications.default_priority must be in [0,5]")
+		}
+		if n.Enabled {
+			switch n.Provider {
+			case "", "ntfy":
+				if n.Ntfy == nil {
+					return errors.New("notifications.ntfy required when provider=ntfy and enabled")
+				}
+				if strings.TrimSpace(n.Ntfy.Server) == "" {
+					return errors.New("notifications.ntfy.server required when enabled")
+				}
+				if strings.TrimSpace(n.Ntfy.Topic) == "" {
+					return errors.New("notifications.ntfy.topic required when enabled")
+				}
+			default:
+				return fmt.Errorf("notifications.provider %q not supported", n.Provider)
+			}
+		}
+		for i, ev := range n.Events {
+			if strings.TrimSpace(ev.Type) == "" {
+				return fmt.Errorf("notifications.events[%d]: type required", i)
+			}
+			if ev.ThresholdS < 0 {
+				return fmt.Errorf("notifications.events[%d]: threshold_s must be >= 0", i)
+			}
+			if ev.Priority < 0 || ev.Priority > 5 {
+				return fmt.Errorf("notifications.events[%d]: priority must be in [0,5]", i)
+			}
+			if ev.CooldownS < 0 {
+				return fmt.Errorf("notifications.events[%d]: cooldown_s must be >= 0", i)
+			}
+		}
+	}
+	if c.Nova != nil && c.Nova.Enabled {
+		if c.Nova.URL == "" {
+			return errors.New("nova.url is required when nova.enabled")
+		}
+		if c.Nova.MQTTHost == "" {
+			return errors.New("nova.mqtt_host is required when nova.enabled")
+		}
+		if c.Nova.GatewaySerial == "" {
+			return errors.New("nova.gateway_serial is required when nova.enabled — run `forty-two-watts nova-claim`")
+		}
+		if c.Nova.OrgID == "" {
+			return errors.New("nova.org_id is required when nova.enabled")
+		}
+		if c.Nova.SiteID == "" {
+			return errors.New("nova.site_id is required when nova.enabled")
+		}
+		switch c.Nova.SchemaMode {
+		case "legacy", "unified":
+		default:
+			return fmt.Errorf("nova.schema_mode must be \"legacy\" or \"unified\", got %q", c.Nova.SchemaMode)
+		}
 	}
 	return nil
 }

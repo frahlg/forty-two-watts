@@ -30,7 +30,7 @@ Endpoint groups (route table is `api.go:95-130`):
 | devices | `GET /api/devices` |
 | battery_models | `GET /api/battery_models`, `POST /api/battery_models/reset` |
 | self_tune | `POST /api/self_tune/start`, `GET /api/self_tune/status`, `POST /api/self_tune/cancel` |
-| history / series | `GET /api/history`, `GET /api/series`, `GET /api/series/catalog` |
+| history / series | `GET /api/history`, `GET /api/series`, `GET /api/series/catalog`, `GET /api/energy/daily` |
 | prices / forecast | `GET /api/prices`, `GET /api/forecast` |
 | mpc | `GET /api/mpc/plan`, `POST /api/mpc/replan`, `GET /api/mpc/diagnose` |
 | loadpoints | `GET /api/loadpoints`, `POST /api/loadpoints/{id}/target` |

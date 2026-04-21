@@ -204,9 +204,19 @@ func Backfill(s *state.Store, cfg BackfillConfig, log *slog.Logger) error {
 	}
 	log.Info("backfill: done", "rows_written", written)
 
-	// Round-trip the marker through a marshal as a cheap sanity check
-	// so format drift (e.g. whitespace) doesn't silently break the gate.
+	// Round-trip the marker through unmarshal+marshal so format drift
+	// (e.g. whitespace, key reordering) doesn't silently break the gate
+	// query in CountNonSyntheticHistory which compares the raw string.
 	var tmp map[string]any
-	_ = json.Unmarshal([]byte(backfillMarker), &tmp)
+	if err := json.Unmarshal([]byte(backfillMarker), &tmp); err != nil {
+		return fmt.Errorf("invalid backfill marker JSON: %w", err)
+	}
+	roundTripped, err := json.Marshal(tmp)
+	if err != nil {
+		return fmt.Errorf("marshal backfill marker: %w", err)
+	}
+	if string(roundTripped) != backfillMarker {
+		return fmt.Errorf("backfill marker format drift: got %q, want %q", string(roundTripped), backfillMarker)
+	}
 	return nil
 }

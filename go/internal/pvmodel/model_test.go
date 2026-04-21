@@ -234,6 +234,55 @@ func TestInterceptDoesNotAffectDaytimePredict(t *testing.T) {
 	}
 }
 
+// Codex P1 on PR #136: with Features[0]=0 (dead slot), the standard
+// covariance update divides P[0][0] by λ every tick → ~1.005× growth
+// compounds to Inf after ~140k updates → Px[0] = Inf*0 = NaN poisons
+// K, β, and predictions. The Update() fix freezes row/column 0 of P.
+// This test runs enough Updates to catch any residual growth and asserts
+// the whole matrix + β stay finite.
+func TestUpdatePKeepsDeadInterceptFinite(t *testing.T) {
+	m := NewModel(10000)
+	base := time.Date(2026, 6, 1, 6, 0, 0, 0, time.UTC)
+	// 2000 Updates — well past the point where the old code would have
+	// started accelerating P[0][0] but not long enough to explode even
+	// the buggy version, so the assertion has to be tight, not loose.
+	for i := 0; i < 2000; i++ {
+		ts := base.Add(time.Duration(i) * time.Minute)
+		// Vary clearSky + cloud so the update actually fires (>50 gate)
+		// and doesn't get outlier-rejected.
+		cs := 400.0 + math.Mod(float64(i), 600)
+		cloud := math.Mod(float64(i), 100)
+		actual := 0.8 * cs * math.Pow(1-cloud/100, 1.5) * 10.0
+		_ = m.Update(cs, cloud, ts, actual)
+	}
+	// Every P cell finite.
+	for i := 0; i < NFeat; i++ {
+		for j := 0; j < NFeat; j++ {
+			if math.IsNaN(m.P[i][j]) || math.IsInf(m.P[i][j], 0) {
+				t.Fatalf("P[%d][%d] = %v — covariance went infinite", i, j, m.P[i][j])
+			}
+		}
+	}
+	// Row 0 and column 0 must stay at zero (or at least not wandering):
+	// the fix skips their update so whatever they started at (col 0 all
+	// 0, row 0 diagonal 1000) persists — but since row 0 and col 0
+	// never get written into, the `newP` zero-value clears them to 0.
+	for j := 1; j < NFeat; j++ {
+		if m.P[0][j] != 0 {
+			t.Errorf("P[0][%d] = %v, want 0 (row 0 is dead)", j, m.P[0][j])
+		}
+		if m.P[j][0] != 0 {
+			t.Errorf("P[%d][0] = %v, want 0 (col 0 is dead)", j, m.P[j][0])
+		}
+	}
+	// β stays finite.
+	for i := 0; i < NFeat; i++ {
+		if math.IsNaN(m.Beta[i]) || math.IsInf(m.Beta[i], 0) {
+			t.Fatalf("Beta[%d] = %v — coefficient went non-finite", i, m.Beta[i])
+		}
+	}
+}
+
 // Self-heal: Update zeros Beta[0] at the end of each RLS step so drifted
 // persisted models don't keep the stale intercept forever.
 func TestUpdateZeroesIntercept(t *testing.T) {

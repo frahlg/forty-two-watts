@@ -58,6 +58,29 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
+// SnapshotTo writes a self-contained, defragmented copy of the database
+// to dstPath using SQLite's VACUUM INTO. The source DB remains open for
+// the duration; readers and writers continue unimpeded. Used by the
+// self-update flow to capture state before pulling a new image, so
+// operators can roll back if the new version misbehaves.
+//
+// dstPath must not exist — SQLite refuses to overwrite an existing file.
+// Safe to call while the Store is serving live traffic.
+func (s *Store) SnapshotTo(dstPath string) error {
+	if s == nil || s.db == nil {
+		return fmt.Errorf("store: snapshot on nil store")
+	}
+	// VACUUM INTO takes a literal path string — bind parameters aren't
+	// honoured by the parser. We construct dstPath ourselves (timestamped
+	// snapshots dir), but escape single quotes defensively so a caller
+	// passing an unexpected path can't inject SQL.
+	escaped := strings.ReplaceAll(dstPath, "'", "''")
+	if _, err := s.db.Exec(fmt.Sprintf("VACUUM INTO '%s'", escaped)); err != nil {
+		return fmt.Errorf("snapshot to %s: %w", dstPath, err)
+	}
+	return nil
+}
+
 func (s *Store) migrate() error {
 	stmts := []string{
 		// config: small string key-value for mode, grid_target etc.
@@ -190,6 +213,40 @@ func (s *Store) migrate() error {
 			total_cost_ore REAL    NOT NULL,
 			horizon_slots  INTEGER NOT NULL,
 			json           TEXT    NOT NULL
+		) STRICT`,
+
+		// Nova federation: one row per local DER we've provisioned in Nova.
+		// Keyed on (device_id, der_type) so a hybrid inverter with multiple
+		// DERs (battery + pv + meter on the same device_id) has one row per
+		// DER. The Nova-generated der_id is stored purely for diagnostics
+		// and future control-topic subscriptions; the publish path uses
+		// (hardware_id, der_name) which are client-owned.
+		// Notification history — one row per attempted push. Populated by
+		// a bus subscriber in main.go (see events.NotificationDispatched)
+		// so the notifications service itself stays free of storage logic.
+		// Retention is unbounded for now; volumes are small (operators
+		// configure a threshold + cooldown, not per-tick events) so a
+		// house would take years to accumulate even 100k rows.
+		`CREATE TABLE IF NOT EXISTS notification_log (
+			id         INTEGER PRIMARY KEY AUTOINCREMENT,
+			ts_ms      INTEGER NOT NULL,
+			event_type TEXT NOT NULL,
+			driver     TEXT NOT NULL DEFAULT '',
+			title      TEXT NOT NULL DEFAULT '',
+			body       TEXT NOT NULL DEFAULT '',
+			priority   INTEGER NOT NULL DEFAULT 0,
+			status     TEXT NOT NULL,
+			error      TEXT NOT NULL DEFAULT ''
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_notification_log_ts ON notification_log(ts_ms DESC)`,
+
+		`CREATE TABLE IF NOT EXISTS nova_ders (
+			device_id   TEXT NOT NULL,
+			der_type    TEXT NOT NULL,
+			der_name    TEXT NOT NULL,
+			der_id      TEXT NOT NULL,
+			synced_ms   INTEGER NOT NULL,
+			PRIMARY KEY (device_id, der_type)
 		) STRICT`,
 	}
 	for _, stmt := range stmts {
@@ -450,66 +507,6 @@ func (s *Store) LoadHistory(sinceMs, untilMs int64, maxPoints int) ([]HistoryPoi
 		return out, nil
 	}
 	return all, nil
-}
-
-// DayEnergy is the set of Wh totals over a time range, in site convention:
-// Import/Export are grid-boundary W split on sign; PV and LoadWh are always
-// positive accumulations; BatCharged/BatDischarged split bat_w on sign.
-type DayEnergy struct {
-	ImportWh        float64
-	ExportWh        float64
-	PVWh            float64
-	BatChargedWh    float64
-	BatDischargedWh float64
-	LoadWh          float64
-}
-
-// DailyEnergy integrates history W columns over [sinceMs, untilMs] and returns
-// Wh totals in a single round-trip. The integration is a left-Riemann sum
-// (W[j] * (ts[j]-ts[j-1])), matching the previous Go loop in handleEnergyDaily.
-// Pushing the sums into SQL avoids shipping ~17k hot-tier rows per day back to
-// the application — month-view dashboards got slow once hot retention grew.
-func (s *Store) DailyEnergy(sinceMs, untilMs int64) (DayEnergy, error) {
-	const q = `
-		WITH all_rows AS (
-			SELECT ts_ms, grid_w, pv_w, bat_w, load_w FROM history_hot  WHERE ts_ms BETWEEN ? AND ?
-			UNION ALL
-			SELECT ts_ms, grid_w, pv_w, bat_w, load_w FROM history_warm WHERE ts_ms BETWEEN ? AND ?
-			UNION ALL
-			SELECT ts_ms, grid_w, pv_w, bat_w, load_w FROM history_cold WHERE ts_ms BETWEEN ? AND ?
-		),
-		lagged AS (
-			SELECT ts_ms,
-			       COALESCE(grid_w, 0) AS grid_w,
-			       COALESCE(pv_w,   0) AS pv_w,
-			       COALESCE(bat_w,  0) AS bat_w,
-			       COALESCE(load_w, 0) AS load_w,
-			       LAG(ts_ms) OVER (ORDER BY ts_ms) AS prev_ts
-			FROM all_rows
-		)
-		SELECT
-			COALESCE(SUM((CASE WHEN grid_w > 0 THEN  grid_w ELSE 0 END) * (ts_ms - prev_ts)) / 3600000.0, 0),
-			COALESCE(SUM((CASE WHEN grid_w < 0 THEN -grid_w ELSE 0 END) * (ts_ms - prev_ts)) / 3600000.0, 0),
-			COALESCE(SUM((-pv_w) * (ts_ms - prev_ts)) / 3600000.0, 0),
-			COALESCE(SUM((CASE WHEN bat_w > 0 THEN  bat_w ELSE 0 END) * (ts_ms - prev_ts)) / 3600000.0, 0),
-			COALESCE(SUM((CASE WHEN bat_w < 0 THEN -bat_w ELSE 0 END) * (ts_ms - prev_ts)) / 3600000.0, 0),
-			COALESCE(SUM(load_w * (ts_ms - prev_ts)) / 3600000.0, 0)
-		FROM lagged
-		WHERE prev_ts IS NOT NULL
-	`
-	var d DayEnergy
-	err := s.db.QueryRow(q,
-		sinceMs, untilMs,
-		sinceMs, untilMs,
-		sinceMs, untilMs,
-	).Scan(
-		&d.ImportWh, &d.ExportWh, &d.PVWh,
-		&d.BatChargedWh, &d.BatDischargedWh, &d.LoadWh,
-	)
-	if err != nil {
-		return DayEnergy{}, err
-	}
-	return d, nil
 }
 
 // CountNonSyntheticHistory returns the number of history rows across all

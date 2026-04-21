@@ -152,7 +152,7 @@ func TestProportionalSplitByCapacity(t *testing.T) {
 		{driver: "big", capacityWh: 15000, currentW: 0, soc: 0.5, online: true},
 		{driver: "small", capacityWh: 5000, currentW: 0, soc: 0.5, online: true},
 	}
-	targets := distributeProportional(bats, -1000) // want -1000W total discharge
+	targets := distributeProportional(bats, -1000, nil) // want -1000W total discharge; nil groupPV → capacity-only split
 	var big, small float64
 	for _, tg := range targets {
 		if tg.Driver == "big" { big = tg.TargetW }
@@ -170,7 +170,7 @@ func TestProportionalUsesTotalDesired(t *testing.T) {
 		{driver: "a", capacityWh: 10000, currentW: 500, soc: 0.5, online: true},
 		{driver: "b", capacityWh: 10000, currentW: 500, soc: 0.5, online: true},
 	}
-	targets := distributeProportional(bats, -200)
+	targets := distributeProportional(bats, -200, nil)
 	for _, tg := range targets {
 		if math.Abs(tg.TargetW-400) > 1 {
 			t.Errorf("%s: got %f, want 400", tg.Driver, tg.TargetW)
@@ -229,48 +229,134 @@ func TestWeightedDistribution(t *testing.T) {
 // ---- Clamps ----
 
 func TestClampWithSoCBlocksDischargeWhenEmpty(t *testing.T) {
-	v, was := clampWithSoC(-1000, 0.04)
+	b := batteryInfo{soc: 0.04}
+	v, was := clampWithSoC(-1000, b)
 	if v != 0 || !was {
 		t.Errorf("SoC<5%%: discharge should be blocked, got %f clamped=%v", v, was)
 	}
-	v, was = clampWithSoC(+1000, 0.04)
+	v, was = clampWithSoC(+1000, b)
 	if v != 1000 || was {
 		t.Error("charge at low SoC should pass through unchanged")
 	}
 }
 
-func TestClampWithSoCCapsAt5kW(t *testing.T) {
-	v, was := clampWithSoC(+7000, 0.5)
-	if v != 5000 || !was { t.Errorf("expected cap at +5000, got %f", v) }
-	v, was = clampWithSoC(-7000, 0.5)
-	if v != -5000 || !was { t.Errorf("expected cap at -5000, got %f", v) }
+func TestClampWithSoCCapsAtDefaultWhenLimitsUnset(t *testing.T) {
+	// No per-driver limits → falls back to global MaxCommandW default.
+	b := batteryInfo{soc: 0.5}
+	v, was := clampWithSoC(+7000, b)
+	if v != MaxCommandW || !was {
+		t.Errorf("expected cap at +%d default, got %f", MaxCommandW, v)
+	}
+	v, was = clampWithSoC(-7000, b)
+	if v != -MaxCommandW || !was {
+		t.Errorf("expected cap at -%d default, got %f", MaxCommandW, v)
+	}
+}
+
+// Per-driver limits override the global default. Charge + discharge can be
+// asymmetric (hybrid inverters often are). Issue #145.
+func TestClampWithSoCUsesPerBatteryLimits(t *testing.T) {
+	b := batteryInfo{soc: 0.5, maxChargeW: 10000, maxDischargeW: 8000}
+	// Charge up to 10 kW — passes through.
+	if v, was := clampWithSoC(+9500, b); v != 9500 || was {
+		t.Errorf("+9500 under 10 kW cap: got %f clamped=%v, want 9500 false", v, was)
+	}
+	// +12 kW above cap → clamped at 10 kW.
+	if v, was := clampWithSoC(+12000, b); v != 10000 || !was {
+		t.Errorf("+12000 vs 10 kW cap: got %f clamped=%v, want 10000 true", v, was)
+	}
+	// Discharge cap is separate (8 kW). -9 kW → clamped at -8 kW.
+	if v, was := clampWithSoC(-9000, b); v != -8000 || !was {
+		t.Errorf("-9000 vs 8 kW discharge cap: got %f clamped=%v, want -8000 true", v, was)
+	}
 }
 
 // ---- Fuse guard ----
 
-func TestFuseGuardScalesDischargeWhenPVHigh(t *testing.T) {
+// Old-world test updated for the bidirectional predicted-grid guard
+// (#145). Previous semantics ("PV + discharge > fuse → scale") assumed
+// zero load and treated discharge as always pushing past the fuse. The
+// new guard predicts site-boundary flow from live telemetry, which is
+// physically accurate AND covers the charge side symmetrically.
+func TestFuseGuardScalesDischargeWhenExportExceedsFuse(t *testing.T) {
 	s := telemetry.NewStore()
-	s.Update("a", telemetry.DerPV, -8000, nil, nil) // site: PV = -8000 (generating)
+	s.Update("meter", telemetry.DerMeter, -8000, nil, nil) // grid exporting 8 kW (PV dominant)
+	s.DriverHealthMut("meter").RecordSuccess()
+	s.Update("a", telemetry.DerBattery, 0, nil, nil)
 	s.DriverHealthMut("a").RecordSuccess()
-	targets := []DispatchTarget{{Driver: "a", TargetW: -6000}} // 6 kW discharge
-	// PV 8000 + discharge 6000 = 14 kW > 11040 fuse
-	scaled := applyFuseGuard(targets, s, 11040)
+	targets := []DispatchTarget{{Driver: "a", TargetW: -6000}} // add 6 kW discharge on top
+	// Predicted grid = -8000 - 0 + (-6000) = -14000 (exporting). Fuse 11040.
+	scaled := applyFuseGuard(targets, s, "meter", 11040)
 	if !scaled[0].Clamped {
 		t.Error("expected clamped=true")
 	}
-	expected := -6000.0 * (11040.0 / 14000.0)
-	if math.Abs(scaled[0].TargetW-expected) > 1 {
-		t.Errorf("expected ~%.0f, got %f", expected, scaled[0].TargetW)
+	// Over by 14000 − 11040 = 2960. Discharge scales from 6000 → 6000 − 2960 = 3040.
+	if math.Abs(scaled[0].TargetW-(-3040)) > 1 {
+		t.Errorf("expected target ≈ -3040 after scaling, got %f", scaled[0].TargetW)
 	}
 }
 
-func TestFuseGuardDoesNotScaleCharging(t *testing.T) {
+// Small charge under the fuse → unchanged. No scaling.
+func TestFuseGuardPassesThroughWhenWithinFuse(t *testing.T) {
 	s := telemetry.NewStore()
-	s.Update("a", telemetry.DerPV, -12000, nil, nil)
-	targets := []DispatchTarget{{Driver: "a", TargetW: 3000}} // charging
-	scaled := applyFuseGuard(targets, s, 11040)
-	if scaled[0].TargetW != 3000 {
-		t.Error("charging shouldn't be scaled by fuse guard (doesn't add to generation)")
+	s.Update("meter", telemetry.DerMeter, 0, nil, nil)
+	s.DriverHealthMut("meter").RecordSuccess()
+	s.Update("a", telemetry.DerBattery, 0, nil, nil)
+	s.DriverHealthMut("a").RecordSuccess()
+	targets := []DispatchTarget{{Driver: "a", TargetW: 3000}}
+	scaled := applyFuseGuard(targets, s, "meter", 11040)
+	if scaled[0].TargetW != 3000 || scaled[0].Clamped {
+		t.Errorf("within fuse: got %f clamped=%v, want 3000 false", scaled[0].TargetW, scaled[0].Clamped)
+	}
+}
+
+// Charge side now protected (#145). With high load and aggressive
+// charge targets, predicted grid import can exceed the fuse — the
+// guard must scale charge down.
+func TestFuseGuardScalesChargingWhenImportExceedsFuse(t *testing.T) {
+	s := telemetry.NewStore()
+	// Grid currently importing 8 kW (load-dominated, night/no PV).
+	s.Update("meter", telemetry.DerMeter, 8000, nil, nil)
+	s.DriverHealthMut("meter").RecordSuccess()
+	s.Update("a", telemetry.DerBattery, 0, nil, nil)
+	s.DriverHealthMut("a").RecordSuccess()
+	s.Update("b", telemetry.DerBattery, 0, nil, nil)
+	s.DriverHealthMut("b").RecordSuccess()
+	targets := []DispatchTarget{
+		{Driver: "a", TargetW: 5000},
+		{Driver: "b", TargetW: 5000},
+	}
+	// Predicted = 8000 - 0 + 10000 = 18000 W. Fuse 11040.
+	// Overage = 6960. Total charge = 10000. New total = 3040. Scale = 0.304.
+	scaled := applyFuseGuard(targets, s, "meter", 11040)
+	var totalCharge float64
+	for _, tgt := range scaled {
+		if tgt.TargetW > 0 {
+			totalCharge += tgt.TargetW
+		}
+	}
+	if math.Abs(totalCharge-3040) > 2 {
+		t.Errorf("total charging after scaling = %f, want ≈ 3040", totalCharge)
+	}
+	for _, tgt := range scaled {
+		if !tgt.Clamped {
+			t.Errorf("%s: expected Clamped=true after charge scaling", tgt.Driver)
+		}
+	}
+}
+
+// Mirror of the charging test with no grid reading: guard can't predict
+// reliably, stays conservative by NOT scaling (leave the decision to
+// the upstream per-battery cap). Guards against a bare-metal test
+// setup accidentally triggering the guard.
+func TestFuseGuardNoOpWithoutMeterReading(t *testing.T) {
+	s := telemetry.NewStore()
+	targets := []DispatchTarget{{Driver: "a", TargetW: 5000}}
+	// No meter reading → currentGrid defaults to 0 → predicted = 5000 which is fine.
+	scaled := applyFuseGuard(targets, s, "does-not-exist", 11040)
+	if scaled[0].TargetW != 5000 || scaled[0].Clamped {
+		t.Errorf("absent meter → no prediction-based clamp, got %f clamped=%v",
+			scaled[0].TargetW, scaled[0].Clamped)
 	}
 }
 
@@ -395,6 +481,55 @@ func TestEVChargingSignalOverriddenByDerEVReading(t *testing.T) {
 	_ = ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
 	if st.EVChargingW != 4000 {
 		t.Errorf("expected EVChargingW to be overridden by live EV reading = 4000, got %f", st.EVChargingW)
+	}
+}
+
+// TestBatteryCoversEV_OffExcludesEVFromGrid mirrors the existing
+// exclusion behaviour. Grid meter reads +3000 W, 2500 W is EV, so
+// the effective grid the controller sees should be 500 W — well
+// within the dead-band — and the battery should not try to cover
+// the whole 3000 W. Regression guard that the new flag's default
+// preserves current behaviour.
+func TestBatteryCoversEV_OffExcludesEVFromGrid(t *testing.T) {
+	store := seedStore(3000, []struct{ name string; currentW, soc float64 }{
+		{"ferroamp", 0, 0.5},
+	})
+	st := NewState(0, 50, "ferroamp")
+	st.Mode = ModeSelfConsumption
+	st.EVChargingW = 2500
+	st.BatteryCoversEV = false // explicit — this is the default
+	st.SlewRateW = 100000
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) > 0 && math.Abs(targets[0].TargetW) > 2000 {
+		t.Errorf("with flag off, battery must not try to cover 2500W EV draw; got target=%f", targets[0].TargetW)
+	}
+}
+
+// TestBatteryCoversEV_OnIncludesEVInGrid covers the opt-in scenario:
+// high grid prices now, cheap solar later → operator flips the
+// override and the battery discharges to cover full grid load
+// including EV. The dispatch should produce a target that actively
+// pulls the battery into discharge territory for the full 3000 W
+// import, not just the 500 W house portion.
+func TestBatteryCoversEV_OnIncludesEVInGrid(t *testing.T) {
+	store := seedStore(3000, []struct{ name string; currentW, soc float64 }{
+		{"ferroamp", 0, 0.5},
+	})
+	st := NewState(0, 50, "ferroamp")
+	st.Mode = ModeSelfConsumption
+	st.EVChargingW = 2500
+	st.BatteryCoversEV = true // opt in — battery covers everything
+	st.SlewRateW = 100000
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) == 0 {
+		t.Fatal("expected a dispatch target when grid is 3 kW over target, got none")
+	}
+	// With flag on, the full 3000 W import should drive battery toward
+	// discharge (negative target in site convention). Require at least
+	// half of the raw import as discharge command — conservative on the
+	// PI gain but clearly separates "covers EV too" from "house only".
+	if targets[0].TargetW > -1500 {
+		t.Errorf("with flag on, battery must drive toward discharge for full import; got target=%f (want <= -1500)", targets[0].TargetW)
 	}
 }
 
@@ -862,8 +997,12 @@ func TestPlannerSelfIdleGateRampsBatteryToZeroOverCycles(t *testing.T) {
 		BatteryEnergyWh: 0, // idle-gated
 		Strategy:        "self_consumption",
 	}
-	// Battery at -2000 W (discharging), live grid exporting 4 kW.
-	store := seedStore(-4000, []struct {
+	// Battery at -2000 W (discharging), live grid exporting 500 W — under
+	// the #153 idle-gate-override threshold, so the gate truly holds and
+	// this test exercises the ramp-to-zero behaviour it was written to
+	// guard. Heavier export would correctly trigger the override and
+	// invalidate the assumption.
+	store := seedStore(-500, []struct {
 		name          string
 		currentW, soc float64
 	}{
@@ -957,5 +1096,408 @@ func TestPlannerSelfWithoutPlanActsLikeManual(t *testing.T) {
 	}
 	if !st.PlanStale {
 		t.Error("expected PlanStale=true when planner_self sees no directive")
+	}
+}
+
+// ---- Per-driver power limits (#145) ----
+
+// End-to-end via ModeCharge (the "fill every battery fully" knob):
+// Ferroamp with max_charge_w=10000, Sungrow using the default. With
+// per-driver caps, Ferroamp should be commanded at its 10 kW limit
+// and Sungrow at the 5 kW default — previously both would have been
+// pinned to 5 kW regardless of hardware capability.
+func TestPerDriverLimits_ChargeModeRespectsAsymmetricCaps(t *testing.T) {
+	store := seedStore(0, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+		{"sungrow", 0, 0.5},
+	})
+	st := NewState(0, 0, "ferroamp")
+	st.Mode = ModeCharge
+	st.DriverLimits = map[string]PowerLimits{
+		"ferroamp": {MaxChargeW: 10000, MaxDischargeW: 10000},
+		// sungrow intentionally omitted → falls through to MaxCommandW default.
+	}
+
+	// Fuse set generously so the per-driver caps are what actually binds.
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200, "sungrow": 9600}), 50000)
+	got := map[string]float64{}
+	for _, t := range targets {
+		got[t.Driver] = t.TargetW
+	}
+	if got["ferroamp"] != 10000 {
+		t.Errorf("ferroamp = %f — ModeCharge should drive to per-driver MaxChargeW (10000)", got["ferroamp"])
+	}
+	if got["sungrow"] != 5000 {
+		t.Errorf("sungrow = %f — expected the MaxCommandW default (5000) when no override", got["sungrow"])
+	}
+}
+
+// A per-driver discharge cap is honoured separately from the charge
+// cap. Real hybrid inverters commonly differ between the two directions.
+func TestPerDriverLimits_AsymmetricChargeVsDischarge(t *testing.T) {
+	// Grid importing 12 kW (high load → big discharge correction).
+	store := seedStore(12000, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	st := NewState(0, 0, "ferroamp")
+	st.Mode = ModeSelfConsumption
+	st.SlewRateW = 100000
+	st.MinDispatchIntervalS = 0
+	st.DriverLimits = map[string]PowerLimits{
+		"ferroamp": {MaxChargeW: 15000, MaxDischargeW: 7000}, // asymmetric caps
+	}
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 22080)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	// Must be discharging, and must NOT exceed -7000 (discharge cap).
+	if targets[0].TargetW > 0 {
+		t.Errorf("expected negative (discharge) target, got %f", targets[0].TargetW)
+	}
+	if targets[0].TargetW < -7000 {
+		t.Errorf("target = %f — asymmetric discharge cap (7 kW) was not honoured", targets[0].TargetW)
+	}
+}
+
+// ---- Inverter-affinity routing (#143) ----
+
+// All charging flows to the group that has live PV — cross-inverter
+// DC→AC→AC→DC is avoided.
+func TestInverterAffinity_PrefersLocalBatteryForLocalSurplus(t *testing.T) {
+	bats := []batteryInfo{
+		{driver: "ferroamp", capacityWh: 15200, currentW: 0, soc: 0.5, online: true, group: "ferroamp"},
+		{driver: "sungrow", capacityWh: 9600, currentW: 0, soc: 0.5, online: true, group: "sungrow"},
+	}
+	// All surplus on Ferroamp's inverter; none on Sungrow's.
+	groupPV := map[string]float64{"ferroamp": 4000, "sungrow": 0}
+	// +3 kW correction — fits entirely inside Ferroamp's local surplus.
+	targets := distributeProportional(bats, 3000, groupPV)
+	got := map[string]float64{}
+	for _, t := range targets {
+		got[t.Driver] = t.TargetW
+	}
+	if math.Abs(got["ferroamp"]-3000) > 1 {
+		t.Errorf("ferroamp target = %f, want 3000 (all local routing)", got["ferroamp"])
+	}
+	if math.Abs(got["sungrow"]) > 1 {
+		t.Errorf("sungrow target = %f, want 0 (no local PV, correction absorbable locally)", got["sungrow"])
+	}
+}
+
+// When the operator demands more charge than the sum of local PV, the
+// overflow is routed proportionally across the whole fleet. The
+// locality bonus is exhausted first; nothing to gain after that.
+func TestInverterAffinity_FallsBackToProportionalOnOverflow(t *testing.T) {
+	bats := []batteryInfo{
+		{driver: "ferroamp", capacityWh: 15200, currentW: 0, soc: 0.5, online: true, group: "ferroamp"},
+		{driver: "sungrow", capacityWh: 9600, currentW: 0, soc: 0.5, online: true, group: "sungrow"},
+	}
+	// 4 kW of PV on ferroamp only; operator wants to charge 6 kW total.
+	groupPV := map[string]float64{"ferroamp": 4000, "sungrow": 0}
+	targets := distributeProportional(bats, 6000, groupPV)
+	got := map[string]float64{}
+	for _, t := range targets {
+		got[t.Driver] = t.TargetW
+	}
+	// Ferroamp gets full 4 kW local + its capacity share of the 2 kW
+	// overflow = 4000 + 2000 * 15200/24800 = 4000 + 1226 ≈ 5226.
+	// clampWithSoC caps at 5000 per command.
+	if got["ferroamp"] != 5000 {
+		t.Errorf("ferroamp target = %f, want 5000 (local 4000 + overflow share, clamped at MaxCommandW)", got["ferroamp"])
+	}
+	// Sungrow gets its capacity share of the 2 kW overflow = 2000 * 9600/24800 ≈ 774.
+	if math.Abs(got["sungrow"]-774) > 1 {
+		t.Errorf("sungrow target = %f, want ≈774 (overflow × capacity share)", got["sungrow"])
+	}
+}
+
+// With no inverter groups configured, the algorithm must produce
+// identical results to today's capacity-proportional split — the
+// backward-compat invariant.
+func TestInverterAffinity_UngroupedBehavesAsBefore(t *testing.T) {
+	bats := []batteryInfo{
+		{driver: "a", capacityWh: 15200, currentW: 0, soc: 0.5, online: true}, // no group
+		{driver: "b", capacityWh: 9600, currentW: 0, soc: 0.5, online: true},
+	}
+	// groupPV nil → "no locality info available" → fall back to
+	// capacity-proportional.
+	targets := distributeProportional(bats, 3000, nil)
+	got := map[string]float64{}
+	for _, t := range targets {
+		got[t.Driver] = t.TargetW
+	}
+	wantA := 3000 * 15200.0 / 24800.0 // ~1838
+	wantB := 3000 * 9600.0 / 24800.0  // ~1161
+	if math.Abs(got["a"]-wantA) > 1 {
+		t.Errorf("a = %f, want %f (proportional, no groups)", got["a"], wantA)
+	}
+	if math.Abs(got["b"]-wantB) > 1 {
+		t.Errorf("b = %f, want %f", got["b"], wantB)
+	}
+}
+
+// Discharge skips the locality math entirely — routing discharge to
+// a group with PV buys nothing (discharge energy goes on the AC bus
+// regardless of origin), and the simpler formula keeps behaviour
+// predictable for multi-battery sites running in self_consumption
+// during import peaks.
+func TestInverterAffinity_DischargeStillProportional(t *testing.T) {
+	bats := []batteryInfo{
+		{driver: "ferroamp", capacityWh: 15200, currentW: 0, soc: 0.5, online: true, group: "ferroamp"},
+		{driver: "sungrow", capacityWh: 9600, currentW: 0, soc: 0.5, online: true, group: "sungrow"},
+	}
+	// PV on ferroamp only — but it's night-time demand so we're discharging.
+	groupPV := map[string]float64{"ferroamp": 4000, "sungrow": 0}
+	targets := distributeProportional(bats, -2000, groupPV)
+	got := map[string]float64{}
+	for _, t := range targets {
+		got[t.Driver] = t.TargetW
+	}
+	wantFerro := -2000 * 15200.0 / 24800.0 // ~-1226
+	wantSun := -2000 * 9600.0 / 24800.0    // ~-774
+	if math.Abs(got["ferroamp"]-wantFerro) > 1 {
+		t.Errorf("ferroamp discharge = %f, want %f (proportional split on discharge)", got["ferroamp"], wantFerro)
+	}
+	if math.Abs(got["sungrow"]-wantSun) > 1 {
+		t.Errorf("sungrow discharge = %f, want %f", got["sungrow"], wantSun)
+	}
+}
+
+// End-to-end via ComputeDispatch: with InverterGroups wired on State
+// and PV telemetry per driver, the dispatcher computes groupPV from
+// live telemetry and routes charge preferentially. Guards against
+// wiring bugs between the per-driver PV reading, the State map, and
+// distributeProportional's input.
+func TestInverterAffinity_EndToEndViaComputeDispatch(t *testing.T) {
+	// Site exporting 3 kW surplus — PI will want to charge the fleet.
+	store := seedStore(-3000, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+		{"sungrow", 0, 0.5},
+	})
+	// All PV on Ferroamp's inverter; Sungrow's inverter has no PV right now.
+	store.Update("ferroamp", telemetry.DerPV, -3500, nil, nil)
+	store.DriverHealthMut("ferroamp").RecordSuccess()
+
+	st := NewState(0, 0, "ferroamp")
+	st.Mode = ModeSelfConsumption
+	st.SlewRateW = 100000 // unbounded so the formula is what we see
+	st.MinDispatchIntervalS = 0
+	st.InverterGroups = map[string]string{
+		"ferroamp": "ferroamp",
+		"sungrow":  "sungrow",
+	}
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200, "sungrow": 9600}), 11040)
+	got := map[string]float64{}
+	for _, t := range targets {
+		got[t.Driver] = t.TargetW
+	}
+	// Under plain proportional (no affinity) sungrow would receive
+	// ~39% of the charge command (≈600 W on a 1.5 kW correction).
+	// Under affinity sungrow gets ≈0 because ferroamp's local PV can
+	// absorb the whole correction DC-direct.
+	if got["sungrow"] > 200 {
+		t.Errorf("sungrow target = %f — affinity should keep cross-inverter charge near zero when ferroamp's PV covers the surplus", got["sungrow"])
+	}
+	if got["ferroamp"] <= 0 {
+		t.Errorf("ferroamp target = %f — should be charging since export + local PV = local routing opportunity", got["ferroamp"])
+	}
+}
+
+// Issue #167: planner_self has two discrete per-slot states — IDLE or
+// SELF_CONSUMPTION — both picked by the plan. The dispatch does not
+// second-guess the plan with live data. When the plan says idle, the
+// gate holds at 0 regardless of live grid direction or magnitude.
+// Forecast divergence is handled by the reactive replan trigger
+// (mpc/service.go), which re-runs the DP with fresh telemetry and
+// emits a new plan that may flip the slot to self-consumption.
+//
+// Pre-#167 this scenario (large live export during a plan-idle slot)
+// used to flip the gate off via a one-directional override. That was
+// dropped because the symmetric case (large live import) was not
+// handled and a mixed live/plan control surface made the mode's
+// mental model noisy. See issue #167.
+func TestPlannerSelfIdleGateHoldsEvenOnLargeLiveSurplus(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: 0, // plan wants idle
+		Strategy:        "self_consumption",
+	}
+	// Live: grid exporting 3 kW — pre-#167 this would have overridden
+	// the gate. Post-#167 the gate holds; a fresh replan is the fix.
+	store := seedStore(-3000, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	st := NewState(0, 0, "ferroamp")
+	st.Mode = ModePlannerSelf
+	st.UseEnergyDispatch = true
+	st.SlewRateW = 100000
+	st.MinDispatchIntervalS = 0
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) { return dir, true }
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	// Idle-gate holds → totalCorrection = -currentTotal. Battery at 0,
+	// stays at 0. Operator who wants coverage switches to manual
+	// self_consumption; replanner closes the loop automatically when
+	// forecast error accumulates past the reactive-replan threshold.
+	if math.Abs(targets[0].TargetW) > 1 {
+		t.Errorf("TargetW = %f — idle-gate must hold regardless of live grid; "+
+			"forecast divergence is the replan's job, not the dispatcher's", targets[0].TargetW)
+	}
+}
+
+// The idle gate holds on small live export (forecast and reality
+// roughly agree). Kept as a regression guard for the symmetric
+// property that the dispatch does not second-guess the plan.
+func TestPlannerSelfIdleGateHoldsWhenLiveSurplusUnderThreshold(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: 0,
+		Strategy:        "self_consumption",
+	}
+	// Live: grid exporting 500 W — below the 1 kW override threshold.
+	store := seedStore(-500, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	st := NewState(0, 0, "ferroamp")
+	st.Mode = ModePlannerSelf
+	st.UseEnergyDispatch = true
+	st.SlewRateW = 100000
+	st.MinDispatchIntervalS = 0
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) { return dir, true }
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	// Idle-gate held → totalCorrection = -currentTotal. Battery at 0 →
+	// desired 0, no charge command.
+	if math.Abs(targets[0].TargetW) > 1 {
+		t.Errorf("TargetW = %f — idle-gate should hold under small export; "+
+			"dispatch does not second-guess the plan, want ~0", targets[0].TargetW)
+	}
+}
+
+// Idle gate holds during import too — the dispatch does not
+// second-guess the plan regardless of live grid direction. Symmetric
+// to TestPlannerSelfIdleGateHoldsEvenOnLargeLiveSurplus: one invariant,
+// two sides. See issue #167.
+func TestPlannerSelfIdleGateHoldsDuringImport(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: 0,
+		Strategy:        "self_consumption",
+	}
+	// Live: grid importing 2 kW (load-dominated evening).
+	store := seedStore(2000, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	st := NewState(0, 0, "ferroamp")
+	st.Mode = ModePlannerSelf
+	st.UseEnergyDispatch = true
+	st.SlewRateW = 100000
+	st.MinDispatchIntervalS = 0
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) { return dir, true }
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	// Idle-gate holds; battery stays at 0 even though live grid is
+	// importing. If the forecast error is large enough, the reactive
+	// replan trigger in mpc/service.go will re-plan and potentially
+	// flip this slot to self_consumption.
+	if math.Abs(targets[0].TargetW) > 1 {
+		t.Errorf("TargetW = %f — idle-gate should hold during live import; "+
+			"dispatch does not second-guess the plan, want ~0", targets[0].TargetW)
+	}
+}
+
+// Codex P2 on PR #131: planner_cheap → planner_self → planner_cheap within
+// the same 15-minute slot must not let the energy path read stale
+// `slotDelivered` accumulated before the planner_self hop. If that leak
+// happens, the second cheap cycle computes `remainingWh` off the pre-hop
+// delivery number and over-commands battery for the rest of the slot.
+func TestPlannerSelfResetsEnergyBookkeepingOnEntry(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: 200,
+		Strategy:        "arbitrage",
+	}
+	store := seedStore(0, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 800, 0.5}, // mid-charge so cheap path accumulates delivery
+	})
+	st := NewState(0, 0, "ferroamp")
+	st.Mode = ModePlannerArbitrage
+	st.UseEnergyDispatch = true
+	st.SlewRateW = 100000
+	st.MinDispatchIntervalS = 0
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) { return dir, true }
+
+	// 1. Run arbitrage — primes state.currentDirective / slotDelivered / lastTickTs.
+	_ = ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if st.currentDirective.SlotStart.IsZero() {
+		t.Fatal("precondition: arbitrage cycle should have set currentDirective")
+	}
+
+	// 2. Operator flips to planner_self inside the same slot.
+	st.Mode = ModePlannerSelf
+	_ = ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+
+	// After planner_self runs the energy-path bookkeeping must be
+	// cleared so a future cheap/arbitrage cycle can't read stale state.
+	if !st.currentDirective.SlotStart.IsZero() {
+		t.Errorf("currentDirective.SlotStart = %v after planner_self, want zero", st.currentDirective.SlotStart)
+	}
+	if st.slotDelivered != 0 {
+		t.Errorf("slotDelivered = %f after planner_self, want 0", st.slotDelivered)
+	}
+	if !st.lastTickTs.IsZero() {
+		t.Errorf("lastTickTs = %v after planner_self, want zero", st.lastTickTs)
+	}
+
+	// 3. Flip back to arbitrage — the SlotStart-equality branch should
+	// no longer match, so the code takes the rollover-reset path
+	// cleanly rather than accumulating off a frozen baseline.
+	st.Mode = ModePlannerArbitrage
+	_ = ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	// The re-primed directive should equal the fresh one exactly (reset
+	// branch fires), which implies slotDelivered starts from 0 again.
+	if !st.currentDirective.SlotStart.Equal(dir.SlotStart) {
+		t.Errorf("arbitrage cycle after planner_self didn't re-prime directive; SlotStart=%v want %v",
+			st.currentDirective.SlotStart, dir.SlotStart)
 	}
 }

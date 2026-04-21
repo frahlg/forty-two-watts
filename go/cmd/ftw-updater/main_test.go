@@ -158,6 +158,96 @@ func TestHandleUpdate_UpFailure(t *testing.T) {
 	}
 }
 
+// Rollback flow: stop → docker cp per file → up. Issue #152.
+func TestHandleUpdate_RollbackRestoresFiles(t *testing.T) {
+	s, runner := newTestServer(t)
+
+	// Create a fake snapshot on disk at the sidecar's expected host
+	// path: <compose_dir>/data/snapshots/<id>/. The sidecar derives
+	// this from FTW_UPDATER_COMPOSE (s.composeFile in tests).
+	composeDir := filepath.Dir(s.composeFile)
+	snapID := "2026-04-20T10-00-00Z_0.30.0_to_0.31.0"
+	snapDir := filepath.Join(composeDir, "data", "snapshots", snapID)
+	if err := os.MkdirAll(snapDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{"state.db", "config.yaml"} {
+		if err := os.WriteFile(filepath.Join(snapDir, f), []byte("fake"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	body := `{"action":"rollback","snapshot":"` + snapID + `","files":["state.db","config.yaml"]}`
+	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(body))
+	rr := httptest.NewRecorder()
+	s.handleUpdate(rr, req)
+	if rr.Code != 202 {
+		t.Fatalf("rollback 202 expected, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	st := waitForState(t, s, "done")
+	if st.Action != "rollback" || st.Snapshot != snapID {
+		t.Errorf("state should track rollback + snapshot id: %+v", st)
+	}
+
+	calls := runner.snapshot()
+	// Expected sequence: compose stop → cp state.db → cp config.yaml → compose up.
+	if len(calls) != 4 {
+		t.Fatalf("want 4 docker calls, got %d: %v", len(calls), calls)
+	}
+	if !strings.Contains(strings.Join(calls[0], " "), "stop") {
+		t.Errorf("first call must be compose stop: %v", calls[0])
+	}
+	for i, f := range []string{"state.db", "config.yaml"} {
+		joined := strings.Join(calls[i+1], " ")
+		if !strings.HasPrefix(joined, "cp ") || !strings.Contains(joined, f) {
+			t.Errorf("call %d should be docker cp for %s: %v", i+1, f, calls[i+1])
+		}
+		if !strings.Contains(joined, snapID) {
+			t.Errorf("call %d should reference snapshot id %s: %v", i+1, snapID, calls[i+1])
+		}
+	}
+	up := strings.Join(calls[3], " ")
+	if !strings.Contains(up, "up -d") || !strings.Contains(up, "--force-recreate") {
+		t.Errorf("final call must be compose up -d --force-recreate: %v", calls[3])
+	}
+}
+
+// Rollback with a missing snapshot dir fails at stat, never stops the
+// main service. Safer than optimistically stopping then discovering no
+// files to restore.
+func TestHandleUpdate_RollbackMissingSnapshot(t *testing.T) {
+	s, runner := newTestServer(t)
+	body := `{"action":"rollback","snapshot":"nope","files":["state.db"]}`
+	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(body))
+	rr := httptest.NewRecorder()
+	s.handleUpdate(rr, req)
+	if rr.Code != 202 {
+		t.Fatalf("handler should 202 and fail async, got %d", rr.Code)
+	}
+	st := waitForState(t, s, "failed")
+	if !strings.Contains(st.Message, "snapshot not readable") {
+		t.Errorf("failure should mention missing snapshot: %+v", st)
+	}
+	if len(runner.snapshot()) != 0 {
+		t.Errorf("no docker calls should fire when snapshot is missing, got: %v", runner.snapshot())
+	}
+}
+
+// Rollback with dangerous snapshot ids is rejected at the handler level,
+// before any goroutine is spawned.
+func TestHandleUpdate_RollbackRejectsTraversal(t *testing.T) {
+	s, _ := newTestServer(t)
+	for _, evil := range []string{"", "..", "../foo", "a/b"} {
+		body := `{"action":"rollback","snapshot":"` + evil + `"}`
+		req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(body))
+		rr := httptest.NewRecorder()
+		s.handleUpdate(rr, req)
+		if rr.Code != 400 {
+			t.Errorf("snapshot %q: want 400, got %d", evil, rr.Code)
+		}
+	}
+}
+
 func TestHandleUpdate_RejectsBadAction(t *testing.T) {
 	s, _ := newTestServer(t)
 	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(`{"action":"rm -rf"}`))

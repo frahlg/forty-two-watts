@@ -86,6 +86,20 @@ The dashboard shows real-time power flow, battery SoC, energy totals, the planne
 
 Built-in MQTT autodiscovery. Enable it in Settings → Home Assistant, point it at your Mosquitto broker, and sensors + controls appear in HA automatically.
 
+## Notifications
+
+Get a push to your phone when something goes wrong at home. 42W can publish push notifications via [ntfy.sh](https://ntfy.sh) (or your own self-hosted ntfy server) on operator-configured events — today: a driver going offline and recovering.
+
+Open **Settings → Notifications**:
+
+1. Pick a topic name in the ntfy app (e.g. `forty-two-<something-random>`) and subscribe to it on your phone.
+2. Enable notifications in 42W, paste the same topic name, and (optionally) a bearer access token if you're using a self-hosted ntfy with auth.
+3. Toggle each event on, set its threshold (default 10 min — separate from the control-loop watchdog, which trips at 60 s for safety reasons), priority, and cooldown.
+4. Customize the title/body templates if you like — they're Go `text/template` strings with access to `{{.Device}}`, `{{.Make}}`, `{{.Serial}}`, `{{.Duration}}`, `{{.DurationS}}`, `{{.EventType}}`, `{{.Timestamp}}`. Leave blank to use the built-in defaults shown in the inputs.
+5. Hit **Send test notification** to verify end-to-end delivery before relying on it.
+
+Under the hood an event bus decouples the core control loop from notifications, and the transport is selected by a strategy-pattern provider registry — adding a new provider (Pushover, Slack, …) is a drop-in Go file. Config reference: `notifications:` block in [docs/configuration.md](docs/configuration.md).
+
 ## EV charging
 
 Configure your Easee charger in Settings → EV Charger (email + password). The driver polls the Easee Cloud API every 5 seconds. When the car charges, the dispatch clamp prevents home batteries from discharging into the car.

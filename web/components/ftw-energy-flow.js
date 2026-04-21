@@ -48,7 +48,7 @@
 //     ],
 //   });
 
-import { FtwElement } from "./ftw-element.js";
+import { FtwElement, ftwDebugDelay } from "./ftw-element.js";
 
 // World width is fixed at 1000; CX is always at the center of whatever
 // crop we render. The viewBox HEIGHT (and CY = H/2) are computed per
@@ -61,6 +61,12 @@ const CX = W / 2;
 // the floor for the dynamic computation so the diagram never shrinks
 // below the single-device size.
 const H_BASE = 580;
+
+// localStorage key for the last-seen max cluster size. Used during the
+// loading phase to reserve the final SVG height up front so the page
+// doesn't shift ~150 px when the first /api/status response arrives
+// on a multi-inverter setup.
+const EF_SIZING_CACHE_KEY = "ftw-ef-sizing-n";
 
 // Corner → anchor angle in screen coordinates (0°=east, 90°=south).
 // Fixed at exactly 45° so the whole diagram reads as a uniform X
@@ -78,6 +84,63 @@ const CORNER_PLACEHOLDER_TITLE = {
   "top-right":    "BATTERY",
   "bottom-right": "EV CHARGER",
   "bottom-left":  "GRID",
+};
+
+// Each corner's partner across the vertical centerline. When a corner
+// is populated but its partner is empty we collapse the populated
+// anchor to the shared top/bottom axis (top-center for the upper pair,
+// bottom-center for the lower pair) — turns a "PV + Grid only" setup
+// into a clean vertical line rather than a diagonal, and a "PV +
+// Battery + Grid" setup into a Y with Grid centered below the house.
+const PARTNER_CORNER = {
+  "top-left":     "top-right",
+  "top-right":    "top-left",
+  "bottom-left":  "bottom-right",
+  "bottom-right": "bottom-left",
+};
+// Axis angles the populated side collapses to when its partner is empty.
+const ANGLE_TOP_CENTER    = -Math.PI / 2;
+const ANGLE_BOTTOM_CENTER =  Math.PI / 2;
+
+// Role-native color used on placeholder bubbles during the loading
+// phase so the dashed rings + role icons read as colored from the
+// first paint instead of a gray "unknown" blob. Once real telemetry
+// lands, the per-driver color (set by next-app.js) overrides this.
+const CORNER_PLACEHOLDER_COLOR = {
+  "top-left":     "var(--amber)",
+  "top-right":    "var(--cyan)",
+  "bottom-right": "var(--green-e)",
+  "bottom-left":  "var(--red-e)",
+};
+const CORNER_PLACEHOLDER_ROLE = {
+  "top-left":     "pv",
+  "top-right":    "battery",
+  "bottom-right": "ev",
+  "bottom-left":  "grid",
+};
+
+// SVG icon per role, drawn at (0,0) in a ±10 unit box. The loading
+// state renders this instead of the kW/title/sub text block — stroke
+// and fill both use currentColor so the icon picks up the planet's
+// accent (we set `color: <hex>` on the parent group). Only visible
+// while the SVG carries the ef-loading / ef-fade-in class; the
+// steady-state render hides .ef-icon via CSS.
+const ROLE_ICON = {
+  pv: `<circle r="2.4" fill="currentColor"/>
+       <path d="M0 -10 V-6 M7 -7 L4.5 -4.5 M10 0 H6 M7 7 L4.5 4.5 M0 10 V6 M-7 7 L-4.5 4.5 M-10 0 H-6 M-7 -7 L-4.5 -4.5"
+             stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/>`,
+  battery: `<rect x="-7" y="-4.5" width="12" height="9" rx="1.5"
+                  stroke="currentColor" stroke-width="2" fill="none"/>
+            <rect x="5.5" y="-2" width="2.5" height="4" fill="currentColor" rx="0.6"/>
+            <rect x="-5" y="-2.5" width="5" height="5" fill="currentColor" opacity="0.7"/>`,
+  grid: `<path d="M-2 -9 L4 -1 L0.5 -1 L4 9 L-4 1 L-0.5 1 Z"
+               fill="currentColor" stroke="none"/>`,
+  ev: `<path d="M-3 -7 V-3 M3 -7 V-3 M-6 -3 H6 V1 A6 6 0 0 1 -6 1 Z"
+             stroke="currentColor" stroke-width="2" fill="none"
+             stroke-linejoin="round" stroke-linecap="round"/>
+       <path d="M0 2 V8" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round"/>`,
+  unknown: `<circle r="6" fill="none" stroke="currentColor" stroke-width="2"/>`,
 };
 
 class FtwEnergyFlow extends FtwElement {
@@ -103,7 +166,7 @@ class FtwEnergyFlow extends FtwElement {
     }
     .title {
       font-family: var(--mono);
-      font-size: 19px;
+      font-size: 16px;
       font-weight: 600;
       letter-spacing: 0.22em;
       text-transform: uppercase;
@@ -111,25 +174,23 @@ class FtwEnergyFlow extends FtwElement {
       text-align: center;
       padding: 2px 0;
       margin-top: 10px;
-      margin-bottom: 56px;
+      margin-bottom: 48px;
       position: relative;
     }
     svg {
       width: 100%;
-      height: calc(var(--efl-h-factor, 1) * 642px);
+      height: calc(var(--efl-h-factor, 1) * 535px);
       display: block;
     }
     /* SVG text classes — font-size values are in viewBox units (the SVG
        scales with container width via preserveAspectRatio), so at narrow
        viewports the default sizes render too small. Media queries below
-       bump them back into legible range on small screens. Desktop
-       defaults are +20% over the historic baseline so the hero reads
-       as the focal point it's meant to be on larger screens. */
-    .sv-node-title { font-family: var(--mono); font-size: 12px; font-weight: 500; letter-spacing: 0.08em; }
-    .sv-node-value { font-family: var(--mono); font-size: 24px; font-weight: 700; font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
-    .sv-node-sub   { font-family: var(--mono); font-size: 12px; letter-spacing: 0.04em; }
-    .sv-hub-value  { font-family: var(--mono); font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; }
-    .sv-hub-label  { font-family: var(--mono); font-size: 11px; letter-spacing: 0.1em; }
+       bump them back into legible range on small screens. */
+    .sv-node-title { font-family: var(--mono); font-size: 10px; font-weight: 500; letter-spacing: 0.08em; }
+    .sv-node-value { font-family: var(--mono); font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
+    .sv-node-sub   { font-family: var(--mono); font-size: 10px; letter-spacing: 0.04em; }
+    .sv-hub-value  { font-family: var(--mono); font-size: 18px; font-weight: 700; font-variant-numeric: tabular-nums; }
+    .sv-hub-label  { font-family: var(--mono); font-size: 9px; letter-spacing: 0.1em; }
     .ef-clickable { cursor: pointer; outline: none; }
     .ef-clickable:focus-visible > circle { stroke-width: 3; filter: drop-shadow(0 0 4px var(--accent, #6cf)); }
     /* One dash cycle advances by exactly (dash + gap). The fwd/rev pair
@@ -142,6 +203,174 @@ class FtwEnergyFlow extends FtwElement {
       transform-box: fill-box;
       transform-origin: center;
       animation: ef-spin 24s linear infinite;
+    }
+    /* Loading sequence — three phases gated by SVG classes that
+       render() sets:
+         1. ef-loading:  planets + sun scaled to 0.7 and rotating in
+                         place like the hub's dashed ring. Text hidden;
+                         a role icon shows instead.
+         2. ef-fade-in:  (first render after the first setReadings).
+                         Planets ease-in-out back up to 1.0 scale over
+                         500 ms; icons cross-fade to text in 150 ms,
+                         delayed until the grow finishes (500 ms →
+                         650 ms). animation-fill-mode on both keeps
+                         the final state sticky through the render.
+         3. (no class):  steady state — default static visuals, no
+                         animations, so the 2 s /api/status poll
+                         re-renders don't re-trigger any of this. */
+    .ef-icon { display: none; }
+    svg.ef-loading .ef-icon,
+    svg.ef-fade-in .ef-icon { display: block; }
+
+    svg.ef-loading .ef-node text,
+    svg.ef-loading .ef-hub text { display: none; }
+
+    /* Planet/hub shrink to 0.7 × while loading but do NOT spin
+       themselves — if the whole node spun, the role icon would tumble
+       with it. Only the dashed loading ring inside each node rotates,
+       which matches the existing hub .ring pattern. */
+    svg.ef-loading .ef-node,
+    svg.ef-loading .ef-hub {
+      transform-box: fill-box;
+      transform-origin: center;
+      transform: scale(0.7);
+    }
+
+    /* Per-planet dashed loading ring. Always in the DOM so the fade-in
+       render can target it; visibility gated to the loading state. Uses
+       the same ef-spin keyframe as the permanent .ring, but 8× faster
+       so it reads as an active spinner rather than the hub's ambient
+       decoration. During loading the hub's own .ring also accelerates
+       via the rule further down, keeping every spinning border in the
+       scene in sync. */
+    .ef-loading-ring { display: none; }
+    svg.ef-loading .ef-loading-ring {
+      display: block;
+      transform-box: fill-box;
+      transform-origin: center;
+      animation: ef-spin 3s linear infinite;
+    }
+    svg.ef-loading .ring { animation-duration: 3s; }
+
+    /* Aggregation toggle — sits centred at the bottom of the hero.
+       Bottom-centre rather than upper-right so the position is stable
+       across desktop and mobile (narrow viewports would have crowded
+       the top-right cluster against the hero's title). Only rendered
+       when the current readings have >1 planet in any corner, so
+       single-inverter setups never see the control. Amber track
+       (--accent-e) when ON per DESIGN.md: one accent, near-black
+       on-accent fill, 999 px radius, mono eyebrow label at 0.18 em. */
+    .ef-toggle {
+      position: absolute;
+      bottom: 14px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      background: none;
+      border: 0;
+      cursor: pointer;
+      z-index: 3;
+      font-family: var(--mono);
+      font-size: 10px;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      font-weight: 500;
+      color: var(--fg-muted);
+      padding: 4px 6px;
+      border-radius: 999px;
+      transition: color 200ms ease;
+    }
+    .ef-toggle:hover { color: var(--fg-dim); }
+    .ef-toggle:focus-visible {
+      outline: 1px solid var(--accent-e);
+      outline-offset: 2px;
+    }
+    .ef-toggle-track {
+      position: relative;
+      /* Sized so the 12 px thumb has exactly 2 px of track showing on
+         each side (2 + 12 + 12-travel + 2 = 28 H-total minus the 1 px
+         border per side). box-sizing: border-box so border math stays
+         inside the declared dimensions — otherwise the track ends up
+         18 px tall and the thumb floats visibly off-center. */
+      box-sizing: border-box;
+      width: 30px;
+      height: 18px;
+      background: var(--ink-sunken);
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      transition: background 220ms ease, border-color 220ms ease;
+      flex-shrink: 0;
+    }
+    .ef-toggle-track::before {
+      content: '';
+      position: absolute;
+      /* Positioned with explicit 2 px gaps on every side of the
+         padding box (= inside the 1 px border). Track is 30×18 with
+         border-box, so padding box is 28×16, and a 12 px thumb at
+         top:2 + height:12 leaves exactly 2 px gap top + 2 px gap
+         bottom. Uses explicit offsets instead of the translateY/50%
+         centering trick because the percentage resolution against a
+         border-box padding area introduced a 1 px sub-pixel drift
+         the user could see. */
+      top: 2px;
+      left: 2px;
+      width: 12px;
+      height: 12px;
+      border-radius: 999px;
+      background: var(--fg-muted);
+      transition: transform 220ms ease, background 220ms ease;
+    }
+    .ef-toggle[aria-checked="true"] { color: var(--fg); }
+    .ef-toggle[aria-checked="true"] .ef-toggle-track {
+      background: var(--accent-e);
+      border-color: var(--accent-e);
+    }
+    .ef-toggle[aria-checked="true"] .ef-toggle-track::before {
+      /* Travel = padding width (28) − left gap (2) − thumb (12) −
+         right gap (2) = 12 px, landing the thumb with the same 2 px
+         margin on the right that it had on the left in the OFF state. */
+      transform: translateX(12px);
+      background: #0a0a0a;
+    }
+
+    /* Layer fade — both aggregation modes live in the SVG at the same
+       time; data-agg on the SVG toggles which one is visible. 300 ms
+       ease gives a soft cross-fade; pointer-events follows opacity so
+       clicks don't hit the invisible layer. transition on opacity is
+       cheap and the invisible layer's particles keep running (RAF)
+       but at opacity 0 they're not painted. */
+    .ef-layer { transition: opacity 300ms ease; }
+    svg[data-agg="on"]  .ef-layer-agg { opacity: 1; }
+    svg[data-agg="on"]  .ef-layer-ind { opacity: 0; pointer-events: none; }
+    svg[data-agg="off"] .ef-layer-agg { opacity: 0; pointer-events: none; }
+    svg[data-agg="off"] .ef-layer-ind { opacity: 1; }
+
+    @keyframes ef-node-grow {
+      from { transform: scale(0.7); }
+      to   { transform: scale(1); }
+    }
+    @keyframes ef-fade-in-opacity {
+      from { opacity: 0; }
+      to   { opacity: 1; }
+    }
+    @keyframes ef-fade-out-opacity {
+      from { opacity: 1; }
+      to   { opacity: 0; }
+    }
+    svg.ef-fade-in .ef-node,
+    svg.ef-fade-in .ef-hub {
+      transform-box: fill-box;
+      transform-origin: center;
+      animation: ef-node-grow 500ms ease-in-out both;
+    }
+    svg.ef-fade-in .ef-node text,
+    svg.ef-fade-in .ef-hub text {
+      animation: ef-fade-in-opacity 150ms ease-out 500ms both;
+    }
+    svg.ef-fade-in .ef-icon {
+      animation: ef-fade-out-opacity 150ms ease-in 500ms both;
     }
     @media (max-width: 900px) {
       :host { padding: 20px 12px; }
@@ -168,6 +397,24 @@ class FtwEnergyFlow extends FtwElement {
     // Start with empty clusters; render shows placeholder slots until the
     // first setReadings() push arrives from next-app.js.
     this._readings = { load: 0, planets: [] };
+    // Flipped true on the first setReadings(); the SVG carries an
+    // `ef-loading` class until then, which a CSS keyframe uses to pulse
+    // every node + number while /api/status is still in flight. Matches
+    // the skeleton shimmer used by the history cards so the whole hero
+    // + card region reads as "waiting" on initial paint.
+    // `_everFaded` caps the loading→loaded fade-in to exactly ONE
+    // render. After that, the SVG renders without the fade class so
+    // the 2 s /api/status poll doesn't blink the hero each cycle.
+    this._loaded = false;
+    this._everFaded = false;
+    // Aggregation toggle — when true (default), corners that host
+    // multiple planets (dual PV inverters, dual batteries, …) render
+    // as a single summed bubble; when false, each planet draws in its
+    // own slot. The button is only shown when at least one corner
+    // actually has >1 planet. Persisted across renders; the fade is
+    // done in CSS by stacking both layers in the SVG and toggling
+    // their opacity via data-agg on the svg element.
+    this._aggregated = true;
     // JS-driven particle system — one rAF loop animates every "electron"
     // independently. Each particle has its own amp/phase/freq/speed plus
     // a low-frequency 2D noise term, so even at high particle counts
@@ -237,7 +484,88 @@ class FtwEnergyFlow extends FtwElement {
   setReadings(r) {
     if (r.load != null)         this._readings.load    = r.load;
     if (Array.isArray(r.planets)) this._readings.planets = r.planets;
+    // `?delay=N` (dev hook) holds the loading state for N ms after the
+    // first setReadings call so the shimmer + fade-in can be inspected.
+    // Subsequent calls (once loaded) apply immediately.
+    const delay = ftwDebugDelay();
+    if (!this._loaded && delay > 0) {
+      if (!this._loadTimer) {
+        this._loadTimer = setTimeout(() => {
+          this._loadTimer = null;
+          this._loaded = true;
+          this.update();
+        }, delay);
+      }
+      // Still re-render so the loading-state layout reflects the new
+      // planet list (e.g. cluster arcs shift if count changes).
+      this.update();
+      return;
+    }
+    this._loaded = true;
     this.update();
+  }
+
+  // SVG class for the three loading phases. Called exactly once per
+  // render(); the `_everFaded` flag flips the first time we exit
+  // loading so the fade-in animation plays once and never re-triggers
+  // on subsequent /api/status polls (every 2 s). After that, the SVG
+  // renders with no class and shows its steady state directly.
+  _svgClass() {
+    if (!this._loaded) return "ef-loading";
+    if (!this._everFaded) { this._everFaded = true; return "ef-fade-in"; }
+    return "";
+  }
+
+  // Build one aggregation layer — either the individual planets or the
+  // folded "combined" version. Both layouts use the SAME orbit + hub
+  // geometry (P), so a planet at corner X always sits on the same
+  // ring regardless of which layer is visible; only the cluster arc
+  // density differs. Pushes particle params into `this._particles`
+  // so afterRender() binds the <circle> DOM nodes back; each layer's
+  // particles live under a unique key so both layouts can animate
+  // independently when the toggle flips.
+  _buildLayer(layerGroups, P, layerClass, anchors) {
+    const placed = [];
+    for (const c of Object.keys(layerGroups)) {
+      const g = layerGroups[c];
+      if (g.length === 0) continue;
+      const pl = clusterArc(g.length, CX, P.cy, P.orbitR, anchors[c], P.baseR);
+      g.forEach((planet, i) => {
+        placed.push({ ...planet,
+          _pos: pl.positions[i], _r: pl.r, _groupSize: g.length });
+      });
+    }
+    const edges = placed.map(p => {
+      const kwAbs = Math.abs(p.kw);
+      return {
+        id: `${layerClass}:${p.id}`,
+        ...radialEndpoints(p._pos, p._r, P.hubR, p.toHub, CX, P.cy),
+        kw: kwAbs,
+        color: p.color,
+        active: !p.placeholder && kwAbs > 0.05,
+      };
+    });
+    const maxKw = Math.max(0.5, ...edges.map(e => e.kw));
+    const edgesSvg = edges.map(e => renderEdge(e, maxKw, this._particles)).join("");
+    const nodesSvg = placed.map(p =>
+      renderCircleNode({
+        pos: p._pos,
+        value: p.placeholder ? "—" : fmtKw(p.kw),
+        title: p.title,
+        nameLabel: p._groupSize > 1 && p.name ? p.name.toUpperCase() : null,
+        sub: p.sub,
+        color: p.color,
+        soc: p.placeholder ? null : p.soc,
+        radius: p._r,
+        clickable: !p.placeholder && !!p.role,
+        role: p.role || "",
+        name: p.name || "",
+        id: p.id,
+        aggregated: !!p.aggregated,
+      })
+    ).join("");
+    return `<g class="ef-layer ef-layer-${layerClass}">` +
+           `<g class="ef-edges">${edgesSvg}</g>${nodesSvg}</g>`;
   }
 
   // Override FtwElement.update so we can snapshot particle motion
@@ -278,6 +606,24 @@ class FtwEnergyFlow extends FtwElement {
     if (this._rafId) {
       cancelAnimationFrame(this._rafId);
       this._rafId = null;
+    }
+    // Aggregation toggle — flipping the aria-checked attribute and
+    // the svg's data-agg triggers the CSS opacity transition between
+    // layers. Intentionally NOT calling this.update() here: a full
+    // re-render would wipe the shadow DOM mid-fade and the transition
+    // would freeze. The two layers already both exist; we just flip
+    // which is visible.
+    const toggleBtn = this.shadowRoot.querySelector(".ef-toggle");
+    if (toggleBtn) {
+      toggleBtn.addEventListener("click", () => {
+        this._aggregated = !this._aggregated;
+        const svgEl = this.shadowRoot.querySelector("svg");
+        if (svgEl) svgEl.dataset.agg = this._aggregated ? "on" : "off";
+        toggleBtn.setAttribute("aria-checked", this._aggregated ? "true" : "false");
+        toggleBtn.setAttribute("title", this._aggregated
+          ? "Split multi-device corners into individual bubbles"
+          : "Combine multi-device corners into one bubble");
+      });
     }
     // Delegated click on the SVG — one listener per render covers every
     // planet group that opted in via data-role. The handler dispatches
@@ -408,16 +754,53 @@ class FtwEnergyFlow extends FtwElement {
     }
     for (const c of Object.keys(groups)) {
       if (groups[c].length === 0) {
+        // Placeholders fill empty corners during the initial loading
+        // phase so the X silhouette reads complete before /api/status
+        // returns (role-native color + spinning ring). Once loaded,
+        // an empty corner is a genuine absence — but the rules
+        // differ by role:
+        //   • Grid (bottom-left) — ALWAYS rendered even when absent.
+        //     A site without a reporting grid meter is a critical
+        //     telemetry gap, and a visible "no data" bubble is the
+        //     right signal to the operator.
+        //   • PV / Battery / EV — hardware is optional. Drawing a
+        //     "— / no data" bubble for a category the user didn't
+        //     configure would misrepresent absent hardware as
+        //     present-but-idle, so those corners render nothing.
+        if (this._loaded && c !== "bottom-left") continue;
         groups[c].push({
           id: `_placeholder-${c}`, corner: c,
           title: CORNER_PLACEHOLDER_TITLE[c], name: null,
+          role: CORNER_PLACEHOLDER_ROLE[c],
           kw: 0, toHub: true,
-          color: "var(--fg-muted)", sub: "no data", soc: null,
+          // Loaded-but-empty grid reads as muted ("broken") rather
+          // than role-colored; unloaded corners keep the lively
+          // role-native color so the skeleton doesn't look dead.
+          color: this._loaded ? "var(--fg-muted)" : CORNER_PLACEHOLDER_COLOR[c],
+          sub: "no data", soc: null,
           placeholder: true,
         });
       }
     }
     const maxN = Math.max(1, ...Object.values(groups).map(g => g.length));
+
+    // Sizing reservation. During the loading phase we only have
+    // placeholder clusters (n=1 each), but the SVG that follows once
+    // /api/status returns often has n=2 (dual-inverter setups) — and
+    // the factor delta is ~150 px, which shifts the whole page when
+    // the first reading lands. Reserve space for a "typical" loaded
+    // layout up front: prefer the last-known cluster size from
+    // localStorage (so repeat sessions paint at exactly the right
+    // height), fall back to 2-per-corner. Once loaded, the true maxN
+    // wins and we cache it for next time.
+    let sizingN = maxN;
+    if (!this._loaded) {
+      let cached = 0;
+      try { cached = +localStorage.getItem(EF_SIZING_CACHE_KEY) || 0; } catch (e) {}
+      sizingN = Math.max(2, cached);
+    } else {
+      try { localStorage.setItem(EF_SIZING_CACHE_KEY, String(maxN)); } catch (e) {}
+    }
 
     // -- Dynamic orbit + container sizing --------------------------------
     // For N>=3 the arc would either spill past 60° (clusterArc's maxSpan)
@@ -427,8 +810,8 @@ class FtwEnergyFlow extends FtwElement {
     const gap = 16;
     const maxSpan = Math.PI / 3;
     let orbitR = tier.orbitR;
-    if (maxN >= 3) {
-      const step = maxSpan / (maxN - 1);
+    if (sizingN >= 3) {
+      const step = maxSpan / (sizingN - 1);
       const required = (2 * tier.baseR + gap) / (2 * Math.sin(step / 2));
       orbitR = Math.max(orbitR, Math.ceil(required));
     }
@@ -437,16 +820,35 @@ class FtwEnergyFlow extends FtwElement {
     // formula clusterArc uses), so we know how far the outermost arc
     // position lies from the corner anchor.
     const naturalStep = 2 * Math.asin(Math.min(1, (2 * tier.baseR + gap) / (2 * orbitR)));
-    const stepActual = maxN <= 1 ? 0 : Math.min(naturalStep, maxSpan / (maxN - 1));
-    const halfSpan = ((maxN - 1) * stepActual) / 2;
+    const stepActual = sizingN <= 1 ? 0 : Math.min(naturalStep, maxSpan / (sizingN - 1));
+    const halfSpan = ((sizingN - 1) * stepActual) / 2;
 
-    // Worst-case x/y offsets from CX/CY across all four corners (each
-    // anchor ± halfSpan). Whichever planet sits closest to the
-    // top/bottom/left/right of the world drives the container size.
+    // Effective anchor per corner. A corner collapses to the shared
+    // top/bottom axis when it's populated and its partner is empty —
+    // turns "PV only" into PV-at-top-center and "Grid only" into
+    // Grid-at-bottom-center so the silhouette stays symmetric.
+    const effAnchor = {};
+    const populated = [];
+    for (const c of Object.keys(CORNER_ANGLE)) {
+      const partner = PARTNER_CORNER[c];
+      const mine = groups[c] && groups[c].length > 0;
+      const partnerEmpty = !groups[partner] || groups[partner].length === 0;
+      if (mine && partnerEmpty) {
+        effAnchor[c] = (c === "top-left" || c === "top-right")
+          ? ANGLE_TOP_CENTER : ANGLE_BOTTOM_CENTER;
+      } else {
+        effAnchor[c] = CORNER_ANGLE[c];
+      }
+      if (mine) populated.push(c);
+    }
+
+    // Worst-case x/y offsets from CX/CY, measured only across the
+    // corners we actually render. Empty corners contribute nothing —
+    // a PV-only setup doesn't need to reserve battery/EV space.
     const margin = 12;
-    const corners = Object.values(CORNER_ANGLE);
     let maxYOff = 0, maxXOff = 0;
-    for (const a0 of corners) {
+    for (const c of populated) {
+      const a0 = effAnchor[c];
       for (const da of [-halfSpan, +halfSpan]) {
         const ay = Math.abs(orbitR * Math.sin(a0 + da));
         const ax = Math.abs(orbitR * Math.cos(a0 + da));
@@ -479,63 +881,33 @@ class FtwEnergyFlow extends FtwElement {
     };
     // -- /Dynamic sizing -------------------------------------------------
 
-    // Per-corner arc placement. Every corner uses the same orbitR so
-    // beams are identical-length radial lines.
-    const placed = [];
-    for (const c of Object.keys(groups)) {
-      const g = groups[c];
-      const pl = clusterArc(g.length, CX, P.cy, P.orbitR, CORNER_ANGLE[c], P.baseR);
-      g.forEach((planet, i) => {
-        placed.push({ ...planet,
-          _pos: pl.positions[i], _r: pl.r, _groupSize: g.length });
-      });
-    }
-
-    // Build edges. Each planet owns one radial beam; `toHub` decides
-    // particle direction (house-inward vs house-outward).
-    const edges = placed.map(p => {
-      const kwAbs = Math.abs(p.kw);
-      return {
-        id: p.id,
-        ...radialEndpoints(p._pos, p._r, P.hubR, p.toHub, CX, P.cy),
-        kw: kwAbs,
-        color: p.color,
-        active: !p.placeholder && kwAbs > 0.05,
-      };
-    });
-
-    const maxKw = Math.max(0.5, ...edges.map(e => e.kw));
-    // Stash the particle-param list on the instance so afterRender()
-    // can pick it up once the shadow DOM is in place. Re-assigning
-    // here (instead of pushing) ensures a re-render starts from a
-    // clean slate — no stale particles from the previous frame.
+    // Two layouts live in the SVG simultaneously so the
+    // aggregated↔individual toggle is a pure CSS cross-fade instead
+    // of a shadow-DOM re-render (which would wipe the transition).
+    // `groups` above is the individual layout (one entry per planet);
+    // `aggGroups` folds multi-planet corners into a single synthesized
+    // bubble. The aggregated bubble's id is stable (`agg-<corner>`) so
+    // particles keep state across /api/status polls.
     this._particles = [];
-    const edgesSvg = edges.map(e => renderEdge(e, maxKw, this._particles)).join("");
+    const hasMultipleType = hasMultipleOfAnyType(this._readings.planets);
+    const aggGroups = aggregateGroups(groups);
+    const indLayerSvg = this._buildLayer(groups, P, "ind", effAnchor);
+    const aggLayerSvg = this._buildLayer(aggGroups, P, "agg", effAnchor);
 
-    // Nodes. The driver name only appears (as a second title line) when
-    // >1 planet shares the corner — keeps single-device rigs clean.
-    // Clickable planets are tagged with data-* attrs picked up by the
-    // delegated SVG click listener wired in afterRender().
-    const nodesSvg = placed.map(p =>
-      renderCircleNode({
-        pos: p._pos,
-        value: p.placeholder ? "—" : fmtKw(p.kw),
-        title: p.title,
-        nameLabel: p._groupSize > 1 && p.name ? p.name.toUpperCase() : null,
-        sub: p.sub,
-        color: p.color,
-        soc: p.placeholder ? null : p.soc,
-        radius: p._r,
-        clickable: !p.placeholder && !!p.role,
-        role: p.role || "",
-        name: p.name || "",
-        id: p.id,
-      })
-    ).join("");
+    const aggAttr = this._aggregated ? "on" : "off";
 
     return `
       <div class="title">Energy balance</div>
-      <svg viewBox="${P.vbX} 0 ${P.vbW} ${P.H}" preserveAspectRatio="xMidYMid meet" aria-hidden="true">
+      ${hasMultipleType ? `
+        <button class="ef-toggle" type="button" role="switch"
+                aria-checked="${this._aggregated ? "true" : "false"}"
+                aria-label="Combine multiple inverters into one bubble"
+                title="${this._aggregated ? "Split multi-device corners into individual bubbles" : "Combine multi-device corners into one bubble"}">
+          <span class="ef-toggle-label">Combined</span>
+          <span class="ef-toggle-track"></span>
+        </button>
+      ` : ""}
+      <svg class="${this._svgClass()}" data-agg="${aggAttr}" viewBox="${P.vbX} 0 ${P.vbW} ${P.H}" preserveAspectRatio="xMidYMid meet" aria-hidden="true">
         <defs>
           <radialGradient id="ef-hub" cx="50%" cy="50%" r="50%">
             <stop offset="0%" stop-color="oklch(0.85 0.18 var(--accent-hue))" stop-opacity="0.55"/>
@@ -558,10 +930,14 @@ class FtwEnergyFlow extends FtwElement {
 
         <circle cx="${CX}" cy="${P.cy}" r="200" fill="url(#ef-hub)"/>
 
-        ${edgesSvg}
+        ${aggLayerSvg}
+        ${indLayerSvg}
 
-        <!-- HOUSE / hub: load reading lives here -->
-        <g>
+        <!-- HOUSE / hub: load reading lives here. Kept outside both
+             aggregation layers because the hub value (instantaneous
+             house load) is identical in both views, so there's no
+             reason to duplicate it. -->
+        <g class="ef-hub">
           <circle cx="${CX}" cy="${P.cy}" r="${P.hubR}"
                   fill="var(--hero-house-fill)"
                   stroke="var(--hero-house-stroke)" stroke-width="1.5"/>
@@ -584,8 +960,6 @@ class FtwEnergyFlow extends FtwElement {
             CONSUMING
           </text>
         </g>
-
-        ${nodesSvg}
       </svg>
     `;
   }
@@ -817,11 +1191,18 @@ function hashStr(s) {
 // accent color so each node carries its identity on the edge of the
 // circle — no separate stripe needed the way rectangular boxes have.
 function renderCircleNode({ pos, title, nameLabel, value, sub, color, soc, radius = 86,
-                            clickable = false, role = "", name = "", id = "" }) {
+                            clickable = false, role = "", name = "", id = "",
+                            aggregated = false }) {
   const r = radius;
   const { x, y } = pos;
+  // Clickable planets must advertise themselves to assistive tech:
+  // role=button so screen readers announce "button", and aria-label
+  // derived from the visible title/name so the announcement names
+  // what activating this node will open.
+  const nodeLabel = [title, nameLabel].filter(Boolean).join(" ");
+  const ariaLabel = nodeLabel ? `Open ${nodeLabel}` : "Open node";
   const groupAttrs = clickable
-    ? ` class="ef-node ef-clickable" data-role="${escapeXml(role)}" data-name="${escapeXml(name)}" data-id="${escapeXml(id)}" tabindex="0"`
+    ? ` class="ef-node ef-clickable" data-role="${escapeXml(role)}" data-name="${escapeXml(name)}" data-id="${escapeXml(id)}" tabindex="0" role="button" aria-label="${escapeXml(ariaLabel)}"`
     : ` class="ef-node"`;
   // When a per-device name suffix is present, the title becomes two
   // stacked lines ("SOLAR" / "SUNGROW"). That preserves more horizontal
@@ -841,14 +1222,30 @@ function renderCircleNode({ pos, title, nameLabel, value, sub, color, soc, radiu
              fill="var(--hero-label-text)" class="sv-node-title">
          ${escapeXml(title)}
        </text>`;
+  // Label reads "Avg SoC" when the value is a cross-battery mean from
+  // the aggregation layer, "SoC" for a single-battery reading.
+  // Honest about provenance — a 72 % on the aggregated bubble is not
+  // the same fact as a 72 % on one inverter.
+  const socLabel = aggregated ? "Avg SoC" : "SoC";
   const socText = soc != null
     ? `<text x="${x}" y="${y + socY}" text-anchor="middle"
-             fill="var(--cyan)" class="sv-node-sub">SoC ${Math.round(soc)}%</text>`
+             fill="var(--cyan)" class="sv-node-sub">${socLabel} ${Math.round(soc)}%</text>`
     : "";
+  // Icon swapped in during the loading + fade-in phases. Scale chosen
+  // so a full-size planet (r ≈ 86) hosts a ~30 px icon — readable at
+  // the overview zoom without competing with the text once it fades
+  // in. `color: ${color}` on the group feeds currentColor into every
+  // stroke/fill in the icon SVG.
+  const iconSvg = ROLE_ICON[role] || ROLE_ICON.unknown;
+  const iconScale = r * 0.45 / 10;
   return `
-    <g${groupAttrs}>
+    <g${groupAttrs} style="color:${color}">
       <circle cx="${x}" cy="${y}" r="${r}"
               fill="var(--hero-box-fill)" stroke="${color}" stroke-width="2"/>
+      <circle class="ef-loading-ring" cx="${x}" cy="${y}" r="${r - 6}"
+              fill="none" stroke="${color}" stroke-width="1"
+              stroke-dasharray="2 4"/>
+      <g class="ef-icon" transform="translate(${x} ${y}) scale(${iconScale})">${iconSvg}</g>
       ${titleSvg}
       <text x="${x}" y="${y + valueY}" text-anchor="middle" fill="${color}" class="sv-node-value">
         ${value}
@@ -868,6 +1265,73 @@ function fmtKw(kw) {
   if (abs < 0.1) return "0 W";
   if (abs < 1)   return `${Math.round(kw * 1000)} W`;
   return `${kw.toFixed(2)} kW`;
+}
+
+// Collapse multi-planet corners into a single synthesized "combined"
+// bubble. Single-planet corners (typical for grid + ev) pass through
+// unchanged so toggling between aggregated and individual only moves
+// bubbles that actually have siblings to fold. The folded bubble gets
+// a stable id (`agg-<corner>`) so particle state can persist across
+// /api/status polls the same way it does for individual planets.
+function aggregateGroups(groups) {
+  const out = {};
+  for (const [corner, group] of Object.entries(groups)) {
+    if (group.length <= 1) { out[corner] = group.slice(); continue; }
+    // First planet's identity drives color + role + title; the kW is
+    // summed so the combined beam reflects the quadrant's total flow,
+    // and toHub is only true if every underlying planet agrees (mixed
+    // directions keep the beam pointing outward, which matches the
+    // "net discharge" case for batteries split between charge and
+    // discharge — rare, but correct).
+    const first = group[0];
+    const totalKw = group.reduce((s, p) => s + (p.kw || 0), 0);
+    const absKw = Math.abs(totalKw);
+    const toHub = group.every(p => p.toHub) ||
+                  (!group.some(p => p.toHub) ? false : (totalKw >= 0));
+    let sub = first.sub || "";
+    if (first.role === "battery") {
+      sub = absKw < 0.05 ? "idle" : (totalKw >= 0 ? "charging" : "discharging");
+    } else if (first.role === "pv") {
+      sub = absKw < 0.05 ? "idle" : "generating";
+    } else if (first.role === "ev") {
+      sub = absKw < 0.05 ? "idle" : "charging";
+    }
+    // SoC: simple mean across reporters. Real weighting needs per-
+    // battery capacity, which the component doesn't have here — the
+    // unweighted mean is close enough for the ambient display; the
+    // detailed per-battery SoC lives in the individual view.
+    const socs = group.map(p => p.soc).filter(s => s != null);
+    const soc = socs.length ? socs.reduce((a, b) => a + b, 0) / socs.length : null;
+    out[corner] = [{
+      id: `agg-${corner}`,
+      corner,
+      title: first.title,
+      role: first.role,
+      kw: totalKw,
+      toHub,
+      color: absKw < 0.05 ? "var(--fg-muted)" : first.color,
+      sub,
+      soc,
+      name: `${group.length}×`,
+      aggregated: true,
+    }];
+  }
+  return out;
+}
+
+// The aggregation toggle is only shown when at least one role has
+// more than one planet — single-inverter setups never see the
+// control. Counts per role (pv/battery/grid/ev); returns true the
+// first time any count clears 2.
+function hasMultipleOfAnyType(planets) {
+  const counts = {};
+  for (const p of planets) {
+    if (!p || p.placeholder) continue;
+    const r = p.role || "";
+    counts[r] = (counts[r] || 0) + 1;
+    if (counts[r] > 1) return true;
+  }
+  return false;
 }
 function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
 function escapeXml(s) {

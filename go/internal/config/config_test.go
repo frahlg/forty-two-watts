@@ -403,3 +403,91 @@ func TestUnresolveDriverPathsRoundtrip(t *testing.T) {
 		}
 	}
 }
+
+func TestNotificationsDefaults(t *testing.T) {
+	c := &Config{Notifications: &Notifications{Enabled: false}}
+	applyDefaults(c)
+	if c.Notifications.Provider != "ntfy" {
+		t.Errorf("provider default: got %q", c.Notifications.Provider)
+	}
+	if c.Notifications.Ntfy == nil || c.Notifications.Ntfy.Server != "https://ntfy.sh" {
+		t.Errorf("ntfy.server default: got %+v", c.Notifications.Ntfy)
+	}
+	if c.Notifications.DefaultPriority != 3 {
+		t.Errorf("default_priority default: got %d", c.Notifications.DefaultPriority)
+	}
+}
+
+func TestNotificationsValidateRejectsEmptyTopic(t *testing.T) {
+	c := &Config{
+		Site:          Site{SmoothingAlpha: 0.3},
+		Fuse:          Fuse{MaxAmps: 16},
+		Notifications: &Notifications{Enabled: true, Provider: "ntfy", Ntfy: &NtfyConfig{Server: "https://ntfy.sh", Topic: ""}},
+	}
+	if err := c.Validate(); err == nil {
+		t.Error("expected error for empty topic")
+	}
+}
+
+func TestNotificationsValidateRejectsBadPriority(t *testing.T) {
+	c := &Config{
+		Site:          Site{SmoothingAlpha: 0.3},
+		Fuse:          Fuse{MaxAmps: 16},
+		Notifications: &Notifications{Enabled: false, DefaultPriority: 9},
+	}
+	if err := c.Validate(); err == nil {
+		t.Error("expected error for default_priority=9")
+	}
+}
+
+func TestNotificationsDisabledPartialPasses(t *testing.T) {
+	c := &Config{
+		Site:          Site{SmoothingAlpha: 0.3},
+		Fuse:          Fuse{MaxAmps: 16},
+		Notifications: &Notifications{Enabled: false, Ntfy: &NtfyConfig{Topic: ""}},
+	}
+	applyDefaults(c)
+	if err := c.Validate(); err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestNotificationsValidateRejectsUnknownProvider(t *testing.T) {
+	c := &Config{
+		Site:          Site{SmoothingAlpha: 0.3},
+		Fuse:          Fuse{MaxAmps: 16},
+		Notifications: &Notifications{Enabled: true, Provider: "slack"},
+	}
+	if err := c.Validate(); err == nil {
+		t.Error("expected error for unknown provider")
+	}
+}
+
+func TestNotificationsMaskSecrets(t *testing.T) {
+	c := Config{Notifications: &Notifications{
+		Provider: "ntfy",
+		Ntfy:     &NtfyConfig{AccessToken: "tk_secret", Password: "pw_secret", Username: "u"},
+	}}
+	m := c.MaskSecrets()
+	if m.Notifications.Ntfy.AccessToken != "" || m.Notifications.Ntfy.Password != "" {
+		t.Errorf("secrets not blanked: %+v", m.Notifications.Ntfy)
+	}
+	if m.Notifications.Ntfy.Username != "u" {
+		t.Errorf("username got blanked")
+	}
+	if c.Notifications.Ntfy.AccessToken != "tk_secret" {
+		t.Errorf("original mutated")
+	}
+}
+
+func TestNotificationsPreserveMaskedSecrets(t *testing.T) {
+	existing := &Config{Notifications: &Notifications{Provider: "ntfy", Ntfy: &NtfyConfig{AccessToken: "real_tok", Password: "real_pw"}}}
+	incoming := &Config{Notifications: &Notifications{Provider: "ntfy", Ntfy: &NtfyConfig{}}}
+	incoming.PreserveMaskedSecrets(existing)
+	if incoming.Notifications.Ntfy.AccessToken != "real_tok" {
+		t.Errorf("token not restored: %q", incoming.Notifications.Ntfy.AccessToken)
+	}
+	if incoming.Notifications.Ntfy.Password != "real_pw" {
+		t.Errorf("password not restored")
+	}
+}

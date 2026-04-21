@@ -278,6 +278,18 @@ function driver_poll()
     host.emit_metric("battery_dc_v", bat_v)
     host.emit_metric("battery_dc_a", bat_a)
 
+    -- EMS state diagnostics — what the inverter *actually* has latched
+    -- in its control registers right now. With the #164 write-order fix
+    -- these should track whatever the dispatcher sent last tick; any
+    -- drift between target and ems_force_w points at external writers
+    -- (iSolarCloud, HA integration, another EMS) racing the driver.
+    local ok_emsd, emsd = pcall(host.modbus_read, 13049, 3, "holding")
+    if ok_emsd and emsd then
+        host.emit_metric("sungrow_ems_mode",  emsd[1]) -- 0=self, 2=forced, 3=ext
+        host.emit_metric("sungrow_force_cmd", emsd[2]) -- 0xAA=170 chg, 0xBB=187 dis, 0xCC=204 stop
+        host.emit_metric("sungrow_force_w",   emsd[3])
+    end
+
     -- Grid meter power: 5600-5601, I32 LE, watts (positive=import, negative=export)
     local ok_mw, mw_regs = pcall(host.modbus_read, 5600, 2, "input")
     local meter_w = 0
@@ -378,30 +390,56 @@ end
 -- power_w > 0: charge at power_w watts
 -- power_w < 0: discharge at |power_w| watts
 -- power_w = 0: return to self-consumption
+-- Write order matters. SH-series ignores the force_cmd (13050) and
+-- force_power (13051) registers while EMS mode (13049) is still 0
+-- (self-consumption). Writing power + cmd FIRST and mode LAST means
+-- the cmd/power writes land in self-consumption mode and get buffered-
+-- and-discarded or implicitly reset by the mode transition; the
+-- inverter ends up in mode=2 with no forced command and the battery
+-- sits idle despite a non-zero target. Reference implementations
+-- (mkaiser/Sungrow-SHx Home Assistant, openWB) write mode → cmd →
+-- power for exactly this reason. Issue #164.
 function set_battery_power(power_w)
+    local want_cmd, watts
     if power_w > 0 then
-        local watts = math.floor(math.min(power_w, 5000))
-        host.modbus_write(13051, watts)   -- set power limit
-        host.modbus_write(13050, 0xAA)    -- force charge command
-        host.modbus_write(13049, 2)       -- forced mode
-        host.log("debug", "Sungrow: force charge " .. tostring(watts) .. "W")
+        watts    = math.floor(math.min(power_w, 5000))
+        want_cmd = 0xAA -- force charge
     elseif power_w < 0 then
-        local watts = math.floor(math.min(math.abs(power_w), 5000))
-        host.modbus_write(13051, watts)   -- set power limit
-        host.modbus_write(13050, 0xBB)    -- force discharge command
-        host.modbus_write(13049, 2)       -- forced mode
-        host.log("debug", "Sungrow: force discharge " .. tostring(watts) .. "W")
+        watts    = math.floor(math.min(math.abs(power_w), 5000))
+        want_cmd = 0xBB -- force discharge
     else
         return set_self_consumption()
     end
 
-    -- Verify the command was accepted
+    -- Order: mode first (so the inverter is ready to latch cmd/power),
+    -- then cmd (which register is honoured), then power setpoint.
+    host.modbus_write(13049, 2)         -- 1. forced mode
+    host.modbus_write(13050, want_cmd)  -- 2. force charge/discharge cmd
+    host.modbus_write(13051, watts)     -- 3. power setpoint
+    host.log("debug", string.format("Sungrow: force %s %dW",
+        want_cmd == 0xAA and "charge" or "discharge", watts))
+
+    -- Verify all three latched. Previous version only checked mode and
+    -- logged success on mode=2 even when cmd was still 0 → the exact
+    -- class of silent failure #164 describes. Emit mismatches as WARN
+    -- so operators see the drift in logs without spamming on ok cases.
     local ok, ems = pcall(host.modbus_read, 13049, 3, "holding")
-    if ok and ems then
-        if ems[1] ~= 2 then
-            host.log("warn", "Sungrow: EMS mode not set to forced (got " .. tostring(ems[1]) .. ")")
-            return false
-        end
+    if not ok or not ems then
+        return true -- transient read failure; assume writes are good
+    end
+    if ems[1] ~= 2 then
+        host.log("warn", "Sungrow: EMS mode not latched (got " .. tostring(ems[1]) .. " want 2)")
+        return false
+    end
+    if ems[2] ~= want_cmd then
+        host.log("warn", string.format("Sungrow: force_cmd not latched (got 0x%02x want 0x%02x)",
+            ems[2], want_cmd))
+        return false
+    end
+    if math.abs(ems[3] - watts) > 1 then -- 1W rounding tolerance
+        host.log("warn", string.format("Sungrow: force_power not latched (got %dW want %dW)",
+            ems[3], watts))
+        return false
     end
     return true
 end

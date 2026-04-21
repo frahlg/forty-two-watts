@@ -69,9 +69,25 @@ type SlotDirective struct {
 // stale-plan branch.
 type SlotDirectiveFunc func(now time.Time) (SlotDirective, bool)
 
-// MaxCommandW is the hard per-command power cap (±5 kW). Used by both
-// clampWithSoC (distribution) and the post-slew re-clamp.
+// MaxCommandW is the default per-command power cap (±5 kW), applied when
+// a driver has no per-battery override. A deliberate floor-to-conservative
+// pick for v0.2x: safer than guessing a driver's headroom wrong. Override
+// on a per-driver basis via `config.Driver.max_charge_w` /
+// `max_discharge_w` (see PowerLimits + State.DriverLimits, issue #145).
 const MaxCommandW = 5000
+
+// PowerLimits holds the per-driver charge/discharge ceiling. Zero on
+// either field means "use the global MaxCommandW default" — the value
+// an unset config key carries through the YAML → Driver struct →
+// dispatch map pipeline. A non-zero value overrides the default at
+// every clamp point (clampWithSoC and the post-slew re-clamp).
+//
+// A per-driver cap higher than the site fuse doesn't buy extra throughput:
+// the fuse-guard still scales at the site boundary (#145 safety invariant).
+type PowerLimits struct {
+	MaxChargeW    float64
+	MaxDischargeW float64
+}
 
 // DispatchTarget is one command to issue to a single battery driver.
 // `TargetW` is in site sign convention:
@@ -100,6 +116,16 @@ type State struct {
 	PeakLimitW float64
 	// EV charging signal — batteries won't try to cover this much of import
 	EVChargingW float64
+	// BatteryCoversEV overrides the default EV-exclusion behaviour. When
+	// false (default), EVChargingW is subtracted from the meter reading
+	// before the PI runs so batteries don't shuffle energy through the
+	// inverter to feed the EV on a normal day. When true, the subtraction
+	// is skipped and the battery is free to discharge into the EV up to
+	// its own SoC / power / fuse clamps — useful in price-arbitrage
+	// situations where the operator wants to drain the battery now and
+	// refill it later from cheap solar. Persisted in state.db via
+	// "battery_covers_ev"; toggled from HA and POST /api/battery_covers_ev.
+	BatteryCoversEV bool
 
 	// PI controller (outer, site-level)
 	PI *PIController
@@ -144,6 +170,24 @@ type State struct {
 	// PlanStale tracks whether the last cycle fell back to self_consumption
 	// because the plan was missing. Surfaced via the API for the UI.
 	PlanStale bool
+
+	// InverterGroups maps driver name → inverter-group tag (e.g.
+	// "ferroamp", "sungrow"). Drivers sharing a tag are assumed to
+	// share a single inverter unit: their PV readings feed DC-direct
+	// into the same-group battery. During charging, `distributeProportional`
+	// prefers routing the total first to batteries whose group also
+	// has live PV output, so a kWh doesn't cross inverters through
+	// the AC bus (DC→AC→AC→DC ≈ 3-4 pp loss vs DC-local). Nil or empty
+	// preserves the capacity-proportional default. Issue #143.
+	InverterGroups map[string]string
+
+	// DriverLimits maps driver name → per-battery charge/discharge cap.
+	// Missing entries (or zero fields) fall through to the global
+	// MaxCommandW default. Consulted in every clamp step — per-battery
+	// clampWithSoC, post-slew re-clamp, and fuse-guard's reference to
+	// total headroom. Hot-swappable via the config-reload watcher.
+	// Issue #145.
+	DriverLimits map[string]PowerLimits
 }
 
 // NewState creates default control state (port of Rust ControlState::new).
@@ -175,11 +219,34 @@ func (s *State) SetGridTarget(w float64) {
 
 // batteryInfo is internal state read from telemetry per dispatch cycle.
 type batteryInfo struct {
-	driver     string
-	capacityWh float64
-	currentW   float64
-	soc        float64
-	online     bool
+	driver        string
+	capacityWh    float64
+	currentW      float64
+	soc           float64
+	online        bool
+	group         string  // inverter-affinity tag; empty = untagged (#143)
+	maxChargeW    float64 // per-driver cap; 0 = use MaxCommandW default (#145)
+	maxDischargeW float64 // per-driver cap; 0 = use MaxCommandW default (#145)
+}
+
+// chargeCap returns the effective per-battery charge ceiling, falling
+// back to MaxCommandW when the driver didn't set an explicit limit.
+// Kept a method so every clamp point queries the same fallback rule.
+func (b batteryInfo) chargeCap() float64 {
+	if b.maxChargeW > 0 {
+		return b.maxChargeW
+	}
+	return MaxCommandW
+}
+
+// dischargeCap is the symmetric version of chargeCap for discharge
+// targets. Returned as a positive magnitude; callers apply the minus
+// sign at the comparison site.
+func (b batteryInfo) dischargeCap() float64 {
+	if b.maxDischargeW > 0 {
+		return b.maxDischargeW
+	}
+	return MaxCommandW
 }
 
 // ComputeDispatch runs one cycle of the control loop and returns the targets
@@ -233,6 +300,17 @@ func ComputeDispatch(
 	case state.Mode == ModePlannerSelf:
 		effectiveMode = ModeSelfConsumption
 		state.SetGridTarget(0)
+		// Reset the energy-allocation bookkeeping so a future switch to
+		// planner_cheap / planner_arbitrage within the same 15-minute
+		// slot can't read stale `slotDelivered` accumulated before the
+		// operator hopped through planner_self. Without this reset, the
+		// `SlotStart` comparison in the energy path would match (still
+		// the same clock-aligned slot) and skip its own rollover reset
+		// — reading the pre-hop delivered-Wh number and over-commanding
+		// charge/discharge for the rest of the slot. Codex P2 on PR #131.
+		state.currentDirective = SlotDirective{}
+		state.slotDelivered = 0
+		state.lastTickTs = time.Time{}
 		planFresh := false
 		if state.SlotDirective != nil {
 			if dir, ok := state.SlotDirective(time.Now()); ok {
@@ -293,7 +371,7 @@ func ComputeDispatch(
 		state.LastTargets = nil
 		return nil
 	case ModeCharge:
-		targets := chargeAll(store, driverCapacities)
+		targets := chargeAll(store, driverCapacities, state.DriverLimits)
 		state.LastTargets = targets
 		return targets
 	}
@@ -319,12 +397,24 @@ func ComputeDispatch(
 	if evSum > 0 {
 		state.EVChargingW = evSum
 	}
-	// EV signal: subtract EV load from grid so batteries don't try to cover it.
-	// EV is always a positive import at the meter; subtracting it makes the
-	// "effective grid" the controller works on the house-side portion only.
-	gridW := rawGridW - state.EVChargingW
+	// EV signal: subtract EV load from grid so batteries don't try to cover
+	// it. EV is always a positive import at the meter; subtracting it makes
+	// the "effective grid" the controller works on the house-side portion
+	// only — a sensible default that avoids shuffling energy through the
+	// inverter twice on a normal day.
+	//
+	// BatteryCoversEV (default false) flips this: the operator opts in to
+	// have the battery discharge into the EV. Useful when grid prices are
+	// high right now but expected to drop later (e.g. solar coming up), so
+	// it's cheaper to drain the battery now and refill it off-peak. All
+	// clamps (SoC, per-driver MaxDischargeW, fuse guard) still apply —
+	// exceeding battery capacity just means the residual comes from grid.
+	gridW := rawGridW
+	if !state.BatteryCoversEV {
+		gridW -= state.EVChargingW
+	}
 
-	// ---- Gather online batteries ----
+// ---- Gather online batteries ----
 	batteries := make([]batteryInfo, 0, len(driverCapacities))
 	for name, cap := range driverCapacities {
 		r := store.Get(name, telemetry.DerBattery)
@@ -339,12 +429,16 @@ func ComputeDispatch(
 		if r.SoC != nil {
 			soc = *r.SoC
 		}
+		lim := state.DriverLimits[name]
 		batteries = append(batteries, batteryInfo{
-			driver:     name,
-			capacityWh: cap,
-			currentW:   r.SmoothedW,
-			soc:        soc,
-			online:     h.IsOnline(),
+			driver:        name,
+			capacityWh:    cap,
+			currentW:      r.SmoothedW,
+			soc:           soc,
+			online:        h.IsOnline(),
+			group:         state.InverterGroups[name],
+			maxChargeW:    lim.MaxChargeW,
+			maxDischargeW: lim.MaxDischargeW,
 		})
 	}
 	onlineBats := make([]batteryInfo, 0, len(batteries))
@@ -459,11 +553,27 @@ func ComputeDispatch(
 		totalCorrection = out.Output
 	}
 
+	// ---- Per-group PV surplus for DC-local charge routing (#143) ----
+	// Empty when no drivers carry an inverter-group tag → distributeProportional
+	// falls through to its capacity-only split (today's behavior).
+	groupPV := map[string]float64{}
+	if len(state.InverterGroups) > 0 {
+		for _, r := range store.ReadingsByType(telemetry.DerPV) {
+			group := state.InverterGroups[r.Driver]
+			if group == "" {
+				continue // untagged PV: no locality signal, treat as AC-bus
+			}
+			// PV is site-signed (negative = generating). Magnitude = surplus
+			// potentially routable DC-direct to the same-group battery.
+			groupPV[group] += math.Abs(r.SmoothedW)
+		}
+	}
+
 	// ---- Distribute across batteries ----
 	var raw []DispatchTarget
 	switch effectiveMode {
 	case ModeSelfConsumption, ModePeakShaving:
-		raw = distributeProportional(onlineBats, totalCorrection)
+		raw = distributeProportional(onlineBats, totalCorrection, groupPV)
 	case ModePriority:
 		raw = distributePriority(onlineBats, totalCorrection, state.PriorityOrder)
 	case ModeWeighted:
@@ -508,22 +618,33 @@ func ComputeDispatch(
 
 	// ---- Re-clamp after slew ----
 	// The slew anchor is the battery's actual output (SmoothedW). If the
-	// battery was already beyond the ±5 kW per-command cap (e.g. after a
+	// battery was already beyond its per-command cap (e.g. after a
 	// manual restart, external control, or driver returning an out-of-range
 	// reading), the slewed target inherits the overshoot. Re-apply the
-	// hard per-command cap so we never issue a command outside safe bounds.
+	// per-driver cap (DriverLimits, falling back to MaxCommandW) so we
+	// never issue a command outside safe bounds.
 	for i := range raw {
-		if raw[i].TargetW > MaxCommandW {
-			raw[i].TargetW = MaxCommandW
+		maxC := float64(MaxCommandW)
+		maxD := float64(MaxCommandW)
+		if lim, ok := state.DriverLimits[raw[i].Driver]; ok {
+			if lim.MaxChargeW > 0 {
+				maxC = lim.MaxChargeW
+			}
+			if lim.MaxDischargeW > 0 {
+				maxD = lim.MaxDischargeW
+			}
+		}
+		if raw[i].TargetW > maxC {
+			raw[i].TargetW = maxC
 			raw[i].Clamped = true
-		} else if raw[i].TargetW < -MaxCommandW {
-			raw[i].TargetW = -MaxCommandW
+		} else if raw[i].TargetW < -maxD {
+			raw[i].TargetW = -maxD
 			raw[i].Clamped = true
 		}
 	}
 
-	// ---- Fuse guard ----
-	raw = applyFuseGuard(raw, store, fuseMaxW)
+	// ---- Fuse guard (bidirectional, #145) ----
+	raw = applyFuseGuard(raw, store, state.SiteMeterDriver, fuseMaxW)
 
 	// Update state
 	now := time.Now()
@@ -539,18 +660,79 @@ func ComputeDispatch(
 // available batteries by capacity. Each battery gets its share of the TOTAL
 // desired site battery power — not its share of the delta. This prevents the
 // "drift" bug where each battery drifts independently under prolonged error.
-func distributeProportional(bats []batteryInfo, totalCorrection float64) []DispatchTarget {
+//
+// When `groupPV` is non-empty AND the fleet is charging (desiredTotal > 0),
+// the algorithm first routes up to `min(desiredTotal, ΣPV_g)` preferentially
+// to batteries whose inverter-group also reports live PV output — keeping
+// the flow DC-coupled on the same inverter avoids the ~3-4 pp round-trip
+// loss of cross-inverter AC routing. Any remaining correction is then
+// spread proportionally across all batteries (capacity-weighted), identical
+// to today. With no `groupPV` info or during discharge, the algorithm
+// collapses to a single capacity-proportional split. Issue #143.
+func distributeProportional(bats []batteryInfo, totalCorrection float64, groupPV map[string]float64) []DispatchTarget {
 	var totalCap float64
-	for _, b := range bats { totalCap += b.capacityWh }
-	if totalCap <= 0 { return nil }
+	for _, b := range bats {
+		totalCap += b.capacityWh
+	}
+	if totalCap <= 0 {
+		return nil
+	}
 	var currentTotal float64
-	for _, b := range bats { currentTotal += b.currentW }
+	for _, b := range bats {
+		currentTotal += b.currentW
+	}
 	desiredTotal := currentTotal + totalCorrection
+
+	// Discharge, idle, or no PV locality info → capacity-only split.
+	// Discharge energy flows to the AC bus regardless of where it
+	// originated, so DC-locality has no win for the negative branch.
+	var totalPV float64
+	for _, w := range groupPV {
+		totalPV += w
+	}
+	if desiredTotal <= 0 || totalPV <= 0 {
+		return distributeByCapacity(bats, desiredTotal, totalCap)
+	}
+
+	// Charging with PV locality info: prefer DC-local routing.
+	//   localCap  = min(desiredTotal, totalPV)  — how much of the total
+	//               fleet charge can be kept DC-coupled
+	//   overflow  = desiredTotal - localCap     — excess that has to cross
+	//               inverters via the AC bus; no locality benefit, so
+	//               it's allocated by capacity like today.
+	//
+	// Within the local pool, each group gets a share of localCap
+	// proportional to its PV output; within a group, that share is split
+	// by capacity (same rule as the fleet-wide split).
+	localCap := math.Min(desiredTotal, totalPV)
+	overflow := desiredTotal - localCap
+
+	capByGroup := map[string]float64{}
+	for _, b := range bats {
+		capByGroup[b.group] += b.capacityWh
+	}
 
 	out := make([]DispatchTarget, 0, len(bats))
 	for _, b := range bats {
+		var localShare float64
+		if capG := capByGroup[b.group]; capG > 0 && groupPV[b.group] > 0 {
+			localShare = (groupPV[b.group] / totalPV) * localCap * (b.capacityWh / capG)
+		}
+		overflowShare := overflow * (b.capacityWh / totalCap)
+		target := localShare + overflowShare
+		clamped, was := clampWithSoC(target, b)
+		out = append(out, DispatchTarget{Driver: b.driver, TargetW: clamped, Clamped: was})
+	}
+	return out
+}
+
+// distributeByCapacity is the legacy capacity-proportional split, extracted
+// so both the discharge path and the no-groupPV fallback share the same code.
+func distributeByCapacity(bats []batteryInfo, desiredTotal, totalCap float64) []DispatchTarget {
+	out := make([]DispatchTarget, 0, len(bats))
+	for _, b := range bats {
 		target := desiredTotal * (b.capacityWh / totalCap)
-		clamped, was := clampWithSoC(target, b.soc)
+		clamped, was := clampWithSoC(target, b)
 		out = append(out, DispatchTarget{Driver: b.driver, TargetW: clamped, Clamped: was})
 	}
 	return out
@@ -568,7 +750,7 @@ func distributePriority(bats []batteryInfo, totalCorrection float64, order []str
 				continue
 			}
 			t := b.currentW + remaining
-			clamped, was := clampWithSoC(t, b.soc)
+			clamped, was := clampWithSoC(t, b)
 			remaining -= clamped - b.currentW
 			out = append(out, DispatchTarget{Driver: b.driver, TargetW: clamped, Clamped: was})
 		}
@@ -607,78 +789,166 @@ func distributeWeighted(bats []batteryInfo, totalCorrection float64, weights map
 		w, ok := weights[b.driver]
 		if !ok { w = 1.0 }
 		t := desiredTotal * (w / totalW)
-		clamped, was := clampWithSoC(t, b.soc)
+		clamped, was := clampWithSoC(t, b)
 		out = append(out, DispatchTarget{Driver: b.driver, TargetW: clamped, Clamped: was})
 	}
 	return out
 }
 
-// chargeAll forces all online batteries to max charge (+5 kW each, site convention).
-func chargeAll(store *telemetry.Store, capacities map[string]float64) []DispatchTarget {
+// chargeAll forces every online battery to its per-driver MaxChargeW
+// (or MaxCommandW default when the driver doesn't override). Used by
+// the "Charge" manual mode as a sanity-check / pre-peak-fill knob.
+// Issue #145 — previously hardcoded at +5 kW regardless of hardware.
+func chargeAll(store *telemetry.Store, capacities map[string]float64, limits map[string]PowerLimits) []DispatchTarget {
 	out := make([]DispatchTarget, 0)
 	for name := range capacities {
 		h := store.DriverHealth(name)
 		if h == nil || !h.IsOnline() {
 			continue
 		}
-		// Site convention: + = charge
-		out = append(out, DispatchTarget{Driver: name, TargetW: 5000})
+		target := float64(MaxCommandW)
+		if lim, ok := limits[name]; ok && lim.MaxChargeW > 0 {
+			target = lim.MaxChargeW
+		}
+		// Site convention: + = charge.
+		out = append(out, DispatchTarget{Driver: name, TargetW: target})
 	}
 	return out
 }
 
-// clampWithSoC applies the hard safety clamps:
-//   - don't discharge below SoC 5% (site: don't make target < 0 when SoC < 0.05)
-//   - cap absolute power at 5000W per command
+// clampWithSoC applies the hard safety clamps for one battery command:
+//   - don't discharge below SoC 5 % (site: don't make target < 0 when SoC < 0.05);
+//     BMS handles fine-grained SoC but we never ask it to pull an empty pack.
+//   - cap charge at the battery's MaxChargeW (falls back to MaxCommandW default).
+//   - cap discharge at the battery's MaxDischargeW (same fallback).
 //
-// BMS handles fine-grained SoC management; we just prevent obviously-dumb values.
-func clampWithSoC(target, soc float64) (float64, bool) {
+// The caps are asymmetric on purpose — real hybrid inverters often have
+// different charge and discharge capability (e.g. Ferroamp 15 kW charge /
+// 10 kW discharge). Issue #145.
+func clampWithSoC(target float64, b batteryInfo) (float64, bool) {
 	clamped := target
 	wasClamped := false
-	// Block discharge (negative target) when battery is empty
-	if soc < 0.05 && target < 0 {
+	// Block discharge when the battery is empty.
+	if b.soc < 0.05 && target < 0 {
 		clamped = 0
 		wasClamped = true
 	}
-	// Per-command cap
-	if math.Abs(clamped) > MaxCommandW {
-		sign := 1.0
-		if clamped < 0 {
-			sign = -1.0
-		}
-		clamped = sign * MaxCommandW
+	if clamped > b.chargeCap() {
+		clamped = b.chargeCap()
+		wasClamped = true
+	} else if clamped < -b.dischargeCap() {
+		clamped = -b.dischargeCap()
 		wasClamped = true
 	}
 	return clamped, wasClamped
 }
 
-// applyFuseGuard caps total site current. In site convention:
-//   - Battery discharge is − W (source, contributes current to the house bus)
-//   - PV is − W (source)
-// If |total discharge| + |PV| > fuse limit, scale all discharge targets
-// proportionally to bring the total under budget.
-func applyFuseGuard(targets []DispatchTarget, store *telemetry.Store, fuseMaxW float64) []DispatchTarget {
-	var totalPVW float64
-	for _, r := range store.ReadingsByType(telemetry.DerPV) {
-		totalPVW += math.Abs(r.SmoothedW)
-	}
-	var totalDischargeW float64
-	for _, t := range targets {
-		if t.TargetW < 0 {
-			totalDischargeW += -t.TargetW
-		}
-	}
-	totalGeneration := totalPVW + totalDischargeW
-	if totalGeneration <= fuseMaxW {
+// applyFuseGuard enforces the site fuse budget on both directions of
+// grid flow — import AND export. Any dispatched target would shift the
+// grid flow by (target − current_battery_power); the guard predicts
+// the post-dispatch grid reading and, if it would exceed ±fuseMaxW,
+// scales the same-direction targets toward zero until the boundary is
+// respected.
+//
+// Prediction (site sign: grid = load + pv + battery):
+//
+//	predicted_grid = live_grid − Σ current_battery_w + Σ target
+//
+// Because load and pv are invariant in the 5 s dispatch window, only
+// the battery row changes when we apply new targets.
+//
+// Directional scaling:
+//   - predicted > +fuseMaxW (too much import): scale POSITIVE (charge)
+//     targets down. 1 W less charge = 1 W less import, so the reduction
+//     directly offsets the overage.
+//   - predicted < −fuseMaxW (too much export): scale NEGATIVE (discharge)
+//     targets toward zero — the symmetric case.
+//
+// Issue #145 changed the guard from "PV + discharge > fuse → scale
+// discharge" (old, discharge-only, assumed zero load) to this
+// bidirectional predicted-grid approach so heavy PV-free charge slots
+// can't push aggregate imports past the fuse. The new path also uses
+// live load inference so the discharge side no longer over-scales
+// during high-load hours.
+func applyFuseGuard(targets []DispatchTarget, store *telemetry.Store, siteMeter string, fuseMaxW float64) []DispatchTarget {
+	if fuseMaxW <= 0 {
 		return targets
 	}
-	scale := fuseMaxW / totalGeneration
+	// Aggregate live battery power so we can hold load+pv constant.
+	var currentBat float64
+	for _, r := range store.ReadingsByType(telemetry.DerBattery) {
+		currentBat += r.SmoothedW
+	}
+	var currentGrid float64
+	if siteMeter != "" {
+		if r := store.Get(siteMeter, telemetry.DerMeter); r != nil {
+			currentGrid = r.SmoothedW
+		}
+	}
+	var sumTarget float64
+	for _, t := range targets {
+		sumTarget += t.TargetW
+	}
+	predicted := currentGrid - currentBat + sumTarget
+
+	if math.Abs(predicted) <= fuseMaxW {
+		return targets
+	}
+
 	out := make([]DispatchTarget, len(targets))
 	copy(out, targets)
-	for i := range out {
-		if out[i].TargetW < 0 {
-			out[i].TargetW *= scale
-			out[i].Clamped = true
+
+	switch {
+	case predicted > fuseMaxW:
+		// Too much import → shrink charging.
+		overage := predicted - fuseMaxW
+		var totalCharge float64
+		for _, t := range out {
+			if t.TargetW > 0 {
+				totalCharge += t.TargetW
+			}
+		}
+		if totalCharge <= 0 {
+			// No charge commands to pull back — the overage is load-driven
+			// and nothing this layer can do. Leave targets untouched;
+			// operator/BMS/load shedding is the next lever.
+			return out
+		}
+		newTotal := totalCharge - overage
+		if newTotal < 0 {
+			newTotal = 0
+		}
+		scale := newTotal / totalCharge
+		for i := range out {
+			if out[i].TargetW > 0 {
+				out[i].TargetW *= scale
+				out[i].Clamped = true
+			}
+		}
+	default: // predicted < -fuseMaxW
+		overage := -fuseMaxW - predicted // positive magnitude over export fuse
+		var totalDischarge float64
+		for _, t := range out {
+			if t.TargetW < 0 {
+				totalDischarge += -t.TargetW
+			}
+		}
+		if totalDischarge <= 0 {
+			// Nothing to scale — PV alone is pushing past the fuse.
+			// Fuse-guard can't curtail PV; pv_limit_w from the plan
+			// is the lever in that scenario (annotateCurtailment).
+			return out
+		}
+		newTotal := totalDischarge - overage
+		if newTotal < 0 {
+			newTotal = 0
+		}
+		scale := newTotal / totalDischarge
+		for i := range out {
+			if out[i].TargetW < 0 {
+				out[i].TargetW *= scale
+				out[i].Clamped = true
+			}
 		}
 	}
 	return out
