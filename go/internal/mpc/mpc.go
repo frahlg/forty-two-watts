@@ -399,14 +399,12 @@ func Optimize(slots []Slot, p Params) Plan {
 						}
 
 						// Strict self-consumption bias. When the mode
-						// is self_consumption and the battery has
-						// headroom above the SoC floor + 20 %, we
-						// add a penalty equal to 2× effPrice per kWh
-						// of HOUSE-driven grid import — so the total
-						// house-import cost the DP sees is tripled.
-						// That makes discharge strictly cheaper than
-						// idle whenever the battery can physically
-						// supply house load.
+						// is self_consumption we add a penalty equal
+						// to 2× effPrice per kWh of HOUSE-driven grid
+						// import — so the total house-import cost the
+						// DP sees is tripled. That makes discharge
+						// strictly cheaper than idle whenever the
+						// battery can physically supply house load.
 						//
 						// The penalty applies only to the house
 						// portion of the import (gridW minus EV). EV
@@ -425,11 +423,15 @@ func Optimize(slots []Slot, p Params) Plan {
 						// sometimes prefer importing today to
 						// preserve SoC for tomorrow's peak — that's
 						// arbitrage behaviour, not self-consumption.
-						// The 20-% floor stops the DP from draining
-						// a nearly-empty battery on a cloudy
-						// morning; above it, discharge wins.
-						if p.Mode == ModeSelfConsumption &&
-							soc > p.SoCMinPct+20 {
+						// The bias extends all the way down to
+						// SoCMinPct: the operator's configured floor
+						// IS the reserve, no implicit extra buffer on
+						// top of it (#157). The hard floor is still
+						// enforced by the SoC-transition feasibility
+						// check above (line 357), so the bias can only
+						// push discharge *toward* the floor, never
+						// past it.
+						if p.Mode == ModeSelfConsumption {
 							houseGridW := slot.LoadW + slot.PVW + battW
 							if houseGridW > 0 {
 								houseKWh := houseGridW * dtH / 1000.0
