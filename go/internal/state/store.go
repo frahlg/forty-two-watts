@@ -420,6 +420,34 @@ func (s *Store) RecordHistory(p HistoryPoint) error {
 	return err
 }
 
+// BulkRecordHistory writes many HistoryPoints in a single transaction.
+// Used by backfill / migration tooling where per-row implicit-commit
+// overhead dominates (SQLite on slow filesystems).
+func (s *Store) BulkRecordHistory(pts []HistoryPoint) error {
+	if len(pts) == 0 {
+		return nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	stmt, err := tx.Prepare(
+		`INSERT OR REPLACE INTO history_hot (ts_ms, grid_w, pv_w, bat_w, load_w, bat_soc, json)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+	)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for _, p := range pts {
+		if _, err := stmt.Exec(p.TsMs, p.GridW, p.PVW, p.BatW, p.LoadW, p.BatSoC, p.JSON); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 // LoadHistory returns points from ALL tiers in [sinceMs, untilMs], merged + sorted.
 // maxPoints=0 means no limit. With a limit, we return at most that many evenly-spaced rows.
 func (s *Store) LoadHistory(sinceMs, untilMs int64, maxPoints int) ([]HistoryPoint, error) {
@@ -479,6 +507,25 @@ func (s *Store) LoadHistory(sinceMs, untilMs int64, maxPoints int) ([]HistoryPoi
 		return out, nil
 	}
 	return all, nil
+}
+
+// CountNonSyntheticHistory returns the number of history rows across all
+// three tiers whose JSON payload is NOT the backfill marker — i.e. rows
+// that look like real recorded data. Used by the dev-backfill safety
+// gate so pointing the seeder at a production DB aborts cleanly.
+func (s *Store) CountNonSyntheticHistory() (int, error) {
+	const marker = `{"source":"backfill"}`
+	const q = `
+		SELECT
+			(SELECT COUNT(*) FROM history_hot  WHERE json IS NOT ?) +
+			(SELECT COUNT(*) FROM history_warm WHERE json IS NOT ?) +
+			(SELECT COUNT(*) FROM history_cold WHERE json IS NOT ?)
+	`
+	var n int
+	if err := s.db.QueryRow(q, marker, marker, marker).Scan(&n); err != nil {
+		return 0, err
+	}
+	return n, nil
 }
 
 // HistoryCounts returns the number of rows in (hot, warm, cold) tiers.

@@ -30,6 +30,7 @@ import (
 	"github.com/frahlg/forty-two-watts/go/internal/events"
 	"github.com/frahlg/forty-two-watts/go/internal/notifications"
 	"github.com/frahlg/forty-two-watts/go/internal/arp"
+	"github.com/frahlg/forty-two-watts/go/internal/devtools"
 	"github.com/frahlg/forty-two-watts/go/internal/drivers"
 	"github.com/frahlg/forty-two-watts/go/internal/forecast"
 	"github.com/frahlg/forty-two-watts/go/internal/ha"
@@ -70,6 +71,15 @@ func main() {
 	configPath := flag.String("config", "config.yaml", "Path to config.yaml")
 	webDir := flag.String("web", "web", "Path to static web UI directory")
 	driverDirFlag := flag.String("drivers", "", "Path to drivers directory (default: <config-dir>/drivers)")
+	// Developer utility — seeds state.db with N days of synthetic history
+	// so /api/energy/daily has something to render locally. Refuses to run
+	// if the target DB already holds non-synthetic rows (prod-safety gate);
+	// -backfill-force bypasses that check. Exits after seeding without
+	// starting the service.
+	backfillDays := flag.Int("backfill", 0, "DEV ONLY: seed N days of synthetic history into state.db then exit (0 disables)")
+	backfillStep := flag.Duration("backfill-step", 5*time.Second, "DEV ONLY: backfill sample interval")
+	backfillSeed := flag.Int64("backfill-seed", 0, "DEV ONLY: backfill rng seed (0 = random)")
+	backfillForce := flag.Bool("backfill-force", false, "DEV ONLY: bypass the non-synthetic-data safety gate")
 	flag.Parse()
 
 	// Drivers default to a sibling of the config file (historical layout:
@@ -118,6 +128,24 @@ func main() {
 		os.Exit(1)
 	}
 	defer st.Close()
+
+	// ---- Dev backfill (flag-gated, one-shot) ----
+	// When -backfill N (N>0) is set, seed N days of synthetic history
+	// into state.db and exit WITHOUT starting the service. Refuses if
+	// the DB already holds non-synthetic rows unless -backfill-force.
+	if *backfillDays > 0 {
+		if err := devtools.Backfill(st, devtools.BackfillConfig{
+			Days:  *backfillDays,
+			Step:  *backfillStep,
+			Seed:  *backfillSeed,
+			Force: *backfillForce,
+		}, slog.Default()); err != nil {
+			slog.Error("backfill", "err", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	if err := st.RecordEvent("startup"); err != nil {
 		slog.Warn("failed to persist startup event", "err", err)
 	}

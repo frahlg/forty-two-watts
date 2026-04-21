@@ -40,6 +40,11 @@
   --fg:         oklch(0.96 0.01 250);
   --fg-dim:     oklch(0.70 0.015 250);
   --fg-muted:   oklch(0.50 0.015 250);
+  /* Small-label text (.card-label on every card). Kept separate from
+     --fg-muted so semantic muted text elsewhere (subs, placeholders)
+     can stay quiet while the labels themselves read at ~#d9dbe0 on
+     dark — the previous oklch(0.50) was too dim to scan at a glance. */
+  --fg-label:   oklch(0.86 0.015 250);
 
   --amber:    oklch(0.82 0.18 75);
   --amber-d:  oklch(0.65 0.14 75);
@@ -65,8 +70,11 @@
   --hero-house-stroke: oklch(0.7 0.14 var(--accent-hue));
   --hero-house-ring:   oklch(0.55 0.1 var(--accent-hue));
   --hero-load-text:    oklch(0.9 0.08 var(--accent-hue));
-  --hero-label-text:   oklch(0.6 0.015 250);
-  --hero-sub-text:     oklch(0.5 0.015 250);
+  /* Labels / subs inside the energy-flow bubbles — pulled up to match
+     the brighter --fg-label token used by card-labels so the bubble
+     text isn't noticeably dimmer than every other label on the page. */
+  --hero-label-text:   oklch(0.86 0.015 250);
+  --hero-sub-text:     oklch(0.78 0.015 250);
   --hero-soc-track:    oklch(0.25 0.015 250);
 
   /* No external font CDN — all fallbacks are either shipped with the
@@ -102,6 +110,9 @@ html[data-theme="light"] {
   --fg:         oklch(0.22 0.02 250);
   --fg-dim:     oklch(0.40 0.02 250);
   --fg-muted:   oklch(0.55 0.015 250);
+  /* Light theme already has enough contrast at --fg-muted; keep labels
+     aligned with it so the hierarchy doesn't flip when switching themes. */
+  --fg-label:   oklch(0.40 0.02 250);
 
   /* Functional colours pulled ~15% darker so they keep contrast on paper
      without turning neon. Accent hue still drives --accent-e. */
