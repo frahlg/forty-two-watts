@@ -36,6 +36,7 @@ const (
 	EventDriverRecovered = "driver_recovered"
 	EventUpdateAvailable = "update_available"
 	EventFuseOverLimit   = "fuse_over_limit"
+	EventEVSurplusStarved = "ev_surplus_starved"
 )
 
 // Defaults for a freshly-seeded rule.
@@ -54,6 +55,10 @@ func DefaultRules() []config.NotificationRule {
 		// Default threshold 30 s — brief inrush / dryer starts shouldn't
 		// page the operator. Cooldown 15 min per phase.
 		{Type: EventFuseOverLimit, Enabled: false, ThresholdS: 30, Priority: 5, CooldownS: 900},
+		// ThresholdS is 0 here because main.go already enforces
+		// Settings.SurplusStarvationS before publishing. The
+		// notifications layer only deduplicates via CooldownS.
+		{Type: EventEVSurplusStarved, Enabled: false, ThresholdS: 0, Priority: 3, CooldownS: 3600},
 	}
 }
 
@@ -267,6 +272,14 @@ func (s *Service) Subscribe(bus *events.Bus) {
 		// the bus is synchronous and Publish can block up to 10 s.
 		go s.handleUpdateAvailable(ev)
 	})
+	bus.Subscribe(events.KindEVSurplusStarved, func(e events.Event) {
+		ev, ok := e.(events.EVSurplusStarved)
+		if !ok {
+			return
+		}
+		// Offload — dispatch may take up to 10s on a slow ntfy server.
+		go s.handleEVSurplusStarved(ev)
+	})
 }
 
 // handleUpdateAvailable dispatches a notification for a newly-discovered
@@ -305,6 +318,47 @@ func (s *Service) handleUpdateAvailable(ev events.UpdateAvailable) {
 		Version:         ev.Version,
 		PreviousVersion: ev.PreviousVersion,
 		ReleaseURL:      ev.ReleaseNotesURL,
+	}
+	s.dispatch(cfg, rule, data)
+}
+
+// handleEVSurplusStarved dispatches a notification for a surplus-only
+// EV loadpoint that has been unable to charge for the configured
+// starvation window. Keyed per loadpoint so concurrent starvations on
+// different loadpoints don't block each other; cooldown still
+// deduplicates repeat starvations on the same loadpoint.
+func (s *Service) handleEVSurplusStarved(ev events.EVSurplusStarved) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	if s.cfg == nil || !s.cfg.Enabled {
+		s.mu.Unlock()
+		return
+	}
+	rule, ok := findRule(s.cfg.Events, EventEVSurplusStarved)
+	if !ok || !rule.Enabled {
+		s.mu.Unlock()
+		return
+	}
+	cfg := s.cfg
+	key := EventEVSurplusStarved + "|" + ev.LoadpointID
+	now := s.now()
+	if rule.CooldownS > 0 {
+		if last, ok := s.lastFired[key]; ok && now.Sub(last) < time.Duration(rule.CooldownS)*time.Second {
+			s.mu.Unlock()
+			return
+		}
+	}
+	s.lastFired[key] = now
+	s.mu.Unlock()
+
+	data := templateData{
+		EventType:   EventEVSurplusStarved,
+		Timestamp:   ev.At.UTC().Format(time.RFC3339),
+		LoadpointID: ev.LoadpointID,
+		Duration:    humanDuration(ev.StarvedFor),
+		DurationS:   int(ev.StarvedFor / time.Second),
 	}
 	s.dispatch(cfg, rule, data)
 }
@@ -617,6 +671,8 @@ type templateData struct {
 	Phase  string  // "L1" | "L2" | "L3"
 	Amps   float64 // current reading on that phase
 	LimitA float64 // fuse rating (site.fuse.max_amps)
+	// Populated for ev_surplus_starved events only.
+	LoadpointID string
 }
 
 func (s *Service) buildData(driver, eventType string, since time.Duration, now time.Time) templateData {
@@ -744,7 +800,7 @@ func EventDefaults() map[string]struct {
 	Title string `json:"title"`
 	Body  string `json:"body"`
 } {
-	types := []string{EventDriverOffline, EventDriverRecovered, EventUpdateAvailable, EventFuseOverLimit}
+	types := []string{EventDriverOffline, EventDriverRecovered, EventUpdateAvailable, EventFuseOverLimit, EventEVSurplusStarved}
 	out := make(map[string]struct {
 		Title string `json:"title"`
 		Body  string `json:"body"`
@@ -768,6 +824,8 @@ func defaultTitleFor(eventType string) string {
 		return "forty-two-watts: update {{.Version}} available"
 	case EventFuseOverLimit:
 		return "forty-two-watts: {{.Phase}} over fuse limit"
+	case EventEVSurplusStarved:
+		return "forty-two-watts: EV {{.LoadpointID}} surplus starved"
 	}
 	return "forty-two-watts: {{.EventType}}"
 }
@@ -782,6 +840,8 @@ func defaultBodyFor(eventType string) string {
 		return "Version {{.Version}} is available (running {{.PreviousVersion}}). {{.ReleaseURL}}"
 	case EventFuseOverLimit:
 		return "{{.Phase}} draw {{printf \"%.1f\" .Amps}} A exceeded the {{printf \"%.0f\" .LimitA}} A fuse for {{.Duration}}."
+	case EventEVSurplusStarved:
+		return "The {{.LoadpointID}} loadpoint has been unable to charge from PV surplus for {{.Duration}} during an active charging target."
 	}
 	return "{{.EventType}} for {{.Device}}"
 }

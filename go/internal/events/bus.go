@@ -67,6 +67,7 @@ const (
 	KindNotificationTest       = "notifications.test"
 	KindNotificationDispatched = "notifications.dispatched"
 	KindUpdateAvailable        = "update.available"
+	KindEVSurplusStarved       = "ev.surplus.starved"
 )
 
 // HealthTick is fired every control-loop tick with the current telemetry
@@ -139,3 +140,16 @@ type NotificationTest struct {
 }
 
 func (NotificationTest) Kind() string { return KindNotificationTest }
+
+// EVSurplusStarved fires when an active surplus-only EV loadpoint
+// target has commanded 0 W continuously for at least
+// Settings.SurplusStarvationS — signalling that PV isn't enough to
+// make progress on the deadline. One emission per continuous run;
+// cooldown dedup is the notifications layer's job.
+type EVSurplusStarved struct {
+	LoadpointID string
+	StarvedFor  time.Duration
+	At          time.Time
+}
+
+func (EVSurplusStarved) Kind() string { return KindEVSurplusStarved }

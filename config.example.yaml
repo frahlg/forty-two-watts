@@ -57,3 +57,34 @@ homeassistant:
 # Persistent state (SQLite)
 state:
   path: state.db
+
+# Push notifications (optional — ntfy transport)
+notifications:
+  enabled: false
+  provider: ntfy
+  ntfy:
+    server: https://ntfy.sh
+    topic: forty-two-watts
+  events:
+    - type: driver_offline
+      enabled: false
+      threshold_s: 600
+      priority: 4
+      cooldown_s: 3600
+    - type: driver_recovered
+      enabled: false
+      priority: 3
+      cooldown_s: 0
+    - type: update_available
+      enabled: false
+      priority: 3
+      cooldown_s: 3600
+    - type: fuse_over_limit
+      enabled: false
+      threshold_s: 30
+      priority: 5
+      cooldown_s: 900
+    - type: ev_surplus_starved
+      enabled: false
+      priority: 3
+      cooldown_s: 3600

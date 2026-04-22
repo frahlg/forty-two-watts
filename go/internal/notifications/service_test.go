@@ -508,6 +508,64 @@ func TestUpdateAvailableDispatches(t *testing.T) {
 	}
 }
 
+func TestEVSurplusStarvedFiresOnce(t *testing.T) {
+	pub := &fakePub{}
+	cfg := baseCfg()
+	cfg.Events = append(cfg.Events, config.NotificationRule{
+		Type: EventEVSurplusStarved, Enabled: true, Priority: 3, CooldownS: 3600,
+	})
+	svc, clk := newSvc(cfg, pub)
+	bus := events.NewBus()
+	svc.Subscribe(bus)
+
+	// First publish fires.
+	bus.Publish(events.EVSurplusStarved{
+		LoadpointID: "garage",
+		StarvedFor:  35 * time.Minute,
+		At:          clk.now(),
+	})
+	// Subscribe handler dispatches in a goroutine — give it a moment.
+	for i := 0; i < 50 && len(pub.Messages()) == 0; i++ {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if n := len(pub.Messages()); n != 1 {
+		t.Fatalf("first publish: want 1 msg, got %d", n)
+	}
+
+	// Second publish within cooldown: suppressed.
+	clk.advance(10 * time.Minute) // still within 1h cooldown
+	bus.Publish(events.EVSurplusStarved{
+		LoadpointID: "garage",
+		StarvedFor:  40 * time.Minute,
+		At:          clk.now(),
+	})
+	// Same cooldown key → no additional message.
+	time.Sleep(50 * time.Millisecond)
+	if n := len(pub.Messages()); n != 1 {
+		t.Fatalf("within cooldown: want 1 msg (unchanged), got %d", n)
+	}
+
+	// After cooldown, fires again.
+	clk.advance(2 * time.Hour)
+	bus.Publish(events.EVSurplusStarved{
+		LoadpointID: "garage",
+		StarvedFor:  30 * time.Minute,
+		At:          clk.now(),
+	})
+	for i := 0; i < 50 && len(pub.Messages()) < 2; i++ {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if n := len(pub.Messages()); n != 2 {
+		t.Fatalf("after cooldown: want 2 msgs, got %d", n)
+	}
+
+	// Verify rendered template carries the loadpoint id.
+	last := pub.Messages()[1]
+	if !strings.Contains(last.Body, "garage") {
+		t.Errorf("body missing loadpoint id: %q", last.Body)
+	}
+}
+
 func TestFuseOverLimitFiresAfterThresholdAndResets(t *testing.T) {
 	cfg := baseCfg()
 	cfg.Events = append(cfg.Events, config.NotificationRule{
