@@ -1570,6 +1570,32 @@
     var evFocusable = [evModalClose, evBtnStart, evBtnPause, evBtnResume];
     var evLastFocused = null;
 
+    // Resolve which loadpoint (if any) is associated with the active popup.
+    // When there's exactly one loadpoint, use it regardless of driver_name.
+    function resolveLoadpoint() {
+      return fetch("/api/loadpoints")
+        .then(function (r) { return r.json(); })
+        .then(function (body) {
+          var lps = (body && body.loadpoints) || [];
+          if (lps.length === 0) return null;
+          if (lps.length === 1) return lps[0];
+          return null;
+        })
+        .catch(function () { return null; });
+    }
+
+    var policyRow = document.getElementById("ev-policy");
+    var cbAllowGrid = document.getElementById("ev-policy-allow-grid");
+    var cbAllowBattery = document.getElementById("ev-policy-allow-battery");
+    var surplusOnlyLabel = document.getElementById("ev-policy-surplus-only-label");
+
+    function updateSurplusOnlyIndicator() {
+      var surplus = !cbAllowGrid.checked && !cbAllowBattery.checked;
+      surplusOnlyLabel.textContent = surplus ? "✓" : "—";
+    }
+    if (cbAllowGrid) cbAllowGrid.addEventListener("change", updateSurplusOnlyIndicator);
+    if (cbAllowBattery) cbAllowBattery.addEventListener("change", updateSurplusOnlyIndicator);
+
     function openEvModal() {
       evLastFocused = document.activeElement;
       evModal.classList.remove("hidden");
@@ -1581,6 +1607,17 @@
       evRefreshTimer = setInterval(refreshEvModal, 5000);
       // Focus lands on the close button so ESC/Enter work immediately.
       setTimeout(function () { evModalClose.focus(); }, 0);
+      resolveLoadpoint().then(function (lp) {
+        if (!lp || !policyRow) {
+          if (policyRow) policyRow.style.display = "none";
+          return;
+        }
+        policyRow.style.display = "flex";
+        var last = lp.last_policy || {};
+        cbAllowGrid.checked = !!last.allow_grid;
+        cbAllowBattery.checked = !!last.allow_battery_support;
+        updateSurplusOnlyIndicator();
+      });
     }
     function closeEvModal() {
       evModal.classList.add("hidden");
@@ -1640,9 +1677,41 @@
           evActionBtns.forEach(function (b) { b.disabled = false; });
         });
     }
-    evBtnStart.addEventListener("click", function () { evCommand("ev_start"); });
-    evBtnPause.addEventListener("click", function () { evCommand("ev_pause"); });
-    evBtnResume.addEventListener("click", function () { evCommand("ev_resume"); });
+
+    async function armTargetThenCommand(action) {
+      // Pause is a pure command — no target change; user may resume later
+      // and the existing target (if any) stays intact.
+      if (action === "ev_pause") {
+        evCommand(action);
+        return;
+      }
+      var lp = await resolveLoadpoint();
+      if (lp) {
+        var durationH = (lp.settings && lp.settings.charge_duration_h) || 8;
+        var deadlineMs = Date.now() + durationH * 3600 * 1000;
+        var body = {
+          soc_pct: 100,
+          target_time_ms: deadlineMs,
+          origin: "manual",
+          policy: {
+            allow_grid: !!cbAllowGrid.checked,
+            allow_battery_support: !!cbAllowBattery.checked,
+          },
+        };
+        try {
+          await postJson("/api/loadpoints/" + encodeURIComponent(lp.id) + "/target", body);
+        } catch (e) {
+          // postJson already warned. Continue to the driver command so
+          // the user isn't completely blocked if the target endpoint
+          // is temporarily unavailable.
+        }
+      }
+      evCommand(action);
+    }
+
+    evBtnStart.addEventListener("click", function () { armTargetThenCommand("ev_start"); });
+    evBtnPause.addEventListener("click", function () { armTargetThenCommand("ev_pause"); });
+    evBtnResume.addEventListener("click", function () { armTargetThenCommand("ev_resume"); });
   }
 
   // Click-to-toggle legend items. Each item has data-toggle with a

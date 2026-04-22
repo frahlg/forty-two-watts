@@ -416,10 +416,17 @@
     <div id="ev-modal-body">
       <p style="color:var(--text-dim)">Loading...</p>
     </div>
-    <div slot="footer" style="display:flex;gap:0.5rem;width:100%">
-      <button class="btn-add" id="ev-btn-start" style="flex:1">Start</button>
-      <button class="btn-add" id="ev-btn-pause" style="flex:1">Pause</button>
-      <button class="btn-add" id="ev-btn-resume" style="flex:1">Resume</button>
+    <div slot="footer" style="display:flex;flex-direction:column;gap:0.6rem;width:100%">
+      <div id="ev-policy" class="ev-policy" style="display:none;flex-wrap:wrap;gap:0.8rem;align-items:center;font-size:0.9em">
+        <label style="display:flex;gap:0.4rem;align-items:center;cursor:pointer"><input type="checkbox" id="ev-policy-allow-grid"> Allow grid import</label>
+        <label style="display:flex;gap:0.4rem;align-items:center;cursor:pointer"><input type="checkbox" id="ev-policy-allow-battery"> Allow battery support</label>
+        <span style="color:var(--text-dim);margin-left:auto">Surplus only: <span id="ev-policy-surplus-only-label">&#10003;</span></span>
+      </div>
+      <div style="display:flex;gap:0.5rem;width:100%">
+        <button class="btn-add" id="ev-btn-start" style="flex:1">Start</button>
+        <button class="btn-add" id="ev-btn-pause" style="flex:1">Pause</button>
+        <button class="btn-add" id="ev-btn-resume" style="flex:1">Resume</button>
+      </div>
     </div>
   </ftw-modal>
 
