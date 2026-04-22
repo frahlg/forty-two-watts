@@ -25,13 +25,13 @@ import (
 	"github.com/frahlg/forty-two-watts/go/internal/control"
 	"github.com/frahlg/forty-two-watts/go/internal/drivers"
 	"github.com/frahlg/forty-two-watts/go/internal/evcloud"
-	"github.com/frahlg/forty-two-watts/go/internal/forecast"
 	"github.com/frahlg/forty-two-watts/go/internal/events"
+	"github.com/frahlg/forty-two-watts/go/internal/forecast"
 	"github.com/frahlg/forty-two-watts/go/internal/ha"
 	"github.com/frahlg/forty-two-watts/go/internal/loadmodel"
-	"github.com/frahlg/forty-two-watts/go/internal/notifications"
 	"github.com/frahlg/forty-two-watts/go/internal/loadpoint"
 	"github.com/frahlg/forty-two-watts/go/internal/mpc"
+	"github.com/frahlg/forty-two-watts/go/internal/notifications"
 	"github.com/frahlg/forty-two-watts/go/internal/prices"
 	"github.com/frahlg/forty-two-watts/go/internal/pvmodel"
 	"github.com/frahlg/forty-two-watts/go/internal/scanner"
@@ -383,17 +383,39 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 				Phases               *int     `json:"phases"`
 			}
 			if r.Data != nil && json.Unmarshal(r.Data, &ev) == nil {
-				if ev.Connected != nil            { d["ev_connected"] = *ev.Connected }
-				if ev.Charging != nil             { d["ev_charging"] = *ev.Charging }
-				if ev.SessionWh != nil            { d["ev_session_wh"] = *ev.SessionWh }
-				if ev.OpMode != nil               { d["ev_op_mode"] = *ev.OpMode }
-				if ev.StateLabel != nil           { d["ev_state_label"] = *ev.StateLabel }
-				if ev.ReasonNoCurrent != nil      { d["ev_reason_no_current"] = *ev.ReasonNoCurrent }
-				if ev.ReasonNoCurrentLabel != nil { d["ev_reason_no_current_label"] = *ev.ReasonNoCurrentLabel }
-				if ev.IsOnline != nil             { d["ev_is_online"] = *ev.IsOnline }
-				if ev.CableLocked != nil          { d["ev_cable_locked"] = *ev.CableLocked }
-				if ev.MaxA != nil                 { d["ev_max_a"] = *ev.MaxA }
-				if ev.Phases != nil               { d["ev_phases"] = *ev.Phases }
+				if ev.Connected != nil {
+					d["ev_connected"] = *ev.Connected
+				}
+				if ev.Charging != nil {
+					d["ev_charging"] = *ev.Charging
+				}
+				if ev.SessionWh != nil {
+					d["ev_session_wh"] = *ev.SessionWh
+				}
+				if ev.OpMode != nil {
+					d["ev_op_mode"] = *ev.OpMode
+				}
+				if ev.StateLabel != nil {
+					d["ev_state_label"] = *ev.StateLabel
+				}
+				if ev.ReasonNoCurrent != nil {
+					d["ev_reason_no_current"] = *ev.ReasonNoCurrent
+				}
+				if ev.ReasonNoCurrentLabel != nil {
+					d["ev_reason_no_current_label"] = *ev.ReasonNoCurrentLabel
+				}
+				if ev.IsOnline != nil {
+					d["ev_is_online"] = *ev.IsOnline
+				}
+				if ev.CableLocked != nil {
+					d["ev_cable_locked"] = *ev.CableLocked
+				}
+				if ev.MaxA != nil {
+					d["ev_max_a"] = *ev.MaxA
+				}
+				if ev.Phases != nil {
+					d["ev_phases"] = *ev.Phases
+				}
 			}
 		}
 		drivers[name] = d
@@ -468,12 +490,12 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 				loadWh += pts[i].LoadW * dtH
 			}
 			energyToday = map[string]any{
-				"import_wh":       importWh,
-				"export_wh":       exportWh,
-				"pv_wh":           pvWh,
-				"bat_charged_wh":  chargedWh,
+				"import_wh":         importWh,
+				"export_wh":         exportWh,
+				"pv_wh":             pvWh,
+				"bat_charged_wh":    chargedWh,
 				"bat_discharged_wh": dischargedWh,
-				"load_wh":         loadWh,
+				"load_wh":           loadWh,
 			}
 		}
 	}
@@ -493,20 +515,20 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	phaseAmps := siteMeterPhaseAmps(s.deps.Tel, ctrl.SiteMeterDriver)
 
 	resp := map[string]any{
-		"version":          s.deps.Version,
-		"mode":             ctrl.Mode,
-		"plan_stale":       ctrl.PlanStale,
-		"grid_w":           gridW,
-		"pv_w":             pvW,
-		"pv_w_predicted":   pvPredictW,
-		"bat_w":            batW,
-		"ev_w":             evW,
-		"load_w":           loadW,
-		"load_w_predicted": loadPredictW,
-		"bat_soc":          avgSoC,
-		"grid_target_w":    ctrl.GridTargetW,
-		"peak_limit_w":     ctrl.PeakLimitW,
-		"ev_charging_w":    ctrl.EVChargingW,
+		"version":           s.deps.Version,
+		"mode":              ctrl.Mode,
+		"plan_stale":        ctrl.PlanStale,
+		"grid_w":            gridW,
+		"pv_w":              pvW,
+		"pv_w_predicted":    pvPredictW,
+		"bat_w":             batW,
+		"ev_w":              evW,
+		"load_w":            loadW,
+		"load_w_predicted":  loadPredictW,
+		"bat_soc":           avgSoC,
+		"grid_target_w":     ctrl.GridTargetW,
+		"peak_limit_w":      ctrl.PeakLimitW,
+		"ev_charging_w":     ctrl.EVChargingW,
 		"battery_covers_ev": ctrl.BatteryCoversEV,
 		// True when an EV charger password is persisted in state.db. The
 		// Settings UI uses this to show a "credentials saved" badge so the
@@ -518,10 +540,10 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			pw, ok := s.deps.State.LoadConfig(evPasswordKey)
 			return ok && pw != ""
 		}(),
-		"fuse":             fuseCfg,
-		"phase_amps":       phaseAmps,
-		"drivers":          drivers,
-		"dispatch":         dispatch,
+		"fuse":       fuseCfg,
+		"phase_amps": phaseAmps,
+		"drivers":    drivers,
+		"dispatch":   dispatch,
 	}
 	if energyToday != nil {
 		resp["energy"] = map[string]any{"today": energyToday}
@@ -534,19 +556,31 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 // meter isn't reporting per-phase data — the frontend falls back to a
 // total-amps bar in that case. Signed: negative = export on that phase.
 func siteMeterPhaseAmps(tel *telemetry.Store, siteMeter string) []float64 {
-	if siteMeter == "" { return nil }
+	if siteMeter == "" {
+		return nil
+	}
 	r := tel.Get(siteMeter, telemetry.DerMeter)
-	if r == nil || len(r.Data) == 0 { return nil }
+	if r == nil || len(r.Data) == 0 {
+		return nil
+	}
 	var payload struct {
 		L1A *float64 `json:"l1_a"`
 		L2A *float64 `json:"l2_a"`
 		L3A *float64 `json:"l3_a"`
 	}
-	if err := json.Unmarshal(r.Data, &payload); err != nil { return nil }
+	if err := json.Unmarshal(r.Data, &payload); err != nil {
+		return nil
+	}
 	out := make([]float64, 0, 3)
-	if payload.L1A != nil { out = append(out, *payload.L1A) }
-	if payload.L2A != nil { out = append(out, *payload.L2A) }
-	if payload.L3A != nil { out = append(out, *payload.L3A) }
+	if payload.L1A != nil {
+		out = append(out, *payload.L1A)
+	}
+	if payload.L2A != nil {
+		out = append(out, *payload.L2A)
+	}
+	if payload.L3A != nil {
+		out = append(out, *payload.L3A)
+	}
 	return out
 }
 
@@ -961,8 +995,8 @@ func (s *Server) handleResetModel(w http.ResponseWriter, r *http.Request) {
 		if m, ok := s.deps.Models[name]; ok {
 			if data, err := json.Marshal(m); err == nil {
 				if err := s.deps.State.SaveBatteryModel(name, string(data)); err != nil {
-				slog.Warn("failed to persist battery model", "battery", name, "err", err)
-			}
+					slog.Warn("failed to persist battery model", "battery", name, "err", err)
+				}
 			}
 		}
 	}
@@ -1071,8 +1105,9 @@ func parseRange(s string) int64 {
 //
 // Query params: days=N (default 7, capped at 90)
 // Response: {"days": [{"day":"YYYY-MM-DD","import_wh":..., "export_wh":...,
-//                      "pv_wh":..., "bat_charged_wh":..., "bat_discharged_wh":...,
-//                      "load_wh":...}], "tz": "Local"}
+//
+//	"pv_wh":..., "bat_charged_wh":..., "bat_discharged_wh":...,
+//	"load_wh":...}], "tz": "Local"}
 //
 // Buckets are local-day. Today is the last entry. Mirrors the integration
 // loop in handleStatus's energy-today block — same site convention, same
