@@ -7,8 +7,9 @@ Den här guiden är skriven för dig som aldrig har pillat med en Raspberry Pi f
 ## Vad du behöver
 
 - En **Raspberry Pi**
-- Det **minneskort** som följer med
-- **Strömadaptern**
+- Ett **minneskort** — medföljer om du köpte den i en bundle, annars behöver du ett separat microSD-kort
+- En **strömadapter** — medföljer om du köpte den i en bundle, annars behöver du en separat
+- Ett **chassi** — valfritt, om du inte har en RAK wireless eller Sourceful gateway (de kommer redan i ett chassi)
 - **Din vanliga dator** (Windows eller Mac)
 - En **kortläsare** till din vanliga dator (inbyggt fack, eller en liten USB-pryl att stoppa i)
 - **Internet** hemma (nätverkskabel eller Wi-Fi)

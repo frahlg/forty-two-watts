@@ -7,8 +7,9 @@ Diese Anleitung ist für dich, wenn du noch nie einen Raspberry Pi eingerichtet 
 ## Was du brauchst
 
 - Einen **Raspberry Pi**
-- Die **Speicherkarte**, die mitgeliefert wurde
-- Das **Netzteil**
+- Eine **Speicherkarte** — im Bundle enthalten, ansonsten besorge dir eine separate microSD-Karte
+- Ein **Netzteil** — im Bundle enthalten, ansonsten besorge dir ein separates
+- Ein **Gehäuse** — optional, außer du hast ein RAK-wireless- oder Sourceful-Gateway (die werden bereits im Gehäuse geliefert)
 - **Deinen normalen Computer** (Windows oder Mac)
 - Einen **Kartenleser** an deinem normalen Computer (eingebauter Schlitz oder ein kleines USB-Gerät)
 - **Internet zu Hause** (Netzwerkkabel oder WLAN)

@@ -7,8 +7,9 @@ Esta guía es para ti que nunca has configurado una Raspberry Pi antes. Tranquil
 ## Lo que necesitas
 
 - Una **Raspberry Pi**
-- La **tarjeta de memoria** que viene con ella
-- El **adaptador de corriente**
+- Una **tarjeta de memoria** — incluida si la compraste en un pack, si no, consigue una microSD aparte
+- Un **adaptador de corriente** — incluido si lo compraste en un pack, si no, consigue uno aparte
+- Una **caja** — opcional, salvo si tienes un RAK wireless o una Sourceful gateway (vienen ya con carcasa)
 - **Tu ordenador normal** (Windows o Mac)
 - Un **lector de tarjetas** en tu ordenador normal (ranura incorporada o un pequeño aparato USB)
 - **Internet en casa** (cable de red o Wi-Fi)

@@ -7,8 +7,9 @@ This guide is for you if you've never set up a Raspberry Pi before. Relax — it
 ## What you'll need
 
 - A **Raspberry Pi**
-- The **memory card** that came with it
-- The **power adapter**
+- A **memory card** — included if you bought it as a bundle, otherwise grab a separate microSD card
+- A **power adapter** — included if you bought it as a bundle, otherwise grab a separate one
+- A **case** — optional, unless you bought a RAK wireless or Sourceful gateway (those already come housed)
 - **Your regular computer** (Windows or Mac)
 - A **card reader** on your regular computer (a built-in slot, or a small USB gadget)
 - **Internet at home** (a network cable or Wi-Fi)
