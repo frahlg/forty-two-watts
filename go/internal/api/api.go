@@ -202,6 +202,7 @@ func (s *Server) routes() {
 	s.handle("GET  /api/loadpoints", s.handleLoadpoints)
 	s.handle("POST /api/loadpoints/{id}/target", s.handleLoadpointTarget)
 	s.handle("POST /api/loadpoints/{id}/soc", s.handleLoadpointSoC)
+	s.handle("POST /api/loadpoints/{id}/settings", s.handleLoadpointSettings)
 	s.handle("GET  /api/version/check", s.handleVersionCheck)
 	s.handle("POST /api/version/skip", s.handleVersionSkip)
 	s.handle("POST /api/version/unskip", s.handleVersionUnskip)
@@ -1732,108 +1733,6 @@ func (s *Server) handleEVChargers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, chargers)
-}
-
-// GET /api/loadpoints returns the configured EV loadpoints with their
-// current observable state.
-func (s *Server) handleLoadpoints(w http.ResponseWriter, r *http.Request) {
-	if s.deps.Loadpoints == nil {
-		writeJSON(w, 200, map[string]any{"enabled": false, "loadpoints": []any{}})
-		return
-	}
-	writeJSON(w, 200, map[string]any{
-		"enabled":    true,
-		"loadpoints": s.deps.Loadpoints.States(),
-	})
-}
-
-// POST /api/loadpoints/{id}/target sets user intent for an EV
-// loadpoint: the SoC % the vehicle should reach by the target time.
-// Triggers an MPC replan so the new target takes effect within one
-// control cycle.
-//
-// Body: {"soc_pct": 80, "target_time_ms": 1745000000000}
-//
-// target_time_ms == 0 → no deadline (charge opportunistically).
-func (s *Server) handleLoadpointTarget(w http.ResponseWriter, r *http.Request) {
-	if s.deps.Loadpoints == nil {
-		writeJSON(w, 404, map[string]string{"error": "loadpoints not configured"})
-		return
-	}
-	id := r.PathValue("id")
-	if id == "" {
-		writeJSON(w, 400, map[string]string{"error": "id required"})
-		return
-	}
-	var req struct {
-		SoCPct       float64 `json:"soc_pct"`
-		TargetTimeMs int64   `json:"target_time_ms"`
-	}
-	if err := readJSON(r, &req); err != nil {
-		writeJSON(w, 400, map[string]string{"error": err.Error()})
-		return
-	}
-	var deadline time.Time
-	if req.TargetTimeMs > 0 {
-		deadline = time.UnixMilli(req.TargetTimeMs).UTC()
-	}
-	if !s.deps.Loadpoints.SetTarget(id, req.SoCPct, deadline, "manual", loadpoint.TargetPolicy{}) {
-		writeJSON(w, 404, map[string]string{"error": "loadpoint not found"})
-		return
-	}
-	// Trigger replan so the new target lands in the schedule fast.
-	if s.deps.MPC != nil {
-		go s.deps.MPC.Replan(r.Context())
-	}
-	writeJSON(w, 200, map[string]any{"ok": true})
-}
-
-// POST /api/loadpoints/{id}/soc lets the operator correct the
-// inferred vehicle SoC. Easee (and most chargers) are blind to the
-// vehicle's BMS — without a vehicle API integration (Tesla, VW, …)
-// we have no way to know actual SoC. We infer from
-// `plugin_soc_pct + delivered_wh / capacity`, but if the plug-in
-// anchor was wrong the estimate drifts. This endpoint re-anchors so
-// `current_soc_pct` equals the value the operator reads off their
-// car, and future observations accumulate from there.
-//
-// Body: {"soc_pct": 60}
-//
-// Returns 409 if the loadpoint is unplugged (can't set SoC on a
-// vehicle that isn't in the session).
-func (s *Server) handleLoadpointSoC(w http.ResponseWriter, r *http.Request) {
-	if s.deps.Loadpoints == nil {
-		writeJSON(w, 404, map[string]string{"error": "loadpoints not configured"})
-		return
-	}
-	id := r.PathValue("id")
-	if id == "" {
-		writeJSON(w, 400, map[string]string{"error": "id required"})
-		return
-	}
-	var req struct {
-		SoCPct float64 `json:"soc_pct"`
-	}
-	if err := readJSON(r, &req); err != nil {
-		writeJSON(w, 400, map[string]string{"error": err.Error()})
-		return
-	}
-	// Confirm loadpoint exists before inspecting plug state.
-	if _, ok := s.deps.Loadpoints.State(id); !ok {
-		writeJSON(w, 404, map[string]string{"error": "loadpoint not found"})
-		return
-	}
-	if !s.deps.Loadpoints.SetCurrentSoC(id, req.SoCPct) {
-		writeJSON(w, 409, map[string]string{
-			"error": "loadpoint not plugged in — SoC can only be set during an active session",
-		})
-		return
-	}
-	// Trigger replan so the corrected SoC feeds into the next plan.
-	if s.deps.MPC != nil {
-		go s.deps.MPC.Replan(r.Context())
-	}
-	writeJSON(w, 200, map[string]any{"ok": true})
 }
 
 // GET /api/notifications/status — reports enabled + counters.

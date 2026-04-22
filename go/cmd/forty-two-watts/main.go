@@ -283,6 +283,7 @@ func main() {
 	// Phase 4 wires the first plugged-in loadpoint's state into the
 	// MPC's DP so battery + EV are co-optimized in one DP.
 	lpMgr := loadpoint.NewManager()
+	lpMgr.BindKV(st)
 	if len(cfg.Loadpoints) > 0 {
 		lpMgr.Load(buildLoadpointConfigs(cfg.Loadpoints))
 		slog.Info("loadpoints configured", "count", len(cfg.Loadpoints))
