@@ -1097,6 +1097,22 @@ func main() {
 					liveGridW = gridR.SmoothedW
 				}
 
+				// Home-battery charging counts as part of the EV's
+				// available surplus: when the EV ramps up, the control
+				// loop's PI slews the battery's charging DOWN to keep
+				// the grid balanced (the battery never *needs* to
+				// absorb PV — it's the flexible consumer of last
+				// resort). Only positive (charging) readings count;
+				// a discharging battery is already covering load and
+				// must not be diverted to the EV unless
+				// AllowBatterySupport is on.
+				var batteryChargingW float64
+				for _, r := range tel.ReadingsByType(telemetry.DerBattery) {
+					if r != nil && r.SmoothedW > 0 {
+						batteryChargingW += r.SmoothedW
+					}
+				}
+
 				// Aggregate target policy across all active loadpoints for
 				// BatteryCoversEV: if ANY active manual target says
 				// AllowBatterySupport=true, the site-level flag is true.
@@ -1188,7 +1204,7 @@ func main() {
 						if gridStale {
 							wantW = 0
 						} else {
-							surplusW := -liveGridW + powerW
+							surplusW := -liveGridW + powerW + batteryChargingW
 							if surplusW < 0 {
 								surplusW = 0
 							}
