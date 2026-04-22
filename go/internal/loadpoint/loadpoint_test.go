@@ -245,3 +245,77 @@ func TestSetTargetUnknownID(t *testing.T) {
 		t.Errorf("expected false for unknown id")
 	}
 }
+
+// fakeKV implements the tiny interface loadpoint needs for persistence.
+type fakeKV struct{ m map[string]string }
+
+func (k *fakeKV) SaveConfig(key, value string) error {
+	if k.m == nil {
+		k.m = map[string]string{}
+	}
+	k.m[key] = value
+	return nil
+}
+func (k *fakeKV) LoadConfig(key string) (string, bool) {
+	v, ok := k.m[key]
+	return v, ok
+}
+
+func TestLoadpointSettingsDefaults(t *testing.T) {
+	m := NewManager()
+	m.Load([]Config{{ID: "garage"}})
+	m.BindKV(&fakeKV{})
+	s := m.Settings("garage")
+	if s.ChargeDurationH != 8 {
+		t.Errorf("ChargeDurationH default = %v, want 8", s.ChargeDurationH)
+	}
+	if s.SurplusHysteresisW != 500 {
+		t.Errorf("SurplusHysteresisW default = %v, want 500", s.SurplusHysteresisW)
+	}
+	if s.SurplusHysteresisS != 300 {
+		t.Errorf("SurplusHysteresisS default = %v, want 300", s.SurplusHysteresisS)
+	}
+	if s.SurplusStarvationS != 1800 {
+		t.Errorf("SurplusStarvationS default = %v, want 1800", s.SurplusStarvationS)
+	}
+}
+
+func TestLoadpointSettingsRoundtrip(t *testing.T) {
+	kv := &fakeKV{}
+	m := NewManager()
+	m.Load([]Config{{ID: "garage"}})
+	m.BindKV(kv)
+	err := m.UpdateSettings("garage", Settings{
+		ChargeDurationH:    4,
+		SurplusHysteresisW: 300,
+		SurplusHysteresisS: 120,
+		SurplusStarvationS: 900,
+	})
+	if err != nil {
+		t.Fatalf("UpdateSettings: %v", err)
+	}
+	// Fresh manager, same KV → settings restore.
+	m2 := NewManager()
+	m2.Load([]Config{{ID: "garage"}})
+	m2.BindKV(kv)
+	s := m2.Settings("garage")
+	if s.ChargeDurationH != 4 || s.SurplusHysteresisW != 300 ||
+		s.SurplusHysteresisS != 120 || s.SurplusStarvationS != 900 {
+		t.Errorf("settings not restored: %+v", s)
+	}
+}
+
+func TestLoadpointLastPolicyRoundtrip(t *testing.T) {
+	kv := &fakeKV{}
+	m := NewManager()
+	m.Load([]Config{{ID: "garage"}})
+	m.BindKV(kv)
+	m.SaveLastPolicy("garage", TargetPolicy{AllowGrid: true, AllowBatterySupport: false})
+	m2 := NewManager()
+	m2.Load([]Config{{ID: "garage"}})
+	m2.BindKV(kv)
+	p := m2.LastPolicy("garage")
+	if !p.AllowGrid || p.AllowBatterySupport {
+		t.Errorf("last policy not restored: %+v", p)
+	}
+}

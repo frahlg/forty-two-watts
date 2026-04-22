@@ -18,7 +18,9 @@
 package loadpoint
 
 import (
+	"fmt"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -89,11 +91,40 @@ func (p TargetPolicy) SurplusOnly() bool {
 	return !p.AllowGrid && !p.AllowBatterySupport
 }
 
+// Settings is the persistent per-loadpoint configuration the operator
+// tweaks at runtime (separate from Config, which comes from
+// config.yaml). Values live in state.db via KV keys of the form
+// `loadpoint.<id>.<field>`. Defaults apply when a key is absent.
+type Settings struct {
+	ChargeDurationH    int     `json:"charge_duration_h"`
+	SurplusHysteresisW float64 `json:"surplus_hysteresis_w"`
+	SurplusHysteresisS int     `json:"surplus_hysteresis_s"`
+	SurplusStarvationS int     `json:"surplus_starvation_s"`
+}
+
+// DefaultSettings mirrors the spec defaults.
+func DefaultSettings() Settings {
+	return Settings{
+		ChargeDurationH:    8,
+		SurplusHysteresisW: 500,
+		SurplusHysteresisS: 300,
+		SurplusStarvationS: 1800,
+	}
+}
+
+// KV is the minimal persistence surface loadpoint needs. state.Store
+// satisfies it; tests use a fake.
+type KV interface {
+	SaveConfig(key, value string) error
+	LoadConfig(key string) (string, bool)
+}
+
 // Manager holds the running set of loadpoints. Thread-safe.
 type Manager struct {
-	mu     sync.RWMutex
-	byID   map[string]*loadpointRuntime
-	order  []string // insertion-preserving id list for deterministic listing
+	mu    sync.RWMutex
+	byID  map[string]*loadpointRuntime
+	order []string // insertion-preserving id list for deterministic listing
+	kv    KV
 }
 
 // loadpointRuntime is the in-memory representation. Its fields are the
@@ -329,6 +360,137 @@ func (m *Manager) SetCurrentSoC(id string, socPct float64) bool {
 	lp.currentSoCPct = estimateSoCPct(anchor, lp.deliveredWhSession, lp.VehicleCapacityWh)
 	lp.updatedAtMs = time.Now().UnixMilli()
 	return true
+}
+
+// BindKV attaches a KV store for settings persistence. Idempotent.
+// Nil kv disables persistence (useful for tests that don't care).
+func (m *Manager) BindKV(kv KV) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.kv = kv
+}
+
+// Settings returns the persisted settings for id, falling back to
+// DefaultSettings() for missing/invalid keys. Unknown ids also return
+// defaults (callers shouldn't be hitting the manager with a bogus id
+// anyway).
+func (m *Manager) Settings(id string) Settings {
+	m.mu.RLock()
+	kv := m.kv
+	m.mu.RUnlock()
+	s := DefaultSettings()
+	if kv == nil {
+		return s
+	}
+	if v, ok := kv.LoadConfig(lpKey(id, "charge_duration_h")); ok {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			s.ChargeDurationH = n
+		}
+	}
+	if v, ok := kv.LoadConfig(lpKey(id, "surplus_hysteresis_w")); ok {
+		if f, err := strconv.ParseFloat(v, 64); err == nil && f >= 0 {
+			s.SurplusHysteresisW = f
+		}
+	}
+	if v, ok := kv.LoadConfig(lpKey(id, "surplus_hysteresis_s")); ok {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			s.SurplusHysteresisS = n
+		}
+	}
+	if v, ok := kv.LoadConfig(lpKey(id, "surplus_starvation_s")); ok {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			s.SurplusStarvationS = n
+		}
+	}
+	return s
+}
+
+// UpdateSettings writes every non-zero field of s to the KV. Zero
+// values skip that field (so partial updates work). Validation:
+// ChargeDurationH must be in [1, 72], hysteresis watts in [0, 5000],
+// seconds in [0, 7200]. Violations return an error and write nothing.
+func (m *Manager) UpdateSettings(id string, s Settings) error {
+	m.mu.RLock()
+	kv := m.kv
+	m.mu.RUnlock()
+	if kv == nil {
+		return fmt.Errorf("no KV bound")
+	}
+	if s.ChargeDurationH != 0 && (s.ChargeDurationH < 1 || s.ChargeDurationH > 72) {
+		return fmt.Errorf("charge_duration_h out of range [1,72]: %d", s.ChargeDurationH)
+	}
+	if s.SurplusHysteresisW < 0 || s.SurplusHysteresisW > 5000 {
+		return fmt.Errorf("surplus_hysteresis_w out of range [0,5000]: %v", s.SurplusHysteresisW)
+	}
+	if s.SurplusHysteresisS < 0 || s.SurplusHysteresisS > 7200 {
+		return fmt.Errorf("surplus_hysteresis_s out of range [0,7200]: %d", s.SurplusHysteresisS)
+	}
+	if s.SurplusStarvationS < 0 || s.SurplusStarvationS > 7200 {
+		return fmt.Errorf("surplus_starvation_s out of range [0,7200]: %d", s.SurplusStarvationS)
+	}
+	if s.ChargeDurationH != 0 {
+		if err := kv.SaveConfig(lpKey(id, "charge_duration_h"), strconv.Itoa(s.ChargeDurationH)); err != nil {
+			return err
+		}
+	}
+	if s.SurplusHysteresisW != 0 {
+		if err := kv.SaveConfig(lpKey(id, "surplus_hysteresis_w"), strconv.FormatFloat(s.SurplusHysteresisW, 'f', -1, 64)); err != nil {
+			return err
+		}
+	}
+	if s.SurplusHysteresisS != 0 {
+		if err := kv.SaveConfig(lpKey(id, "surplus_hysteresis_s"), strconv.Itoa(s.SurplusHysteresisS)); err != nil {
+			return err
+		}
+	}
+	if s.SurplusStarvationS != 0 {
+		if err := kv.SaveConfig(lpKey(id, "surplus_starvation_s"), strconv.Itoa(s.SurplusStarvationS)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// SaveLastPolicy persists the policy the UI should pre-fill for the
+// next Start press. Two booleans as "1"/"0" keys so debugging is
+// obvious without JSON parsing.
+func (m *Manager) SaveLastPolicy(id string, p TargetPolicy) {
+	m.mu.RLock()
+	kv := m.kv
+	m.mu.RUnlock()
+	if kv == nil {
+		return
+	}
+	_ = kv.SaveConfig(lpKey(id, "last_policy.allow_grid"), boolStr(p.AllowGrid))
+	_ = kv.SaveConfig(lpKey(id, "last_policy.allow_battery_support"), boolStr(p.AllowBatterySupport))
+}
+
+// LastPolicy returns the last-used policy for id, or zero-value (all
+// false = surplus-only) if never saved.
+func (m *Manager) LastPolicy(id string) TargetPolicy {
+	m.mu.RLock()
+	kv := m.kv
+	m.mu.RUnlock()
+	if kv == nil {
+		return TargetPolicy{}
+	}
+	var p TargetPolicy
+	if v, ok := kv.LoadConfig(lpKey(id, "last_policy.allow_grid")); ok {
+		p.AllowGrid = v == "1"
+	}
+	if v, ok := kv.LoadConfig(lpKey(id, "last_policy.allow_battery_support")); ok {
+		p.AllowBatterySupport = v == "1"
+	}
+	return p
+}
+
+func lpKey(id, field string) string { return "loadpoint." + id + "." + field }
+
+func boolStr(b bool) string {
+	if b {
+		return "1"
+	}
+	return "0"
 }
 
 func (lp *loadpointRuntime) snapshot() State {
