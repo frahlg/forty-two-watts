@@ -133,3 +133,98 @@ func TestDiagnoseHandlesLengthMismatch(t *testing.T) {
 		t.Errorf("should truncate to shorter side; got %d rows", len(d.Slots))
 	}
 }
+
+// TestDiagnoseCarriesLoadpointFields — without this the plan table
+// hides EV columns because its `lpActive` gate is
+// `slots.some(x => x.loadpoint_w || x.loadpoint_soc_pct)`. Plumbing
+// these fields through is the whole point of issue #174: when the
+// battery covers `LOAD + EV`, an operator looking at `BATTERY −5.6
+// kW` next to `LOAD 1.6 kW` would reasonably think the battery is
+// exporting 4 kW to grid — the reality is the EV eats the
+// difference. This test is the contract that the diagnostic carries
+// enough information to explain that arithmetic.
+func TestDiagnoseCarriesLoadpointFields(t *testing.T) {
+	// Four cheap-priced slots with a deadline-bound EV. The DP
+	// must charge at least once, so at least one action carries a
+	// non-zero LoadpointW we can observe through the diagnostic.
+	start := time.Date(2026, 4, 22, 0, 0, 0, 0, time.UTC).UnixMilli()
+	slots := []Slot{
+		{StartMs: start, LenMin: 60, PriceOre: 30, SpotOre: 15,
+			LoadW: 400, Confidence: 1.0},
+		{StartMs: start + 3600_000, LenMin: 60, PriceOre: 20, SpotOre: 10,
+			LoadW: 400, Confidence: 1.0},
+		{StartMs: start + 7200_000, LenMin: 60, PriceOre: 25, SpotOre: 12,
+			LoadW: 400, Confidence: 1.0},
+		{StartMs: start + 10800_000, LenMin: 60, PriceOre: 40, SpotOre: 20,
+			LoadW: 400, Confidence: 1.0},
+	}
+	p := Params{
+		Mode:                ModeCheapCharge,
+		SoCLevels:           21,
+		CapacityWh:          10000,
+		SoCMinPct:           10,
+		SoCMaxPct:           95,
+		InitialSoCPct:       50,
+		ActionLevels:        5,
+		MaxChargeW:          2000,
+		MaxDischargeW:       2000,
+		ChargeEfficiency:    0.95,
+		DischargeEfficiency: 0.95,
+		TerminalSoCPrice:    70,
+		Loadpoint: &LoadpointSpec{
+			ID:               "garage",
+			CapacityWh:       60000,
+			Levels:           11,
+			InitialSoCPct:    20,
+			PluggedIn:        true,
+			TargetSoCPct:     30,
+			TargetSlotIdx:    3,
+			MaxChargeW:       11000,
+			AllowedStepsW:    []float64{0, 11000},
+			ChargeEfficiency: 0.9,
+		},
+	}
+	plan := Optimize(slots, p)
+	svc := &Service{
+		Zone:         "SE3",
+		last:         &plan,
+		lastSlots:    slots,
+		lastParams:   p,
+		lastReplanAt: time.UnixMilli(plan.GeneratedAtMs),
+		lastReason:   "ev-test",
+	}
+	d := svc.Diagnose()
+	if d == nil {
+		t.Fatal("Diagnose returned nil with a loadpoint-enabled plan")
+	}
+
+	// At least one slot must report the EV charging that the DP
+	// decided — otherwise the UI's lpActive gate stays false and
+	// the columns never appear.
+	sawCharge := false
+	sawSoC := false
+	for i, row := range d.Slots {
+		if row.LoadpointW != plan.Actions[i].LoadpointW {
+			t.Errorf("slot %d LoadpointW: diagnostic=%.1f plan=%.1f — "+
+				"the plumb from Action → DiagnosticSlot is broken",
+				i, row.LoadpointW, plan.Actions[i].LoadpointW)
+		}
+		if row.LoadpointSoCPct != plan.Actions[i].LoadpointSoCPct {
+			t.Errorf("slot %d LoadpointSoCPct: diagnostic=%.1f plan=%.1f",
+				i, row.LoadpointSoCPct, plan.Actions[i].LoadpointSoCPct)
+		}
+		if row.LoadpointW > 0 {
+			sawCharge = true
+		}
+		if row.LoadpointSoCPct > 0 {
+			sawSoC = true
+		}
+	}
+	if !sawCharge {
+		t.Error("no slot carries LoadpointW — deadline-bound DP should " +
+			"charge at least once; check Action.LoadpointW plumbing")
+	}
+	if !sawSoC {
+		t.Error("no slot carries LoadpointSoCPct — EV SoC trajectory lost")
+	}
+}
