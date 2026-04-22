@@ -1125,17 +1125,20 @@ func main() {
 					plugged := false
 					var sessionWh, powerW float64
 					var opMode int
+					var obsPhases int
 					if evr != nil {
 						powerW = evr.SmoothedW
 						var d struct {
 							Connected bool    `json:"connected"`
 							SessionWh float64 `json:"session_wh"`
 							OpMode    int     `json:"op_mode"`
+							Phases    int     `json:"phases"`
 						}
 						if err := json.Unmarshal(evr.Data, &d); err == nil {
 							plugged = d.Connected
 							sessionWh = d.SessionWh
 							opMode = d.OpMode
+							obsPhases = d.Phases
 						}
 					}
 					lpMgr.Observe(lpCfg.ID, plugged, powerW, sessionWh)
@@ -1145,6 +1148,11 @@ func main() {
 						dst = &loadpoint.DispatchState{}
 						lpDispatch[lpCfg.ID] = dst
 					}
+					// Track the charger's believed phase count from its
+					// own telemetry. Seeds the switch-cooldown logic and
+					// lets the driver authoritatively tell us what mode
+					// it's actually in.
+					dst.ObservePhases(obsPhases)
 					stSettings := lpMgr.Settings(lpCfg.ID)
 
 					lpState, _ := lpMgr.State(lpCfg.ID)
@@ -1201,6 +1209,17 @@ func main() {
 
 					// ---- Policy-aware snap. ----
 					if targetActive && !policy.AllowGrid {
+						// Default mode: 3φ (existing behaviour). If
+						// the loadpoint has 1φ config populated AND
+						// surplus can't reach the 3φ minimum, we fall
+						// back to 1φ so the charger can still make use
+						// of smaller PV surpluses (≈1.4 kW vs ≈4 kW).
+						has1Phase := lpCfg.MinCharge1PhaseW > 0
+						modeMin := lpCfg.MinChargeW
+						modeMax := lpCfg.MaxChargeW
+						modeSteps := lpCfg.AllowedStepsW
+						wantPhases := 3
+
 						if gridStale {
 							wantW = 0
 						} else {
@@ -1208,14 +1227,54 @@ func main() {
 							if surplusW < 0 {
 								surplusW = 0
 							}
-							decided, commit := dst.SurplusDecision(surplusW, lpCfg.MinChargeW, stSettings, nowT)
+							// Pick desired phase mode from raw surplus.
+							// 3φ if surplus ≥ 3φ min; else 1φ if we
+							// have it configured and surplus ≥ 1φ min;
+							// else 0 (will commit to pause below).
+							if surplusW >= lpCfg.MinChargeW {
+								wantPhases = 3
+							} else if has1Phase && surplusW >= lpCfg.MinCharge1PhaseW {
+								wantPhases = 1
+							} else if has1Phase {
+								// Surplus below even 1φ min — stay in
+								// whatever mode the charger is in; the
+								// hysteresis below will decide pause.
+								if dst.PhaseCount() == 1 {
+									wantPhases = 1
+								}
+							}
+
+							if wantPhases == 1 && has1Phase {
+								modeMin = lpCfg.MinCharge1PhaseW
+								modeMax = lpCfg.MaxCharge1PhaseW
+								modeSteps = lpCfg.AllowedSteps1PhaseW
+							}
+
+							decided, commit := dst.SurplusDecision(surplusW, modeMin, stSettings, nowT)
 							if commit {
 								wantW = 0
-							} else if decided < wantW {
+							} else if decided < wantW || wantW == 0 {
 								wantW = decided
 							}
 						}
-						cmdW = control.FloorSnapChargeW(wantW, lpCfg.MinChargeW, lpCfg.MaxChargeW, lpCfg.AllowedStepsW)
+
+						// Issue a phase switch BEFORE the current
+						// command so the driver's amperage math lands
+						// in the right mode. 120s cooldown avoids flap.
+						if has1Phase && wantW > 0 {
+							if target, ok := dst.ShouldSwitchPhase(wantPhases, nowMs, 120_000); ok {
+								phasePayload, _ := json.Marshal(map[string]any{
+									"action": "ev_set_phases",
+									"phases": target,
+								})
+								if err := reg.Send(ctx, lpCfg.DriverName, phasePayload); err != nil {
+									slog.Warn("loadpoint phase switch", "lp", lpCfg.ID,
+										"driver", lpCfg.DriverName, "target", target, "err", err)
+								}
+							}
+						}
+
+						cmdW = control.FloorSnapChargeW(wantW, modeMin, modeMax, modeSteps)
 					} else {
 						cmdW = control.SnapChargeW(wantW, lpCfg.MinChargeW, lpCfg.MaxChargeW, lpCfg.AllowedStepsW)
 					}
