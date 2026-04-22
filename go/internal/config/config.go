@@ -110,14 +110,23 @@ type Nova struct {
 // Phase 3 introduces the schema + observable surface; Phase 4 wires
 // it into the DP state space so the MPC optimizes battery + EV jointly.
 // See docs/plan-ems-contract.md + go/internal/loadpoint.
+//
+// The `_1phase_w` fields are optional. When populated, surplus-only
+// dispatch may dynamically drop the charger into locked 1φ mode to
+// track lower PV surplus (≈1380 W min on 1φ vs ≈4140 W on 3φ for
+// 6 A × 230 V). See docs/superpowers/specs/2026-04-22-ev-loadpoint-policy-v1-design.md
+// for the full rationale.
 type Loadpoint struct {
-	ID                string    `yaml:"id" json:"id"`
-	DriverName        string    `yaml:"driver_name" json:"driver_name"`
-	MinChargeW        float64   `yaml:"min_charge_w,omitempty" json:"min_charge_w,omitempty"`
-	MaxChargeW        float64   `yaml:"max_charge_w,omitempty" json:"max_charge_w,omitempty"`
-	AllowedStepsW     []float64 `yaml:"allowed_steps_w,omitempty" json:"allowed_steps_w,omitempty"`
-	VehicleCapacityWh float64   `yaml:"vehicle_capacity_wh,omitempty" json:"vehicle_capacity_wh,omitempty"`
-	PluginSoCPct      float64   `yaml:"plugin_soc_pct,omitempty" json:"plugin_soc_pct,omitempty"`
+	ID                  string    `yaml:"id" json:"id"`
+	DriverName          string    `yaml:"driver_name" json:"driver_name"`
+	MinChargeW          float64   `yaml:"min_charge_w,omitempty" json:"min_charge_w,omitempty"`
+	MaxChargeW          float64   `yaml:"max_charge_w,omitempty" json:"max_charge_w,omitempty"`
+	AllowedStepsW       []float64 `yaml:"allowed_steps_w,omitempty" json:"allowed_steps_w,omitempty"`
+	MinCharge1PhaseW    float64   `yaml:"min_charge_1phase_w,omitempty" json:"min_charge_1phase_w,omitempty"`
+	MaxCharge1PhaseW    float64   `yaml:"max_charge_1phase_w,omitempty" json:"max_charge_1phase_w,omitempty"`
+	AllowedSteps1PhaseW []float64 `yaml:"allowed_steps_1phase_w,omitempty" json:"allowed_steps_1phase_w,omitempty"`
+	VehicleCapacityWh   float64   `yaml:"vehicle_capacity_wh,omitempty" json:"vehicle_capacity_wh,omitempty"`
+	PluginSoCPct        float64   `yaml:"plugin_soc_pct,omitempty" json:"plugin_soc_pct,omitempty"`
 }
 
 // OCPP configures the embedded OCPP 1.6J Central System for EV chargers.

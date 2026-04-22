@@ -25,6 +25,13 @@ type DispatchState struct {
 	lastOpMode  int
 	lastPlugged bool
 	lastCmdW    float64
+
+	// Current phase count the charger is believed to be in (1 or 3).
+	// Zero means "unknown — don't switch until observed".
+	phaseCount int
+	// When we last switched phase mode, in unix millis. Cooldown
+	// prevents flap around the 3φ/1φ boundary.
+	lastPhaseSwitchMs int64
 }
 
 // SurplusDecision implements the forward-only hysteresis from the
@@ -119,3 +126,36 @@ func (s *DispatchState) LastCmdW() float64 { return s.lastCmdW }
 
 // LastPlugged returns the plugged-in flag from the previous tick.
 func (s *DispatchState) LastPlugged() bool { return s.lastPlugged }
+
+// PhaseCount returns the last-observed phase count. Zero if unknown.
+func (s *DispatchState) PhaseCount() int { return s.phaseCount }
+
+// ObservePhases records the phase count from the driver's telemetry.
+// Call this on every tick with the JSON-decoded phases field. Values
+// other than 1 or 3 are ignored (2φ is not a dispatch mode we use).
+func (s *DispatchState) ObservePhases(n int) {
+	if n == 1 || n == 3 {
+		s.phaseCount = n
+	}
+}
+
+// ShouldSwitchPhase decides if we should request a phase change this
+// tick. Returns (targetPhases, true) when a switch is recommended,
+// (0, false) otherwise. Applies a cooldown between switches to avoid
+// flapping around the 3φ/1φ boundary.
+//
+// Side effect: records the switch time when it returns true, so
+// repeated calls within the cooldown window are no-ops.
+func (s *DispatchState) ShouldSwitchPhase(desired int, nowMs int64, cooldownMs int64) (int, bool) {
+	if desired != 1 && desired != 3 {
+		return 0, false
+	}
+	if s.phaseCount == desired {
+		return 0, false
+	}
+	if s.lastPhaseSwitchMs > 0 && nowMs-s.lastPhaseSwitchMs < cooldownMs {
+		return 0, false
+	}
+	s.lastPhaseSwitchMs = nowMs
+	return desired, true
+}

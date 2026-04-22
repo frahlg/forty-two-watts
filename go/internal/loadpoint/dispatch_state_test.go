@@ -121,3 +121,76 @@ func TestAutoClearIgnoresSurplusPause(t *testing.T) {
 		t.Errorf("3→2 with lastCmd>0 (user pause) must NOT signal clear")
 	}
 }
+
+func TestObservePhasesAcceptsOnly1And3(t *testing.T) {
+	st := &DispatchState{}
+	st.ObservePhases(1)
+	if st.PhaseCount() != 1 {
+		t.Errorf("ObservePhases(1) → PhaseCount=%d, want 1", st.PhaseCount())
+	}
+	st.ObservePhases(3)
+	if st.PhaseCount() != 3 {
+		t.Errorf("ObservePhases(3) → PhaseCount=%d, want 3", st.PhaseCount())
+	}
+	// 2φ is not a dispatch mode — ignore, keep prior value.
+	st.ObservePhases(2)
+	if st.PhaseCount() != 3 {
+		t.Errorf("ObservePhases(2) should be ignored, got %d", st.PhaseCount())
+	}
+	// 0 also ignored.
+	st.ObservePhases(0)
+	if st.PhaseCount() != 3 {
+		t.Errorf("ObservePhases(0) should be ignored, got %d", st.PhaseCount())
+	}
+}
+
+func TestShouldSwitchPhaseNoOpWhenAlreadyThere(t *testing.T) {
+	st := &DispatchState{}
+	st.ObservePhases(3)
+	_, ok := st.ShouldSwitchPhase(3, 1_000_000, 120_000)
+	if ok {
+		t.Errorf("switch to same phase should be a no-op")
+	}
+}
+
+func TestShouldSwitchPhaseRejectsInvalidDesired(t *testing.T) {
+	st := &DispatchState{}
+	st.ObservePhases(3)
+	if _, ok := st.ShouldSwitchPhase(2, 1_000_000, 120_000); ok {
+		t.Errorf("desired=2 must be rejected")
+	}
+	if _, ok := st.ShouldSwitchPhase(0, 1_000_000, 120_000); ok {
+		t.Errorf("desired=0 must be rejected")
+	}
+}
+
+func TestShouldSwitchPhaseRespectsCooldown(t *testing.T) {
+	st := &DispatchState{}
+	st.ObservePhases(3)
+	// First switch → allowed.
+	target, ok := st.ShouldSwitchPhase(1, 1_000_000, 120_000)
+	if !ok || target != 1 {
+		t.Fatalf("first switch should be allowed, got (%d, %v)", target, ok)
+	}
+	// Simulate driver not yet acknowledging the switch (phaseCount still 3).
+	// A second switch request 60s later (within 120s cooldown) must be blocked.
+	if _, ok := st.ShouldSwitchPhase(1, 1_060_000, 120_000); ok {
+		t.Errorf("switch within cooldown should be blocked")
+	}
+	// 121s later — cooldown elapsed, but phaseCount==desired-inverse only if
+	// we observe 1. Test the pure-time gate: update observed to 3, then
+	// request 1 again after the cooldown expires.
+	if _, ok := st.ShouldSwitchPhase(1, 1_121_000, 120_000); !ok {
+		t.Errorf("switch after cooldown should be allowed")
+	}
+}
+
+func TestShouldSwitchPhaseZeroPhaseCountPermitsFirstSwitch(t *testing.T) {
+	// Fresh state, PhaseCount unknown (0). A desired switch must still
+	// be allowed — the caller has no prior belief to match against.
+	st := &DispatchState{}
+	target, ok := st.ShouldSwitchPhase(1, 500, 120_000)
+	if !ok || target != 1 {
+		t.Errorf("unknown phase count should permit first switch, got (%d, %v)", target, ok)
+	}
+}
