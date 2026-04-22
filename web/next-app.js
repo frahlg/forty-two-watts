@@ -1813,6 +1813,33 @@
     animating = !document.hidden;
   });
 
+  // ---- History wrapper: one Week/Month toggle drives all three tiles ----
+  // The wrapper card in index.html hosts #history-toggle and the three
+  // <ftw-history-card hide-toggle range="week"> children. Clicking a
+  // button flips data-active (moves the sliding pill) and pushes
+  // `range=week|month` onto every child — the component observes that
+  // attribute and re-fetches, so the three charts stay in lock-step.
+  var historyToggle = $("history-toggle");
+  if (historyToggle) {
+    historyToggle.addEventListener("click", function (e) {
+      var btn = e.target.closest("button[data-range]");
+      if (!btn) return;
+      var next = btn.getAttribute("data-range");
+      if (!next || next === historyToggle.getAttribute("data-active")) return;
+      historyToggle.setAttribute("data-active", next);
+      var buttons = historyToggle.querySelectorAll("button[data-range]");
+      for (var i = 0; i < buttons.length; i++) {
+        var on = buttons[i].getAttribute("data-range") === next;
+        buttons[i].classList.toggle("active", on);
+        buttons[i].setAttribute("aria-selected", on ? "true" : "false");
+      }
+      var tiles = document.querySelectorAll(".history-tiles ftw-history-card");
+      for (var j = 0; j < tiles.length; j++) {
+        tiles[j].setAttribute("range", next);
+      }
+    });
+  }
+
   // ---- Init ----
   loadHistory(chartRange);
   fetchStatus();

@@ -52,7 +52,7 @@
     }
   }
   </script>
-  <script type="module" src="/components/index.js"></script>
+  <script type="module" src="/components/index.js?v=histwrap1"></script>
 </head>
 <body class="ftw-next">
   <header>
@@ -184,13 +184,27 @@
       </div>
     </section>
 
-    <!-- History cards — three daily kWh stats with Week/Month toggle.
-         Each <ftw-history-card> owns its own fetch/state — no wiring
-         needed in next-app.js. -->
-    <section class="history-cards">
-      <ftw-history-card metric="import" label="Imported"></ftw-history-card>
-      <ftw-history-card metric="load"   label="Consumed"></ftw-history-card>
-      <ftw-history-card metric="export" label="Exported"></ftw-history-card>
+    <!-- History — one wrapper card with a single Week/Month toggle that
+         drives all three daily-kWh tiles. Mirrors the fuse-card pattern:
+         the outer card owns label + toggle chrome; each inner
+         <ftw-history-card hide-toggle range=…> renders as a pure chart
+         tile. next-app.js binds #history-toggle to push range= onto all
+         three children in lock-step. -->
+    <section class="history-row">
+      <div class="card history-group">
+        <div class="history-head">
+          <div class="card-label">Daily energy</div>
+          <div class="history-toggle" id="history-toggle" role="tablist" data-active="week">
+            <button type="button" role="tab" data-range="week"  class="active" aria-selected="true">Week</button>
+            <button type="button" role="tab" data-range="month" aria-selected="false">Month</button>
+          </div>
+        </div>
+        <div class="history-tiles">
+          <ftw-history-card metric="import" label="Imported" hide-toggle range="week"></ftw-history-card>
+          <ftw-history-card metric="load"   label="Consumed" hide-toggle range="week"></ftw-history-card>
+          <ftw-history-card metric="export" label="Exported" hide-toggle range="week"></ftw-history-card>
+        </div>
+      </div>
     </section>
 
     <!-- Controls — two-tier: primary strategy + manual advanced -->

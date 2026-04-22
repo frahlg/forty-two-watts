@@ -12,6 +12,14 @@
 //   accent   — bar + total color (default depends on metric; falls back
 //              to var(--cyan))
 //   default-range — "week" (default, last 7 days) | "month" (so far)
+//   range    — when set (e.g. by an outer wrapper card with a shared
+//              Week/Month toggle), this attribute is the authoritative
+//              source for the range. Changes on it re-fetch. Use this
+//              to drive multiple sibling cards from one toggle.
+//   hide-toggle — presence hides the per-card Week/Month pill (the
+//              caller renders a shared one in the wrapper) and flips
+//              the card chrome to the "sub-card" surface so nested
+//              tiles read as recessed against the wrapper.
 //   poll-ms  — refresh interval in ms (default 300000 = 5 min);
 //              0 disables polling
 //
@@ -58,15 +66,28 @@ class FtwHistoryCard extends FtwElement {
       border-radius: var(--radius-md, 10px);
       padding: var(--card-pad, 14px 16px);
     }
+    /* Nested mode — when the host has the hide-toggle attribute, the card is sitting
+       inside an outer wrapper (see .history-group in next.css) that owns
+       the label/toggle chrome. Flip the surface to --ink-sunken so the
+       nested tile reads as recessed, matching the fuse-card → phase-box
+       pattern. */
+    :host([hide-toggle]) .card-inner {
+      background: var(--ink-sunken);
+    }
     .head {
       display: flex;
       align-items: center;
       justify-content: space-between;
     }
+    /* Card heading (Imported / Consumed / Exported). Reads --fg-label
+       from theme.css so every label across the dashboard — inside
+       shadow DOMs or out — picks up the same brightness from one
+       themeable token. The shadow boundary doesn't block custom
+       properties, so nothing else is needed to keep it in sync. */
     .label {
       font-family: var(--mono);
       font-size: 10px;
-      color: var(--fg-muted);
+      color: var(--fg-label);
       letter-spacing: 0.1em;
       text-transform: uppercase;
     }
@@ -107,7 +128,10 @@ class FtwHistoryCard extends FtwElement {
       z-index: 1;
       background: transparent;
       border: 0;
-      color: var(--fg-muted);
+      /* Inactive Week/Month text matches the card label brightness
+         (--fg-label) so the whole row reads at one tier. The active
+         button still flips to near-black on the amber pill below. */
+      color: var(--fg-label);
       font-family: var(--mono);
       font-size: 10px;
       font-weight: 500;
@@ -141,7 +165,7 @@ class FtwHistoryCard extends FtwElement {
     .total .avg-mini {
       font-size: 0.82rem;
       font-weight: 500;
-      color: var(--fg-muted);
+      color: var(--fg-label);
       margin-left: 6px;
       letter-spacing: 0;
     }
@@ -151,7 +175,7 @@ class FtwHistoryCard extends FtwElement {
   `;
 
   static get observedAttributes() {
-    return ["metric", "label", "accent", "default-range", "poll-ms"];
+    return ["metric", "label", "accent", "default-range", "poll-ms", "range", "hide-toggle"];
   }
 
   constructor() {
@@ -176,11 +200,24 @@ class FtwHistoryCard extends FtwElement {
   }
 
   attributeChangedCallback(name) {
+    // `range` syncs BEFORE update() because render() also reads the
+    // attribute into _range — if we called update() first, the check
+    // below would see _range already equal to the new attribute and
+    // skip the refresh, leaving the chart stuck on the old range.
+    let rangeChanged = false;
+    if (name === "range") {
+      const next = this.getAttribute("range");
+      if (next && next !== this._range) {
+        this._range = next;
+        rangeChanged = true;
+      }
+    }
     this.update();
     if (name === "metric" || name === "poll-ms") {
       this._refresh();
       this._restartPolling();
     }
+    if (rangeChanged) this._refresh();
   }
 
   _restartPolling() {
@@ -202,27 +239,32 @@ class FtwHistoryCard extends FtwElement {
   }
 
   render() {
+    // `range` attribute (pushed in by a wrapper) wins over internal
+    // state. Falls back to `default-range`, then "week". Reading it on
+    // every render keeps the component in sync whether the source is
+    // an outer toggle or this card's own.
+    const rangeAttr = this.getAttribute("range");
+    if (rangeAttr && rangeAttr !== this._range) this._range = rangeAttr;
     if (this._range == null) {
       this._range = this.getAttribute("default-range") || "week";
     }
     const label = this.getAttribute("label") || "";
     const accent = this._accent();
+    const hideToggle = this.hasAttribute("hide-toggle");
     this.style.setProperty("--ftw-history-accent", accent);
-    // Plain buttons with aria-pressed rather than role=tablist/tab: a
-    // proper tabs pattern requires aria-selected + arrow-key navigation
-    // we don't implement, so we'd only be lying to assistive tech.
     // accent is applied to the bar-chart in afterRender() via
     // setAttribute, not interpolated here, so a future caller passing a
     // CSS value containing quotes can't escape the attribute context.
     const wk = this._range === "week";
-    return `
-      <div class="card-inner">
-        <div class="head">
-          <div class="label">${escapeHtml(label)}</div>
+    const toggleHtml = hideToggle ? "" : `
           <div class="toggle" role="tablist" data-active="${wk ? "week" : "month"}">
             <button type="button" role="tab" data-range="week"  aria-selected="${wk ? "true" : "false"}"${wk ? ' class="active"' : ""}>Week</button>
             <button type="button" role="tab" data-range="month" aria-selected="${!wk ? "true" : "false"}"${!wk ? ' class="active"' : ""}>Month</button>
-          </div>
+          </div>`;
+    return `
+      <div class="card-inner">
+        <div class="head">
+          <div class="label">${escapeHtml(label)}</div>${toggleHtml}
         </div>
         <div class="total" data-role="total">— kWh</div>
         <ftw-bar-chart data-role="chart" loading="true"></ftw-bar-chart>

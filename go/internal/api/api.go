@@ -123,6 +123,13 @@ type Deps struct {
 type Server struct {
 	deps *Deps
 	mux  *http.ServeMux
+
+	// dailyCache memoizes per-local-day energy totals keyed by "YYYY-MM-DD".
+	// Past days are immutable once the day ends, so we only ever recompute
+	// today. Lives for process lifetime; /api/energy/daily?days=31 drops from
+	// ~30 SQL round-trips with ~500k rows shipped to Go to at most one.
+	dailyCacheMu sync.Mutex
+	dailyCache   map[string]state.DayEnergy
 }
 
 // New creates a new API server.
@@ -133,7 +140,11 @@ func New(deps *Deps) *Server {
 	if deps.WebDir == "" {
 		deps.WebDir = "web"
 	}
-	s := &Server{deps: deps, mux: http.NewServeMux()}
+	s := &Server{
+		deps:       deps,
+		mux:        http.NewServeMux(),
+		dailyCache: make(map[string]state.DayEnergy),
+	}
 	s.routes()
 	return s
 }
@@ -1083,66 +1094,55 @@ func (s *Server) handleEnergyDaily(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	loc := now.Location()
 	todayMidnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
-	firstDayStart := todayMidnight.AddDate(0, 0, -(days - 1))
 
-	// One range scan across the whole window; buckets are pre-seeded so
-	// gap-days render as zeros and are distinguishable from a DB failure
-	// (which returns 500 below instead of a silently empty payload).
-	pts, err := s.deps.State.LoadHistory(firstDayStart.UnixMilli(), now.UnixMilli(), 0)
-	if err != nil {
-		slog.Error("handleEnergyDaily: LoadHistory failed", "err", err, "days", days)
-		http.Error(w, "history load failed", http.StatusInternalServerError)
-		return
-	}
-
-	type dayTotals struct {
-		importWh, exportWh, pvWh, chargedWh, dischargedWh, loadWh float64
-	}
-	buckets := make(map[string]*dayTotals, days)
-	order := make([]string, 0, days)
-	for i := 0; i < days; i++ {
-		key := todayMidnight.AddDate(0, 0, -(days-1-i)).Format("2006-01-02")
-		buckets[key] = &dayTotals{}
-		order = append(order, key)
-	}
-
-	// Attribute each (pts[j-1], pts[j]) slice to the day of pts[j], matching
-	// the right-hand-sample attribution used by handleStatus's today-block
-	// integration. Points before firstDayStart are filtered out below in the
-	// LoadHistory range, so j==0 is always at/after firstDayStart.
-	for j := 1; j < len(pts); j++ {
-		dtH := float64(pts[j].TsMs-pts[j-1].TsMs) / 3_600_000.0
-		key := time.UnixMilli(pts[j].TsMs).In(loc).Format("2006-01-02")
-		b := buckets[key]
-		if b == nil {
-			continue
-		}
-		g := pts[j].GridW
-		if g > 0 {
-			b.importWh += g * dtH
-		} else {
-			b.exportWh += -g * dtH
-		}
-		b.pvWh += -pts[j].PVW * dtH
-		if pts[j].BatW > 0 {
-			b.chargedWh += pts[j].BatW * dtH
-		} else {
-			b.dischargedWh += -pts[j].BatW * dtH
-		}
-		b.loadWh += pts[j].LoadW * dtH
-	}
-
+	// Walk day-by-day: past days hit the immutable-day cache, today always
+	// recomputes (in-progress). Each cache miss / today fire is one SQL
+	// round-trip that returns a single pre-integrated row — no raw samples
+	// shipped to Go.
 	out := make([]map[string]any, 0, days)
-	for _, key := range order {
-		b := buckets[key]
+	for i := days - 1; i >= 0; i-- {
+		dayStart := todayMidnight.AddDate(0, 0, -i)
+		dayKey := dayStart.Format("2006-01-02")
+		isToday := i == 0
+
+		var de state.DayEnergy
+		if isToday {
+			d, err := s.deps.State.DailyEnergy(dayStart.UnixMilli(), now.UnixMilli())
+			if err != nil {
+				slog.Error("handleEnergyDaily: DailyEnergy failed", "err", err, "day", dayKey)
+				http.Error(w, "history load failed", http.StatusInternalServerError)
+				return
+			}
+			de = d
+		} else {
+			s.dailyCacheMu.Lock()
+			cached, ok := s.dailyCache[dayKey]
+			s.dailyCacheMu.Unlock()
+			if ok {
+				de = cached
+			} else {
+				dayEnd := dayStart.AddDate(0, 0, 1)
+				d, err := s.deps.State.DailyEnergy(dayStart.UnixMilli(), dayEnd.UnixMilli())
+				if err != nil {
+					slog.Error("handleEnergyDaily: DailyEnergy failed", "err", err, "day", dayKey)
+					http.Error(w, "history load failed", http.StatusInternalServerError)
+					return
+				}
+				de = d
+				s.dailyCacheMu.Lock()
+				s.dailyCache[dayKey] = de
+				s.dailyCacheMu.Unlock()
+			}
+		}
+
 		out = append(out, map[string]any{
-			"day":               key,
-			"import_wh":         b.importWh,
-			"export_wh":         b.exportWh,
-			"pv_wh":             b.pvWh,
-			"bat_charged_wh":    b.chargedWh,
-			"bat_discharged_wh": b.dischargedWh,
-			"load_wh":           b.loadWh,
+			"day":               dayKey,
+			"import_wh":         de.ImportWh,
+			"export_wh":         de.ExportWh,
+			"pv_wh":             de.PVWh,
+			"bat_charged_wh":    de.BatChargedWh,
+			"bat_discharged_wh": de.BatDischargedWh,
+			"load_wh":           de.LoadWh,
 		})
 	}
 	writeJSON(w, 200, map[string]any{"days": out, "tz": loc.String()})

@@ -260,9 +260,13 @@ body.ftw-next .flow-hero {
 }
 body.ftw-next .flow-hero ftw-energy-flow {
   display: block;
-  /* Extra breathing room under the planets on desktop so the hero
-     doesn't crowd the cards directly below it. Mobile stays tight. */
-  padding-bottom: 40px;
+  /* Desktop breathing room under the planets. The Combined switch
+     sits inside this host at `position:absolute; bottom:14px`, so
+     padding-bottom controls how far BELOW the SVG it lands — growing
+     this value is what gives the toggle more top-margin, and the
+     extra padding also keeps the hero from crowding the cards right
+     below it. Mobile stays tight (no extra padding). */
+  padding-bottom: 80px;
 }
 @media (max-width: 900px) {
   body.ftw-next .flow-hero ftw-energy-flow { padding-bottom: 0; }
@@ -279,9 +283,27 @@ body.ftw-next.mode-numbers .flow-hero        { display: none !important; }
 /* In hero mode the summary-cards row only holds .ftw-hide-in-hero tiles
    (SoC/EV/Fuse moved out), so the section collapses to zero height but
    still claims a flex gap slot — visible as an extra ~16 px between the
-   hero and the history-cards row. Hide the empty section to keep all
+   hero and the history-row wrapper card. Hide the empty section to keep all
    inter-section gaps uniform. */
 body.ftw-next.mode-hero    .summary-cards    { display: none !important; }
+
+/* ---- Card labels — single themeable rule shared by every .card-label
+       across the dashboard (summary, fuse, energy, control, history…).
+       Color is driven by --fg-label from theme.css so a one-line palette
+       tweak propagates everywhere and the brightness stays uniform
+       between cards. Spacing (margin-bottom) is set per-card since the
+       gap to the card's value differs by tile size. Anything that is
+       secondary text (subs, hints, targets) stays on --fg-muted.
+       The matching .fuse-phase-label (L1/L2/L3) and every label inside
+       a web-component shadow DOM should also read --fg-label so they
+       match these without a one-off override. */
+body.ftw-next .card-label {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--fg-label);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
 
 /* ---- Summary tiles ---- */
 body.ftw-next .summary-cards {
@@ -302,11 +324,6 @@ body.ftw-next .summary-card:hover {
   border-color: oklch(0.35 0.02 250);
 }
 body.ftw-next .summary-card .card-label {
-  font-family: var(--mono);
-  font-size: 10px;
-  color: var(--fg-muted);
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
   margin-bottom: 8px;
 }
 body.ftw-next .summary-card .card-value {
@@ -354,11 +371,6 @@ body.ftw-next .fuse-card {
   padding: var(--card-pad, 14px 16px);
 }
 body.ftw-next .fuse-card .card-label {
-  font-family: var(--mono);
-  font-size: 10px;
-  color: var(--fg-muted);
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
   margin-bottom: 10px;
 }
 body.ftw-next .fuse-phase-boxes {
@@ -384,7 +396,7 @@ body.ftw-next .fuse-phase-box {
 body.ftw-next .fuse-phase-box .fuse-phase-label {
   font-family: var(--mono);
   font-size: 11px;
-  color: var(--fg-muted);
+  color: var(--fg-label);
   letter-spacing: 0.1em;
 }
 body.ftw-next .fuse-phase-box .fuse-phase-val {
@@ -444,18 +456,90 @@ body.ftw-next .fuse-fallback-value {
   margin-top: 6px;
 }
 
-/* ---- History cards row — outer grid only.
-   Each card is an <ftw-history-card> custom element with all chrome
-   + bar styling living in its shadow DOM. Only the row layout
-   stays here. */
-body.ftw-next .history-cards {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 12px;
+/* ---- History — single outer card wrapping three daily-kWh tiles.
+   Mirrors the fuse-card pattern: the wrapper owns the card chrome
+   (label + a single shared Week/Month toggle), the inner tiles
+   render as recessed sub-cards via the [hide-toggle] attribute on
+   the web component. next-app.js wires #history-toggle to push a
+   `range="week"|"month"` attribute onto every child tile so the
+   pill drives all three charts in lock-step. */
+body.ftw-next .history-row {
   margin-top: 12px;
 }
+body.ftw-next .history-group {
+  background: var(--ink-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  padding: var(--card-pad, 14px 16px);
+}
+body.ftw-next .history-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+/* Shared Week/Month segmented pill — same visual as the per-card
+   toggle that used to live inside the shadow DOM so the brand
+   stays consistent. Kept here (not duplicated into a shared
+   component) because it's the only instance outside the card. */
+body.ftw-next .history-toggle {
+  position: relative;
+  display: inline-grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--ink-sunken);
+  padding: 2px;
+  isolation: isolate;
+}
+body.ftw-next .history-toggle::before {
+  content: '';
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  left: 2px;
+  width: calc(50% - 2px);
+  background: var(--accent-e);
+  border-radius: 999px;
+  transform: translateX(0);
+  transition: transform 260ms cubic-bezier(0.4, 0, 0.2, 1);
+  z-index: 0;
+}
+body.ftw-next .history-toggle[data-active="month"]::before {
+  transform: translateX(100%);
+}
+body.ftw-next .history-toggle button {
+  position: relative;
+  z-index: 1;
+  background: transparent;
+  border: 0;
+  color: var(--fg-label);
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  padding: 4px 12px;
+  cursor: pointer;
+  transition: color 220ms ease;
+}
+body.ftw-next .history-toggle button.active { color: #0a0a0a; }
+body.ftw-next .history-toggle button:not(.active):hover { color: var(--fg); }
+body.ftw-next .history-toggle button:focus-visible {
+  outline: 1px solid var(--accent-e);
+  outline-offset: 2px;
+  border-radius: 999px;
+}
+/* Inner 3-tile grid. Same column layout the old row used; collapses
+   to one column on narrow viewports. */
+body.ftw-next .history-tiles {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+}
 @media (max-width: 900px) {
-  body.ftw-next .history-cards { grid-template-columns: 1fr; }
+  body.ftw-next .history-tiles { grid-template-columns: 1fr; }
 }
 
 /* ---- Energy cards (today) ---- */
@@ -471,11 +555,9 @@ body.ftw-next .energy-card {
   padding: var(--card-pad-tight, 12px 14px);
 }
 body.ftw-next .energy-card .card-label {
-  font-family: var(--mono);
-  font-size: 10px;
-  color: var(--fg-muted);
+  /* Override base letter-spacing (0.1em) — tighter tracking reads
+     better on the smaller energy-card tiles without crowding. */
   letter-spacing: 0.08em;
-  text-transform: uppercase;
   margin-bottom: 6px;
 }
 body.ftw-next .energy-card .card-value {
@@ -503,11 +585,6 @@ body.ftw-next .control-card {
   padding: var(--card-pad, 14px 16px);
 }
 body.ftw-next .control-card .card-label {
-  font-family: var(--mono);
-  font-size: 10px;
-  color: var(--fg-muted);
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
   margin-bottom: 10px;
 }
 /* ftw-toggle: compact switch used inside control-cards for boolean
