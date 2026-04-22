@@ -1,12 +1,12 @@
-package control
+package loadpoint
 
 import "math"
 
 // SnapChargeW turns an ideal charging-power request into the nearest
-// feasible level the charger can actually deliver. Used by EV
-// dispatch to convert a smooth MPC-derived power target into one of
-// the discrete levels a charger supports (e.g. Easee's 0 plus 6-32 A
-// bands).
+// feasible level the charger can actually deliver. Used by the
+// loadpoint Controller to convert a smooth MPC-derived power target
+// into one of the discrete levels a charger supports (e.g. Easee's 0
+// plus 6-32 A bands).
 //
 // Rules:
 //
@@ -50,9 +50,8 @@ func SnapChargeW(want, min, max float64, steps []float64) float64 {
 // so EV and battery share one mental model.
 //
 // Negative remaining energy (already overshot the plan) → 0 so we
-// stop drawing. Non-positive remaining time → return `want` as if
-// the slot were just beginning; the next dispatch tick will see a
-// fresh slot anyway.
+// stop drawing. Non-positive remaining time → 0; the next tick will
+// see a fresh slot anyway.
 func EnergyBudgetToPowerW(remainingWh, remainingS float64) float64 {
 	if remainingWh <= 0 {
 		return 0

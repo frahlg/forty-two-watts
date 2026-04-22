@@ -173,6 +173,22 @@ func (m *Manager) States() []State {
 	return out
 }
 
+// Configs returns a snapshot of the currently-configured loadpoints
+// in insertion order. Used by Controller.Tick to drive dispatch
+// without needing a second copy of the YAML source of truth — the
+// manager is already the authoritative in-memory view after Load().
+func (m *Manager) Configs() []Config {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]Config, 0, len(m.order))
+	for _, id := range m.order {
+		if lp, ok := m.byID[id]; ok {
+			out = append(out, lp.Config)
+		}
+	}
+	return out
+}
+
 // Observe updates the measurement side of a loadpoint from raw driver
 // telemetry. The manager derives current SoC internally from the
 // session's plug-in anchor + delivered energy (chargers like Easee

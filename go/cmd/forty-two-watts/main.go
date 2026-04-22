@@ -664,6 +664,50 @@ func main() {
 			"pvtwin", pvSvc != nil)
 	}
 
+	// ---- EV loadpoint controller ----
+	// Phase 1 of the EV-arch refactor (issue #172): the per-tick EV
+	// dispatch that used to live inline in the control loop is now
+	// owned by loadpoint.Controller. Behaviour is identical — same
+	// 5 s cadence, same energy-allocation contract, same snap. The
+	// separation exists so follow-up PRs can give each loadpoint its
+	// own goroutine + driver-declared cadence (#172 PR 2) and a
+	// phase/step state machine (#172 PR 3) without disturbing
+	// battery dispatch.
+	//
+	// Adapters here keep loadpoint independent of mpc/telemetry
+	// (mpc already imports loadpoint — the cycle must go this way).
+	var lpController *loadpoint.Controller
+	if mpcSvc != nil {
+		planAdapter := func(now time.Time) (loadpoint.Directive, bool) {
+			d, ok := mpcSvc.SlotDirectiveAt(now)
+			if !ok {
+				return loadpoint.Directive{}, false
+			}
+			return loadpoint.Directive{
+				SlotStart:         d.SlotStart,
+				SlotEnd:           d.SlotEnd,
+				LoadpointEnergyWh: d.LoadpointEnergyWh,
+			}, true
+		}
+		telAdapter := func(driver string) (loadpoint.EVSample, bool) {
+			r := tel.Get(driver, telemetry.DerEV)
+			if r == nil {
+				return loadpoint.EVSample{}, false
+			}
+			var d struct {
+				Connected bool    `json:"connected"`
+				SessionWh float64 `json:"session_wh"`
+			}
+			_ = json.Unmarshal(r.Data, &d)
+			return loadpoint.EVSample{
+				PowerW:    r.SmoothedW,
+				SessionWh: d.SessionWh,
+				Connected: d.Connected,
+			}, true
+		}
+		lpController = loadpoint.NewController(lpMgr, planAdapter, telAdapter, reg.Send)
+	}
+
 	// ---- Self-update checker ----
 	// Probes the GitHub Releases API in the background; the UI reads the
 	// cached result via /api/version/check. Gated behind FTW_SELFUPDATE_ENABLED
@@ -1072,70 +1116,11 @@ func main() {
 				}
 			}
 
-			// ---- EV dispatch: observe + command per loadpoint ----
-			// For each configured loadpoint we first read the
-			// charger driver's latest telemetry and feed it to the
-			// manager (plug state + session Wh → inferred SoC). Then
-			// we ask the MPC for the current slot's energy budget
-			// and translate it to an instantaneous W command. No
-			// PI — energy-allocation contract: remaining Wh /
-			// remaining s → W, snap to the charger's allowed steps.
-			if len(cfg.Loadpoints) > 0 && mpcSvc != nil {
-				for _, lpCfg := range cfg.Loadpoints {
-					evr := tel.Get(lpCfg.DriverName, telemetry.DerEV)
-					plugged := false
-					var sessionWh, powerW float64
-					if evr != nil {
-						powerW = evr.SmoothedW
-						var d struct {
-							Connected bool    `json:"connected"`
-							SessionWh float64 `json:"session_wh"`
-						}
-						if err := json.Unmarshal(evr.Data, &d); err == nil {
-							plugged = d.Connected
-							sessionWh = d.SessionWh
-						}
-					}
-					lpMgr.Observe(lpCfg.ID, plugged, powerW, sessionWh)
-					if !plugged {
-						continue
-					}
-					// Resolve this tick's EV setpoint. Default 0 W so
-					// the charger is explicitly told to stand down
-					// whenever the MPC has no allocation for this
-					// slot — without an explicit command, the
-					// charger silently keeps drawing at its last
-					// setpoint from a previous slot.
-					var cmdW float64
-					d, ok := mpcSvc.SlotDirectiveAt(time.Now())
-					if ok {
-						if budgetWh, hasBudget := d.LoadpointEnergyWh[lpCfg.ID]; hasBudget {
-							remainingS := d.SlotEnd.Sub(time.Now()).Seconds()
-							// Subtract what's already been delivered
-							// so a mid-slot dispatch doesn't
-							// overshoot. Approximated from current
-							// power × fraction of slot elapsed.
-							elapsed := d.SlotEnd.Sub(d.SlotStart).Seconds() - remainingS
-							if elapsed < 0 {
-								elapsed = 0
-							}
-							alreadyWh := powerW * elapsed / 3600.0
-							remainingWh := budgetWh - alreadyWh
-							wantW := control.EnergyBudgetToPowerW(remainingWh, remainingS)
-							cmdW = control.SnapChargeW(wantW, lpCfg.MinChargeW,
-								lpCfg.MaxChargeW, lpCfg.AllowedStepsW)
-						}
-					}
-					payload, _ := json.Marshal(map[string]any{
-						"action":  "ev_set_current",
-						"power_w": cmdW,
-					})
-					if err := reg.Send(ctx, lpCfg.DriverName, payload); err != nil {
-						slog.Warn("loadpoint dispatch", "lp", lpCfg.ID,
-							"driver", lpCfg.DriverName, "err", err)
-					}
-				}
-			}
+			// ---- EV dispatch: per-loadpoint observe + command ----
+			// The per-loadpoint state machine (observe → plan lookup
+			// → snap → send) is owned by loadpoint.Controller so the
+			// main tick stays a thin orchestrator. See issue #172.
+			lpController.Tick(ctx, time.Now())
 
 			// ---- Record history snapshot ----
 			recordHistory(st, tel, ctrl, nowMs)

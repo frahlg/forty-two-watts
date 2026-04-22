@@ -1,4 +1,4 @@
-package control
+package loadpoint
 
 import "testing"
 
