@@ -1674,12 +1674,14 @@ var validEVActions = map[string]bool{
 	"ev_pause":       true,
 	"ev_resume":      true,
 	"ev_set_current": true,
+	"ev_set_phases":  true,
 }
 
 func (s *Server) handleEVCommand(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Action string `json:"action"`
 		Driver string `json:"driver"`
+		Phases int    `json:"phases,omitempty"` // for ev_set_phases: 1 or 3
 	}
 	if err := readJSON(r, &req); err != nil {
 		writeJSON(w, 400, map[string]string{"error": "invalid request"})
@@ -1687,6 +1689,10 @@ func (s *Server) handleEVCommand(w http.ResponseWriter, r *http.Request) {
 	}
 	if !validEVActions[req.Action] {
 		writeJSON(w, 400, map[string]string{"error": "unsupported action"})
+		return
+	}
+	if req.Action == "ev_set_phases" && req.Phases != 1 && req.Phases != 3 {
+		writeJSON(w, 400, map[string]string{"error": "phases must be 1 or 3"})
 		return
 	}
 	// Validate the request against telemetry (is the driver known?) before
@@ -1721,7 +1727,11 @@ func (s *Server) handleEVCommand(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 503, map[string]string{"error": "driver registry not available"})
 		return
 	}
-	payload, _ := json.Marshal(map[string]any{"action": req.Action})
+	payloadMap := map[string]any{"action": req.Action}
+	if req.Action == "ev_set_phases" {
+		payloadMap["phases"] = req.Phases
+	}
+	payload, _ := json.Marshal(payloadMap)
 	if err := s.deps.Registry.Send(r.Context(), driverName, payload); err != nil {
 		writeJSON(w, 500, map[string]string{"error": err.Error()})
 		return
