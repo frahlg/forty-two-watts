@@ -45,6 +45,10 @@ local refresh_token = nil
 local token_expires_at = 0   -- millis
 local charger_serial = nil
 local phases = 3   -- populated from config.phases (if present) in driver_init
+-- Last phaseMode we requested (Easee API: 1=locked 1φ, 2=auto, 3=locked 3φ).
+-- nil means "never set by us" — we leave the user's pre-existing config
+-- untouched until the first ev_set_phases command.
+local phase_mode = nil
 
 -- Easee error bodies have historically echoed submitted form data
 -- (credentials, tokens). Strip the body and keep only the status prefix
@@ -354,6 +358,30 @@ function driver_command(action, power_w, cmd)
             BASE_URL .. "/chargers/" .. charger_serial .. "/settings",
             body, auth_headers())
         return err == nil
+    elseif action == "ev_set_phases" then
+        -- cmd carries {"phases": 1} or {"phases": 3}. We use locked
+        -- phaseMode (1 or 3) because dispatch wants deterministic control;
+        -- phaseMode=2 (auto) hands the decision to Easee's contactor logic
+        -- and breaks the surplus-tracking assumption.
+        local want = (cmd and tonumber(cmd.phases)) or 0
+        local api_mode
+        if want == 1 then api_mode = 1
+        elseif want == 3 then api_mode = 3
+        else return false
+        end
+        if phases == want then return true end  -- no-op if already there
+        local body = host.json_encode({phaseMode = api_mode})
+        local _, err = host.http_post(
+            BASE_URL .. "/chargers/" .. charger_serial .. "/settings",
+            body, auth_headers())
+        if err then
+            host.log("warn", "Easee: phase switch failed: " .. redact_http_err(err))
+            return false
+        end
+        phases = want
+        phase_mode = api_mode
+        host.log("info", "Easee: phase mode switched to " .. want .. "φ")
+        return true
     end
 
     return false
