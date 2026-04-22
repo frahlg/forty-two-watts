@@ -32,10 +32,10 @@ import (
 
 // Event types.
 const (
-	EventDriverOffline   = "driver_offline"
-	EventDriverRecovered = "driver_recovered"
-	EventUpdateAvailable = "update_available"
-	EventFuseOverLimit   = "fuse_over_limit"
+	EventDriverOffline    = "driver_offline"
+	EventDriverRecovered  = "driver_recovered"
+	EventUpdateAvailable  = "update_available"
+	EventFuseOverLimit    = "fuse_over_limit"
 	EventEVSurplusStarved = "ev_surplus_starved"
 )
 
