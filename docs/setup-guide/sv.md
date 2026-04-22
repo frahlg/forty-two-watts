@@ -2,7 +2,7 @@
 
 Den här guiden är skriven för dig som aldrig har pillat med en Raspberry Pi förut. Lugn — det är lättare än det låter. Följ stegen ett i taget, så går det fint.
 
-> **Ingen Raspberry Pi?** Vad som helst som kan köra Docker Compose funkar — en gammal bärbar, en hemserver du har stående, en NAS, eller liknande. Om maskinen redan kör Debian eller Ubuntu kan du hoppa över SD-kort- och Pi-stegen och gå direkt till **Steg 11 — Installera forty-two-watts**.
+> **Ingen Raspberry Pi?** Du kan lika gärna köra forty-two-watts på en NUC, en gammal bärbar, eller annan hårdvara du har liggande — så länge den kan köra Docker. Den här guiden fokuserar på att komma igång med en Raspberry Pi; är du på en annan burk kan du skumma hårdvarustegen och gå direkt till **Steg 11 — Installera forty-two-watts** (installationsskriptet förutsätter Debian eller Ubuntu).
 
 ## Vad du behöver
 

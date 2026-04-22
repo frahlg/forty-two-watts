@@ -2,7 +2,7 @@
 
 Ce guide est fait pour vous qui n'avez jamais configuré un Raspberry Pi. Pas de panique — c'est plus simple qu'il n'y paraît. Il suffit de suivre les étapes, une par une.
 
-> **Pas de Raspberry Pi ?** N'importe quelle machine capable d'exécuter Docker Compose fait l'affaire — un vieux portable, un serveur domestique qui traîne, un NAS, etc. Si elle tourne déjà sous Debian ou Ubuntu, sautez les étapes de carte SD et de Pi et passez directement à l'**Étape 11 — Installer forty-two-watts**.
+> **Pas de Raspberry Pi ?** Vous pouvez aussi faire tourner forty-two-watts sur un NUC, un vieux portable ou tout autre matériel qui traîne — du moment qu'il peut exécuter Docker. Ce guide se concentre sur la mise en route avec un Raspberry Pi ; si vous êtes sur une autre machine, survolez les étapes matérielles et passez directement à l'**Étape 11 — Installer forty-two-watts** (le script d'installation suppose Debian ou Ubuntu).
 
 ## Ce dont vous avez besoin
 
