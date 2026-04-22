@@ -143,4 +143,4 @@ Si esa dirección no funciona — prueba con la dirección IP que apuntaste, p. 
 - **La luz no se enciende nada** → revisa que el adaptador de corriente esté bien conectado.
 - **No encuentras la dirección IP** → reinicia el router, espera 5 minutos, vuelve a mirar.
 - **SSH dice "Connection refused"** → espera un poco más. El primer arranque tarda.
-- **Nada de esto funciona** → llama a alguien que sepa de ordenadores. Pedir ayuda está perfectamente bien.
+- **Nada de esto funciona** → pásate por nuestro Discord y pide ayuda amablemente: **https://discord.gg/7Ewr45rd**

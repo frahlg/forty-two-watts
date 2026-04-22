@@ -143,4 +143,4 @@ If that address doesn't work — try the IP address you wrote down, e.g. `http:/
 - **The light isn't on at all** → check that the power adapter is plugged in.
 - **Can't find the IP address** → restart the router, wait 5 minutes, look again.
 - **SSH says "Connection refused"** → wait a little longer. The first boot takes time.
-- **None of this helps** → call someone who knows computers. It's completely fine to ask for help.
+- **None of this helps** → drop by our Discord and kindly ask for help: **https://discord.gg/7Ewr45rd**

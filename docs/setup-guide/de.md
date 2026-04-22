@@ -143,4 +143,4 @@ Wenn diese Adresse nicht funktioniert — probiere die IP-Adresse, die du aufges
 - **Das Lämpchen leuchtet gar nicht** → prüfe, ob das Netzteil richtig eingesteckt ist.
 - **Keine IP-Adresse zu finden** → starte den Router neu, warte 5 Minuten, schau nochmal.
 - **SSH sagt "Connection refused"** → warte noch etwas. Der erste Start dauert.
-- **Das alles hilft nicht** → ruf jemanden an, der sich mit Computern auskennt. Um Hilfe zu bitten ist völlig in Ordnung.
+- **Das alles hilft nicht** → schau auf unserem Discord vorbei und frage freundlich nach Hilfe: **https://discord.gg/7Ewr45rd**

@@ -143,4 +143,4 @@ Si cette adresse ne fonctionne pas — essayez l'adresse IP que vous avez notée
 - **La lumière ne s'allume pas du tout** → vérifiez que l'adaptateur secteur est bien branché.
 - **Pas d'adresse IP trouvée** → redémarrez la box, attendez 5 minutes, regardez à nouveau.
 - **SSH dit "Connection refused"** → attendez encore un peu. Le premier démarrage prend du temps.
-- **Rien de tout cela ne marche** → appelez quelqu'un qui s'y connaît en informatique. C'est tout à fait normal de demander de l'aide.
+- **Rien de tout cela ne marche** → passez sur notre Discord et demandez gentiment de l'aide : **https://discord.gg/7Ewr45rd**

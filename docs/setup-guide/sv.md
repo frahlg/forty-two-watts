@@ -143,4 +143,4 @@ Fungerar inte den adressen — prova IP-adressen du skrev ner, t.ex. `http://192
 - **Lampan lyser inte alls** → kolla att strömadaptern sitter i.
 - **Hittar ingen IP-adress** → starta om routern, vänta 5 minuter, titta igen.
 - **SSH säger "Connection refused"** → vänta lite till. Första uppstarten tar tid.
-- **Det hjälper inte** → ring någon som är datorkunnig. Det är helt okej att be om hjälp.
+- **Det hjälper inte** → kika in på vår Discord och fråga snällt om hjälp: **https://discord.gg/7Ewr45rd**
