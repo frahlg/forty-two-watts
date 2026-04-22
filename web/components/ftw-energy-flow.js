@@ -372,6 +372,15 @@ class FtwEnergyFlow extends FtwElement {
     svg.ef-fade-in .ef-icon {
       animation: ef-fade-out-opacity 150ms ease-in 500ms both;
     }
+    /* Desktop-only (>900px). No-EV "Y" layout centers Grid at the
+       bottom; in combined mode the merged bubble sits right on the
+       card edge and its lower arc clips. Extra 20px bottom padding
+       fixes that. :has() reads the SVG's live data-agg (flipped by
+       the toggle click handler without re-render), so this tracks
+       combined↔individual without re-rendering. */
+    @media (min-width: 901px) {
+      :host([data-no-ev]:has(svg[data-agg="on"])) { padding-bottom: 40px; }
+    }
     @media (max-width: 900px) {
       :host { padding: 20px 12px; }
       .title { margin-bottom: 8px; }
@@ -782,6 +791,12 @@ class FtwEnergyFlow extends FtwElement {
         });
       }
     }
+    // Y layout (no EV): bottom-right is empty, so Grid collapses to
+    // bottom-center. CSS uses this (combined with svg[data-agg="on"]
+    // via :has()) to add desktop-only bottom padding in combined mode,
+    // where the merged Grid bubble would otherwise clip on the card edge.
+    this.toggleAttribute("data-no-ev", groups["bottom-right"].length === 0);
+
     const maxN = Math.max(1, ...Object.values(groups).map(g => g.length));
 
     // Sizing reservation. During the loading phase we only have
@@ -856,7 +871,13 @@ class FtwEnergyFlow extends FtwElement {
         if (ax > maxXOff) maxXOff = ax;
       }
     }
-    const Hdyn = Math.max(H_BASE, Math.ceil(2 * (maxYOff + tier.baseR + margin)));
+    // Y pattern (no EV): Grid collapses to bottom-center, the 12 px
+    // margin isn't quite enough once the combined bubble's visuals
+    // (ring + connectors) extend past baseR, so the lower arc clips.
+    // Bias extra room to the bottom only by growing Hdyn AND shifting
+    // CY up by the same amount — top side stays tight.
+    const bottomExtra = groups["bottom-right"].length === 0 ? 30 : 0;
+    const Hdyn = Math.max(H_BASE, Math.ceil(2 * (maxYOff + tier.baseR + margin)) + bottomExtra);
     const Wneeded = Math.ceil(2 * (maxXOff + tier.baseR + margin));
     let vbW = tier.vbW, vbX = tier.vbX;
     if (Wneeded > vbW) {
@@ -870,8 +891,11 @@ class FtwEnergyFlow extends FtwElement {
     this.style.setProperty("--efl-h-factor", (Hdyn / H_BASE).toFixed(3));
 
     // Per-render layout struct. CY now varies — every helper that used
-    // to read module-level CY now takes (cx, cy) explicitly.
-    const cy = Hdyn / 2;
+    // to read module-level CY now takes (cx, cy) explicitly. In the Y
+    // pattern CY is shifted up by half of bottomExtra so the added
+    // Hdyn becomes empty space beneath the bottom-center cluster,
+    // not centered letter-boxing.
+    const cy = (Hdyn - bottomExtra) / 2;
     const P = {
       vbX, vbW, H: Hdyn, cy,
       orbitR, baseR: tier.baseR, hubR: tier.hubR,
