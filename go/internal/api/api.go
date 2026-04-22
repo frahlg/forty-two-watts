@@ -156,6 +156,7 @@ func (s *Server) routes() {
 	// ---- JSON endpoints ----
 	s.handle("GET  /api/health", s.handleHealth)
 	s.handle("GET  /api/status", s.handleStatus)
+	s.handle("GET  /api/system/info", s.handleSysInfo)
 	s.handle("GET  /api/config", s.handleGetConfig)
 	s.handle("POST /api/config", s.handlePostConfig)
 	s.handle("GET  /api/mode", s.handleGetMode)
