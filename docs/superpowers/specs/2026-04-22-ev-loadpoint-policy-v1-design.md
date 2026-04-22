@@ -115,12 +115,18 @@ Persisted per-loadpoint in `state.db` via the existing settings pattern:
 
 No changes to `config.yaml`.
 
-### API surface (`go/internal/api/api.go`)
+### API surface
 
-- `POST /api/loadpoints/{id}/target` — existing endpoint gains optional `origin` (string, default `"manual"`) and `policy` (object `{allow_grid, allow_battery_support}`, default both `false`) in the JSON body. Backward-compatible: callers that omit these get v0 behaviour.
+Handlers land in a **new file** `go/internal/api/api_loadpoint_policy.go`, following the existing split pattern (compare `api_selfupdate.go`). `api.go` only gains three lines in `routes()` registering the new paths; all handler bodies, request/response structs, and validation live in the new file.
+
+- `POST /api/loadpoints/{id}/target` — existing handler moves to `api_loadpoint_policy.go` and gains optional `origin` (string, default `"manual"`) and `policy` (object `{allow_grid, allow_battery_support}`, default both `false`) in the JSON body. Backward-compatible: callers that omit these get v0 behaviour.
 - `POST /api/loadpoints/{id}/settings` — new. Body `{charge_duration_h?, surplus_hysteresis_w?, surplus_hysteresis_s?, surplus_starvation_s?}`. Any subset; values validated (positive, sensible ranges).
-- `GET /api/loadpoints` — response extended with `target.origin`, `target.policy`, `last_policy`, and the four settings fields.
-- `BatteryCoversEV` is no longer operator-controllable from the UI in v1 — it's set by an active target's policy. If a global "force battery to always cover EVs" affordance is needed later, that's its own spec.
+- `GET /api/loadpoints` — existing handler moves to the new file; response extended with `target.origin`, `target.policy`, `last_policy`, and the four settings fields.
+- `POST /api/loadpoints/{id}/soc` — the existing SoC-anchor handler lives alongside the other loadpoint endpoints by topic; moves to the new file too so the package split is by feature, not by age.
+
+Tests for the new handlers live in `go/internal/api/api_loadpoint_policy_test.go`.
+
+`BatteryCoversEV` is no longer operator-controllable from the UI in v1 — it's set by an active target's policy. If a global "force battery to always cover EVs" affordance is needed later, that's its own spec.
 
 ### Notifications
 
