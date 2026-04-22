@@ -97,5 +97,34 @@ services:
       # lifecycle of individual services that mount the same volume).
       - update-ipc:/run/ftw-update
 
+  # ---------------------------------------------------------------------
+  # MQTT broker (Eclipse Mosquitto)
+  #
+  # Lets on-LAN devices — notably the Pixii PowerShaper's MQTT uplink —
+  # publish telemetry into forty-two-watts without us having to poll them
+  # over Modbus. The main app reaches the broker at localhost:1883 because
+  # it runs with host networking; the Pixii (and any other LAN device)
+  # reaches it at <host-ip>:1883.
+  #
+  # Config lives in ./mosquitto/config/mosquitto.conf (anonymous access,
+  # persistent queues). Remove this service block if you don't need an
+  # embedded broker — forty-two-watts' drivers can just as well dial out
+  # to a broker somewhere else on the LAN.
+  # ---------------------------------------------------------------------
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: forty-two-watts-mosquitto
+    restart: unless-stopped
+
+    ports:
+      - "1883:1883"
+
+    volumes:
+      - ./mosquitto/config:/mosquitto/config:ro
+      - mosquitto-data:/mosquitto/data
+      - mosquitto-log:/mosquitto/log
+
 volumes:
   update-ipc:
+  mosquitto-data:
+  mosquitto-log:
