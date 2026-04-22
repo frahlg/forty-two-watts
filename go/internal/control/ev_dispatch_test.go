@@ -1,6 +1,9 @@
 package control
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
 
 func TestSnapChargeWSnapsToNearest(t *testing.T) {
 	steps := []float64{0, 1400, 4100, 7400, 11000}
@@ -57,5 +60,36 @@ func TestEnergyBudgetToPowerW(t *testing.T) {
 	}
 	if got := EnergyBudgetToPowerW(500, 0); got != 0 {
 		t.Errorf("zero remaining time should return 0 (safety), got %.0f", got)
+	}
+}
+
+func TestFloorSnapChargeW(t *testing.T) {
+	steps := []float64{0, 4140, 4830, 5520, 7400, 11000}
+	cases := []struct {
+		name           string
+		want, min, max float64
+		expected       float64
+	}{
+		{"below min → 0", 3000, 4140, 11000, 0},
+		{"exact min step", 4140, 4140, 11000, 4140},
+		{"between 4140 and 4830 → 4140", 4500, 4140, 11000, 4140},
+		{"between 4830 and 5520 → 4830", 5000, 4140, 11000, 4830},
+		{"above max → max step", 15000, 4140, 11000, 11000},
+		{"zero want → 0", 0, 4140, 11000, 0},
+		{"negative want → 0", -100, 4140, 11000, 0},
+		{"empty steps, >= min → clamp value", 5000, 4140, 11000, 5000},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var useSteps []float64
+			if tc.name != "empty steps, >= min → clamp value" {
+				useSteps = steps
+			}
+			got := FloorSnapChargeW(tc.want, tc.min, tc.max, useSteps)
+			if math.Abs(got-tc.expected) > 0.01 {
+				t.Errorf("FloorSnapChargeW(%v,%v,%v,%v) = %v, want %v",
+					tc.want, tc.min, tc.max, useSteps, got, tc.expected)
+			}
+		})
 	}
 }

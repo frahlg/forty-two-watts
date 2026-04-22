@@ -44,6 +44,39 @@ func SnapChargeW(want, min, max float64, steps []float64) float64 {
 	return best
 }
 
+// FloorSnapChargeW returns the largest step ≤ want. Unlike SnapChargeW
+// which picks the nearest step, this snaps DOWN — required by
+// surplus-only dispatch where any step above live surplus imports
+// grid power.
+//
+// Rules:
+//   - want <= 0 → 0 (off).
+//   - want < min → 0. A below-min surplus has no legal step; pausing
+//     is the only way to avoid import.
+//   - len(steps) == 0 → clamped value (continuous).
+//   - Otherwise: largest step s such that s <= min(want, max).
+func FloorSnapChargeW(want, min, max float64, steps []float64) float64 {
+	if want <= 0 {
+		return 0
+	}
+	if want < min {
+		return 0
+	}
+	if max > 0 && want > max {
+		want = max
+	}
+	if len(steps) == 0 {
+		return want
+	}
+	best := 0.0
+	for _, s := range steps {
+		if s <= want && s > best {
+			best = s
+		}
+	}
+	return best
+}
+
 // EnergyBudgetToPowerW translates a remaining-Wh budget over a
 // remaining-seconds window into instantaneous W. Mirrors the battery
 // energy-allocation dispatch path (see docs/plan-ems-contract.md)
