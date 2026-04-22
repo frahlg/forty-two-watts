@@ -93,7 +93,7 @@ Apunta la dirección IP. Se ve así: **192.168.1.xxx**.
 
 ### En Windows
 
-1. Descarga **PuTTY** (busca "PuTTY download" en Google — elige putty.org).
+1. Descarga **PuTTY** desde el sitio oficial: **https://www.chiark.greenend.org.uk/~sgtatham/putty/latest.html**
 2. Instala el programa y ábrelo.
 3. En la casilla "Host Name": escribe la dirección IP que anotaste.
 4. Haz clic en **Open**. Si sale un aviso — haz clic en **Yes / Accept**.

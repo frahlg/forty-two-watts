@@ -93,7 +93,7 @@ Skriv ner IP-adressen. Den ser ut som **192.168.1.xxx**.
 
 ### Har du Windows?
 
-1. Ladda ner **PuTTY** (sök "PuTTY download" på Google — välj putty.org).
+1. Ladda ner **PuTTY** från den officiella sidan: **https://www.chiark.greenend.org.uk/~sgtatham/putty/latest.html**
 2. Installera och starta programmet.
 3. I rutan "Host Name": skriv IP-adressen du antecknade.
 4. Klicka **Open**. Dyker en varningsruta upp — klicka **Yes / Accept**.
