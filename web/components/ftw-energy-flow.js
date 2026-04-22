@@ -1106,12 +1106,15 @@ function renderEdge(e, _maxKw, collect) {
       len, baseSpeed,
       // Emission area half-width along the source box face — spawn
       // points are randomised within this interval each respawn.
-      spread: 10,
+      // Kept tight so the fountain reads as a focused stream; the
+      // mid-flight swirl (rollLife's omega/damp) does the visual
+      // work of making the beam feel alive.
+      spread: 6,
       // Cone half-angle (radians) — particles deviate this much from
       // a straight line to the target. Narrow enough that the overall
       // flow direction is still obvious but wide enough that no two
       // particles trace identical arcs.
-      cone: 0.18,
+      cone: 0.12,
       // Dynamic fields — initialised below with random starting phases
       // so the fountain is already mid-flight on first paint instead
       // of bursting from zero.
@@ -1176,13 +1179,14 @@ function rollLife(p, now) {
   // Lifetime sized to roughly reach target (len / speed). Slight extra
   // randomness so particles don't all respawn in lockstep.
   p.life = (p.len / speed) * (0.9 + Math.random() * 0.25);
-  // Spring/damping parameters. Heavy damping — particles stay glued
-  // to the beam for most of the flight, with a short initial spiral
-  // around the source and a long tight glide into the target.
+  // Spring/damping parameters. Strong pull toward the beam (damp)
+  // combined with high oscillation frequency (omega) packs several
+  // tight cycles near the source before the envelope collapses, so
+  // the eye reads it as swirling-into-the-beam rather than drifting.
   // damp ≈ 5.5/life drops amplitude to e^-5.5 (~0.4%) by end-of-life
-  // and already to e^-2.75 (~6%) at the midpoint, so the second half
-  // of the trip reads as "on the beam".
-  p.omega = 3.5 + Math.random() * 4;
+  // and to e^-2.75 (~6%) at the midpoint; at omega in [4.5, 9] that's
+  // 2-3 visible cycles before gravity dominates.
+  p.omega = 4.5 + Math.random() * 4.5;
   p.damp  = 5.5 / p.life + Math.random() * 0.6;
   p.phase = Math.random() * Math.PI * 2;
   // Smaller initial radius to match — otherwise the early orbit flies
