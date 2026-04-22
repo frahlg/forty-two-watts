@@ -2,6 +2,8 @@
 
 This guide is for you if you've never set up a Raspberry Pi before. Relax — it's easier than it sounds. Just follow the steps, one at a time.
 
+> **No Raspberry Pi?** Any machine that runs Docker Compose will do — an old laptop, a spare home server, a NAS, etc. If it's already running Debian or Ubuntu, skip the SD-card and Pi-specific steps and jump straight to **Step 11 — Install forty-two-watts**.
+
 ## What you'll need
 
 - A **Raspberry Pi**

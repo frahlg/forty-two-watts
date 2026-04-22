@@ -2,6 +2,8 @@
 
 Esta guía es para ti que nunca has configurado una Raspberry Pi antes. Tranquila — es más fácil de lo que parece. Basta con seguir los pasos, uno a uno.
 
+> **¿No tienes Raspberry Pi?** Cualquier máquina que pueda ejecutar Docker Compose sirve — un portátil viejo, un servidor doméstico que tengas por ahí, un NAS, etc. Si ya corre Debian o Ubuntu, sáltate los pasos de tarjeta SD y Pi y pasa directamente al **Paso 11 — Instalar forty-two-watts**.
+
 ## Lo que necesitas
 
 - Una **Raspberry Pi**
