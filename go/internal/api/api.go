@@ -1777,7 +1777,7 @@ func (s *Server) handleLoadpointTarget(w http.ResponseWriter, r *http.Request) {
 	if req.TargetTimeMs > 0 {
 		deadline = time.UnixMilli(req.TargetTimeMs).UTC()
 	}
-	if !s.deps.Loadpoints.SetTarget(id, req.SoCPct, deadline) {
+	if !s.deps.Loadpoints.SetTarget(id, req.SoCPct, deadline, "manual", loadpoint.TargetPolicy{}) {
 		writeJSON(w, 404, map[string]string{"error": "loadpoint not found"})
 		return
 	}

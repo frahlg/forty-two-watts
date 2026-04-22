@@ -32,7 +32,7 @@ func TestReloadPreservesObservedState(t *testing.T) {
 	}})
 	m.Observe("garage", true, 7400, 1200) // 1.2 kWh into session
 	target := time.Date(2026, 4, 18, 6, 0, 0, 0, time.UTC)
-	m.SetTarget("garage", 80, target)
+	m.SetTarget("garage", 80, target, "manual", TargetPolicy{})
 
 	// Reload with same ID — state should persist.
 	m.Load([]Config{{
@@ -80,12 +80,12 @@ func TestObserveOnUnknownIsNoop(t *testing.T) {
 func TestSetTargetClamp(t *testing.T) {
 	m := NewManager()
 	m.Load([]Config{{ID: "a"}})
-	m.SetTarget("a", 250, time.Time{})
+	m.SetTarget("a", 250, time.Time{}, "manual", TargetPolicy{})
 	st, _ := m.State("a")
 	if st.TargetSoCPct != 100 {
 		t.Errorf("should clamp to 100; got %f", st.TargetSoCPct)
 	}
-	m.SetTarget("a", -10, time.Time{})
+	m.SetTarget("a", -10, time.Time{}, "manual", TargetPolicy{})
 	st, _ = m.State("a")
 	if st.TargetSoCPct != 0 {
 		t.Errorf("should clamp to 0; got %f", st.TargetSoCPct)
@@ -206,5 +206,42 @@ func TestStatesReturnsAllInOrder(t *testing.T) {
 	}
 	if states[1].PluggedIn {
 		t.Error("street should not be plugged in")
+	}
+}
+
+func TestSetTargetWithPolicyRoundtrip(t *testing.T) {
+	m := NewManager()
+	m.Load([]Config{{ID: "garage", DriverName: "easee"}})
+	deadline := time.Now().Add(8 * time.Hour)
+	ok := m.SetTarget("garage", 80, deadline, "manual", TargetPolicy{
+		AllowGrid:           false,
+		AllowBatterySupport: true,
+	})
+	if !ok {
+		t.Fatalf("SetTarget returned false for known id")
+	}
+	st, ok := m.State("garage")
+	if !ok {
+		t.Fatalf("State not found")
+	}
+	if st.TargetSoCPct != 80 {
+		t.Errorf("target SoC = %v, want 80", st.TargetSoCPct)
+	}
+	if st.TargetOrigin != "manual" {
+		t.Errorf("origin = %q, want manual", st.TargetOrigin)
+	}
+	if st.TargetPolicy.AllowGrid {
+		t.Errorf("AllowGrid = true, want false")
+	}
+	if !st.TargetPolicy.AllowBatterySupport {
+		t.Errorf("AllowBatterySupport = false, want true")
+	}
+}
+
+func TestSetTargetUnknownID(t *testing.T) {
+	m := NewManager()
+	m.Load([]Config{{ID: "garage"}})
+	if m.SetTarget("unknown", 80, time.Now(), "manual", TargetPolicy{}) {
+		t.Errorf("expected false for unknown id")
 	}
 }

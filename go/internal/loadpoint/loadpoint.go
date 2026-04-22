@@ -59,14 +59,34 @@ type State struct {
 	CurrentSoCPct      float64   `json:"current_soc_pct"`       // observed or estimated
 	CurrentPowerW      float64   `json:"current_power_w"`       // actual draw (site sign: + = charging)
 	DeliveredWhSession float64   `json:"delivered_wh_session"`  // since plug-in
-	TargetSoCPct       float64   `json:"target_soc_pct"`        // user intent
-	TargetTime         time.Time `json:"target_time,omitempty"` // user intent
-	UpdatedAtMs        int64     `json:"updated_at_ms"`
+	TargetSoCPct       float64      `json:"target_soc_pct"`               // user intent
+	TargetTime         time.Time    `json:"target_time,omitempty"`        // user intent
+	TargetOrigin       string       `json:"target_origin,omitempty"`      // "manual" | "schedule" | ""
+	TargetPolicy       TargetPolicy `json:"target_policy"`                // per-session policy
+	UpdatedAtMs        int64        `json:"updated_at_ms"`
 	// MinChargeW / MaxChargeW / AllowedStepsW are repeated here so the
 	// UI has everything for rendering in one fetch.
 	MinChargeW    float64   `json:"min_charge_w"`
 	MaxChargeW    float64   `json:"max_charge_w"`
 	AllowedStepsW []float64 `json:"allowed_steps_w,omitempty"`
+}
+
+// TargetPolicy is the per-session policy snapshot the user locked in
+// when the target was armed. The dispatcher reads these fields every
+// tick to decide whether to clamp to live PV surplus (AllowGrid=false)
+// and whether to let the home battery discharge to cover EV load
+// (AllowBatterySupport=true flips control.State.BatteryCoversEV while
+// the target is active).
+type TargetPolicy struct {
+	AllowGrid           bool `json:"allow_grid"`
+	AllowBatterySupport bool `json:"allow_battery_support"`
+}
+
+// SurplusOnly is true when neither grid nor battery support is
+// allowed — the dispatcher must charge strictly from PV surplus.
+// Derived from the two Allow fields to keep one source of truth.
+func (p TargetPolicy) SurplusOnly() bool {
+	return !p.AllowGrid && !p.AllowBatterySupport
 }
 
 // Manager holds the running set of loadpoints. Thread-safe.
@@ -88,6 +108,8 @@ type loadpointRuntime struct {
 	deliveredWhSession float64
 	targetSoCPct       float64
 	targetTime         time.Time
+	targetOrigin       string
+	targetPolicy       TargetPolicy
 	updatedAtMs        int64
 
 	// Plug-in anchor: the SoC we believe the vehicle was at when
@@ -128,6 +150,8 @@ func (m *Manager) Load(cfgs []Config) {
 			lp.deliveredWhSession = existing.deliveredWhSession
 			lp.targetSoCPct = existing.targetSoCPct
 			lp.targetTime = existing.targetTime
+			lp.targetOrigin = existing.targetOrigin
+			lp.targetPolicy = existing.targetPolicy
 			lp.updatedAtMs = existing.updatedAtMs
 			lp.sessionPluginSoCPct = existing.sessionPluginSoCPct
 		}
@@ -233,8 +257,14 @@ func estimateSoCPct(pluginSoCPct, deliveredWh, capacityWh float64) float64 {
 }
 
 // SetTarget updates the user-intent fields for an existing loadpoint.
-// targetTime zero = no deadline. Returns false for unknown IDs.
-func (m *Manager) SetTarget(id string, socPct float64, targetTime time.Time) bool {
+// targetTime zero = no deadline. origin tags the caller ("manual" for
+// the Start button, "schedule" for a future schedule window, ""
+// treated as "manual" when socPct > 0). policy snapshots the AllowGrid /
+// AllowBatterySupport booleans the dispatcher honours until the
+// target is cleared.
+//
+// Returns false for unknown IDs.
+func (m *Manager) SetTarget(id string, socPct float64, targetTime time.Time, origin string, policy TargetPolicy) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	lp, ok := m.byID[id]
@@ -247,8 +277,13 @@ func (m *Manager) SetTarget(id string, socPct float64, targetTime time.Time) boo
 	if socPct > 100 {
 		socPct = 100
 	}
+	if origin == "" && socPct > 0 {
+		origin = "manual"
+	}
 	lp.targetSoCPct = socPct
 	lp.targetTime = targetTime
+	lp.targetOrigin = origin
+	lp.targetPolicy = policy
 	return true
 }
 
@@ -309,6 +344,8 @@ func (lp *loadpointRuntime) snapshot() State {
 		DeliveredWhSession: lp.deliveredWhSession,
 		TargetSoCPct:       lp.targetSoCPct,
 		TargetTime:         lp.targetTime,
+		TargetOrigin:       lp.targetOrigin,
+		TargetPolicy:       lp.targetPolicy,
 		UpdatedAtMs:        lp.updatedAtMs,
 		MinChargeW:         lp.MinChargeW,
 		MaxChargeW:         lp.MaxChargeW,
