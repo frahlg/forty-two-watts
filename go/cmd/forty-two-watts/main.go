@@ -538,11 +538,16 @@ func main() {
 		mpcSvc.Price = priceFc.Predict
 		mpcSvc.SiteMeter = cfg.SiteMeterDriver()
 		// Wire the loadpoint probe so the DP extends its state space
-		// when an EV is plugged in. Single-loadpoint for now: picks
-		// the first plugged-in one.
+		// when an EV is plugged in AND the operator has expressed
+		// intent by setting a target. Plugging in alone is not
+		// enough — without a target the DP would opportunistically
+		// allocate charging energy (battery → EV) as "free", which
+		// surprises operators who expect their car to sit idle.
+		// Target > 0 is the explicit "please plan for this EV"
+		// signal; sub-project 2's scheduler will set it the same way.
 		mpcSvc.Loadpoint = func(slotLenMin int) *mpc.LoadpointSpec {
 			for _, st := range lpMgr.States() {
-				if !st.PluggedIn {
+				if !st.PluggedIn || st.TargetSoCPct <= 0 {
 					continue
 				}
 				// Pull capacity off the configured loadpoint.
