@@ -965,6 +965,10 @@ func main() {
 	ticker := time.NewTicker(controlInterval)
 	defer ticker.Stop()
 	var saveCount uint64
+	// lpDispatch holds per-loadpoint transient state for the dispatch
+	// loop (hysteresis, starvation, op-mode edge detection). Owner is
+	// THIS goroutine; no mutex needed.
+	lpDispatch := map[string]*loadpoint.DispatchState{}
 	for {
 		select {
 		case <-sigc:
@@ -1072,60 +1076,146 @@ func main() {
 				}
 			}
 
-			// ---- EV dispatch: observe + command per loadpoint ----
-			// For each configured loadpoint we first read the
-			// charger driver's latest telemetry and feed it to the
-			// manager (plug state + session Wh → inferred SoC). Then
-			// we ask the MPC for the current slot's energy budget
-			// and translate it to an instantaneous W command. No
-			// PI — energy-allocation contract: remaining Wh /
-			// remaining s → W, snap to the charger's allowed steps.
+			// ---- EV dispatch: policy-aware loadpoint control ----
+			// Per-loadpoint, per tick: observe charger telemetry, apply
+			// session policy (surplus-only clamp with forward-only
+			// hysteresis, BatteryCoversEV auto-flip), detect completion
+			// or unplug, publish surplus-starved events. See
+			// docs/superpowers/specs/2026-04-22-ev-loadpoint-policy-v1-design.md.
 			if len(cfg.Loadpoints) > 0 && mpcSvc != nil {
+				siteMeter := cfg.SiteMeterDriver()
+				gridR := tel.Get(siteMeter, telemetry.DerMeter)
+				gridStale := tel.IsStale(siteMeter, telemetry.DerMeter, watchdogTimeout)
+				var liveGridW float64
+				if gridR != nil {
+					liveGridW = gridR.SmoothedW
+				}
+
+				// Aggregate target policy across all active loadpoints for
+				// BatteryCoversEV: if ANY active manual target says
+				// AllowBatterySupport=true, the site-level flag is true.
+				// Otherwise false. (v1 expects one loadpoint; the
+				// aggregate reduces to the single decision cleanly.)
+				anyBatterySupport := false
+
 				for _, lpCfg := range cfg.Loadpoints {
 					evr := tel.Get(lpCfg.DriverName, telemetry.DerEV)
 					plugged := false
 					var sessionWh, powerW float64
+					var opMode int
 					if evr != nil {
 						powerW = evr.SmoothedW
 						var d struct {
 							Connected bool    `json:"connected"`
 							SessionWh float64 `json:"session_wh"`
+							OpMode    int     `json:"op_mode"`
 						}
 						if err := json.Unmarshal(evr.Data, &d); err == nil {
 							plugged = d.Connected
 							sessionWh = d.SessionWh
+							opMode = d.OpMode
 						}
 					}
 					lpMgr.Observe(lpCfg.ID, plugged, powerW, sessionWh)
+
+					dst, ok := lpDispatch[lpCfg.ID]
+					if !ok {
+						dst = &loadpoint.DispatchState{}
+						lpDispatch[lpCfg.ID] = dst
+					}
+					stSettings := lpMgr.Settings(lpCfg.ID)
+
+					lpState, _ := lpMgr.State(lpCfg.ID)
+					nowT := time.Now()
+					targetActive := lpState.TargetSoCPct > 0 && !lpState.TargetTime.IsZero() && lpState.TargetTime.After(nowT)
+					targetExpired := lpState.TargetSoCPct > 0 && !lpState.TargetTime.IsZero() && !lpState.TargetTime.After(nowT)
+					policy := lpState.TargetPolicy
+
+					// ---- Auto-clear: completed (3→4) or unplug. ----
+					clear := false
+					if targetActive {
+						if dst.ObserveOpMode(dst.LastOpMode(), opMode, dst.LastCmdW()) {
+							clear = true
+						}
+						if dst.ObserveUnplug(dst.LastPlugged(), plugged) {
+							clear = true
+						}
+					}
+					if targetExpired {
+						clear = true
+					}
+					if clear {
+						lpMgr.SetTarget(lpCfg.ID, 0, time.Time{}, "", loadpoint.TargetPolicy{})
+						go mpcSvc.Replan(ctx)
+						targetActive = false
+						policy = loadpoint.TargetPolicy{}
+					}
+
+					if targetActive && policy.AllowBatterySupport {
+						anyBatterySupport = true
+					}
+
 					if !plugged {
+						dst.Record(opMode, plugged, 0)
 						continue
 					}
-					// Resolve this tick's EV setpoint. Default 0 W so
-					// the charger is explicitly told to stand down
-					// whenever the MPC has no allocation for this
-					// slot — without an explicit command, the
-					// charger silently keeps drawing at its last
-					// setpoint from a previous slot.
+
+					// ---- Resolve plan wantW (existing behaviour). ----
 					var cmdW float64
-					d, ok := mpcSvc.SlotDirectiveAt(time.Now())
-					if ok {
+					var wantW float64
+					d, okSlot := mpcSvc.SlotDirectiveAt(nowT)
+					if okSlot {
 						if budgetWh, hasBudget := d.LoadpointEnergyWh[lpCfg.ID]; hasBudget {
-							remainingS := d.SlotEnd.Sub(time.Now()).Seconds()
-							// Subtract what's already been delivered
-							// so a mid-slot dispatch doesn't
-							// overshoot. Approximated from current
-							// power × fraction of slot elapsed.
+							remainingS := d.SlotEnd.Sub(nowT).Seconds()
 							elapsed := d.SlotEnd.Sub(d.SlotStart).Seconds() - remainingS
 							if elapsed < 0 {
 								elapsed = 0
 							}
 							alreadyWh := powerW * elapsed / 3600.0
 							remainingWh := budgetWh - alreadyWh
-							wantW := control.EnergyBudgetToPowerW(remainingWh, remainingS)
-							cmdW = control.SnapChargeW(wantW, lpCfg.MinChargeW,
-								lpCfg.MaxChargeW, lpCfg.AllowedStepsW)
+							wantW = control.EnergyBudgetToPowerW(remainingWh, remainingS)
 						}
 					}
+
+					// ---- Policy-aware snap. ----
+					if targetActive && !policy.AllowGrid {
+						if gridStale {
+							wantW = 0
+						} else {
+							surplusW := -liveGridW + powerW
+							if surplusW < 0 {
+								surplusW = 0
+							}
+							decided, commit := dst.SurplusDecision(surplusW, lpCfg.MinChargeW, stSettings, nowT)
+							if commit {
+								wantW = 0
+							} else if decided < wantW {
+								wantW = decided
+							}
+						}
+						cmdW = control.FloorSnapChargeW(wantW, lpCfg.MinChargeW, lpCfg.MaxChargeW, lpCfg.AllowedStepsW)
+					} else {
+						cmdW = control.SnapChargeW(wantW, lpCfg.MinChargeW, lpCfg.MaxChargeW, lpCfg.AllowedStepsW)
+					}
+
+					// ---- Starvation event (surplus-only only). ----
+					if targetActive && policy.SurplusOnly() {
+						if dst.StarvationTick(cmdW, nowT, stSettings) {
+							bus.Publish(events.EVSurplusStarved{
+								LoadpointID: lpCfg.ID,
+								StarvedFor:  time.Duration(stSettings.SurplusStarvationS) * time.Second,
+								At:          nowT,
+							})
+						}
+					}
+
+					// ---- Driver offline: skip this tick's send. ----
+					driverHealth := tel.DriverHealth(lpCfg.DriverName)
+					if driverHealth != nil && !driverHealth.IsOnline() {
+						dst.Record(opMode, plugged, cmdW)
+						continue
+					}
+
 					payload, _ := json.Marshal(map[string]any{
 						"action":  "ev_set_current",
 						"power_w": cmdW,
@@ -1134,7 +1224,13 @@ func main() {
 						slog.Warn("loadpoint dispatch", "lp", lpCfg.ID,
 							"driver", lpCfg.DriverName, "err", err)
 					}
+					dst.Record(opMode, plugged, cmdW)
 				}
+
+				// ---- Site-level BatteryCoversEV follows active policy. ----
+				ctrlMu.Lock()
+				ctrl.BatteryCoversEV = anyBatterySupport
+				ctrlMu.Unlock()
 			}
 
 			// ---- Record history snapshot ----
