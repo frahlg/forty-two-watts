@@ -50,7 +50,7 @@ This is the base program that makes the Raspberry Pi work — a bit like Windows
 
 ## Step 5 — Put the memory card in your computer
 
-1. Take the memory card out of the Raspberry Pi (if it's in there). Handle it gently — it's tiny.
+1. Take the memory card out of the Raspberry Pi (if it's in there). Handle it gently.
 2. Slide it into the card reader on your regular computer.
 3. Click the bottom box ("Storage") in the program and select your card.
 

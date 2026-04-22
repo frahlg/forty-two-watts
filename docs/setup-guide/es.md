@@ -50,7 +50,7 @@ Es el programa base que hace funcionar a la Raspberry Pi — un poco como Window
 
 ## Paso 5 — Pon la tarjeta de memoria en tu ordenador
 
-1. Saca la tarjeta de memoria de la Raspberry Pi (si está dentro). Manéjala con cuidado — es muy pequeña.
+1. Saca la tarjeta de memoria de la Raspberry Pi (si está dentro). Manéjala con cuidado.
 2. Deslízala en el lector de tarjetas de tu ordenador normal.
 3. Haz clic en el cuadro de abajo ("Storage") en el programa y elige tu tarjeta.
 

@@ -50,7 +50,7 @@ C'est le programme de base qui fait fonctionner le Raspberry Pi — un peu comme
 
 ## Étape 5 — Mettre la carte mémoire dans votre ordinateur
 
-1. Sortez la carte mémoire du Raspberry Pi (si elle est dedans). Manipulez-la doucement — elle est toute petite.
+1. Sortez la carte mémoire du Raspberry Pi (si elle est dedans). Manipulez-la doucement.
 2. Glissez-la dans le lecteur de carte de votre ordinateur habituel.
 3. Cliquez sur la case du bas ("Storage") dans le programme et choisissez votre carte.
 

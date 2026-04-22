@@ -50,7 +50,7 @@ Det här är grundprogrammet som får Raspberry Pin att fungera — ungefär som
 
 ## Steg 5 — Stoppa in minneskortet i din dator
 
-1. Ta ur minneskortet ur Raspberry Pin (om det sitter i). Var försiktig, det är pyttelitet.
+1. Ta ur minneskortet ur Raspberry Pin (om det sitter i). Var försiktig.
 2. Stoppa det i kortläsaren på din vanliga dator.
 3. Klicka på den nedersta rutan ("Storage") i programmet och välj ditt kort.
 

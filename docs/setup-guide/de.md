@@ -50,7 +50,7 @@ Das ist das Grundprogramm, damit der Raspberry Pi funktioniert — ähnlich wie 
 
 ## Schritt 5 — Die Speicherkarte in deinen Computer stecken
 
-1. Nimm die Speicherkarte aus dem Raspberry Pi (falls sie drin ist). Sei vorsichtig — sie ist winzig.
+1. Nimm die Speicherkarte aus dem Raspberry Pi (falls sie drin ist). Sei vorsichtig.
 2. Stecke sie in den Kartenleser an deinem normalen Computer.
 3. Klicke im Programm auf das untere Feld ("Storage") und wähle deine Karte aus.
 
