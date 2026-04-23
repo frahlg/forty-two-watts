@@ -257,15 +257,16 @@ jobs:
           sudo docker system prune -af
           df -h /
 
-      - name: Install qemu-user-static
-        # pi-gen's build-docker.sh checks for a qemu-arm binary on the
-        # HOST (not inside the container it builds) and aborts if
-        # missing. ubuntu-latest doesn't ship qemu-user-static by
-        # default, so install it here. binfmt-support registers the
-        # kernel handlers so foreign-arch binaries actually run.
+      - name: Install qemu-user-binfmt
+        # pi-gen needs a `qemu-arm` binary (non-static) on the host —
+        # the check is at build-docker.sh lines 40–45 of pi-gen/master.
+        # qemu-user-binfmt installs it at /usr/bin/qemu-arm and pulls
+        # in binfmt_misc registration. qemu-user-static installs the
+        # -static variant, which doesn't satisfy the `which qemu-arm`
+        # check that pi-gen performs before spinning up its container.
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq qemu-user-static binfmt-support
+          sudo apt-get install -y -qq qemu-user-binfmt binfmt-support
 
       - name: Checkout tag
         uses: actions/checkout@v5
