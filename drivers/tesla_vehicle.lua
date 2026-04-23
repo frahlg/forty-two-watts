@@ -91,12 +91,26 @@ function driver_init(config)
     return
   end
 
-  base_url = "http://" .. ip .. ":" .. tostring(PROXY_PORT)
+  -- Accept bare IP (uses PROXY_PORT default) or host:port. We split
+  -- on the LAST colon so IPv6-in-brackets-plus-port works too, though
+  -- the typical config is "192.168.1.50" or "192.168.1.50:1234".
+  local host_part, port_part = ip:match("^(.*):(%d+)$")
+  if host_part and port_part then
+    base_url = "http://" .. host_part .. ":" .. port_part
+  else
+    base_url = "http://" .. ip .. ":" .. tostring(PROXY_PORT)
+  end
 
   host.set_make("Tesla")
   host.set_sn(tostring(vin))
+  -- The registry uses PollInterval() which is driven by
+  -- host.set_poll_interval, NOT the return value from driver_poll.
+  -- Default is 5 s (way too fast for BLE wake-ups). Set once at
+  -- init so every poll respects our intended cadence.
+  host.set_poll_interval(POLL_INTERVAL_MS)
   host.log("info", "tesla: driver initialized vin=" .. tostring(vin) ..
-                   " proxy=" .. base_url)
+                   " proxy=" .. base_url ..
+                   " poll_s=" .. tostring(POLL_INTERVAL_MS / 1000))
 end
 
 -- emit_last sends the cached reading with a stale flag computed from
@@ -131,37 +145,46 @@ function driver_poll()
   -- this out explicitly for "receive data frequently" use cases.
   local url = base_url .. "/api/1/vehicles/" .. vin ..
               "/vehicle_data?endpoints=charge_state&wakeup=true"
-  local resp, err = host.http_get(url, auth_headers())
+  -- host.http_get returns (body_string, nil) or (nil, error_string) —
+  -- first return is the body directly, NOT a table with .body. The
+  -- earlier tesla_vehicle iterations treated it as a table and got
+  -- length 0 on every poll, which silently emit_last()'d the driver.
+  local body, err = host.http_get(url, auth_headers())
   if err ~= nil then
-    -- Tesla proxies return 408 for "vehicle asleep" — treat as
-    -- "cached data still valid" rather than a hard error.
-    host.log("debug", "tesla: poll error: " .. safe_http_err(err))
+    host.log("warn", "tesla: poll HTTP error: " .. tostring(err))
     emit_last()
     return POLL_INTERVAL_MS
   end
-
-  local body = resp and resp.body
   if not body or body == "" then
+    host.log("warn", "tesla: empty body from proxy")
     emit_last()
     return POLL_INTERVAL_MS
   end
 
   local decoded, derr = host.json_decode(body)
   if derr or not decoded then
-    host.log("warn", "tesla: json decode failed")
+    host.log("warn", "tesla: json decode failed: " .. tostring(derr))
     emit_last()
     return POLL_INTERVAL_MS
   end
 
-  -- Tesla shape: { response: { charge_state: {...}, ... } } for Owner API.
-  -- Some proxies omit the envelope and return charge_state at top level —
-  -- handle both.
+  -- Response shapes (in the wild):
+  --   1. TeslaBLEProxy double-wrapped:
+  --        { response = { response = { charge_state = {...} } } }
+  --   2. Tesla Owner API envelope:
+  --        { response = { charge_state = {...} } }
+  --   3. Bare: { charge_state = {...} }
   local charge_state = nil
   if type(decoded) == "table" then
-    if decoded.response and type(decoded.response) == "table" and
-       decoded.response.charge_state then
-      charge_state = decoded.response.charge_state
-    elseif decoded.charge_state then
+    if type(decoded.response) == "table" then
+      if type(decoded.response.response) == "table" and
+         decoded.response.response.charge_state then
+        charge_state = decoded.response.response.charge_state
+      elseif decoded.response.charge_state then
+        charge_state = decoded.response.charge_state
+      end
+    end
+    if not charge_state and decoded.charge_state then
       charge_state = decoded.charge_state
     end
   end
@@ -173,7 +196,14 @@ function driver_poll()
 
   local soc = tonumber(charge_state.battery_level)
   local limit = tonumber(charge_state.charge_limit_soc)
-  local ttf = tonumber(charge_state.time_to_full_charge)
+  -- Field name depends on source:
+  --   - TeslaBLEProxy emits `minutes_to_full_charge` (integer minutes).
+  --   - Tesla Owner API emits `time_to_full_charge` (fractional hours).
+  local ttf_min = tonumber(charge_state.minutes_to_full_charge)
+  if ttf_min == nil then
+    local ttf_h = tonumber(charge_state.time_to_full_charge)
+    if ttf_h ~= nil then ttf_min = math.floor(ttf_h * 60 + 0.5) end
+  end
   local cs = charge_state.charging_state
   if type(cs) ~= "string" then cs = nil end
 
@@ -181,17 +211,22 @@ function driver_poll()
     last.soc            = soc
     last.charge_limit   = limit
     last.charging_state = cs
-    -- Tesla API returns time_to_full_charge in hours (decimal); convert to minutes.
-    last.time_to_full   = ttf and math.floor(ttf * 60 + 0.5) or nil
+    last.time_to_full   = ttf_min
     last.ts_ms          = host.millis()
 
-    host.emit("vehicle", {
+    host.log("info", "tesla: emit soc=" .. tostring(soc) ..
+                     " limit=" .. tostring(limit) ..
+                     " state=" .. tostring(cs))
+    local emit_err = host.emit("vehicle", {
       soc              = soc,
       charge_limit_pct = limit,
       charging_state   = cs,
-      time_to_full_min = last.time_to_full,
+      time_to_full_min = ttf_min,
       stale            = false,
     })
+    if emit_err then
+      host.log("warn", "tesla: emit returned error: " .. tostring(emit_err))
+    end
   else
     -- Malformed response (no battery_level) → keep last-known.
     emit_last()

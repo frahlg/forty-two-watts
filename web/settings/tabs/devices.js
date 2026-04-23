@@ -44,22 +44,16 @@
           '<label>Battery capacity (kWh) ' + help('Nameplate storage capacity in kilowatt-hours. Stored internally as Wh.') + '</label>' +
           '<input type="number" step="0.1" data-path="drivers.' + idx + '.battery_capacity_wh" data-unit-scale="1000" value="' + ((d.battery_capacity_wh || 0) / 1000) + '">' +
           '</div></div>';
-        // Site-meter checkbox only makes sense for drivers that CAN
-        // be a meter. Vehicle drivers (e.g. tesla_vehicle.lua) have
-        // no grid reading to offer — hide the control entirely to
-        // avoid misconfiguration. catalogByLua is populated by the
-        // async catalog fetch in `after`; absent entries fall through
-        // and show the checkbox (safe default).
-        var catalogEntry = (S.catalogByLua || {})[d.lua];
-        var caps = (catalogEntry && catalogEntry.capabilities) || [];
-        var canBeSiteMeter = !catalogEntry ||
-          caps.indexOf("meter") >= 0 ||
-          caps.indexOf("pv") >= 0 ||
-          caps.indexOf("battery") >= 0 ||
-          caps.length === 0; // legacy drivers without capabilities → keep showing
-        if (canBeSiteMeter) {
-          html += '<label><input type="checkbox" data-checkbox-path="drivers.' + idx + '.is_site_meter"' + (d.is_site_meter ? ' checked' : '') + '> Site meter ' + help('Exactly one driver should be the site meter — its grid reading defines the point-of-measurement the PI loop balances.') + '</label>';
-        }
+        // Site-meter checkbox. Always rendered here so the DOM is
+        // stable regardless of when the catalog arrives — the
+        // post-fetch pass in `after` visits each `.drv-site-meter`
+        // and hides the ones whose driver only has a "vehicle"
+        // capability (no grid reading to offer). Hiding via a
+        // post-render DOM edit instead of a re-render avoids the
+        // select-wiping bug where a user clicking the catalog
+        // dropdown had it disappear under them every time the
+        // fetch resolved.
+        html += '<label class="drv-site-meter" data-drv-lua="' + escHtml(d.lua || '') + '"><input type="checkbox" data-checkbox-path="drivers.' + idx + '.is_site_meter"' + (d.is_site_meter ? ' checked' : '') + '> Site meter ' + help('Exactly one driver should be the site meter — its grid reading defines the point-of-measurement the PI loop balances.') + '</label>';
         if (mqtt) {
           html += '<fieldset><legend>MQTT</legend>' +
             '<div class="field-row"><div>' +
@@ -92,6 +86,8 @@
         var hasHostField = Object.prototype.hasOwnProperty.call(dcfg, 'host');
         var hasAuthField = Object.prototype.hasOwnProperty.call(dcfg, 'email') ||
                            Object.prototype.hasOwnProperty.call(dcfg, 'password');
+        var catalogEntry = (S.catalogByLua || {})[d.lua];
+        var caps = (catalogEntry && catalogEntry.capabilities) || [];
         var isVehicleDriver = cap.http != null &&
           (caps.indexOf("vehicle") >= 0 ||
            Object.prototype.hasOwnProperty.call(dcfg, 'vin') ||
@@ -102,16 +98,22 @@
         if (isVehicleDriver) {
           // TeslaBLEProxy-style drivers only need the LAN IP of the
           // proxy and the VIN the proxy is paired to — no cloud
-          // credentials, no charger serial.
+          // credentials, no charger serial. "Verify connection"
+          // makes the backend issue a one-shot vehicle_data poll so
+          // the operator can confirm pairing before saving.
           var vcfg = d.config || {};
           html += '<fieldset><legend>Vehicle</legend>' +
             '<div class="field-row"><div>' +
-            '<label>Proxy IP ' + help('LAN address of the TeslaBLEProxy (or equivalent HTTP-to-BLE bridge). The driver talks HTTP/JSON only; the proxy handles BLE pairing with the car.') + '</label>' +
-            '<input type="text" data-path="drivers.' + idx + '.config.ip" value="' + escHtml(vcfg.ip || '') + '" placeholder="192.168.1.50">' +
+            '<label>Proxy IP ' + help('LAN address of the TeslaBLEProxy. Bare IP uses port 8080; append ":port" to override (e.g. 192.168.1.50:1234).') + '</label>' +
+            '<input type="text" data-path="drivers.' + idx + '.config.ip" value="' + escHtml(vcfg.ip || '') + '" placeholder="192.168.1.50 (or 192.168.1.50:1234)">' +
             '</div><div>' +
             '<label>VIN ' + help('Vehicle Identification Number the proxy is paired to.') + '</label>' +
             '<input type="text" data-path="drivers.' + idx + '.config.vin" value="' + escHtml(vcfg.vin || '') + '" placeholder="5YJ3E1EA1KF000000">' +
             '</div></div>' +
+            '<div style="margin-top:8px;display:flex;gap:10px;align-items:center">' +
+            '<button class="btn-add tesla-verify-btn" type="button" data-driver-idx="' + idx + '">Verify connection</button>' +
+            '<span class="tesla-verify-status" data-driver-idx="' + idx + '" style="font-size:0.82rem;color:var(--text-dim)"></span>' +
+            '</div>' +
             '</fieldset>';
         }
         if (isLocalHTTP) {
@@ -161,24 +163,39 @@
       var config = ctx.config;
       var bodyEl = ctx.bodyEl;
 
-      // Driver catalog picker — fetch async, render into select.
-      // The re-render trick below was causing an infinite loop: after
-      // populates → fetch resolves → renderTab → after runs again →
-      // fetch again → … Every refresh wiped the <select> before the
-      // user could click an option. Guard: only re-render ONCE when
-      // the cache was empty, then rely on that cached value on every
-      // subsequent tab open.
-      var needRerender = !S.catalogByLua;
-      fetch("/api/drivers/catalog").then(function (r) { return r.json(); }).then(function (data) {
+      // Driver catalog picker — fetch async, populate the select +
+      // post-process the per-driver Site-meter labels. Fetch is
+      // module-cached on window.FTWSettings so opening the tab
+      // again doesn't re-hit the endpoint; the in-DOM <select>
+      // still gets repopulated on every open.
+      var catalogPromise = S._catalogPromise;
+      if (!catalogPromise) {
+        catalogPromise = fetch("/api/drivers/catalog")
+          .then(function (r) { return r.json(); })
+          .catch(function () { return { entries: [] }; });
+        S._catalogPromise = catalogPromise;
+      }
+      catalogPromise.then(function (data) {
         var byLua = {};
         (data && data.entries || []).forEach(function (e) {
           if (e && e.path) byLua[e.path] = e;
         });
         S.catalogByLua = byLua;
-        if (needRerender) {
-          ctx.renderTab("devices");
-          return; // the re-render's own `after` pass will populate the select
-        }
+        // Hide Site-meter on drivers whose catalog advertises only
+        // "vehicle" (or similar non-meter-capable capability sets).
+        // Legacy drivers without a catalog entry keep the checkbox.
+        bodyEl.querySelectorAll(".drv-site-meter").forEach(function (lbl) {
+          var lua = lbl.getAttribute("data-drv-lua");
+          var entry = lua && byLua[lua];
+          if (!entry) return;
+          var caps = entry.capabilities || [];
+          if (caps.length === 0) return;
+          var canBeSiteMeter =
+            caps.indexOf("meter") >= 0 ||
+            caps.indexOf("pv") >= 0 ||
+            caps.indexOf("battery") >= 0;
+          if (!canBeSiteMeter) lbl.style.display = "none";
+        });
         var sel = document.getElementById("driver-catalog-picker");
         if (!sel) return;
         sel.innerHTML = "";
@@ -234,6 +251,75 @@
         }
         config.drivers.push(driver);
         ctx.renderTab("devices");
+      });
+
+      // For vehicle drivers: keep capabilities.http.allowed_hosts
+      // in sync with the configured IP. The capability layer gates
+      // every outbound HTTP on this list — an empty list means the
+      // driver can't talk to anything and gets stuck in watchdog
+      // stale state (exactly what a freshly-added Tesla driver with
+      // an empty list hit). We rewrite the list to [host] (port
+      // stripped) whenever the operator edits the IP.
+      bodyEl.querySelectorAll('[data-path$=".config.ip"]').forEach(function (ipInput) {
+        var m = /^drivers\.(\d+)\.config\.ip$/.exec(ipInput.dataset.path);
+        if (!m) return;
+        var dIdx = parseInt(m[1], 10);
+        function syncHost() {
+          var raw = (ipInput.value || "").trim();
+          if (!raw) return;
+          var host = raw.split(":")[0];
+          var drv = config.drivers[dIdx];
+          if (!drv) return;
+          drv.capabilities = drv.capabilities || {};
+          drv.capabilities.http = drv.capabilities.http || {};
+          drv.capabilities.http.allowed_hosts = [host];
+        }
+        ipInput.addEventListener("input", syncHost);
+        ipInput.addEventListener("blur", syncHost);
+        syncHost(); // catch pre-existing configs that arrived with an empty list
+      });
+
+      // Tesla Verify-connection buttons.
+      bodyEl.querySelectorAll(".tesla-verify-btn").forEach(function (vbtn) {
+        vbtn.addEventListener("click", function () {
+          var dIdx = vbtn.dataset.driverIdx;
+          var statusEl = bodyEl.querySelector('.tesla-verify-status[data-driver-idx="' + dIdx + '"]');
+          var ipInput = bodyEl.querySelector('[data-path="drivers.' + dIdx + '.config.ip"]');
+          var vinInput = bodyEl.querySelector('[data-path="drivers.' + dIdx + '.config.vin"]');
+          var ip = ipInput ? ipInput.value.trim() : "";
+          var vin = vinInput ? vinInput.value.trim() : "";
+          if (!ip || !vin) {
+            if (statusEl) { statusEl.style.color = "#e57373"; statusEl.textContent = "Fill in both IP and VIN first"; }
+            return;
+          }
+          if (statusEl) { statusEl.style.color = "var(--text-dim)"; statusEl.textContent = "Verifying…"; }
+          vbtn.disabled = true;
+          fetch("/api/drivers/verify_tesla", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ip: ip, vin: vin }),
+          })
+            .then(function (r) { return r.json(); })
+            .then(function (j) {
+              if (j && j.ok) {
+                if (statusEl) {
+                  statusEl.style.color = "#81c995";
+                  statusEl.textContent = "✓ SoC " + Math.round(j.soc_pct) +
+                    " / " + Math.round(j.charge_limit_pct) + "% · " +
+                    (j.charging_state || "idle");
+                }
+              } else {
+                if (statusEl) {
+                  statusEl.style.color = "#e57373";
+                  statusEl.textContent = "✗ " + (j && j.error ? j.error : "unknown error");
+                }
+              }
+            })
+            .catch(function (e) {
+              if (statusEl) { statusEl.style.color = "#e57373"; statusEl.textContent = "✗ " + e.message; }
+            })
+            .finally(function () { vbtn.disabled = false; });
+        });
       });
 
       // Cloud-driver Connect buttons.

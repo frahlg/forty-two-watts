@@ -33,9 +33,22 @@
         '  .adv-header .adv-status { flex: 1 1 auto; font-family: var(--mono, monospace); font-size: 0.85rem; color: var(--text-dim); }' +
         '  .adv-header .adv-status.error { color: #e57373; }' +
         '  .adv-header .adv-status.success { color: #81c995; }' +
-        '  .adv-editor { flex: 1 1 auto; min-height: 0; border: 1px solid var(--line, rgba(255,255,255,0.12)); border-radius: 6px; overflow: hidden; background: rgba(0,0,0,0.25); }' +
-        '  .adv-editor .cm-editor { height: 100%; }' +
+        '  .adv-editor { flex: 1 1 auto; min-height: 0; border: 1px solid var(--line, rgba(255,255,255,0.12)); border-radius: 6px; overflow: hidden; background: #f7f7f2; color: #1b1b1b; }' +
+        '  .adv-editor .cm-editor { height: 100%; background: #f7f7f2; color: #1b1b1b; }' +
+        '  .adv-editor .cm-gutters { background: #ececd9; color: #7a7a68; border-right: 1px solid #d5d5c2; }' +
+        '  .adv-editor .cm-activeLine { background: rgba(255, 230, 130, 0.22); }' +
+        '  .adv-editor .cm-activeLineGutter { background: rgba(255, 230, 130, 0.35); }' +
+        '  .adv-editor .cm-selectionBackground, .adv-editor .cm-content ::selection { background: rgba(80, 140, 255, 0.28) !important; }' +
+        '  .adv-editor .cm-cursor { border-left-color: #1b1b1b; }' +
         '  .adv-editor .cm-focused { outline: none; }' +
+        /* Override the bundled (dark-theme) syntax colors so tokens
+           read well against the light background. Targets the class
+           names emitted by @codemirror/language\'s defaultHighlightStyle. */
+        '  .adv-editor .tok-keyword, .adv-editor .ͼm { color: #a33; font-weight: 600; }' +
+        '  .adv-editor .tok-string, .adv-editor .ͼp { color: #0a6a0a; }' +
+        '  .adv-editor .tok-number, .adv-editor .tok-bool, .adv-editor .tok-null { color: #9a5f00; }' +
+        '  .adv-editor .tok-comment, .adv-editor .ͼl { color: #7c7c7c; font-style: italic; }' +
+        '  .adv-editor .tok-propertyName, .adv-editor .tok-typeName, .adv-editor .ͼk { color: #1a4bb5; }' +
         '  .adv-btn { padding: 6px 12px; border-radius: 4px; border: 1px solid var(--line, rgba(255,255,255,0.15)); background: rgba(255,255,255,0.06); color: inherit; cursor: pointer; font: inherit; }' +
         '  .adv-btn:hover { background: rgba(255,255,255,0.1); }' +
         '  .adv-btn.primary { background: var(--accent, #4aa3ff); border-color: var(--accent, #4aa3ff); color: #000; font-weight: 600; }' +

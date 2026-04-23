@@ -162,6 +162,7 @@ func (s *Server) routes() {
 	s.handle("GET  /api/config/raw", s.handleGetConfigRaw)
 	s.handle("POST /api/config/raw", s.handlePostConfigRaw)
 	s.handle("POST /api/config/validate", s.handleValidateConfigRaw)
+	s.handle("POST /api/drivers/verify_tesla", s.handleVerifyTesla)
 	s.handle("GET  /api/mode", s.handleGetMode)
 	s.handle("POST /api/mode", s.handleSetMode)
 	s.handle("POST /api/target", s.handleSetTarget)

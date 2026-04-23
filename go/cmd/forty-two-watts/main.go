@@ -628,15 +628,38 @@ func main() {
 						targetSlot = int(delta / (time.Duration(slotLenMin) * time.Minute))
 					}
 				}
+				// Effective target respects the vehicle's own charge-limit
+				// setting (set in the Tesla app: "charge to 50 %") when
+				// we know it. The EV physically stops at that value even
+				// if the operator asked MPC to charge higher, so planning
+				// past it wastes DP cycles and misleads the UI's "kWh
+				// planned" count. MinOf the two. When the charge_limit is
+				// unknown (no vehicle driver wired), the user's target is
+				// the only signal — use it as-is.
+				effectiveTarget := st.TargetSoCPct
+				if st.VehicleChargeLimitPct > 0 && st.VehicleChargeLimitPct < effectiveTarget {
+					effectiveTarget = st.VehicleChargeLimitPct
+					slog.Debug("loadpoint target clamped by vehicle charge_limit",
+						"lp", st.ID,
+						"user_target", st.TargetSoCPct,
+						"vehicle_limit", st.VehicleChargeLimitPct,
+						"effective", effectiveTarget)
+				}
 				return &mpc.LoadpointSpec{
 					ID:              st.ID,
 					CapacityWh:      capWh,
 					Levels:          11,
 					MinPct:          0,
 					MaxPct:          100,
+					// CurrentSoCPct already prefers the vehicle BMS
+					// reading when a DerVehicle source is live (set in
+					// Manager.Observe). When no vehicle driver is wired
+					// it falls back to the pluginSoC + deliveredWh
+					// inference. Either way we hand the DP the best
+					// number we have.
 					InitialSoCPct:   st.CurrentSoCPct,
 					PluggedIn:       true,
-					TargetSoCPct:    st.TargetSoCPct,
+					TargetSoCPct:    effectiveTarget,
 					TargetSlotIdx:   targetSlot,
 					MaxChargeW:      st.MaxChargeW,
 					AllowedStepsW:   st.AllowedStepsW,
