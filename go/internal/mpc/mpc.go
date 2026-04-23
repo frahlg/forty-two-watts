@@ -494,6 +494,28 @@ func Optimize(slots []Slot, p Params) Plan {
 							}
 						}
 
+						// EV-first preference: when the operator has a
+						// car plugged with outstanding charge demand
+						// AND the DP is weighing charging the HOME
+						// battery in the same slot, nudge the cost up
+						// on the battery side. Effect: when limited
+						// surplus can only feed one, DP prefers EV.
+						// When there's enough for both, they share.
+						// Factor 0.25×effPrice per kWh of battery
+						// charge is small enough that genuine
+						// price/SoC decisions dominate, big enough to
+						// break the tie when (battW>0, evW=0) and
+						// (battW=0, evW>0) would otherwise cost
+						// identically. Only activates when an EV is
+						// actually plugged AND has demand, so sites
+						// without an EV loadpoint see zero change.
+						if evActive && lp != nil &&
+							lp.TargetSoCPct > lp.InitialSoCPct &&
+							battW > 100 && evW == 0 {
+							battChargeKWh := battW * dtH / 1000.0
+							cost += 0.25 * effPrice(slot) * battChargeKWh
+						}
+
 						// Deadline slot: if this slot is the EV's
 						// deadline AND target isn't met with this
 						// action's evSoc2, add a shortfall penalty.
