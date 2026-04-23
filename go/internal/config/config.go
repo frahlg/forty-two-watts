@@ -202,11 +202,31 @@ type Fuse struct {
 	MaxAmps float64 `yaml:"max_amps" json:"max_amps"`
 	Phases  int     `yaml:"phases" json:"phases"`
 	Voltage float64 `yaml:"voltage" json:"voltage"`
+	// SafetyMarginAmps keeps controlled loads (battery dispatch, MPC
+	// plan, EV loadpoint) this many amps below MaxAmps. When a battery
+	// and an EV charger both race for the fuse ceiling, a small live
+	// load swing can push predicted grid flow above the breaker; the
+	// margin is the cushion the controller never spends. Default 0.5 A.
+	// The fuse_over_limit alarm still uses the true MaxAmps — the
+	// margin protects against our own dispatch, not against the alert.
+	SafetyMarginAmps float64 `yaml:"safety_margin_amps,omitempty" json:"safety_margin_amps,omitempty"`
 }
 
-// MaxPowerW returns the total power budget for the fuse guard.
+// MaxPowerW returns the total breaker power rating — the absolute
+// ceiling at which a hardware trip is imminent. Use for alarms.
 func (f Fuse) MaxPowerW() float64 {
 	return f.MaxAmps * f.Voltage * float64(f.Phases)
+}
+
+// SafeMaxPowerW returns the controllable power budget: MaxPowerW minus
+// the safety-margin headroom. This is what dispatch/MPC/loadpoint
+// clamp against so controlled loads don't walk the breaker line.
+func (f Fuse) SafeMaxPowerW() float64 {
+	a := f.MaxAmps - f.SafetyMarginAmps
+	if a < 0 {
+		a = 0
+	}
+	return a * f.Voltage * float64(f.Phases)
 }
 
 // Driver is one driver entry. Each driver is a Lua script loaded by
@@ -665,6 +685,9 @@ func applyDefaults(c *Config) {
 	}
 	if c.Fuse.Voltage == 0 {
 		c.Fuse.Voltage = 230
+	}
+	if c.Fuse.SafetyMarginAmps == 0 {
+		c.Fuse.SafetyMarginAmps = 0.5
 	}
 	if c.API.Port == 0 {
 		c.API.Port = 8080

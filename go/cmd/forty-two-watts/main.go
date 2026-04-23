@@ -796,8 +796,18 @@ func main() {
 			}, true
 		}
 		lpController = loadpoint.NewController(lpMgr, planAdapter, telAdapter, reg.Send)
+		// Loadpoint clamps against the safe budget (MaxAmps − safety
+		// margin), not the raw breaker rating — otherwise an 11 kW EV
+		// charger plus a battery both allowed up to full fuse would
+		// predict zero headroom and push a brief live-load spike past
+		// the breaker. The fuse_over_limit alarm still fires on the
+		// true MaxAmps.
+		lpSafeAmps := cfg.Fuse.MaxAmps - cfg.Fuse.SafetyMarginAmps
+		if lpSafeAmps < 0 {
+			lpSafeAmps = 0
+		}
 		lpController.SetSiteFuse(loadpoint.SiteFuse{
-			MaxAmps: cfg.Fuse.MaxAmps,
+			MaxAmps: lpSafeAmps,
 			Voltage: cfg.Fuse.Voltage,
 		})
 		// Vehicle-side telemetry (DerVehicle emitted by tesla_vehicle.lua
@@ -1122,7 +1132,7 @@ func main() {
 
 	// ---- Control loop ----
 	controlInterval := time.Duration(cfg.Site.ControlIntervalS) * time.Second
-	fuseMaxW := cfg.Fuse.MaxPowerW()
+	fuseMaxW := cfg.Fuse.SafeMaxPowerW()
 	dtS := float64(cfg.Site.ControlIntervalS)
 
 	// Graceful shutdown
@@ -1573,14 +1583,14 @@ func aggregateBatteryLimits(cfg *config.Config, capacities map[string]float64) (
 	// reality, and every downstream decision (when to discharge, when to
 	// idle, what the total cost looks like) is based on that fantasy.
 	// Cheaper to keep the plan feasible up-front.
-	if fuseMaxW := cfg.Fuse.MaxPowerW(); fuseMaxW > 0 {
+	if fuseMaxW := cfg.Fuse.SafeMaxPowerW(); fuseMaxW > 0 {
 		if maxChg > fuseMaxW {
-			slog.Info("mpc: clamping MaxChargeW to fuse capacity",
+			slog.Info("mpc: clamping MaxChargeW to safe fuse capacity",
 				"requested_w", maxChg, "fuse_w", fuseMaxW)
 			maxChg = fuseMaxW
 		}
 		if maxDis > fuseMaxW {
-			slog.Info("mpc: clamping MaxDischargeW to fuse capacity",
+			slog.Info("mpc: clamping MaxDischargeW to safe fuse capacity",
 				"requested_w", maxDis, "fuse_w", fuseMaxW)
 			maxDis = fuseMaxW
 		}
