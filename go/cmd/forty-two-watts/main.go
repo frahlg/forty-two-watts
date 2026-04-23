@@ -863,6 +863,22 @@ func main() {
 				reg.PokePoll(driver)
 			}
 		})
+		// ReplanHint: vehicle data diverged enough from what MPC
+		// last planned against (big SoC delta, charge-limit change,
+		// or proxy just came back online). Fire a replan in a
+		// goroutine so the controller tick isn't blocked. MPC's
+		// DP takes hundreds of ms on a 193-slot horizon; Manager's
+		// built-in cooldown prevents thrashing.
+		lpMgr.SetReplanHint(func(lpID string) {
+			if mpcSvc == nil {
+				return
+			}
+			go func() {
+				slog.Info("loadpoint: replan hint", "lp", lpID,
+					"reason", "vehicle-data-material-change")
+				mpcSvc.Replan(ctx)
+			}()
+		})
 	}
 
 	// ---- Self-update checker ----

@@ -242,7 +242,35 @@ type Manager struct {
 	// for every known vehicle driver on plug-in transition so the
 	// auto-discovery scoring uses up-to-date BMS data.
 	vehiclePoke VehiclePokeFunc
+	// replanHint is invoked when a vehicle reading carries a
+	// material update (big SoC delta, charge-limit change, or
+	// proxy recovery flipping source from inferred to vehicle).
+	// Main wires it to mpcSvc.Replan so the plan can be rebuilt
+	// against the actual state instead of waiting up to 15 min
+	// for the next scheduled replan. Rate-limited per loadpoint
+	// via replanHintLast so a flapping signal can't thrash MPC.
+	replanHint     ReplanHintFunc
+	replanHintLast map[string]time.Time
 }
+
+// ReplanHintFunc is the callback fired when a loadpoint's vehicle
+// telemetry changes materially enough to warrant an MPC replan.
+// Main wires it to the mpc.Service.Replan path; nil disables the
+// feature (plan still refreshes on MPC's own 15-min cadence).
+type ReplanHintFunc func(loadpointID string)
+
+// replanHintCooldown caps how often one loadpoint can trigger
+// replans. MPC's own reactive-replan path has a separate cooldown
+// for PV/load divergence; this keeps loadpoint-side hints on an
+// orthogonal budget. 1 minute is conservative — a running charge
+// session rarely jumps SoC by the threshold more often than that,
+// and MPC's DP solve takes meaningful CPU.
+const replanHintCooldown = 60 * time.Second
+
+// replanSoCDeltaPct is the SoC change (in percentage points) that
+// counts as "material" and worth a replan. Smaller flickers fall
+// under BMS noise and Tesla's rounding.
+const replanSoCDeltaPct = 3.0
 
 // loadpointRuntime is the in-memory representation. Its fields are the
 // union of configured parameters and observed state. Lives behind
@@ -267,6 +295,13 @@ type loadpointRuntime struct {
 	vehicleTimeToFullMin  int
 	vehicleStale        bool
 	socSource           string
+	// Replan-hint baselines. Track the vehicle SoC + limit + source
+	// values we last pinged MPC about, so Observe can compare the
+	// current tick against them and decide if the change is material
+	// enough to fire another hint. Keeps the rate limiter honest.
+	vehicleSoCPctLastHinted         float64
+	vehicleChargeLimitPctLastHinted float64
+	socSourceLastHinted             string
 	// discoveredVehicleDriver holds the runtime auto-discovery result
 	// when the YAML Config.VehicleDriver is empty. Set on plug-in
 	// transition by scoring every live DerVehicle reading. Cleared
@@ -322,6 +357,17 @@ func (m *Manager) SetVehicleSnapshot(f VehicleSnapshotFunc) {
 func (m *Manager) SetVehiclePoke(f VehiclePokeFunc) {
 	m.mu.Lock()
 	m.vehiclePoke = f
+	m.mu.Unlock()
+}
+
+// SetReplanHint installs the callback used to ping MPC when vehicle
+// telemetry changes materially. nil disables the feature.
+func (m *Manager) SetReplanHint(f ReplanHintFunc) {
+	m.mu.Lock()
+	m.replanHint = f
+	if m.replanHintLast == nil {
+		m.replanHintLast = map[string]time.Time{}
+	}
 	m.mu.Unlock()
 }
 
@@ -381,6 +427,9 @@ func (m *Manager) Load(cfgs []Config) {
 			lp.vehicleTimeToFullMin = existing.vehicleTimeToFullMin
 			lp.vehicleStale = existing.vehicleStale
 			lp.socSource = existing.socSource
+			lp.vehicleSoCPctLastHinted = existing.vehicleSoCPctLastHinted
+			lp.vehicleChargeLimitPctLastHinted = existing.vehicleChargeLimitPctLastHinted
+			lp.socSourceLastHinted = existing.socSourceLastHinted
 			lp.discoveredVehicleDriver = existing.discoveredVehicleDriver
 			lp.updatedAtMs = existing.updatedAtMs
 			lp.sessionPluginSoCPct = existing.sessionPluginSoCPct
@@ -575,6 +624,32 @@ func (m *Manager) Observe(id string, pluggedIn bool, powerW, deliveredWh float64
 	}
 	lp.updatedAtMs = time.Now().UnixMilli()
 
+	// Detect material vehicle-data changes vs what MPC likely last
+	// planned against. Three signals:
+	//   * SoC jumped > replanSoCDeltaPct — charger state changed
+	//     faster than MPC expected OR proxy just returned after a
+	//     gap with fresh-but-different data.
+	//   * charge_limit_pct changed at all (operator bumped the
+	//     Tesla app slider mid-session).
+	//   * socSource flipped inferred → vehicle (proxy recovery
+	//     from a stale window — the baseline MPC was planning
+	//     against just got overridden).
+	socDelta := vs.SoCPct - lp.vehicleSoCPctLastHinted
+	if socDelta < 0 {
+		socDelta = -socDelta
+	}
+	materialChange := false
+	if vs.OK && !vs.Stale {
+		switch {
+		case lp.socSource == "vehicle" && lp.vehicleSoCPctLastHinted > 0 && socDelta >= replanSoCDeltaPct:
+			materialChange = true
+		case vs.ChargeLimitPct > 0 && vs.ChargeLimitPct != lp.vehicleChargeLimitPctLastHinted:
+			materialChange = true
+		case lp.socSourceLastHinted == "inferred" && lp.socSource == "vehicle":
+			materialChange = true
+		}
+	}
+
 	// Capture everything we need for the optional auto-schedule below
 	// BEFORE releasing the lock. SetTarget re-acquires it, so we must
 	// drop ours first to avoid reentrant-lock deadlock.
@@ -585,6 +660,23 @@ func (m *Manager) Observe(id string, pluggedIn bool, powerW, deliveredWh float64
 	vehLimit := lp.vehicleChargeLimitPct
 	policySnap := lp.policy
 	persist := m.onTarget
+
+	// Rate-limited replan hint. If we're firing one this tick,
+	// advance the bookkeeping so we don't re-fire until cooldown.
+	fireReplanHint := false
+	if materialChange && m.replanHint != nil {
+		if last, ok := m.replanHintLast[lp.ID]; !ok || time.Since(last) >= replanHintCooldown {
+			fireReplanHint = true
+			if m.replanHintLast == nil {
+				m.replanHintLast = map[string]time.Time{}
+			}
+			m.replanHintLast[lp.ID] = time.Now()
+			lp.vehicleSoCPctLastHinted = vs.SoCPct
+			lp.vehicleChargeLimitPctLastHinted = vs.ChargeLimitPct
+			lp.socSourceLastHinted = lp.socSource
+		}
+	}
+	replanHint := m.replanHint
 	m.mu.Unlock()
 
 	if unplugTransition && persist != nil {
@@ -597,6 +689,11 @@ func (m *Manager) Observe(id string, pluggedIn bool, powerW, deliveredWh float64
 	}
 	if autoArm {
 		m.applyAutoSchedule(lpID, autoSoc, autoTimeLocal, vehLimit)
+	}
+	if fireReplanHint && replanHint != nil {
+		// Non-blocking by contract — main's wrapper should return
+		// quickly (fire-and-forget `go mpcSvc.Replan(ctx)`).
+		replanHint(lpID)
 	}
 }
 
