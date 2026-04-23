@@ -1276,6 +1276,8 @@
         var vState = d.vehicle_charging_state || "—";
         var vTtf = d.vehicle_time_to_full_min;
         var vStale = !!d.vehicle_stale;
+        var vAmps = d.vehicle_charge_amps;             // car's in-app current limit
+        var vActual = d.vehicle_charger_actual_current; // current actually flowing
         var socDisplay = (vSoc != null && vLimit != null)
           ? vSoc + " / " + vLimit + " %"
           : (vSoc != null ? vSoc + " %" : "—");
@@ -1284,10 +1286,28 @@
         var ttfStr = (vTtf != null && vTtf > 0)
           ? (vTtf >= 60 ? Math.floor(vTtf / 60) + "h " + (vTtf % 60) + "m" : vTtf + " min")
           : "—";
+        // Amps row reads "5 / 16 A" (actual / in-app limit) when both
+        // present; flags as warn when actual lags the limit (vehicle
+        // throttled itself or wallbox limit is lower than what the
+        // car would accept). Skipped entirely when neither field is
+        // reported (older proxies).
+        var ampsRow = "";
+        if (vAmps != null || vActual != null) {
+          var ampsText = (vActual != null ? Math.round(vActual) : "?") +
+                         " / " +
+                         (vAmps != null ? Math.round(vAmps) : "?") +
+                         " A";
+          var ampsCls = (vActual != null && vAmps != null && vActual + 0.5 < vAmps)
+            ? "stat-warn" : "stat-value";
+          ampsRow =
+            '  <span class="stat-label">Amps (actual/limit)</span>' +
+            '<span class="stat-value ' + ampsCls + '">' + ampsText + '</span>';
+        }
         body =
           '<div class="driver-stats">' +
           '  <span class="stat-label">SoC</span><span class="stat-value">' + socDisplay + '</span>' +
           '  <span class="stat-label">State</span><span class="stat-value ' + stateClassV + '">' + escHtml(vState) + '</span>' +
+          ampsRow +
           '  <span class="stat-label">Time to full</span><span class="stat-value">' + ttfStr + '</span>' +
           (vStale ? '  <span class="stat-label">Note</span><span class="stat-value stat-warn">data stale</span>' : '') +
           '  <span class="stat-label">Ticks</span><span class="stat-value">' + ticks + '</span>' +

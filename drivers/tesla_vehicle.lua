@@ -55,11 +55,13 @@ local vin = nil
 -- the car is in deep sleep; we treat that as "use last-known" until
 -- STALE_AFTER_MS elapses.
 local last = {
-  ts_ms          = 0,
-  soc            = nil,
-  charge_limit   = nil,
-  charging_state = nil,
-  time_to_full   = nil,
+  ts_ms                   = 0,
+  soc                     = nil,
+  charge_limit            = nil,
+  charging_state          = nil,
+  time_to_full            = nil,
+  charge_amps             = nil,
+  charger_actual_current  = nil,
 }
 
 local function auth_headers()
@@ -132,11 +134,13 @@ local function emit_last()
   local age = host.millis() - last.ts_ms
   local stale = age > STALE_AFTER_MS
   host.emit("vehicle", {
-    soc              = last.soc,
-    charge_limit_pct = last.charge_limit,
-    charging_state   = last.charging_state,
-    time_to_full_min = last.time_to_full,
-    stale            = stale,
+    soc                    = last.soc,
+    charge_limit_pct       = last.charge_limit,
+    charging_state         = last.charging_state,
+    time_to_full_min       = last.time_to_full,
+    charge_amps            = last.charge_amps,
+    charger_actual_current = last.charger_actual_current,
+    stale                  = stale,
   })
 end
 
@@ -210,6 +214,12 @@ function driver_poll()
 
   local soc = tonumber(charge_state.battery_level)
   local limit = tonumber(charge_state.charge_limit_soc)
+  -- Per-vehicle in-app current limit. The car negotiates DOWN to
+  -- this amperage regardless of what the wallbox offers; surface it
+  -- so operators can see "wallbox commands 16A but car capped to 5A"
+  -- mismatches without digging into the raw proxy response.
+  local charge_amps = tonumber(charge_state.charge_amps)
+  local charger_actual_current = tonumber(charge_state.charger_actual_current)
   -- Field name depends on source:
   --   - TeslaBLEProxy emits `minutes_to_full_charge` (integer minutes).
   --   - Tesla Owner API emits `time_to_full_charge` (fractional hours).
@@ -222,21 +232,27 @@ function driver_poll()
   if type(cs) ~= "string" then cs = nil end
 
   if soc ~= nil then
-    last.soc            = soc
-    last.charge_limit   = limit
-    last.charging_state = cs
-    last.time_to_full   = ttf_min
-    last.ts_ms          = host.millis()
+    last.soc                    = soc
+    last.charge_limit           = limit
+    last.charging_state         = cs
+    last.time_to_full           = ttf_min
+    last.charge_amps            = charge_amps
+    last.charger_actual_current = charger_actual_current
+    last.ts_ms                  = host.millis()
 
     host.log("info", "tesla: emit soc=" .. tostring(soc) ..
                      " limit=" .. tostring(limit) ..
-                     " state=" .. tostring(cs))
+                     " state=" .. tostring(cs) ..
+                     " amps=" .. tostring(charge_amps) ..
+                     "/" .. tostring(charger_actual_current))
     local emit_err = host.emit("vehicle", {
-      soc              = soc,
-      charge_limit_pct = limit,
-      charging_state   = cs,
-      time_to_full_min = ttf_min,
-      stale            = false,
+      soc                     = soc,
+      charge_limit_pct        = limit,
+      charging_state          = cs,
+      time_to_full_min        = ttf_min,
+      charge_amps             = charge_amps,
+      charger_actual_current  = charger_actual_current,
+      stale                   = false,
     })
     if emit_err then
       host.log("warn", "tesla: emit returned error: " .. tostring(emit_err))
