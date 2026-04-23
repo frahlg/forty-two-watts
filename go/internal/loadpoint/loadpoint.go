@@ -495,17 +495,20 @@ func (m *Manager) Observe(id string, pluggedIn bool, powerW, deliveredWh float64
 	lp.currentPowerW = powerW
 	lp.deliveredWhSession = deliveredWh
 
-	// Auto-discovery on plug-in: if no YAML binding is set, score
-	// every live DerVehicle reading and pick the most-likely car.
-	// First, poke every known vehicle driver to refresh its BMS
-	// reading (proxy wakeup=true triggers the Tesla to wake) so the
-	// scoring sees current data instead of up-to-60-s-stale cache.
-	// Pokes are async — discovery scores with whatever is cached
-	// now; subsequent ticks will pick up the refreshed data and
-	// re-bind on the NEXT plug-in if needed.
-	if pluginTransition && lp.VehicleDriver == "" && m.vehicleSnap != nil {
+	// Auto-discovery: fire on plug-in transition, AND on every tick
+	// when the loadpoint is plugged but has no binding yet (covers
+	// the "container restarted while plugged" / "operator just
+	// removed YAML binding without re-plugging" cases). YAML
+	// binding always wins; we only auto-discover when both YAML and
+	// previous runtime binding are empty.
+	wantsDiscovery := lp.VehicleDriver == "" &&
+		lp.discoveredVehicleDriver == "" &&
+		pluggedIn && m.vehicleSnap != nil
+	if wantsDiscovery {
 		snap := m.vehicleSnap()
-		if m.vehiclePoke != nil {
+		// Poke once on plug-in transition so subsequent re-discovery
+		// ticks see fresh data; don't spam pokes every observe.
+		if pluginTransition && m.vehiclePoke != nil {
 			for driverName := range snap {
 				m.vehiclePoke(driverName)
 			}
