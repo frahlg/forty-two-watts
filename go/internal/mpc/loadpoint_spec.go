@@ -53,6 +53,45 @@ type LoadpointSpec struct {
 	// Charge-side efficiency (AC → battery). Typical 0.90 for a
 	// modern 3-phase EV charger. 0 defaults to 0.90.
 	ChargeEfficiency float64
+
+	// Policy applies energy-source constraints to the DP action loop.
+	// nil = legacy unrestricted behaviour (EV may use any source);
+	// non-nil activates the AllowGrid / AllowBatterySupport /
+	// OnlySurplus gates described on the Policy type. Stored as a
+	// pointer so the zero-value LoadpointSpec — used extensively in
+	// the existing tests — keeps its unrestricted semantics.
+	Policy *Policy
+}
+
+// Policy is the per-schedule energy-source gate set consulted by the
+// DP when evaluating EV charging actions. Each field is an
+// independent boolean constraint; they combine by AND.
+//
+//   - OnlySurplus: during daylight slots (slot.PVW < -SurplusEpsilonW)
+//     the DP clamps evW to the forecast surplus -(LoadW + PVW). Night
+//     slots are not clamped by this flag — pair with AllowGrid=false
+//     for a strict "no grid import ever" schedule.
+//
+//   - AllowGrid: when false, the DP rejects any action where a non-
+//     zero evW forces net grid import (gridW > SurplusEpsilonW). Hard
+//     counterpart to OnlySurplus — applies day AND night.
+//
+//   - AllowBatterySupport: when false, the DP rejects actions where
+//     the home battery discharges (battW < 0) while the EV draws
+//     (evW > 0). Battery may not prop up EV charging; EV must be
+//     covered by PV or grid (subject to AllowGrid).
+//
+// SurplusEpsilonW is the shared slack value (forecast jitter / kWh
+// round-off). Defaults to 100 W when 0.
+//
+// Construct Policy via loadpoint.Policy → mpc.Policy at the main.go
+// wire boundary. This package stays independent of loadpoint's
+// in-memory types.
+type Policy struct {
+	AllowGrid           bool
+	AllowBatterySupport bool
+	OnlySurplus         bool
+	SurplusEpsilonW     float64
 }
 
 // normalizedSteps returns a non-nil, 0-included, dedup'd + sorted

@@ -1769,9 +1769,15 @@ func (s *Server) handleLoadpointTarget(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]string{"error": "id required"})
 		return
 	}
+	// Optional policy fields. Absent = keep current (nil policy arg to
+	// SetTarget); present = override and persist. Pointers let us
+	// distinguish "not sent" from "explicitly false".
 	var req struct {
-		SoCPct       float64 `json:"soc_pct"`
-		TargetTimeMs int64   `json:"target_time_ms"`
+		SoCPct              float64 `json:"soc_pct"`
+		TargetTimeMs        int64   `json:"target_time_ms"`
+		AllowGrid           *bool   `json:"allow_grid,omitempty"`
+		AllowBatterySupport *bool   `json:"allow_battery_support,omitempty"`
+		OnlySurplus         *bool   `json:"only_surplus,omitempty"`
 	}
 	if err := readJSON(r, &req); err != nil {
 		writeJSON(w, 400, map[string]string{"error": err.Error()})
@@ -1781,7 +1787,25 @@ func (s *Server) handleLoadpointTarget(w http.ResponseWriter, r *http.Request) {
 	if req.TargetTimeMs > 0 {
 		deadline = time.UnixMilli(req.TargetTimeMs).UTC()
 	}
-	if !s.deps.Loadpoints.SetTarget(id, req.SoCPct, deadline) {
+	var policy *loadpoint.Policy
+	if req.AllowGrid != nil || req.AllowBatterySupport != nil || req.OnlySurplus != nil {
+		// Any policy field present → build a Policy. For fields the
+		// caller didn't send, start from the permissive default so
+		// partial updates (e.g. only_surplus=true alone) don't
+		// silently flip the other two to false.
+		p := loadpoint.DefaultPolicy()
+		if req.AllowGrid != nil {
+			p.AllowGrid = *req.AllowGrid
+		}
+		if req.AllowBatterySupport != nil {
+			p.AllowBatterySupport = *req.AllowBatterySupport
+		}
+		if req.OnlySurplus != nil {
+			p.OnlySurplus = *req.OnlySurplus
+		}
+		policy = &p
+	}
+	if !s.deps.Loadpoints.SetTarget(id, req.SoCPct, deadline, policy) {
 		writeJSON(w, 404, map[string]string{"error": "loadpoint not found"})
 		return
 	}
