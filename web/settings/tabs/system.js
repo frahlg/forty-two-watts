@@ -94,7 +94,12 @@
         '</fieldset>';
     },
 
-    after: function () {
+    after: function (ctx) {
+      var escHtml = (ctx && ctx.escHtml) || function (s) {
+        var div = document.createElement("div");
+        div.textContent = s == null ? "" : String(s);
+        return div.innerHTML;
+      };
       function setBar(id, pct) {
         var el = document.getElementById(id);
         if (el) el.innerHTML = bar(pct);
@@ -124,7 +129,7 @@
           return;
         }
         netEl.innerHTML = filtered.map(function (n) {
-          return '<div><span class="sys-net-iface">' + n.iface + '</span>' + n.ips.join(", ") + '</div>';
+          return '<div><span class="sys-net-iface">' + escHtml(n.iface) + '</span>' + escHtml(n.ips.join(", ")) + '</div>';
         }).join("");
       }
 

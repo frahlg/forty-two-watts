@@ -3,6 +3,7 @@ package api
 import (
 	"net"
 	"net/http"
+	"os"
 	"runtime"
 
 	"github.com/shirou/gopsutil/v4/cpu"
@@ -10,6 +11,19 @@ import (
 	"github.com/shirou/gopsutil/v4/host"
 	"github.com/shirou/gopsutil/v4/mem"
 )
+
+// diskRoot returns the filesystem root to probe for disk usage. Unix-like
+// systems use "/"; Windows uses the drive letter from %SystemDrive% (the
+// `make release` target ships a windows/amd64 build, so this path matters).
+func diskRoot() string {
+	if runtime.GOOS == "windows" {
+		if sd := os.Getenv("SystemDrive"); sd != "" {
+			return sd + `\`
+		}
+		return `C:\`
+	}
+	return "/"
+}
 
 type sysInfoCPU struct {
 	Percent float64 `json:"percent"`
@@ -48,9 +62,10 @@ type sysInfoResponse struct {
 // so the call doesn't block; the frontend polls every 5 s, which gives the
 // delta a meaningful window between reads.
 func (s *Server) handleSysInfo(w http.ResponseWriter, r *http.Request) {
+	root := diskRoot()
 	resp := sysInfoResponse{
 		CPU:  sysInfoCPU{Cores: runtime.NumCPU()},
-		Disk: sysInfoDisk{Path: "/"},
+		Disk: sysInfoDisk{Path: root},
 	}
 
 	if hi, err := host.InfoWithContext(r.Context()); err == nil {
@@ -70,7 +85,7 @@ func (s *Server) handleSysInfo(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if du, err := disk.UsageWithContext(r.Context(), "/"); err == nil {
+	if du, err := disk.UsageWithContext(r.Context(), root); err == nil {
 		resp.Disk = sysInfoDisk{
 			Path:       du.Path,
 			TotalBytes: du.Total,
