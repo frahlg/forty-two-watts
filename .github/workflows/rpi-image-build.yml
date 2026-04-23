@@ -1,0 +1,83 @@
+name: rpi-image build (on-demand)
+
+# Parallel to the release.yml rpi-image job, but decoupled from
+# semantic-release. Use this to:
+#   - Get CI signal on PRs that touch the image scaffolding.
+#   - Hand-build a fresh image for hardware testing on any branch via
+#     the Run workflow button (or `gh workflow run`).
+#
+# Output lands as a workflow artifact, not a GitHub Release asset —
+# release-tagged images still go through release.yml.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Git ref to build (branch, tag, or SHA). Defaults to the ref the workflow was dispatched from.
+        required: false
+        default: ''
+  pull_request:
+    # Only re-run when something that actually affects the image
+    # changes. Unrelated docs / Go-only PRs don't need 30 min of
+    # pi-gen churn.
+    paths:
+      - 'deploy/pi-gen/**'
+      - '.github/workflows/rpi-image-build.yml'
+      - 'docker-compose.yml'
+      - 'mosquitto/config/**'
+
+# A new push to a PR cancels the previous in-flight build. 30 min is
+# too long to chain — we just want the latest.
+concurrency:
+  group: rpi-image-build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Free disk space
+        # pi-gen's chroot stages want ~15 GB; ubuntu-latest ships with
+        # ~14 GB free. Same eviction trick as release.yml.
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost "${AGENT_TOOLSDIRECTORY}"
+          sudo docker system prune -af
+          df -h /
+
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          # workflow_dispatch can override; pull_request falls through
+          # to the PR head SHA (empty string → action's default).
+          ref: ${{ github.event.inputs.ref || github.sha }}
+
+      - name: Build image
+        env:
+          PI_GEN_REF: master
+        run: deploy/pi-gen/build.sh
+
+      - name: Locate artifact
+        id: artifact
+        run: |
+          set -euo pipefail
+          IMG="$(ls deploy/pi-gen/pi-gen/deploy/*.img.xz 2>/dev/null | head -n1)"
+          if [ -z "${IMG}" ]; then
+            echo "pi-gen produced no .img.xz — check build log above" >&2
+            exit 1
+          fi
+          ls -lah "${IMG}"
+          echo "path=${IMG}" >> "${GITHUB_OUTPUT}"
+          echo "name=$(basename "${IMG}" .img.xz)" >> "${GITHUB_OUTPUT}"
+
+      - name: Upload image as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.artifact.outputs.name }}
+          path: ${{ steps.artifact.outputs.path }}
+          # Long enough window to grab for real-hardware testing
+          # across a normal review cycle.
+          retention-days: 14
+          if-no-files-found: error
