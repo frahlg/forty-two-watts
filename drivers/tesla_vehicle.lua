@@ -103,14 +103,22 @@ function driver_init(config)
 
   host.set_make("Tesla")
   host.set_sn(tostring(vin))
-  -- The registry uses PollInterval() which is driven by
-  -- host.set_poll_interval, NOT the return value from driver_poll.
-  -- Default is 5 s (way too fast for BLE wake-ups). Set once at
-  -- init so every poll respects our intended cadence.
-  host.set_poll_interval(POLL_INTERVAL_MS)
+  -- Two-phase poll cadence:
+  --  1. Init pumps the interval down to 500 ms so the registry's
+  --     initial timer fires almost immediately. The first poll
+  --     thus runs ≤ 1 s after startup / restart / hot-reload —
+  --     no 60-second blank window where the dashboard says
+  --     "no vehicle data".
+  --  2. driver_poll bumps the interval back up to POLL_INTERVAL_MS
+  --     (60 s) before returning, so steady-state polling is
+  --     conservative on BLE wake-ups + Tesla cloud rate.
+  -- The registry re-reads PollInterval() on every iteration, so the
+  -- mid-flight change takes effect immediately.
+  host.set_poll_interval(500)
   host.log("info", "tesla: driver initialized vin=" .. tostring(vin) ..
                    " proxy=" .. base_url ..
-                   " poll_s=" .. tostring(POLL_INTERVAL_MS / 1000))
+                   " poll_s=" .. tostring(POLL_INTERVAL_MS / 1000) ..
+                   " (first poll within 1s)")
 end
 
 -- emit_last sends the cached reading with a stale flag computed from
@@ -136,6 +144,12 @@ function driver_poll()
   if not base_url or not vin then
     return 10000
   end
+
+  -- Bump the steady-state interval back to 60 s after the (deliberately
+  -- short) init interval that gets us our first reading inside a
+  -- second of startup. Idempotent — running set_poll_interval with the
+  -- same value every poll is a no-op cost-wise.
+  host.set_poll_interval(POLL_INTERVAL_MS)
 
   -- endpoints=charge_state narrows the response to just what we
   -- care about (SoC + limit + charging_state + time_to_full). The
