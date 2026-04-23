@@ -366,6 +366,26 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 				d["bat_soc"] = *r.SoC
 			}
 		}
+		// Vehicle (DerVehicle) — read-only BMS readings emitted by
+		// drivers like tesla_vehicle.lua. Surfaced so the per-driver
+		// card can render SoC + charge_limit + charging_state. RawW
+		// is always 0 for vehicle readings (no power channel).
+		if r := s.deps.Tel.Get(name, telemetry.DerVehicle); r != nil {
+			var v struct {
+				SoC            *float64 `json:"soc"`
+				ChargeLimitPct *float64 `json:"charge_limit_pct"`
+				ChargingState  *string  `json:"charging_state"`
+				TimeToFullMin  *int     `json:"time_to_full_min"`
+				Stale          *bool    `json:"stale"`
+			}
+			if r.Data != nil && json.Unmarshal(r.Data, &v) == nil {
+				if v.SoC != nil            { d["vehicle_soc"] = *v.SoC }
+				if v.ChargeLimitPct != nil { d["vehicle_charge_limit_pct"] = *v.ChargeLimitPct }
+				if v.ChargingState != nil  { d["vehicle_charging_state"] = *v.ChargingState }
+				if v.TimeToFullMin != nil  { d["vehicle_time_to_full_min"] = *v.TimeToFullMin }
+				if v.Stale != nil          { d["vehicle_stale"] = *v.Stale }
+			}
+		}
 		if r := s.deps.Tel.Get(name, telemetry.DerEV); r != nil {
 			d["ev_w"] = r.SmoothedW
 			// Surface the structured fields the driver put in Data so the
@@ -410,12 +430,20 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	s.deps.CfgMu.RLock()
 	for _, dc := range s.deps.Cfg.Drivers {
 		if _, ok := drivers[dc.Name]; ok {
+			// Already populated from telemetry — just stamp the alias
+			// so the UI can show the friendly label.
+			if dc.Alias != "" {
+				if m, mok := drivers[dc.Name].(map[string]any); mok {
+					m["alias"] = dc.Alias
+				}
+			}
 			continue
 		}
 		if dc.Disabled {
 			drivers[dc.Name] = map[string]any{
 				"status":   "disabled",
 				"disabled": true,
+				"alias":    dc.Alias,
 			}
 		} else {
 			// Configured but not running — spawn probably failed. Show
@@ -423,6 +451,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			drivers[dc.Name] = map[string]any{
 				"status":      "offline",
 				"not_running": true,
+				"alias":       dc.Alias,
 			}
 		}
 	}
