@@ -145,7 +145,19 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config) {
 	if !sample.Connected {
 		return
 	}
-	cmdW, phases := c.computeCommand(now, lpCfg, sample.PowerW)
+	// planReady distinguishes "MPC has spoken, evW=0 on purpose"
+	// from "MPC hasn't made up its mind yet" (startup window, stale
+	// plan, no loadpoint allocation in current slot). In the former
+	// we command 0 W explicitly; in the latter we leave the driver's
+	// current setpoint alone so a container restart doesn't zap an
+	// in-flight charge session. Without this guard, every restart
+	// was sending `dynamicChargerCurrent=0` to Easee for the first
+	// few seconds before MPC's first plan landed — the car would
+	// stop and not resume until the next operator POST.
+	cmdW, phases, planReady := c.computeCommand(now, lpCfg, sample.PowerW)
+	if !planReady {
+		return
+	}
 	payload, err := json.Marshal(map[string]any{
 		"action":  "ev_set_current",
 		"power_w": cmdW,
@@ -163,9 +175,21 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config) {
 	}
 }
 
-// computeCommand resolves the (W, phases) setpoint for a plugged
-// loadpoint. Returns (0, 0) when no plan allocation exists — an
-// explicit standdown, not a lazy last-command. Otherwise:
+// computeCommand resolves the (W, phases, planReady) setpoint for a
+// plugged loadpoint. The planReady bool distinguishes:
+//
+//   - planReady=false: MPC has nothing to say right now (startup
+//     hasn't produced a plan yet, the plan is stale / out of
+//     horizon, or the planner doesn't know about this loadpoint).
+//     Caller should SKIP the send entirely so the charger keeps
+//     whatever setpoint it already has — a restart shouldn't zap
+//     an in-flight session.
+//   - planReady=true, W=0: MPC has deliberately allocated zero to
+//     this slot (surplus-only policy during night, cheapcharge
+//     windows, etc.). Caller SHOULD send 0 W so the charger pauses.
+//   - planReady=true, W>0: normal operation.
+//
+// Steps when the plan IS ready:
 //
 //  1. MPC slot budget → wantW (continuous)
 //  2. phaseFor(...) picks 1Φ vs 3Φ based on PhaseMode + wantW,
@@ -174,17 +198,22 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config) {
 //     non-negotiable site invariant.
 //  4. AllowedStepsW filtered to the chosen phase's subset.
 //  5. SnapChargeW picks the nearest feasible step.
-func (c *Controller) computeCommand(now time.Time, lpCfg Config, currentPowerW float64) (float64, int) {
+func (c *Controller) computeCommand(now time.Time, lpCfg Config, currentPowerW float64) (float64, int, bool) {
 	if c.plan == nil {
-		return 0, 0
+		return 0, 0, false
 	}
 	d, ok := c.plan(now)
 	if !ok {
-		return 0, 0
+		return 0, 0, false
 	}
 	budgetWh, hasBudget := d.LoadpointEnergyWh[lpCfg.ID]
 	if !hasBudget {
-		return 0, 0
+		// MPC produced a plan AND the current slot is in-horizon, but
+		// the DP deliberately allocated zero to this loadpoint this
+		// slot. That's an explicit "pause this EV" signal — send 0 W,
+		// don't leave the charger at the previous setpoint. Only the
+		// plan-absent / plan-stale case (ok=false above) is the skip.
+		return 0, 0, true
 	}
 	remainingS := d.SlotEnd.Sub(now).Seconds()
 	elapsed := d.SlotEnd.Sub(d.SlotStart).Seconds() - remainingS
@@ -219,7 +248,7 @@ func (c *Controller) computeCommand(now time.Time, lpCfg Config, currentPowerW f
 		}
 	}
 
-	return snapped, phases
+	return snapped, phases, true
 }
 
 // decidePhase picks 1 or 3 based on PhaseMode + wantW, applying

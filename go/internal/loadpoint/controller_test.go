@@ -73,10 +73,15 @@ func TestTickUnpluggedSendsNoCommand(t *testing.T) {
 	}
 }
 
-// TestTickPluggedNoPlanCommandsZero — preserves the explicit-standdown
-// semantics: without a plan allocation, command 0 W so the charger
-// doesn't ride the previous slot's setpoint.
-func TestTickPluggedNoPlanCommandsZero(t *testing.T) {
+// TestTickPluggedNoPlanSkipsSend — when MPC hasn't produced a plan
+// yet (e.g. startup window, plan stale past MaxPlanAge), the
+// controller leaves the charger's current setpoint alone. Sending
+// 0 W in that window was killing live sessions on container
+// restart: the first tick fires before MPC's first replan and a
+// zeroed dynamicChargerCurrent stopped the car. The "explicit
+// standdown" case (plan exists + allocates zero to this slot) is
+// still a 0 W send — covered by TestTickBudgetMissingForLoadpointCommandsZero.
+func TestTickPluggedNoPlanSkipsSend(t *testing.T) {
 	sender := &fakeSender{}
 	cfgs := []Config{{ID: "garage", DriverName: "easee", MinChargeW: 1400, MaxChargeW: 11000}}
 	samples := map[string]EVSample{"easee": {PowerW: 3000, Connected: true, SessionWh: 4000}}
@@ -84,14 +89,8 @@ func TestTickPluggedNoPlanCommandsZero(t *testing.T) {
 
 	c.Tick(context.Background(), time.Now())
 
-	if len(sender.calls) != 1 {
-		t.Fatalf("expected 1 command, got %d", len(sender.calls))
-	}
-	if sender.calls[0].power != 0 {
-		t.Errorf("plugged + no plan → expected 0 W, got %.0f", sender.calls[0].power)
-	}
-	if sender.calls[0].action != "ev_set_current" {
-		t.Errorf("action = %q, want ev_set_current", sender.calls[0].action)
+	if len(sender.calls) != 0 {
+		t.Fatalf("no plan → expected 0 commands (skip), got %d: %+v", len(sender.calls), sender.calls)
 	}
 }
 
