@@ -32,7 +32,7 @@ func TestReloadPreservesObservedState(t *testing.T) {
 	}})
 	m.Observe("garage", true, 7400, 1200) // 1.2 kWh into session
 	target := time.Date(2026, 4, 18, 6, 0, 0, 0, time.UTC)
-	m.SetTarget("garage", 80, target)
+	m.SetTarget("garage", 80, target, nil)
 
 	// Reload with same ID — state should persist.
 	m.Load([]Config{{
@@ -80,12 +80,12 @@ func TestObserveOnUnknownIsNoop(t *testing.T) {
 func TestSetTargetClamp(t *testing.T) {
 	m := NewManager()
 	m.Load([]Config{{ID: "a"}})
-	m.SetTarget("a", 250, time.Time{})
+	m.SetTarget("a", 250, time.Time{}, nil)
 	st, _ := m.State("a")
 	if st.TargetSoCPct != 100 {
 		t.Errorf("should clamp to 100; got %f", st.TargetSoCPct)
 	}
-	m.SetTarget("a", -10, time.Time{})
+	m.SetTarget("a", -10, time.Time{}, nil)
 	st, _ = m.State("a")
 	if st.TargetSoCPct != 0 {
 		t.Errorf("should clamp to 0; got %f", st.TargetSoCPct)

@@ -136,6 +136,24 @@ func filterStepsByPhase(steps []float64, phases int, splitW float64) []float64 {
 	return out
 }
 
+// Policy captures the energy-source constraints the operator set on
+// the active schedule. Stored per-schedule in state.db and lifted
+// onto the runtime so dispatch + planner can consult it without an
+// extra DB round-trip each tick. Zero-value is "unrestricted" (all
+// sources allowed; no surplus-only clamp) — matches today's
+// behaviour when nothing was explicitly configured.
+type Policy struct {
+	AllowGrid           bool `json:"allow_grid"`
+	AllowBatterySupport bool `json:"allow_battery_support"`
+	OnlySurplus         bool `json:"only_surplus"`
+}
+
+// DefaultPolicy is the permissive policy used when no schedule row
+// exists yet. Equivalent to today's unrestricted behaviour.
+func DefaultPolicy() Policy {
+	return Policy{AllowGrid: true, AllowBatterySupport: true, OnlySurplus: false}
+}
+
 // State is the observable snapshot of one loadpoint at a point in time.
 // Read-only for consumers — only the Manager or dispatch paths mutate
 // it under lock.
@@ -148,6 +166,7 @@ type State struct {
 	DeliveredWhSession float64   `json:"delivered_wh_session"`  // since plug-in
 	TargetSoCPct       float64   `json:"target_soc_pct"`        // user intent
 	TargetTime         time.Time `json:"target_time,omitempty"` // user intent
+	Policy             Policy    `json:"policy"`
 	UpdatedAtMs        int64     `json:"updated_at_ms"`
 	// MinChargeW / MaxChargeW / AllowedStepsW are repeated here so the
 	// UI has everything for rendering in one fetch.
@@ -156,11 +175,22 @@ type State struct {
 	AllowedStepsW []float64 `json:"allowed_steps_w,omitempty"`
 }
 
+// TargetPersister is the callback the manager invokes whenever a
+// loadpoint target changes so the new intent survives restarts.
+// Main wires this to state.Store.UpsertPrimaryLoadpointSchedule.
+// nil is a valid value — in-memory-only mode (useful in tests).
+type TargetPersister func(loadpointID string, socPct float64, targetTime time.Time, policy Policy) error
+
 // Manager holds the running set of loadpoints. Thread-safe.
 type Manager struct {
 	mu     sync.RWMutex
 	byID   map[string]*loadpointRuntime
 	order  []string // insertion-preserving id list for deterministic listing
+	// onTarget is invoked from SetTarget to persist user intent to
+	// state.db. Failures are logged (by main.go's wrapper) but do not
+	// prevent the in-memory state from advancing — the runtime
+	// behaviour is unaffected, only persistence across restart is.
+	onTarget TargetPersister
 }
 
 // loadpointRuntime is the in-memory representation. Its fields are the
@@ -175,6 +205,7 @@ type loadpointRuntime struct {
 	deliveredWhSession float64
 	targetSoCPct       float64
 	targetTime         time.Time
+	policy             Policy
 	updatedAtMs        int64
 
 	// Plug-in anchor: the SoC we believe the vehicle was at when
@@ -190,6 +221,39 @@ func NewManager() *Manager {
 	return &Manager{byID: map[string]*loadpointRuntime{}}
 }
 
+// SetTargetPersister installs the callback used to persist target
+// changes. nil clears it (in-memory-only). Safe to call at any time,
+// including after loadpoints have been Loaded.
+func (m *Manager) SetTargetPersister(p TargetPersister) {
+	m.mu.Lock()
+	m.onTarget = p
+	m.mu.Unlock()
+}
+
+// RestoreTarget seeds a target + policy without invoking the
+// persistence callback — used at startup when rehydrating from
+// state.db so we don't write back what we just read. socPct and
+// targetTime are the canonical "what the user last asked for"
+// values; policy is the schedule's active energy-source flags.
+func (m *Manager) RestoreTarget(id string, socPct float64, targetTime time.Time, policy Policy) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	lp, ok := m.byID[id]
+	if !ok {
+		return false
+	}
+	if socPct < 0 {
+		socPct = 0
+	}
+	if socPct > 100 {
+		socPct = 100
+	}
+	lp.targetSoCPct = socPct
+	lp.targetTime = targetTime
+	lp.policy = policy
+	return true
+}
+
 // Load replaces the configured set. Idempotent: existing state is
 // carried across when the ID is kept; removed IDs are dropped.
 func (m *Manager) Load(cfgs []Config) {
@@ -202,7 +266,7 @@ func (m *Manager) Load(cfgs []Config) {
 		if c.ID == "" {
 			continue
 		}
-		lp := &loadpointRuntime{Config: c}
+		lp := &loadpointRuntime{Config: c, policy: DefaultPolicy()}
 		if existing, ok := m.byID[c.ID]; ok {
 			// Preserve observed state across reload. The session
 			// plug-in anchor is carried too — otherwise a config
@@ -215,6 +279,7 @@ func (m *Manager) Load(cfgs []Config) {
 			lp.deliveredWhSession = existing.deliveredWhSession
 			lp.targetSoCPct = existing.targetSoCPct
 			lp.targetTime = existing.targetTime
+			lp.policy = existing.policy
 			lp.updatedAtMs = existing.updatedAtMs
 			lp.sessionPluginSoCPct = existing.sessionPluginSoCPct
 		}
@@ -335,13 +400,17 @@ func estimateSoCPct(pluginSoCPct, deliveredWh, capacityWh float64) float64 {
 	return soc
 }
 
-// SetTarget updates the user-intent fields for an existing loadpoint.
-// targetTime zero = no deadline. Returns false for unknown IDs.
-func (m *Manager) SetTarget(id string, socPct float64, targetTime time.Time) bool {
+// SetTarget updates target + optionally policy for an existing
+// loadpoint. A nil policy preserves the loadpoint's current policy
+// (used by the legacy endpoint that only sends soc + target_time).
+// Returns false for unknown IDs. Invokes the persistence callback
+// (if any); failures are swallowed — in-memory state advances
+// regardless so dispatch keeps working even when the DB is readonly.
+func (m *Manager) SetTarget(id string, socPct float64, targetTime time.Time, policy *Policy) bool {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	lp, ok := m.byID[id]
 	if !ok {
+		m.mu.Unlock()
 		return false
 	}
 	if socPct < 0 {
@@ -352,6 +421,15 @@ func (m *Manager) SetTarget(id string, socPct float64, targetTime time.Time) boo
 	}
 	lp.targetSoCPct = socPct
 	lp.targetTime = targetTime
+	if policy != nil {
+		lp.policy = *policy
+	}
+	effectivePolicy := lp.policy
+	onTarget := m.onTarget
+	m.mu.Unlock()
+	if onTarget != nil {
+		_ = onTarget(id, socPct, targetTime, effectivePolicy)
+	}
 	return true
 }
 
@@ -412,6 +490,7 @@ func (lp *loadpointRuntime) snapshot() State {
 		DeliveredWhSession: lp.deliveredWhSession,
 		TargetSoCPct:       lp.targetSoCPct,
 		TargetTime:         lp.targetTime,
+		Policy:             lp.policy,
 		UpdatedAtMs:        lp.updatedAtMs,
 		MinChargeW:         lp.MinChargeW,
 		MaxChargeW:         lp.MaxChargeW,

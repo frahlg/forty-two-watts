@@ -288,6 +288,67 @@ func main() {
 		slog.Info("loadpoints configured", "count", len(cfg.Loadpoints))
 	}
 
+	// Persist target changes to state.db so user intent survives
+	// restart. Every POST /api/loadpoints/{id}/target (and the
+	// corresponding SetTarget call) flows through here. Failures are
+	// logged but do not block the in-memory mutation — user intent
+	// continues to drive dispatch even when the DB is read-only.
+	lpMgr.SetTargetPersister(func(id string, socPct float64, targetTime time.Time, policy loadpoint.Policy) error {
+		tt := targetTime.UTC().UnixMilli()
+		if targetTime.IsZero() {
+			tt = 0
+		}
+		sched, err := st.UpsertPrimaryLoadpointSchedule(id, socPct, tt)
+		if err != nil {
+			slog.Warn("loadpoint target persist failed",
+				"lp", id, "soc_pct", socPct, "err", err)
+			return err
+		}
+		// Apply the policy flags the user sent and save again so the
+		// schedule row carries the current energy-source constraints.
+		sched.AllowGrid = policy.AllowGrid
+		sched.AllowBatterySupport = policy.AllowBatterySupport
+		sched.OnlySurplus = policy.OnlySurplus
+		if _, err := st.SaveLoadpointSchedule(sched); err != nil {
+			slog.Warn("loadpoint policy persist failed",
+				"lp", id, "err", err)
+			return err
+		}
+		return nil
+	})
+
+	// Restore persisted schedules into the in-memory manager. One row
+	// per loadpoint → one RestoreTarget call; extra rows (multi-schedule
+	// future) are ignored here until the selection logic lands.
+	if schedules, err := st.AllLoadpointSchedules(); err == nil {
+		for _, sched := range schedules {
+			if sched.Name != "primary" {
+				continue
+			}
+			if !sched.Enabled {
+				continue
+			}
+			var tt time.Time
+			if sched.TargetTimeMs > 0 {
+				tt = time.UnixMilli(sched.TargetTimeMs).UTC()
+			}
+			pol := loadpoint.Policy{
+				AllowGrid:           sched.AllowGrid,
+				AllowBatterySupport: sched.AllowBatterySupport,
+				OnlySurplus:         sched.OnlySurplus,
+			}
+			if lpMgr.RestoreTarget(sched.LoadpointID, sched.TargetSoCPct, tt, pol) {
+				slog.Info("loadpoint target restored",
+					"lp", sched.LoadpointID,
+					"soc_pct", sched.TargetSoCPct,
+					"target_time", tt,
+					"only_surplus", pol.OnlySurplus)
+			}
+		}
+	} else {
+		slog.Warn("loadpoint schedules restore failed", "err", err)
+	}
+
 	// Forward-declared so the hot-reload closure below can push
 	// capacity changes into the running planner. Assigned at line
 	// ~450 after all its dependencies (pvSvc, loadSvc, priceFc) are
@@ -580,6 +641,12 @@ func main() {
 					MaxChargeW:      st.MaxChargeW,
 					AllowedStepsW:   st.AllowedStepsW,
 					ChargeEfficiency: 0.9,
+					Policy: &mpc.Policy{
+						AllowGrid:           st.Policy.AllowGrid,
+						AllowBatterySupport: st.Policy.AllowBatterySupport,
+						OnlySurplus:         st.Policy.OnlySurplus,
+						// SurplusEpsilonW left 0 → DP uses 100 W default.
+					},
 				}
 			}
 			return nil

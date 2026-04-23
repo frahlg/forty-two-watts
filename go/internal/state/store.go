@@ -248,6 +248,37 @@ func (s *Store) migrate() error {
 			synced_ms   INTEGER NOT NULL,
 			PRIMARY KEY (device_id, der_type)
 		) STRICT`,
+
+		// loadpoint_schedules: per-EV charging intents that outlive
+		// restarts. Today's UI creates a single "primary" row per
+		// loadpoint via POST /api/loadpoints/{id}/target, but the
+		// schema is designed for future expansion — operators will be
+		// able to stack schedules (weekday commute + weekend, etc.)
+		// without another migration. `enabled`, `priority`, and
+		// `recurrence` all default to the single-entry semantics so
+		// today's code continues to work.
+		`CREATE TABLE IF NOT EXISTS loadpoint_schedules (
+			id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+			loadpoint_id          TEXT    NOT NULL,
+			name                  TEXT    NOT NULL DEFAULT '',
+			target_soc_pct        REAL    NOT NULL,
+			target_time_ms        INTEGER NOT NULL,
+			enabled               INTEGER NOT NULL DEFAULT 1,
+			priority              INTEGER NOT NULL DEFAULT 0,
+			recurrence            TEXT    NOT NULL DEFAULT '',
+			-- Energy-source policy flags. Independent booleans so they
+			-- can be combined: e.g. (allow_grid=0, allow_battery=0,
+			-- only_surplus=1) is pure PV-only; (allow_grid=1,
+			-- allow_battery=0, only_surplus=0) is grid-or-PV but never
+			-- drain the home battery. Defaults preserve today's
+			-- unrestricted behaviour (plan uses any source).
+			allow_grid            INTEGER NOT NULL DEFAULT 1,
+			allow_battery_support INTEGER NOT NULL DEFAULT 1,
+			only_surplus          INTEGER NOT NULL DEFAULT 0,
+			created_at_ms         INTEGER NOT NULL,
+			updated_at_ms         INTEGER NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_lp_schedules_lp ON loadpoint_schedules(loadpoint_id)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.Exec(stmt); err != nil {
