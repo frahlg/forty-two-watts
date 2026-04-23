@@ -156,20 +156,34 @@ function driver_poll()
   host.set_poll_interval(POLL_INTERVAL_MS)
 
   -- endpoints=charge_state narrows the response to just what we
-  -- care about (SoC + limit + charging_state + time_to_full). The
-  -- wakeup=true flag asks the proxy to wake the car over BLE if it
-  -- is sleeping, so the data returned reflects the current state
-  -- rather than a cached snapshot. TeslaBLEProxy's README calls
-  -- this out explicitly for "receive data frequently" use cases.
+  -- care about (SoC + limit + charging_state + time_to_full).
+  --
+  -- wakeup=true is intentionally OMITTED. The proxy returns
+  -- cached data from its own background sync (typically ≤ 5 s
+  -- fresh, fine for our 60 s poll cadence + pokes). Forcing a
+  -- BLE wake on every poll caused HTTP 503 "Command Disallowed"
+  -- storms when the driver was poked alongside regular polls —
+  -- BLE radio can only service one command at a time and our
+  -- poke-on-plug-in + poke-on-charging-start stacked queries
+  -- faster than the proxy could complete them.
   local url = base_url .. "/api/1/vehicles/" .. vin ..
-              "/vehicle_data?endpoints=charge_state&wakeup=true"
+              "/vehicle_data?endpoints=charge_state"
   -- host.http_get returns (body_string, nil) or (nil, error_string) —
   -- first return is the body directly, NOT a table with .body. The
   -- earlier tesla_vehicle iterations treated it as a table and got
   -- length 0 on every poll, which silently emit_last()'d the driver.
   local body, err = host.http_get(url, auth_headers())
   if err ~= nil then
-    host.log("warn", "tesla: poll HTTP error: " .. tostring(err))
+    -- 503 "Command Disallowed" means the proxy's BLE radio is
+    -- busy (usually because we just poked or the car just started
+    -- charging and the radio negotiation hasn't cleared). Log at
+    -- debug to avoid noise — the next poll will succeed.
+    local es = tostring(err)
+    if es:match("HTTP 503") then
+      host.log("debug", "tesla: proxy busy (BLE busy) — will retry")
+    else
+      host.log("warn", "tesla: poll HTTP error: " .. es)
+    end
     emit_last()
     return POLL_INTERVAL_MS
   end
