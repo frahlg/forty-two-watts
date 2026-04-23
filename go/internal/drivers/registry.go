@@ -199,6 +199,25 @@ func (r *Registry) runLoop(rd *runningDriver) {
 				err = rd.driver.Command(ctx, cmd.payload)
 			case "default":
 				err = rd.driver.DefaultMode(ctx)
+			case "poll":
+				// Force a poll OUT-OF-CYCLE (used by callers who
+				// just got an external trigger and want fresh data
+				// before the next regular tick — e.g. EV plug-in
+				// kicks vehicle drivers to refresh BMS state).
+				// Reuses the same Poll path + health bookkeeping so
+				// the driver can't tell apart a poked poll from a
+				// scheduled one. Timer is NOT re-armed here — the
+				// next scheduled tick still fires whenever it would
+				// have, just possibly with already-fresh data on
+				// the wire.
+				if _, perr := rd.driver.Poll(ctx); perr != nil {
+					slog.Warn("driver poke poll failed", "name", rd.cfg.Name, "err", perr)
+					if r.tel != nil {
+						r.tel.DriverHealthMut(rd.cfg.Name).RecordError(perr.Error())
+					}
+				} else if r.tel != nil {
+					r.tel.DriverHealthMut(rd.cfg.Name).RecordSuccess()
+				}
 			}
 			if cmd.result != nil {
 				cmd.result <- err
@@ -263,6 +282,27 @@ func (r *Registry) Send(ctx context.Context, name string, payload []byte) error 
 		return err
 	case <-ctx.Done():
 		return ctx.Err()
+	}
+}
+
+// PokePoll triggers an out-of-cycle Poll on the named driver.
+// Non-blocking: returns immediately after the cmd is queued (or
+// dropped if the cmdCh is full — the next scheduled tick covers
+// the gap). Used when an external event (EV plug-in, operator
+// "refresh now" button, etc.) wants fresh data before the timer
+// fires. No-op for unknown driver names.
+func (r *Registry) PokePoll(name string) {
+	r.mu.Lock()
+	rd, ok := r.rec[name]
+	r.mu.Unlock()
+	if !ok {
+		return
+	}
+	select {
+	case rd.cmdCh <- driverCmd{kind: "poll"}:
+	default:
+		// Channel full — operator already poked, or scheduled poll
+		// is queued. Skip; next tick has it.
 	}
 }
 

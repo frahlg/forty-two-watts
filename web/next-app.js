@@ -385,11 +385,35 @@
             }
             evSocStale = !!lpEv.vehicle_stale;
           }
+          // Sub-label tracks the actual charger state — sourced from
+          // the driver itself (Easee's "state_label") when available
+          // so the bubble matches what the per-driver Advanced card
+          // shows. Falls back to inferred labels for drivers that
+          // don't expose state_label. Critically, "disconnected"
+          // (no plug in cable) is named explicitly instead of the
+          // ambiguous "idle" we used to fall through to.
+          var evSub;
+          if (d.ev_state_label) {
+            // Use the driver's own label verbatim — keeps protocol
+            // knowledge out of the UI (Easee's vocabulary differs
+            // from Zap differs from OCPP).
+            evSub = d.ev_state_label;
+          } else if (eActive) {
+            evSub = "charging";
+          } else if (d.ev_connected === false) {
+            evSub = "disconnected";
+          } else if (d.ev_connected === true) {
+            // Connected but not drawing power — could be ready,
+            // paused, completed. No state_label so be explicit.
+            evSub = "connected";
+          } else {
+            evSub = "no signal";
+          }
           planets.push({
             id: "ev-" + name, corner: "bottom-right", title: "EV CHARGER", name: name, role: "ev",
             kw: eKw, toHub: false,
             color: eActive ? "var(--green-e)" : "var(--white-s)",
-            sub: eActive ? "charging" : "idle",
+            sub: evSub,
             soc: evSoc,
             chargeLimit: evLimit,
             socStale: evSocStale,

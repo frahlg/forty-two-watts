@@ -853,6 +853,14 @@ func main() {
 			}
 			return out
 		})
+		// PokePoll lets Manager refresh vehicle BMS readings on EV
+		// plug-in instead of waiting up to 60 s for the next regular
+		// driver poll. Best-effort + non-blocking.
+		lpMgr.SetVehiclePoke(func(driver string) {
+			if reg != nil {
+				reg.PokePoll(driver)
+			}
+		})
 	}
 
 	// ---- Self-update checker ----

@@ -158,33 +158,9 @@ func filterStepsByPhase(steps []float64, phases int, splitW float64) []float64 {
 	return out
 }
 
-// VehicleSample is the subset of a DerVehicle reading the manager
-// consumes: the real SoC from the car's BMS, the vehicle-configured
-// charge limit (from e.g. the Tesla app), and a freshness flag set
-// by the driver when no poll has refreshed the data within the
-// configured stale_after_s. `OK` is false when no reading exists
-// yet — the manager falls back to the inferred SoC path.
-type VehicleSample struct {
-	OK             bool
-	SoCPct         float64
-	ChargeLimitPct float64
-	ChargingState  string
-	TimeToFullMin  int
-	Stale          bool
-}
-
-// VehicleTelemetryFunc returns the latest vehicle reading for a
-// driver name. Callers (main.go) wire this to telemetry.Store and
-// parse the Data JSON of the DerVehicle reading.
-type VehicleTelemetryFunc func(driver string) VehicleSample
-
-// VehicleSnapshotFunc returns EVERY currently-known vehicle reading,
-// keyed by driver name. Used by plug-in auto-discovery: when the
-// charger flips to connected and the loadpoint has no explicit
-// `vehicle_driver` binding, the manager scores each candidate and
-// picks the one most likely to be the plugged-in car. nil disables
-// auto-discovery; the loadpoint falls back to the inferred-SoC path.
-type VehicleSnapshotFunc func() map[string]VehicleSample
+// VehicleSample, VehicleTelemetryFunc, VehicleSnapshotFunc and
+// VehiclePokeFunc live in vehicle_discovery.go alongside the
+// scoring helper that consumes them.
 
 // Policy captures the energy-source constraints the operator set on
 // the active schedule. Stored per-schedule in state.db and lifted
@@ -262,6 +238,10 @@ type Manager struct {
 	// keyed by driver name. Used for plug-in auto-discovery. nil
 	// disables it; YAML-configured VehicleDriver still works.
 	vehicleSnap VehicleSnapshotFunc
+	// vehiclePoke forces a fresh poll on a vehicle driver. Called
+	// for every known vehicle driver on plug-in transition so the
+	// auto-discovery scoring uses up-to-date BMS data.
+	vehiclePoke VehiclePokeFunc
 }
 
 // loadpointRuntime is the in-memory representation. Its fields are the
@@ -331,6 +311,16 @@ func (m *Manager) SetVehicleTelemetry(f VehicleTelemetryFunc) {
 func (m *Manager) SetVehicleSnapshot(f VehicleSnapshotFunc) {
 	m.mu.Lock()
 	m.vehicleSnap = f
+	m.mu.Unlock()
+}
+
+// SetVehiclePoke installs the callback used to force fresh polls on
+// vehicle drivers when an EV plug-in transition fires. nil leaves
+// the manager relying on the next regular poll cycle (up to 60 s
+// stale on startup-without-recent-poll).
+func (m *Manager) SetVehiclePoke(f VehiclePokeFunc) {
+	m.mu.Lock()
+	m.vehiclePoke = f
 	m.mu.Unlock()
 }
 
@@ -507,8 +497,20 @@ func (m *Manager) Observe(id string, pluggedIn bool, powerW, deliveredWh float64
 
 	// Auto-discovery on plug-in: if no YAML binding is set, score
 	// every live DerVehicle reading and pick the most-likely car.
+	// First, poke every known vehicle driver to refresh its BMS
+	// reading (proxy wakeup=true triggers the Tesla to wake) so the
+	// scoring sees current data instead of up-to-60-s-stale cache.
+	// Pokes are async — discovery scores with whatever is cached
+	// now; subsequent ticks will pick up the refreshed data and
+	// re-bind on the NEXT plug-in if needed.
 	if pluginTransition && lp.VehicleDriver == "" && m.vehicleSnap != nil {
-		lp.discoveredVehicleDriver = pickPluggedVehicle(m.vehicleSnap())
+		snap := m.vehicleSnap()
+		if m.vehiclePoke != nil {
+			for driverName := range snap {
+				m.vehiclePoke(driverName)
+			}
+		}
+		lp.discoveredVehicleDriver = pickPluggedVehicle(snap)
 	}
 
 	// Resolve the effective vehicle driver. YAML wins; runtime
@@ -575,148 +577,8 @@ func (m *Manager) Observe(id string, pluggedIn bool, powerW, deliveredWh float64
 	}
 }
 
-// applyAutoSchedule posts a target on the loadpoint matching the
-// configured plug-in defaults. When a vehicle driver is bound and
-// reports a charge_limit_soc, the SoC target clamps to min(config,
-// limit) so the plan never aims past what the car will accept.
-// Timezone is the process's local time (docker container's TZ
-// env, typically the operator's site locale).
-func (m *Manager) applyAutoSchedule(lpID string, defaultSoc float64, timeLocal string, vehicleLimit float64) {
-	// Target SoC: fallback to 80 when unconfigured or zero.
-	soc := defaultSoc
-	if soc <= 0 {
-		soc = 80
-	}
-	// If the vehicle advertises a tighter limit, respect it.
-	if vehicleLimit > 0 && vehicleLimit < soc {
-		soc = vehicleLimit
-	}
-	// Deadline: next occurrence of HH:MM (default 06:00) in the host
-	// timezone. A morning-commute default matches the typical "plug
-	// in overnight, leave at 7" use case.
-	deadline := nextLocalTimeOfDay(timeLocal, "06:00", time.Now())
-
-	// SetTarget uses the currently-persisted policy by passing nil
-	// (preserves operator's allow_grid / only_surplus / etc. choice).
-	// Auto-schedule doesn't assume a specific energy-source posture
-	// — if the operator previously POSTed only_surplus:true, the
-	// auto plan respects it and may simply sit on 0 W all night.
-	m.SetTarget(lpID, soc, deadline, nil)
-}
-
-// nextLocalTimeOfDay parses "HH:MM" and returns the next time that
-// hour+minute occurs in the process's local timezone relative to
-// `now`. When the parse fails, the fallback string is used; if that
-// ALSO fails, returns now+8h as a last resort.
-func nextLocalTimeOfDay(hhmm, fallback string, now time.Time) time.Time {
-	parse := func(s string) (h, mi int, ok bool) {
-		if len(s) < 4 || len(s) > 5 {
-			return 0, 0, false
-		}
-		// Accept "HH:MM" or "H:MM".
-		parts := splitHHMM(s)
-		if parts == nil {
-			return 0, 0, false
-		}
-		h = parts[0]
-		mi = parts[1]
-		if h < 0 || h > 23 || mi < 0 || mi > 59 {
-			return 0, 0, false
-		}
-		return h, mi, true
-	}
-	h, mi, ok := parse(hhmm)
-	if !ok {
-		h, mi, ok = parse(fallback)
-	}
-	if !ok {
-		return now.Add(8 * time.Hour)
-	}
-	loc := now.Location()
-	candidate := time.Date(now.Year(), now.Month(), now.Day(), h, mi, 0, 0, loc)
-	if !candidate.After(now) {
-		candidate = candidate.Add(24 * time.Hour)
-	}
-	return candidate
-}
-
-func splitHHMM(s string) []int {
-	// Manual split to avoid pulling fmt.Sscanf. Accepts "HH:MM" and
-	// "H:MM" — any single colon separating two non-negative ints.
-	for i, r := range s {
-		if r == ':' {
-			h := atoiPositive(s[:i])
-			mi := atoiPositive(s[i+1:])
-			if h < 0 || mi < 0 {
-				return nil
-			}
-			return []int{h, mi}
-		}
-	}
-	return nil
-}
-
-func atoiPositive(s string) int {
-	if s == "" {
-		return -1
-	}
-	n := 0
-	for _, r := range s {
-		if r < '0' || r > '9' {
-			return -1
-		}
-		n = n*10 + int(r-'0')
-	}
-	return n
-}
-
-// pickPluggedVehicle scores every live DerVehicle sample and returns
-// the driver name most likely to belong to the just-plugged car.
-// Returns "" when no good candidate exists. Scoring:
-//
-//   - "Charging"                     → 100 (definitely this one)
-//   - "Starting" / "NoPower" /
-//     "Stopped" / "Complete" / ""    → 40  (could be this one; plug
-//                                            just happened so the
-//                                            car may not have
-//                                            started the session yet)
-//   - "Disconnected"                 → 0   (explicitly not this one)
-//   - Stale reading                  → halved
-//
-// Ties broken by driver name (alphabetical) for determinism.
-func pickPluggedVehicle(samples map[string]VehicleSample) string {
-	type cand struct {
-		name  string
-		score int
-	}
-	best := cand{}
-	for name, vs := range samples {
-		if !vs.OK {
-			continue
-		}
-		var score int
-		switch vs.ChargingState {
-		case "Charging":
-			score = 100
-		case "Disconnected":
-			score = 0
-		case "Starting", "NoPower", "Stopped", "Complete", "":
-			score = 40
-		default:
-			score = 20
-		}
-		if vs.Stale {
-			score /= 2
-		}
-		if score == 0 {
-			continue
-		}
-		if score > best.score || (score == best.score && name < best.name) {
-			best = cand{name: name, score: score}
-		}
-	}
-	return best.name
-}
+// applyAutoSchedule, nextLocalTimeOfDay and pickPluggedVehicle now
+// live in auto_charge.go and vehicle_discovery.go respectively.
 
 // estimateSoCPct returns the vehicle SoC % inferred from the session
 // anchor + energy delivered. Chargers like Easee don't expose the
