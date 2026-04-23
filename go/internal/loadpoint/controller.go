@@ -59,13 +59,15 @@ type Directive struct {
 }
 
 // EVSample is the loadpoint-relevant slice of telemetry.DerReading
-// for a DerEV entry — power, cumulative session energy, plug state.
-// Chargers like Easee don't expose the vehicle's BMS SoC, so the
-// controller only sees these three fields.
+// for a DerEV entry — power, cumulative session energy, plug state,
+// and active-charging flag (current actually flowing). Chargers like
+// Easee don't expose the vehicle's BMS SoC, so the controller only
+// sees these four fields.
 type EVSample struct {
 	PowerW    float64
 	SessionWh float64
 	Connected bool
+	Charging  bool
 }
 
 // PlanFunc returns the current-slot directive for now, or (_, false)
@@ -139,7 +141,7 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config) {
 	if c.tel != nil {
 		sample, _ = c.tel(lpCfg.DriverName)
 	}
-	c.manager.Observe(lpCfg.ID, sample.Connected, sample.PowerW, sample.SessionWh)
+	c.manager.Observe(lpCfg.ID, sample.Connected, sample.PowerW, sample.SessionWh, sample.Charging)
 	if !sample.Connected {
 		return
 	}

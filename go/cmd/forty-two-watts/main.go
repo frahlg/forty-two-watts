@@ -789,6 +789,7 @@ func main() {
 			}
 			var d struct {
 				Connected bool    `json:"connected"`
+				Charging  bool    `json:"charging"`
 				SessionWh float64 `json:"session_wh"`
 			}
 			_ = json.Unmarshal(r.Data, &d)
@@ -796,6 +797,7 @@ func main() {
 				PowerW:    r.SmoothedW,
 				SessionWh: d.SessionWh,
 				Connected: d.Connected,
+				Charging:  d.Charging,
 			}, true
 		}
 		lpController = loadpoint.NewController(lpMgr, planAdapter, telAdapter, reg.Send)

@@ -30,7 +30,7 @@ func TestObservePrefersVehicleSoCWhenFresh(t *testing.T) {
 
 	// Delivered 6 kWh → inferred SoC would be 20 + 6000/60000*100 = 30 %.
 	// Vehicle reports 64 %. Manager must prefer 64.
-	m.Observe("garage", true, 7400, 6000)
+	m.Observe("garage", true, 7400, 6000, false)
 
 	st, ok := m.State("garage")
 	if !ok {
@@ -69,7 +69,7 @@ func TestObserveFallsBackWhenVehicleStale(t *testing.T) {
 		}
 	})
 
-	m.Observe("garage", true, 7400, 6000) // inferred: 30 %
+	m.Observe("garage", true, 7400, 6000, false) // inferred: 30 %
 
 	st, _ := m.State("garage")
 	if st.SoCSource != "inferred" {
@@ -98,7 +98,7 @@ func TestObserveNoVehicleDriverUsesInference(t *testing.T) {
 	}})
 	m.SetVehicleTelemetry(func(string) VehicleSample { return VehicleSample{} })
 
-	m.Observe("garage", true, 7400, 12000)
+	m.Observe("garage", true, 7400, 12000, false)
 	st, _ := m.State("garage")
 	if st.SoCSource != "inferred" {
 		t.Errorf("no VehicleDriver should yield inferred, got %q", st.SoCSource)

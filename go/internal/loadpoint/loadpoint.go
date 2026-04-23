@@ -251,6 +251,7 @@ type loadpointRuntime struct {
 	Config
 
 	pluggedIn          bool
+	charging           bool
 	currentSoCPct      float64
 	currentPowerW      float64
 	deliveredWhSession float64
@@ -454,14 +455,24 @@ func (m *Manager) Configs() []Config {
 //
 // No-op for unknown IDs — a misconfigured driver shouldn't crash the
 // manager.
-func (m *Manager) Observe(id string, pluggedIn bool, powerW, deliveredWh float64) {
+func (m *Manager) Observe(id string, pluggedIn bool, powerW, deliveredWh float64, charging bool) {
 	m.mu.Lock()
 	lp, ok := m.byID[id]
 	if !ok {
 		m.mu.Unlock()
 		return
 	}
-	var pluginTransition, unplugTransition bool
+	var pluginTransition, unplugTransition, chargingStartTransition bool
+	if charging && !lp.charging {
+		// Charger has just started pulling current — the moment when
+		// vehicle-side state (charge_amps, charger_actual_current,
+		// charging_state) actually becomes meaningful. Pokes the
+		// bound vehicle driver below so the dashboard reflects the
+		// real numbers within ~1 s instead of waiting for the next
+		// 60-s tick.
+		chargingStartTransition = true
+	}
+	lp.charging = charging
 	if pluggedIn && !lp.pluggedIn {
 		// Plug-in transition: seed the session anchor + arm the
 		// auto-discovery + auto-schedule flags.
@@ -521,6 +532,15 @@ func (m *Manager) Observe(id string, pluggedIn bool, powerW, deliveredWh float64
 	effectiveDriver := lp.VehicleDriver
 	if effectiveDriver == "" {
 		effectiveDriver = lp.discoveredVehicleDriver
+	}
+
+	// Charging-start refresh: when the charger transitions to
+	// actively flowing current, the bound vehicle's amps + state
+	// fields just became meaningful. Poke the vehicle driver so the
+	// dashboard sees real numbers within ~1 s instead of waiting
+	// for the regular 60-s poll cycle.
+	if chargingStartTransition && effectiveDriver != "" && m.vehiclePoke != nil {
+		m.vehiclePoke(effectiveDriver)
 	}
 
 	// Vehicle-side telemetry overrides the inferred SoC path when
