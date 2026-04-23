@@ -96,8 +96,9 @@ type Config struct {
 // current) and nominal voltage. Zero MaxAmps disables clamping —
 // used in tests that don't care about the clamp.
 type SiteFuse struct {
-	MaxAmps float64
-	Voltage float64
+	MaxAmps  float64
+	Voltage  float64
+	PhaseCnt int // number of phases at the service entrance (1 or 3)
 }
 
 // PerPhaseMaxW is the maximum sustained power per phase under this
@@ -109,6 +110,19 @@ func (f SiteFuse) PerPhaseMaxW() float64 {
 		v = 230
 	}
 	return f.MaxAmps * v
+}
+
+// Phases returns the total phase count at the service entrance,
+// defaulting to 3 for backward compat with earlier callers that
+// didn't pass the field explicitly. This is the site's fuse phase
+// count, NOT the loadpoint's current switched phase — it's what
+// the live-load clamp multiplies against PerPhaseMaxW() to get
+// the total site power budget.
+func (f SiteFuse) Phases() int {
+	if f.PhaseCnt <= 0 {
+		return 3
+	}
+	return f.PhaseCnt
 }
 
 // phaseFor returns the phase count chosen for wantW given the mode

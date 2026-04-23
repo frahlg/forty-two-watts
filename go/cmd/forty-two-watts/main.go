@@ -812,8 +812,26 @@ func main() {
 			lpSafeAmps = 0
 		}
 		lpController.SetSiteFuse(loadpoint.SiteFuse{
-			MaxAmps: lpSafeAmps,
-			Voltage: cfg.Fuse.Voltage,
+			MaxAmps:  lpSafeAmps,
+			Voltage:  cfg.Fuse.Voltage,
+			PhaseCnt: cfg.Fuse.Phases,
+		})
+		// Live grid + EV readings for the dynamic fuse clamp. Every
+		// controller tick subtracts non-EV load from the fuse budget
+		// so a house-load spike (oven, kettle, heat pump) forces the
+		// EV to back off in the same dispatch cycle instead of
+		// waiting for MPC to replan. Read values come straight from
+		// telemetry; no coordination required.
+		lpController.SetLiveSiteReader(func() (float64, float64, bool) {
+			siteMeter := cfg.SiteMeterDriver()
+			if siteMeter == "" {
+				return 0, 0, false
+			}
+			r := tel.Get(siteMeter, telemetry.DerMeter)
+			if r == nil {
+				return 0, 0, false
+			}
+			return r.SmoothedW, tel.SumOnlineEVW(), true
 		})
 		// Vehicle-side telemetry (DerVehicle emitted by tesla_vehicle.lua
 		// et al) — parse the stored JSON and surface it as a

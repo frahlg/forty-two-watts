@@ -34,6 +34,17 @@ type Controller struct {
 	// Set at startup via SetSiteFuse from main.go.
 	site SiteFuse
 
+	// liveSite returns the current site meter reading + the total
+	// power the EV charger itself is pulling right now. Used for
+	// the live-load fuse clamp: evMax = fuseSafeW − (grid − evNow),
+	// which converges to the actual headroom after accounting for
+	// the oven, kitchen, battery, PV — anything that already shows
+	// in grid. Returns ok=false when the getter isn't wired, in
+	// which case the live clamp is skipped (today's pre-clamp
+	// behaviour). Nil is a legal value for unit tests that don't
+	// exercise the live path.
+	liveSite LiveSiteReader
+
 	// phases tracks the most recently-commanded phase count per
 	// loadpoint ID so MinPhaseHoldS can prevent flap. A zero
 	// lastPhase means "no commitment yet" — first non-zero command
@@ -101,6 +112,28 @@ func (c *Controller) SetSiteFuse(f SiteFuse) {
 		return
 	}
 	c.site = f
+}
+
+// LiveSiteReader returns (gridW, evW, ok). gridW is the current
+// site meter reading in site convention (+ = import). evW is the
+// total live EV charger draw across all DerEV drivers (so the
+// controller can subtract its own contribution out of the grid
+// reading and compute true non-EV headroom). ok=false disables
+// the live-load clamp gracefully — controller falls back to the
+// per-phase static fuse math alone.
+type LiveSiteReader func() (gridW, evW float64, ok bool)
+
+// SetLiveSiteReader installs the live grid + EV telemetry getter
+// used by the dynamic fuse clamp. When wired, every tickOne
+// additionally caps the EV command at fuseSafeW − (grid − evW),
+// so a sudden unexpected load (oven, kettle, heat pump) forces
+// EV to back off in the same dispatch cycle instead of waiting
+// for MPC to replan.
+func (c *Controller) SetLiveSiteReader(f LiveSiteReader) {
+	if c == nil {
+		return
+	}
+	c.liveSite = f
 }
 
 // Tick runs one dispatch cycle for every configured loadpoint.
@@ -236,16 +269,65 @@ func (c *Controller) computeCommand(now time.Time, lpCfg Config, currentPowerW f
 		}
 	}
 
+	// Live-load fuse clamp. The per-phase clamp above assumes the EV
+	// is the site's only load — fine in isolation, but fatal when the
+	// oven turns on mid-charge. Here we subtract the NON-EV portion
+	// of current grid draw from the fuse budget to compute the true
+	// remaining headroom.
+	//
+	//   gridW_site = load + pv + battery + ev  (site sign convention)
+	//   non-EV load = gridW_site - evW
+	//   evHeadroom  = fuseSafeMaxW - (gridW_site - evW)
+	//
+	// Clamping wantW at evHeadroom keeps total grid import ≤ the
+	// safe fuse budget regardless of house load spikes, battery
+	// limits, or PV dropouts. Converges in one tick: next cycle
+	// sees the reduced EV, grid drops, headroom reappears or not.
+	//
+	// Skipped when the reader isn't wired (tests, pre-startup) or
+	// when the live reading is unavailable. At zero or negative
+	// headroom the clamp forces wantW=0 — preferable to blowing
+	// the main breaker.
+	//
+	// `liveHeadroom = -1` means "no live clamp active"; any other
+	// non-negative value is a hard ceiling the post-snap stage will
+	// also enforce so a nearest-snap that rounds upward past the
+	// cap can't breach the fuse.
+	liveHeadroom := -1.0
+	if c.liveSite != nil && c.site.MaxAmps > 0 {
+		if gridW, evW, ok := c.liveSite(); ok {
+			fuseSafeW := c.site.PerPhaseMaxW() * float64(c.site.Phases())
+			nonEVLoad := gridW - evW
+			headroom := fuseSafeW - nonEVLoad
+			if headroom < 0 {
+				headroom = 0
+			}
+			liveHeadroom = headroom
+			if wantW > headroom {
+				wantW = headroom
+			}
+		}
+	}
+
 	steps := filterStepsByPhase(lpCfg.AllowedStepsW, phases, lpCfg.PhaseSplitW)
 	snapped := SnapChargeW(wantW, lpCfg.MinChargeW, lpCfg.MaxChargeW, steps)
 
 	// Second-line safety: even if a step somehow exceeded the fuse
-	// ceiling (misconfigured step list), never send it.
+	// ceiling (misconfigured step list) or the snap-to-nearest
+	// rounded upward past the live headroom, never send it.
 	if c.site.MaxAmps > 0 && phases > 0 {
 		ceiling := c.site.PerPhaseMaxW() * float64(phases)
 		if snapped > ceiling {
 			snapped = ceiling
 		}
+	}
+	if liveHeadroom >= 0 && snapped > liveHeadroom {
+		// Snap rounded upward — force DOWN to the nearest allowed
+		// step that's at or below the live headroom. Walks the
+		// filtered step list from high to low and picks the first
+		// that fits. Falls back to 0 when nothing fits (headroom <
+		// smallest non-zero step).
+		snapped = stepAtOrBelow(steps, liveHeadroom)
 	}
 
 	return snapped, phases, true

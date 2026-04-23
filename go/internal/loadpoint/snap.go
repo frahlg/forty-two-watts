@@ -44,6 +44,21 @@ func SnapChargeW(want, min, max float64, steps []float64) float64 {
 	return best
 }
 
+// stepAtOrBelow picks the largest value in steps that is <= cap.
+// Returns 0 when nothing fits (including an empty list). Used by
+// the controller's live-load fuse clamp to force a snap-to-nearest
+// result DOWN to the first feasible step under the instantaneous
+// fuse headroom.
+func stepAtOrBelow(steps []float64, cap float64) float64 {
+	var best float64
+	for _, s := range steps {
+		if s <= cap && s > best {
+			best = s
+		}
+	}
+	return best
+}
+
 // EnergyBudgetToPowerW translates a remaining-Wh budget over a
 // remaining-seconds window into instantaneous W. Mirrors the battery
 // energy-allocation dispatch path (see docs/plan-ems-contract.md)
