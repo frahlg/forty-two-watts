@@ -471,7 +471,7 @@ func (m *Manager) Observe(id string, pluggedIn bool, powerW, deliveredWh float64
 		m.mu.Unlock()
 		return
 	}
-	var pluginTransition bool
+	var pluginTransition, unplugTransition bool
 	if pluggedIn && !lp.pluggedIn {
 		// Plug-in transition: seed the session anchor + arm the
 		// auto-discovery + auto-schedule flags.
@@ -484,6 +484,17 @@ func (m *Manager) Observe(id string, pluggedIn bool, powerW, deliveredWh float64
 		// Clear stale runtime binding from the previous session so a
 		// different car plugging in re-runs discovery.
 		lp.discoveredVehicleDriver = ""
+	}
+	if !pluggedIn && lp.pluggedIn {
+		// Unplug transition. The current schedule belonged to the car
+		// that just left — clear it so the NEXT plug-in (potentially a
+		// different vehicle) starts from "no schedule" and the
+		// auto-charge logic re-fires from scratch. The cleared target
+		// is persisted via the same TargetPersister callback so the
+		// dashboard reflects the empty state immediately.
+		unplugTransition = true
+		lp.targetSoCPct = 0
+		lp.targetTime = time.Time{}
 	}
 	if !pluggedIn {
 		// Fully clear the runtime binding on unplug so the NEXT
@@ -547,8 +558,18 @@ func (m *Manager) Observe(id string, pluggedIn bool, powerW, deliveredWh float64
 	autoSoc := lp.AutoChargeTargetSoCPct
 	autoTimeLocal := lp.AutoChargeTargetTimeLocal
 	vehLimit := lp.vehicleChargeLimitPct
+	policySnap := lp.policy
+	persist := m.onTarget
 	m.mu.Unlock()
 
+	if unplugTransition && persist != nil {
+		// Persist the cleared target so the schedule is gone from
+		// state.db too. Reuses the standard TargetPersister callback
+		// (state.UpsertPrimaryLoadpointSchedule via main.go); a 0
+		// soc + zero target_time is treated as "no schedule" by every
+		// downstream consumer.
+		_ = persist(lpID, 0, time.Time{}, policySnap)
+	}
 	if autoArm {
 		m.applyAutoSchedule(lpID, autoSoc, autoTimeLocal, vehLimit)
 	}
