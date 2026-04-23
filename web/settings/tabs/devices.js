@@ -31,12 +31,20 @@
         var modbus = cap.modbus || d.modbus;
         var protocol = mqtt ? "mqtt" : (modbus ? "modbus" : (cap.http ? "http" : "?"));
         var driverFile = d.lua || "(none)";
+        var headerLabel = d.alias ? (escHtml(d.alias) + ' <span style="color:var(--text-dim);font-weight:400">(' + escHtml(d.name) + ')</span>') : escHtml(d.name);
         html += '<div class="device-item">' +
           '<div class="device-item-header">' +
-          '<strong>' + escHtml(d.name) + '</strong>' +
+          '<strong>' + headerLabel + '</strong>' +
           '<span style="color:var(--text-dim);font-size:0.75rem">lua · ' + protocol + ' · ' + escHtml(driverFile) + '</span>' +
           '<button class="btn-remove" data-remove-idx="' + idx + '">Remove</button>' +
           '</div>' +
+          '<div class="field-row"><div>' +
+          '<label>Name (stable ID) ' + help('Internal identifier — used by telemetry, schedule references (loadpoint.vehicle_driver etc.), and device registry. Must be unique across drivers. Change with care: renaming orphans any persisted state keyed on this name.') + '</label>' +
+          '<input type="text" data-path="drivers.' + idx + '.name" value="' + escHtml(d.name || "") + '">' +
+          '</div><div>' +
+          '<label>Alias ' + help('Optional friendly label for the UI (e.g. "My Model Y"). When empty, UIs fall back to the stable name.') + '</label>' +
+          '<input type="text" data-path="drivers.' + idx + '.alias" value="' + escHtml(d.alias || "") + '" placeholder="e.g. Garage Tesla">' +
+          '</div></div>' +
           '<div class="field-row"><div>' +
           '<label>Driver file ' + help('Path to the .lua driver. Absolute or relative to the config file directory.') + '</label>' +
           '<input type="text" data-path="drivers.' + idx + '.lua" value="' + escHtml(driverFile) + '">' +
@@ -230,7 +238,21 @@
         if (!sel || !sel.value) return;
         var chosen = sel.options[sel.selectedIndex];
         var protocols = (chosen.dataset.protocols || "").split("+");
-        var name = (nameEl.value || "").trim() || chosen.dataset.id || ("driver-" + config.drivers.length);
+        var baseName = (nameEl.value || "").trim() || chosen.dataset.id || ("driver-" + config.drivers.length);
+        // Auto-dedupe against existing driver names so adding a second
+        // tesla_vehicle for a two-car household doesn't collide with
+        // the first. "garage-tesla" → "garage-tesla-2" → "garage-tesla-3"…
+        // The operator can still edit to whatever they want — this
+        // only protects against the default picker producing the same
+        // string twice in a row.
+        var takenNames = {};
+        (config.drivers || []).forEach(function (d) { if (d.name) takenNames[d.name] = true; });
+        var name = baseName;
+        if (takenNames[name]) {
+          var i = 2;
+          while (takenNames[baseName + "-" + i]) i++;
+          name = baseName + "-" + i;
+        }
         var driver = { name: name, lua: sel.value };
         driver.capabilities = {};
         if (protocols.indexOf("mqtt") >= 0) driver.capabilities.mqtt = { host: "", port: 1883 };

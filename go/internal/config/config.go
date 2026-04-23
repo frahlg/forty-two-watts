@@ -233,6 +233,15 @@ func (f Fuse) SafeMaxPowerW() float64 {
 // the driver host at startup (or on hot-reload via the file watcher).
 type Driver struct {
 	Name               string  `yaml:"name" json:"name"`
+	// Alias is a human-readable label for the UI — e.g. "My Model Y",
+	// "Spouse car", "Workshop battery". Operator-facing only; the
+	// stable identifier used by all code paths (telemetry, dispatch,
+	// device registry, state.db keys) remains Name. When empty the UI
+	// falls back to Name. Two drivers of the same kind (two
+	// tesla_vehicle entries for a two-car household) MUST have
+	// distinct Names; distinct aliases are a convenience layer on
+	// top of that, not a substitute.
+	Alias              string  `yaml:"alias,omitempty" json:"alias,omitempty"`
 	Lua                string  `yaml:"lua,omitempty" json:"lua,omitempty"` // path to .lua file
 	IsSiteMeter        bool    `yaml:"is_site_meter,omitempty" json:"is_site_meter,omitempty"`
 	BatteryCapacityWh  float64 `yaml:"battery_capacity_wh,omitempty" json:"battery_capacity_wh,omitempty"`
