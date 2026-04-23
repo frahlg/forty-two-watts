@@ -1,29 +1,27 @@
--- Tesla Vehicle Driver (read-only, via TeslaBLEProxy or Tesla API)
+-- Tesla Vehicle Driver (read-only, via TeslaBLEProxy on local LAN)
 -- Emits: Vehicle (DerVehicle)
--- Protocol: HTTPS / HTTP (Tesla Owner API shape — vehicle_data endpoint)
+-- Protocol: HTTP (Tesla Owner API shape — /api/1/vehicles/{VIN}/vehicle_data)
 --
 -- Fetches the vehicle's own SoC and charge_limit so forty-two-watts can
 -- show the real "24 / 50 %" in the EV bubble and let the loadpoint
--- manager prefer the truth over its delivered-Wh inference. This
--- driver is transparent to the transport — it speaks plain HTTP/JSON
--- against anything that implements Tesla's vehicle_data shape. In the
--- typical deployment that's TeslaBLEProxy running on the same LAN
--- (https://github.com/wimaha/TeslaBleHttpProxy) which translates to
--- BLE under the hood — forty-two-watts never sees BLE.
+-- manager prefer the truth over its delivered-Wh inference. Designed
+-- to talk to TeslaBLEProxy running on the same LAN
+-- (https://github.com/wimaha/TeslaBleHttpProxy), which translates
+-- HTTP/JSON to BLE under the hood. No Tesla cloud credentials, no
+-- OAuth token, no internet round-trip — the proxy IS the key to the
+-- vehicle.
 --
--- Config example:
+-- Config: two fields, that's it.
+--
 --   drivers:
 --     - name: tesla-garage
 --       lua: drivers/tesla_vehicle.lua
 --       capabilities:
 --         http:
---           allowed_hosts: ["192.168.1.50"]
+--           allowed_hosts: ["192.168.1.50"]   # IP of the proxy
 --       config:
---         base_url: "http://192.168.1.50:8080"
---         vehicle_id: "1234567890"      # id or VIN, per proxy
---         access_token: ""              # optional Bearer token
---         poll_interval_s: 60           # default 60
---         stale_after_s: 900            # default 900 (15 min)
+--         ip:  "192.168.1.50"
+--         vin: "5YJ3E1EA1KF000000"
 
 DRIVER = {
   id           = "tesla-vehicle",
@@ -41,17 +39,21 @@ DRIVER = {
 
 PROTOCOL = "http"
 
--- Runtime state
+-- Runtime state. base_url is built from the `ip` config field.
+-- TeslaBLEProxy listens on :8080 by default — hardcoded since that's
+-- what the project ships. Poll + staleness are tuned in-driver;
+-- operators touch only `ip` + `vin` in YAML.
+local PROXY_PORT        = 8080
+local POLL_INTERVAL_MS  = 60000
+local STALE_AFTER_MS    = 900000
+
 local base_url = nil
-local vehicle_id = nil
-local access_token = nil
-local poll_interval_ms = 60000
-local stale_after_ms = 900000
+local vin = nil
 
 -- Cached last-known reading so we can keep publishing a value while
 -- the vehicle is asleep. Tesla returns 408 "vehicle unavailable" when
 -- the car is in deep sleep; we treat that as "use last-known" until
--- stale_after_ms elapses.
+-- STALE_AFTER_MS elapses.
 local last = {
   ts_ms          = 0,
   soc            = nil,
@@ -61,10 +63,9 @@ local last = {
 }
 
 local function auth_headers()
-  if access_token and access_token ~= "" then
-    return { ["Authorization"] = "Bearer " .. access_token,
-             ["Accept"] = "application/json" }
-  end
+  -- TeslaBLEProxy on the LAN doesn't require a bearer token; it
+  -- authenticates against the car via BLE itself. Plain JSON Accept
+  -- header is all we need.
   return { ["Accept"] = "application/json" }
 end
 
@@ -75,32 +76,27 @@ end
 
 function driver_init(config)
   if not config then
-    host.log("error", "tesla: config required")
+    host.log("error", "tesla: config required (ip + vin)")
     return
   end
-  base_url = config.base_url
-  vehicle_id = config.vehicle_id or config.vin
-  access_token = config.access_token
+  local ip = config.ip
+  vin = config.vin
 
-  if not base_url or base_url == "" then
-    host.log("error", "tesla: base_url required")
+  if not ip or ip == "" then
+    host.log("error", "tesla: `ip` required (LAN address of TeslaBLEProxy)")
     return
   end
-  if not vehicle_id or vehicle_id == "" then
-    host.log("error", "tesla: vehicle_id (or vin) required")
+  if not vin or vin == "" then
+    host.log("error", "tesla: `vin` required (vehicle VIN the proxy is paired to)")
     return
   end
 
-  if tonumber(config.poll_interval_s) then
-    poll_interval_ms = math.max(15, math.floor(tonumber(config.poll_interval_s))) * 1000
-  end
-  if tonumber(config.stale_after_s) then
-    stale_after_ms = math.max(60, math.floor(tonumber(config.stale_after_s))) * 1000
-  end
+  base_url = "http://" .. ip .. ":" .. tostring(PROXY_PORT)
 
   host.set_make("Tesla")
-  host.set_sn(tostring(vehicle_id))
-  host.log("info", "tesla: driver initialized for " .. tostring(vehicle_id))
+  host.set_sn(tostring(vin))
+  host.log("info", "tesla: driver initialized vin=" .. tostring(vin) ..
+                   " proxy=" .. base_url)
 end
 
 -- emit_last sends the cached reading with a stale flag computed from
@@ -112,7 +108,7 @@ local function emit_last()
     return
   end
   local age = host.millis() - last.ts_ms
-  local stale = age > stale_after_ms
+  local stale = age > STALE_AFTER_MS
   host.emit("vehicle", {
     soc              = last.soc,
     charge_limit_pct = last.charge_limit,
@@ -123,31 +119,38 @@ local function emit_last()
 end
 
 function driver_poll()
-  if not base_url or not vehicle_id then
+  if not base_url or not vin then
     return 10000
   end
 
-  local url = base_url .. "/api/1/vehicles/" .. vehicle_id .. "/vehicle_data"
+  -- endpoints=charge_state narrows the response to just what we
+  -- care about (SoC + limit + charging_state + time_to_full). The
+  -- wakeup=true flag asks the proxy to wake the car over BLE if it
+  -- is sleeping, so the data returned reflects the current state
+  -- rather than a cached snapshot. TeslaBLEProxy's README calls
+  -- this out explicitly for "receive data frequently" use cases.
+  local url = base_url .. "/api/1/vehicles/" .. vin ..
+              "/vehicle_data?endpoints=charge_state&wakeup=true"
   local resp, err = host.http_get(url, auth_headers())
   if err ~= nil then
     -- Tesla proxies return 408 for "vehicle asleep" — treat as
     -- "cached data still valid" rather than a hard error.
     host.log("debug", "tesla: poll error: " .. safe_http_err(err))
     emit_last()
-    return poll_interval_ms
+    return POLL_INTERVAL_MS
   end
 
   local body = resp and resp.body
   if not body or body == "" then
     emit_last()
-    return poll_interval_ms
+    return POLL_INTERVAL_MS
   end
 
   local decoded, derr = host.json_decode(body)
   if derr or not decoded then
     host.log("warn", "tesla: json decode failed")
     emit_last()
-    return poll_interval_ms
+    return POLL_INTERVAL_MS
   end
 
   -- Tesla shape: { response: { charge_state: {...}, ... } } for Owner API.
@@ -165,7 +168,7 @@ function driver_poll()
   if not charge_state then
     host.log("debug", "tesla: no charge_state in response")
     emit_last()
-    return poll_interval_ms
+    return POLL_INTERVAL_MS
   end
 
   local soc = tonumber(charge_state.battery_level)
@@ -194,7 +197,7 @@ function driver_poll()
     emit_last()
   end
 
-  return poll_interval_ms
+  return POLL_INTERVAL_MS
 end
 
 function driver_command(action, _, _)

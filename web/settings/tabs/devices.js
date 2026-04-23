@@ -43,8 +43,23 @@
           '</div><div>' +
           '<label>Battery capacity (kWh) ' + help('Nameplate storage capacity in kilowatt-hours. Stored internally as Wh.') + '</label>' +
           '<input type="number" step="0.1" data-path="drivers.' + idx + '.battery_capacity_wh" data-unit-scale="1000" value="' + ((d.battery_capacity_wh || 0) / 1000) + '">' +
-          '</div></div>' +
-          '<label><input type="checkbox" data-checkbox-path="drivers.' + idx + '.is_site_meter"' + (d.is_site_meter ? ' checked' : '') + '> Site meter ' + help('Exactly one driver should be the site meter — its grid reading defines the point-of-measurement the PI loop balances.') + '</label>';
+          '</div></div>';
+        // Site-meter checkbox only makes sense for drivers that CAN
+        // be a meter. Vehicle drivers (e.g. tesla_vehicle.lua) have
+        // no grid reading to offer — hide the control entirely to
+        // avoid misconfiguration. catalogByLua is populated by the
+        // async catalog fetch in `after`; absent entries fall through
+        // and show the checkbox (safe default).
+        var catalogEntry = (S.catalogByLua || {})[d.lua];
+        var caps = (catalogEntry && catalogEntry.capabilities) || [];
+        var canBeSiteMeter = !catalogEntry ||
+          caps.indexOf("meter") >= 0 ||
+          caps.indexOf("pv") >= 0 ||
+          caps.indexOf("battery") >= 0 ||
+          caps.length === 0; // legacy drivers without capabilities → keep showing
+        if (canBeSiteMeter) {
+          html += '<label><input type="checkbox" data-checkbox-path="drivers.' + idx + '.is_site_meter"' + (d.is_site_meter ? ' checked' : '') + '> Site meter ' + help('Exactly one driver should be the site meter — its grid reading defines the point-of-measurement the PI loop balances.') + '</label>';
+        }
         if (mqtt) {
           html += '<fieldset><legend>MQTT</legend>' +
             '<div class="field-row"><div>' +
@@ -71,13 +86,34 @@
             '<input type="number" data-path="drivers.' + idx + '.capabilities.modbus.unit_id" value="' + (modbus.unit_id || 1) + '">' +
             '</fieldset>';
         }
-        // Local-HTTP vs cloud-HTTP driver detection by declared config shape.
+        // Local-HTTP vs cloud-HTTP vs vehicle-over-proxy detection
+        // by declared config shape + catalog capabilities.
         var dcfg = d.config || {};
         var hasHostField = Object.prototype.hasOwnProperty.call(dcfg, 'host');
         var hasAuthField = Object.prototype.hasOwnProperty.call(dcfg, 'email') ||
                            Object.prototype.hasOwnProperty.call(dcfg, 'password');
-        var isLocalHTTP = cap.http != null && hasHostField;
-        var isCloudDriver = cap.http != null && !hasHostField && (hasAuthField || Object.keys(dcfg).length === 0);
+        var isVehicleDriver = cap.http != null &&
+          (caps.indexOf("vehicle") >= 0 ||
+           Object.prototype.hasOwnProperty.call(dcfg, 'vin') ||
+           Object.prototype.hasOwnProperty.call(dcfg, 'ip'));
+        var isLocalHTTP = !isVehicleDriver && cap.http != null && hasHostField;
+        var isCloudDriver = !isVehicleDriver && cap.http != null && !hasHostField &&
+          (hasAuthField || Object.keys(dcfg).length === 0);
+        if (isVehicleDriver) {
+          // TeslaBLEProxy-style drivers only need the LAN IP of the
+          // proxy and the VIN the proxy is paired to — no cloud
+          // credentials, no charger serial.
+          var vcfg = d.config || {};
+          html += '<fieldset><legend>Vehicle</legend>' +
+            '<div class="field-row"><div>' +
+            '<label>Proxy IP ' + help('LAN address of the TeslaBLEProxy (or equivalent HTTP-to-BLE bridge). The driver talks HTTP/JSON only; the proxy handles BLE pairing with the car.') + '</label>' +
+            '<input type="text" data-path="drivers.' + idx + '.config.ip" value="' + escHtml(vcfg.ip || '') + '" placeholder="192.168.1.50">' +
+            '</div><div>' +
+            '<label>VIN ' + help('Vehicle Identification Number the proxy is paired to.') + '</label>' +
+            '<input type="text" data-path="drivers.' + idx + '.config.vin" value="' + escHtml(vcfg.vin || '') + '" placeholder="5YJ3E1EA1KF000000">' +
+            '</div></div>' +
+            '</fieldset>';
+        }
         if (isLocalHTTP) {
           var lcfg = d.config || {};
           html += '<fieldset><legend>HTTP</legend>' +
@@ -127,6 +163,18 @@
 
       // Driver catalog picker — fetch async, render into select.
       fetch("/api/drivers/catalog").then(function (r) { return r.json(); }).then(function (data) {
+        // Cache {lua_path: entry} on the settings namespace so the
+        // per-driver form (rendered synchronously before this fetch
+        // lands) can decide whether to show the Site-meter checkbox.
+        var byLua = {};
+        (data && data.entries || []).forEach(function (e) {
+          if (e && e.path) byLua[e.path] = e;
+        });
+        S.catalogByLua = byLua;
+        // Re-render so the canBeSiteMeter gate sees the cache. One-
+        // shot flicker on first tab open; cached across subsequent
+        // opens since S.catalogByLua persists on window.FTWSettings.
+        ctx.renderTab("devices");
         var sel = document.getElementById("driver-catalog-picker");
         if (!sel) return;
         sel.innerHTML = "";
@@ -146,6 +194,7 @@
           opt.dataset.protocols = protoLabel;
           opt.dataset.id = e.id || "";
           opt.dataset.httpHosts = (e.http_hosts || []).join(",");
+          opt.dataset.capabilities = (e.capabilities || []).join(",");
           opt.dataset.connectionHost = (e.connection_defaults && e.connection_defaults.host) || "";
           opt.dataset.verificationStatus = e.verification_status || "experimental";
           if (e.verification_notes) opt.title = e.verification_notes;
@@ -169,8 +218,15 @@
           var hosts = (chosen.dataset.httpHosts || "").split(",").filter(Boolean);
           driver.capabilities.http = { allowed_hosts: hosts };
           var connHost = chosen.dataset.connectionHost || "";
-          if (connHost) driver.config = { host: connHost };
-          else driver.config = { email: "", password: "", serial: "" };
+          var chosenCaps = (chosen.dataset.capabilities || "").split(",").filter(Boolean);
+          if (chosenCaps.indexOf("vehicle") >= 0) {
+            // TeslaBLEProxy-style: ip + vin only, no cloud creds.
+            driver.config = { ip: "", vin: "" };
+          } else if (connHost) {
+            driver.config = { host: connHost };
+          } else {
+            driver.config = { email: "", password: "", serial: "" };
+          }
         }
         config.drivers.push(driver);
         ctx.renderTab("devices");
