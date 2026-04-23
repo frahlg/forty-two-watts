@@ -1142,16 +1142,50 @@ footer {
 .modal-body input[type="text"],
 .modal-body input[type="number"],
 .modal-body input[type="password"],
-.modal-body select {
+.modal-body select,
+.modal-body textarea {
   width: 100%;
-  padding: 6px 10px;
-  background: var(--surface2);
-  border: 1px solid var(--border);
-  border-radius: 4px;
+  padding: 7px 11px;
+  /* Lifted a notch brighter than --surface2 (#22223a) so the input
+     well separates from the modal background, and the contrast with
+     --text (#e0e0e0) is honest. Border accent-tinted instead of the
+     near-black default so the field edge reads even at a glance. */
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(120, 140, 220, 0.35);
+  border-radius: 5px;
   color: var(--text);
   font-family: inherit;
-  font-size: 0.85rem;
+  font-size: 0.9rem;
   box-sizing: border-box;
+  transition: border-color 120ms ease-out, background 120ms ease-out;
+}
+.modal-body input[type="text"]:hover,
+.modal-body input[type="number"]:hover,
+.modal-body input[type="password"]:hover,
+.modal-body select:hover,
+.modal-body textarea:hover {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(120, 140, 220, 0.55);
+}
+.modal-body input[type="text"]:focus,
+.modal-body input[type="number"]:focus,
+.modal-body input[type="password"]:focus,
+.modal-body select:focus,
+.modal-body textarea:focus {
+  outline: none;
+  background: rgba(255, 255, 255, 0.1);
+  border-color: var(--accent, #5566ff);
+  box-shadow: 0 0 0 2px rgba(85, 102, 255, 0.2);
+}
+.modal-body input::placeholder,
+.modal-body textarea::placeholder {
+  color: rgba(224, 224, 224, 0.38);
+}
+.modal-body label {
+  color: var(--text);
+  font-size: 0.82rem;
+  margin-bottom: 4px;
+  display: inline-block;
 }
 
 .modal-body fieldset {

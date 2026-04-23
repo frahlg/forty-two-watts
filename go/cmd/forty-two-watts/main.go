@@ -396,8 +396,10 @@ func main() {
 			if mpcSvc != nil {
 				totalCap, maxChg, maxDis := aggregateBatteryLimits(newCfg, capacities)
 				mpcSvc.UpdateCapacity(totalCap, maxChg, maxDis)
+				mpcSvc.FuseMaxImportW = newCfg.Fuse.SafeMaxPowerW()
 				slog.Info("mpc: capacity updated via hot-reload",
-					"capacity_wh", totalCap, "max_charge_w", maxChg, "max_discharge_w", maxDis)
+					"capacity_wh", totalCap, "max_charge_w", maxChg, "max_discharge_w", maxDis,
+					"fuse_import_w", mpcSvc.FuseMaxImportW)
 			}
 
 			// Hot-reload EV loadpoints so operators can add / remove /
@@ -597,6 +599,7 @@ func main() {
 		mpcSvc.Load = loadSvc.Predict
 		mpcSvc.Price = priceFc.Predict
 		mpcSvc.SiteMeter = cfg.SiteMeterDriver()
+		mpcSvc.FuseMaxImportW = cfg.Fuse.SafeMaxPowerW()
 		// Wire the loadpoint probe so the DP extends its state space
 		// when an EV is plugged in. Single-loadpoint for now: picks
 		// the first plugged-in one.
