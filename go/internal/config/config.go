@@ -121,8 +121,21 @@ type Loadpoint struct {
 	// VehicleDriver optionally points to a DerVehicle-emitting driver
 	// (e.g. tesla_vehicle against a TeslaBLEProxy) whose real BMS SoC
 	// overrides the pluginSoC + deliveredWh inference and whose
-	// charge_limit_pct flows through to the UI.
+	// charge_limit_pct flows through to the UI. Empty = manager
+	// auto-discovers on each plug-in by scoring live DerVehicle
+	// readings.
 	VehicleDriver string `yaml:"vehicle_driver,omitempty" json:"vehicle_driver,omitempty"`
+
+	// Auto-charge-on-plug-in. When AutoChargeEnabled and a plug-in
+	// transition finds no existing target, the manager posts one
+	// automatically: reach AutoChargeTargetSoCPct (default 80 %) by
+	// AutoChargeTargetTimeLocal (HH:MM, default "06:00" local tz).
+	// If a vehicle driver is bound AND reports a tighter
+	// charge_limit_soc, the SoC target clamps to min(config,
+	// vehicle_limit). Existing manual targets are respected.
+	AutoChargeEnabled         bool    `yaml:"auto_charge_enabled,omitempty" json:"auto_charge_enabled,omitempty"`
+	AutoChargeTargetSoCPct    float64 `yaml:"auto_charge_target_soc_pct,omitempty" json:"auto_charge_target_soc_pct,omitempty"`
+	AutoChargeTargetTimeLocal string  `yaml:"auto_charge_target_time_local,omitempty" json:"auto_charge_target_time_local,omitempty"`
 }
 
 // OCPP configures the embedded OCPP 1.6J Central System for EV chargers.

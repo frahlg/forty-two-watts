@@ -54,6 +54,20 @@
           '<label>Allowed steps (W, comma-separated) ' + help("Discrete power levels the charger supports. Leave blank for continuous. E.g. '0,1380,2760,4140'.") + '</label>' +
           '<input type="text" class="lp-steps-input" data-lp-index="' + i + '" value="' +
             escHtml((lp.allowed_steps_w || []).join(",")) + '">' +
+          '<fieldset style="margin-top:10px"><legend>Auto-charge on plug-in</legend>' +
+            '<label style="display:flex;align-items:center;gap:6px">' +
+              '<input type="checkbox" data-checkbox-path="' + base + 'auto_charge_enabled"' +
+              (lp.auto_charge_enabled ? ' checked' : '') + '> Enabled ' +
+              help("When the car is plugged in and no existing schedule is set, post one automatically. Vehicle driver's charge_limit_soc takes precedence when tighter than the target below.") +
+            '</label>' +
+            '<div class="field-row" style="margin-top:6px"><div>' +
+              field("Target SoC (%)", base + "auto_charge_target_soc_pct", "number", 80,
+                "Default auto-charge target. Used unless the bound vehicle reports a tighter charge_limit_soc.") +
+            '</div><div>' +
+              field("Target time (HH:MM local)", base + "auto_charge_target_time_local", "text", "06:00",
+                "Next occurrence of this time in the host timezone. Default '06:00' = ready by 6 AM next morning.") +
+            '</div></div>' +
+          '</fieldset>' +
           '<div style="text-align:right;margin-top:6px">' +
             '<button type="button" class="btn-remove-lp" data-lp-index="' + i + '" style="background:transparent;border:1px solid var(--border);color:#e57373;padding:4px 10px;border-radius:4px;cursor:pointer">Remove</button>' +
           '</div>' +

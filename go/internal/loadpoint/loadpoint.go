@@ -52,9 +52,23 @@ type Config struct {
 	// driver (tesla_vehicle.lua + a TeslaBLEProxy today; future
 	// OEM drivers possible) whose readings should override the
 	// PluginSoCPct inference with the vehicle's real BMS SoC and
-	// expose charge_limit_pct in the UI. Empty = no vehicle
-	// integration; manager falls back to the inferred SoC path.
+	// expose charge_limit_pct in the UI. When empty, the manager
+	// auto-discovers the plugged-in vehicle on each connected:
+	// false→true transition by scoring every live DerVehicle
+	// reading — leave blank for multi-car households. Set explicitly
+	// to force a particular binding.
 	VehicleDriver string `yaml:"vehicle_driver,omitempty" json:"vehicle_driver,omitempty"`
+
+	// Auto-charge-on-plug-in. When Enabled and a plug-in transition
+	// finds no existing target, the manager posts one automatically:
+	// reach AutoChargeTargetSoCPct by AutoChargeTargetTimeLocal
+	// (HH:MM in host timezone, next occurrence). If a vehicle driver
+	// is bound AND reports a tighter charge_limit_soc, the target
+	// uses min(AutoChargeTargetSoCPct, vehicle_limit). Existing
+	// manual targets are respected (not overwritten).
+	AutoChargeEnabled         bool    `yaml:"auto_charge_enabled,omitempty" json:"auto_charge_enabled,omitempty"`
+	AutoChargeTargetSoCPct    float64 `yaml:"auto_charge_target_soc_pct,omitempty" json:"auto_charge_target_soc_pct,omitempty"`
+	AutoChargeTargetTimeLocal string  `yaml:"auto_charge_target_time_local,omitempty" json:"auto_charge_target_time_local,omitempty"`
 
 	// PhaseMode selects how the controller picks between 1Φ and 3Φ
 	// delivery each tick. "3p" (default) and "1p" lock the install to
@@ -164,6 +178,14 @@ type VehicleSample struct {
 // parse the Data JSON of the DerVehicle reading.
 type VehicleTelemetryFunc func(driver string) VehicleSample
 
+// VehicleSnapshotFunc returns EVERY currently-known vehicle reading,
+// keyed by driver name. Used by plug-in auto-discovery: when the
+// charger flips to connected and the loadpoint has no explicit
+// `vehicle_driver` binding, the manager scores each candidate and
+// picks the one most likely to be the plugged-in car. nil disables
+// auto-discovery; the loadpoint falls back to the inferred-SoC path.
+type VehicleSnapshotFunc func() map[string]VehicleSample
+
 // Policy captures the energy-source constraints the operator set on
 // the active schedule. Stored per-schedule in state.db and lifted
 // onto the runtime so dispatch + planner can consult it without an
@@ -236,6 +258,10 @@ type Manager struct {
 	// to the pluginSoC + deliveredWh/capacity SoC inference even if
 	// it has VehicleDriver configured. Wired by main.go.
 	vehicleTel VehicleTelemetryFunc
+	// vehicleSnap returns every currently-known vehicle reading
+	// keyed by driver name. Used for plug-in auto-discovery. nil
+	// disables it; YAML-configured VehicleDriver still works.
+	vehicleSnap VehicleSnapshotFunc
 }
 
 // loadpointRuntime is the in-memory representation. Its fields are the
@@ -260,7 +286,14 @@ type loadpointRuntime struct {
 	vehicleTimeToFullMin  int
 	vehicleStale        bool
 	socSource           string
-	updatedAtMs         int64
+	// discoveredVehicleDriver holds the runtime auto-discovery result
+	// when the YAML Config.VehicleDriver is empty. Set on plug-in
+	// transition by scoring every live DerVehicle reading. Cleared
+	// on unplug so a next plug-in re-runs discovery (multi-car
+	// households). Does NOT survive restart — YAML override is the
+	// only persistent binding today.
+	discoveredVehicleDriver string
+	updatedAtMs             int64
 
 	// Plug-in anchor: the SoC we believe the vehicle was at when
 	// this session began. Persisted across Observe() calls so SoC
@@ -290,6 +323,14 @@ func (m *Manager) SetTargetPersister(p TargetPersister) {
 func (m *Manager) SetVehicleTelemetry(f VehicleTelemetryFunc) {
 	m.mu.Lock()
 	m.vehicleTel = f
+	m.mu.Unlock()
+}
+
+// SetVehicleSnapshot installs the getter used for plug-in auto-
+// discovery. nil disables the feature.
+func (m *Manager) SetVehicleSnapshot(f VehicleSnapshotFunc) {
+	m.mu.Lock()
+	m.vehicleSnap = f
 	m.mu.Unlock()
 }
 
@@ -349,6 +390,7 @@ func (m *Manager) Load(cfgs []Config) {
 			lp.vehicleTimeToFullMin = existing.vehicleTimeToFullMin
 			lp.vehicleStale = existing.vehicleStale
 			lp.socSource = existing.socSource
+			lp.discoveredVehicleDriver = existing.discoveredVehicleDriver
 			lp.updatedAtMs = existing.updatedAtMs
 			lp.sessionPluginSoCPct = existing.sessionPluginSoCPct
 		}
@@ -424,22 +466,46 @@ func (m *Manager) Configs() []Config {
 // manager.
 func (m *Manager) Observe(id string, pluggedIn bool, powerW, deliveredWh float64) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	lp, ok := m.byID[id]
 	if !ok {
+		m.mu.Unlock()
 		return
 	}
+	var pluginTransition bool
 	if pluggedIn && !lp.pluggedIn {
-		// Plug-in transition: seed the session anchor.
+		// Plug-in transition: seed the session anchor + arm the
+		// auto-discovery + auto-schedule flags.
 		anchor := lp.PluginSoCPct
 		if anchor <= 0 {
 			anchor = 20 // conservative default
 		}
 		lp.sessionPluginSoCPct = anchor
+		pluginTransition = true
+		// Clear stale runtime binding from the previous session so a
+		// different car plugging in re-runs discovery.
+		lp.discoveredVehicleDriver = ""
+	}
+	if !pluggedIn {
+		// Fully clear the runtime binding on unplug so the NEXT
+		// plug-in re-discovers. YAML binding is untouched.
+		lp.discoveredVehicleDriver = ""
 	}
 	lp.pluggedIn = pluggedIn
 	lp.currentPowerW = powerW
 	lp.deliveredWhSession = deliveredWh
+
+	// Auto-discovery on plug-in: if no YAML binding is set, score
+	// every live DerVehicle reading and pick the most-likely car.
+	if pluginTransition && lp.VehicleDriver == "" && m.vehicleSnap != nil {
+		lp.discoveredVehicleDriver = pickPluggedVehicle(m.vehicleSnap())
+	}
+
+	// Resolve the effective vehicle driver. YAML wins; runtime
+	// discovery fills in when YAML is empty.
+	effectiveDriver := lp.VehicleDriver
+	if effectiveDriver == "" {
+		effectiveDriver = lp.discoveredVehicleDriver
+	}
 
 	// Vehicle-side telemetry overrides the inferred SoC path when
 	// available and fresh. Even stale readings are stored so the UI
@@ -449,8 +515,8 @@ func (m *Manager) Observe(id string, pluggedIn bool, powerW, deliveredWh float64
 	// HTTP refresh). A nil getter → same as empty VehicleDriver:
 	// fall back to the inferred path.
 	var vs VehicleSample
-	if lp.VehicleDriver != "" && m.vehicleTel != nil {
-		vs = m.vehicleTel(lp.VehicleDriver)
+	if effectiveDriver != "" && m.vehicleTel != nil {
+		vs = m.vehicleTel(effectiveDriver)
 	}
 	lp.vehicleSoCPct = vs.SoCPct
 	lp.vehicleChargeLimitPct = vs.ChargeLimitPct
@@ -472,6 +538,163 @@ func (m *Manager) Observe(id string, pluggedIn bool, powerW, deliveredWh float64
 		lp.socSource = "inferred"
 	}
 	lp.updatedAtMs = time.Now().UnixMilli()
+
+	// Capture everything we need for the optional auto-schedule below
+	// BEFORE releasing the lock. SetTarget re-acquires it, so we must
+	// drop ours first to avoid reentrant-lock deadlock.
+	autoArm := pluginTransition && lp.AutoChargeEnabled && lp.targetSoCPct <= 0
+	lpID := lp.ID
+	autoSoc := lp.AutoChargeTargetSoCPct
+	autoTimeLocal := lp.AutoChargeTargetTimeLocal
+	vehLimit := lp.vehicleChargeLimitPct
+	m.mu.Unlock()
+
+	if autoArm {
+		m.applyAutoSchedule(lpID, autoSoc, autoTimeLocal, vehLimit)
+	}
+}
+
+// applyAutoSchedule posts a target on the loadpoint matching the
+// configured plug-in defaults. When a vehicle driver is bound and
+// reports a charge_limit_soc, the SoC target clamps to min(config,
+// limit) so the plan never aims past what the car will accept.
+// Timezone is the process's local time (docker container's TZ
+// env, typically the operator's site locale).
+func (m *Manager) applyAutoSchedule(lpID string, defaultSoc float64, timeLocal string, vehicleLimit float64) {
+	// Target SoC: fallback to 80 when unconfigured or zero.
+	soc := defaultSoc
+	if soc <= 0 {
+		soc = 80
+	}
+	// If the vehicle advertises a tighter limit, respect it.
+	if vehicleLimit > 0 && vehicleLimit < soc {
+		soc = vehicleLimit
+	}
+	// Deadline: next occurrence of HH:MM (default 06:00) in the host
+	// timezone. A morning-commute default matches the typical "plug
+	// in overnight, leave at 7" use case.
+	deadline := nextLocalTimeOfDay(timeLocal, "06:00", time.Now())
+
+	// SetTarget uses the currently-persisted policy by passing nil
+	// (preserves operator's allow_grid / only_surplus / etc. choice).
+	// Auto-schedule doesn't assume a specific energy-source posture
+	// — if the operator previously POSTed only_surplus:true, the
+	// auto plan respects it and may simply sit on 0 W all night.
+	m.SetTarget(lpID, soc, deadline, nil)
+}
+
+// nextLocalTimeOfDay parses "HH:MM" and returns the next time that
+// hour+minute occurs in the process's local timezone relative to
+// `now`. When the parse fails, the fallback string is used; if that
+// ALSO fails, returns now+8h as a last resort.
+func nextLocalTimeOfDay(hhmm, fallback string, now time.Time) time.Time {
+	parse := func(s string) (h, mi int, ok bool) {
+		if len(s) < 4 || len(s) > 5 {
+			return 0, 0, false
+		}
+		// Accept "HH:MM" or "H:MM".
+		parts := splitHHMM(s)
+		if parts == nil {
+			return 0, 0, false
+		}
+		h = parts[0]
+		mi = parts[1]
+		if h < 0 || h > 23 || mi < 0 || mi > 59 {
+			return 0, 0, false
+		}
+		return h, mi, true
+	}
+	h, mi, ok := parse(hhmm)
+	if !ok {
+		h, mi, ok = parse(fallback)
+	}
+	if !ok {
+		return now.Add(8 * time.Hour)
+	}
+	loc := now.Location()
+	candidate := time.Date(now.Year(), now.Month(), now.Day(), h, mi, 0, 0, loc)
+	if !candidate.After(now) {
+		candidate = candidate.Add(24 * time.Hour)
+	}
+	return candidate
+}
+
+func splitHHMM(s string) []int {
+	// Manual split to avoid pulling fmt.Sscanf. Accepts "HH:MM" and
+	// "H:MM" — any single colon separating two non-negative ints.
+	for i, r := range s {
+		if r == ':' {
+			h := atoiPositive(s[:i])
+			mi := atoiPositive(s[i+1:])
+			if h < 0 || mi < 0 {
+				return nil
+			}
+			return []int{h, mi}
+		}
+	}
+	return nil
+}
+
+func atoiPositive(s string) int {
+	if s == "" {
+		return -1
+	}
+	n := 0
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return -1
+		}
+		n = n*10 + int(r-'0')
+	}
+	return n
+}
+
+// pickPluggedVehicle scores every live DerVehicle sample and returns
+// the driver name most likely to belong to the just-plugged car.
+// Returns "" when no good candidate exists. Scoring:
+//
+//   - "Charging"                     → 100 (definitely this one)
+//   - "Starting" / "NoPower" /
+//     "Stopped" / "Complete" / ""    → 40  (could be this one; plug
+//                                            just happened so the
+//                                            car may not have
+//                                            started the session yet)
+//   - "Disconnected"                 → 0   (explicitly not this one)
+//   - Stale reading                  → halved
+//
+// Ties broken by driver name (alphabetical) for determinism.
+func pickPluggedVehicle(samples map[string]VehicleSample) string {
+	type cand struct {
+		name  string
+		score int
+	}
+	best := cand{}
+	for name, vs := range samples {
+		if !vs.OK {
+			continue
+		}
+		var score int
+		switch vs.ChargingState {
+		case "Charging":
+			score = 100
+		case "Disconnected":
+			score = 0
+		case "Starting", "NoPower", "Stopped", "Complete", "":
+			score = 40
+		default:
+			score = 20
+		}
+		if vs.Stale {
+			score /= 2
+		}
+		if score == 0 {
+			continue
+		}
+		if score > best.score || (score == best.score && name < best.name) {
+			best = cand{name: name, score: score}
+		}
+	}
+	return best.name
 }
 
 // estimateSoCPct returns the vehicle SoC % inferred from the session
@@ -575,10 +798,15 @@ func (lp *loadpointRuntime) snapshot() State {
 	steps := make([]float64, len(lp.AllowedStepsW))
 	copy(steps, lp.AllowedStepsW)
 	sort.Float64s(steps)
+	// Effective vehicle driver: YAML wins, else runtime-discovered.
+	effectiveDriver := lp.VehicleDriver
+	if effectiveDriver == "" {
+		effectiveDriver = lp.discoveredVehicleDriver
+	}
 	return State{
 		ID:                    lp.ID,
 		DriverName:            lp.DriverName,
-		VehicleDriver:         lp.VehicleDriver,
+		VehicleDriver:         effectiveDriver,
 		PluggedIn:             lp.pluggedIn,
 		CurrentSoCPct:         lp.currentSoCPct,
 		CurrentPowerW:         lp.currentPowerW,

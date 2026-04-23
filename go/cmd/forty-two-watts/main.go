@@ -817,20 +817,16 @@ func main() {
 		// et al) — parse the stored JSON and surface it as a
 		// VehicleSample for Manager.Observe. Driver unset or no reading
 		// → OK=false → manager falls back to inferred SoC.
-		lpMgr.SetVehicleTelemetry(func(driver string) loadpoint.VehicleSample {
-			if driver == "" {
-				return loadpoint.VehicleSample{}
-			}
-			r := tel.Get(driver, telemetry.DerVehicle)
+		parseVehicle := func(r *telemetry.DerReading) loadpoint.VehicleSample {
 			if r == nil {
 				return loadpoint.VehicleSample{}
 			}
 			var d struct {
-				SoC              float64 `json:"soc"`
-				ChargeLimitPct   float64 `json:"charge_limit_pct"`
-				ChargingState    string  `json:"charging_state"`
-				TimeToFullMin    int     `json:"time_to_full_min"`
-				Stale            bool    `json:"stale"`
+				SoC            float64 `json:"soc"`
+				ChargeLimitPct float64 `json:"charge_limit_pct"`
+				ChargingState  string  `json:"charging_state"`
+				TimeToFullMin  int     `json:"time_to_full_min"`
+				Stale          bool    `json:"stale"`
 			}
 			_ = json.Unmarshal(r.Data, &d)
 			return loadpoint.VehicleSample{
@@ -841,6 +837,21 @@ func main() {
 				TimeToFullMin:  d.TimeToFullMin,
 				Stale:          d.Stale,
 			}
+		}
+		lpMgr.SetVehicleTelemetry(func(driver string) loadpoint.VehicleSample {
+			if driver == "" {
+				return loadpoint.VehicleSample{}
+			}
+			return parseVehicle(tel.Get(driver, telemetry.DerVehicle))
+		})
+		// Plug-in auto-discovery: snapshot every live DerVehicle
+		// reading so Manager can pick the most-likely plugged car.
+		lpMgr.SetVehicleSnapshot(func() map[string]loadpoint.VehicleSample {
+			out := map[string]loadpoint.VehicleSample{}
+			for _, r := range tel.ReadingsByType(telemetry.DerVehicle) {
+				out[r.Driver] = parseVehicle(r)
+			}
+			return out
 		})
 	}
 
@@ -1516,14 +1527,17 @@ func buildLoadpointConfigs(src []config.Loadpoint) []loadpoint.Config {
 	out := make([]loadpoint.Config, 0, len(src))
 	for _, lp := range src {
 		out = append(out, loadpoint.Config{
-			ID:                lp.ID,
-			DriverName:        lp.DriverName,
-			MinChargeW:        lp.MinChargeW,
-			MaxChargeW:        lp.MaxChargeW,
-			AllowedStepsW:     lp.AllowedStepsW,
-			VehicleCapacityWh: lp.VehicleCapacityWh,
-			PluginSoCPct:      lp.PluginSoCPct,
-			VehicleDriver:     lp.VehicleDriver,
+			ID:                        lp.ID,
+			DriverName:                lp.DriverName,
+			MinChargeW:                lp.MinChargeW,
+			MaxChargeW:                lp.MaxChargeW,
+			AllowedStepsW:             lp.AllowedStepsW,
+			VehicleCapacityWh:         lp.VehicleCapacityWh,
+			PluginSoCPct:              lp.PluginSoCPct,
+			VehicleDriver:             lp.VehicleDriver,
+			AutoChargeEnabled:         lp.AutoChargeEnabled,
+			AutoChargeTargetSoCPct:    lp.AutoChargeTargetSoCPct,
+			AutoChargeTargetTimeLocal: lp.AutoChargeTargetTimeLocal,
 		})
 	}
 	return out
