@@ -15,9 +15,17 @@ const (
 	DerPV
 	DerBattery
 	DerEV
+	// DerVehicle is a read-only reading from the connected vehicle
+	// itself (e.g. via TeslaBLEProxy), distinct from DerEV which is
+	// the charger. Carries SoC + `charge_limit_pct`/`charging_state`/
+	// `time_to_full_min`/`stale` in Data. RawW is always 0 — vehicle
+	// readings don't conflict with dispatch math, they only inform
+	// the loadpoint manager's SoC-source selection and the UI.
+	DerVehicle
 )
 
-// String returns the canonical string form ("meter", "pv", "battery", "ev").
+// String returns the canonical string form ("meter", "pv", "battery",
+// "ev", "vehicle").
 func (d DerType) String() string {
 	switch d {
 	case DerMeter:
@@ -28,6 +36,8 @@ func (d DerType) String() string {
 		return "battery"
 	case DerEV:
 		return "ev"
+	case DerVehicle:
+		return "vehicle"
 	}
 	return "unknown"
 }
@@ -43,6 +53,8 @@ func ParseDerType(s string) (DerType, error) {
 		return DerBattery, nil
 	case "ev":
 		return DerEV, nil
+	case "vehicle":
+		return DerVehicle, nil
 	}
 	return 0, fmt.Errorf("unknown der type %q", s)
 }
@@ -359,7 +371,7 @@ func (s *Store) DriverHealthMut(name string) *DriverHealth {
 func (s *Store) Remove(driver string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for _, t := range []DerType{DerMeter, DerPV, DerBattery, DerEV} {
+	for _, t := range []DerType{DerMeter, DerPV, DerBattery, DerEV, DerVehicle} {
 		k := key(driver, t)
 		delete(s.readings, k)
 		delete(s.filters, k)

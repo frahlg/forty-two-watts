@@ -183,7 +183,7 @@ func registerHost(L *lua.LState, env *HostEnv) {
 		return 0
 	}))
 
-	// host.emit("meter"|"pv"|"battery"|"ev", { w=…, soc=…, connected=…, charging=… })
+	// host.emit("meter"|"pv"|"battery"|"ev"|"vehicle", { w=…, soc=…, … })
 	// The type string is prepended to the table as a `type` field and
 	// the whole thing is serialized as JSON before hitting the telemetry store.
 	// Allowed fields per type:
@@ -196,6 +196,14 @@ func registerHost(L *lua.LState, env *HostEnv) {
 	//              session_wh (optional, kWh for current session * 1000),
 	//              max_a (optional, charger current limit),
 	//              phases (optional, 1 or 3)
+	//   vehicle -> soc (required, vehicle battery level % 0-100),
+	//              charge_limit_pct (optional, vehicle-configured limit),
+	//              charging_state (optional, e.g. "Charging"|"Stopped"|"Complete"),
+	//              time_to_full_min (optional),
+	//              stale (optional bool, true when data hasn't refreshed
+	//              since stale_after_s — UI should de-emphasize).
+	//              w is unused for vehicle readings (charger's DerEV owns
+	//              the power number).
 	host.RawSetString("emit", L.NewFunction(func(L *lua.LState) int {
 		typ := L.CheckString(1)
 		tbl := L.CheckTable(2)
