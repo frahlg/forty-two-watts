@@ -63,8 +63,11 @@ type server struct {
 	// runMu ensures only one pull+up runs at a time. HTTP handlers that
 	// arrive while a job is in flight return 409.
 	runMu sync.Mutex
-	// runner lets tests inject a fake exec.
-	runner func(ctx context.Context, args ...string) error
+	// runner lets tests inject a fake exec. env is the extra KEY=VALUE
+	// entries to append to the docker process's environment — used to
+	// pass FTW_IMAGE_TAG=<target> so compose's image tag substitution
+	// pins to the requested version. nil/empty means "inherit only".
+	runner func(ctx context.Context, env []string, args ...string) error
 }
 
 // composeArgs returns the common prefix of every `docker compose` invocation
@@ -177,8 +180,23 @@ func (s *server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch body.Action {
-	case "update", "restart":
-		// existing semantics
+	case "update":
+		// Updates must be version-pinned: the sidecar refuses to fall
+		// back to `:latest` because that re-introduces the race where a
+		// pull resolves to the old digest while the build workflow's
+		// retag is in flight.
+		if body.Target == "" {
+			http.Error(w, "update requires target version (vX.Y.Z)", 400)
+			return
+		}
+		if !isSemverTag(body.Target) {
+			http.Error(w, "target must look like vX.Y.Z", 400)
+			return
+		}
+	case "restart":
+		// target optional — when empty, compose's `${FTW_IMAGE_TAG:-latest}`
+		// substitution falls through to :latest. That's the dev path for
+		// exercising the flow without a real release.
 	case "rollback":
 		if body.Snapshot == "" {
 			http.Error(w, "rollback requires snapshot id", 400)
@@ -234,6 +252,12 @@ func (s *server) handleStatus(w http.ResponseWriter, r *http.Request) {
 // runJob executes a pull+up (or pull+up --force-recreate) sequence,
 // emitting state transitions between steps. Runs inside a goroutine so
 // the HTTP handler that kicked it off has already responded.
+//
+// When target is non-empty (always the case for action=update), it's
+// passed as FTW_IMAGE_TAG=<target> so docker-compose.yml's image tag
+// substitution pulls the specific version. action=restart with empty
+// target falls through to compose's default (`:latest`) — that's the
+// dev path for exercising the flow without a real release.
 func (s *server) runJob(action, target string) {
 	now := time.Now()
 	s.writeState(State{State: "pulling", Action: action, Target: target, StartedAt: now, UpdatedAt: now})
@@ -241,9 +265,14 @@ func (s *server) runJob(action, target string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
 
+	var env []string
+	if target != "" {
+		env = []string{"FTW_IMAGE_TAG=" + target}
+	}
+
 	if !s.skipPull {
 		pullArgs := s.composeArgs("pull", mainServiceName)
-		if err := s.runner(ctx, pullArgs...); err != nil {
+		if err := s.runner(ctx, env, pullArgs...); err != nil {
 			s.writeState(State{State: "failed", Action: action, Target: target, StartedAt: now, UpdatedAt: time.Now(), Message: "pull failed: " + err.Error()})
 			slog.Error("pull failed", "err", err)
 			return
@@ -261,7 +290,7 @@ func (s *server) runJob(action, target string) {
 		// UI exposes as the "Restart" button.
 		upArgs = s.composeArgs("up", "-d", "--force-recreate", mainServiceName)
 	}
-	if err := s.runner(ctx, upArgs...); err != nil {
+	if err := s.runner(ctx, env, upArgs...); err != nil {
 		s.writeState(State{State: "failed", Action: action, Target: target, StartedAt: now, UpdatedAt: time.Now(), Message: "up -d failed: " + err.Error()})
 		slog.Error("compose up failed", "err", err)
 		return
@@ -312,7 +341,7 @@ func (s *server) runRollback(snapshotID string, files []string) {
 	// 1. Stop the main service so SQLite isn't holding a file handle
 	// while we swap state.db under it.
 	stopArgs := s.composeArgs("stop", mainServiceName)
-	if err := s.runner(ctx, stopArgs...); err != nil {
+	if err := s.runner(ctx, nil, stopArgs...); err != nil {
 		s.writeState(State{State: "failed", Action: base.Action, Snapshot: base.Snapshot, StartedAt: now, UpdatedAt: time.Now(), Message: "compose stop failed: " + err.Error()})
 		return
 	}
@@ -335,12 +364,12 @@ func (s *server) runRollback(snapshotID string, files []string) {
 		}
 		dst := "/app/data/" + f
 		cpArgs := []string{"cp", src, mainServiceName + ":" + dst}
-		if err := s.runner(ctx, cpArgs...); err != nil {
+		if err := s.runner(ctx, nil, cpArgs...); err != nil {
 			// File-swap failure is serious. Try to bring the
 			// service back anyway so the operator isn't stranded.
 			slog.Error("rollback docker cp failed", "file", f, "err", err)
 			s.writeState(State{State: "failed", Action: base.Action, Snapshot: base.Snapshot, StartedAt: now, UpdatedAt: time.Now(), Message: "docker cp " + f + " failed: " + err.Error()})
-			_ = s.runner(ctx, s.composeArgs("up", "-d", mainServiceName)...)
+			_ = s.runner(ctx, nil, s.composeArgs("up", "-d", mainServiceName)...)
 			return
 		}
 	}
@@ -350,7 +379,7 @@ func (s *server) runRollback(snapshotID string, files []string) {
 	// restart flow).
 	s.writeState(State{State: "restarting", Action: base.Action, Snapshot: base.Snapshot, StartedAt: now, UpdatedAt: time.Now(), Message: "starting main service on restored state"})
 	upArgs := s.composeArgs("up", "-d", "--force-recreate", mainServiceName)
-	if err := s.runner(ctx, upArgs...); err != nil {
+	if err := s.runner(ctx, nil, upArgs...); err != nil {
 		s.writeState(State{State: "failed", Action: base.Action, Snapshot: base.Snapshot, StartedAt: now, UpdatedAt: time.Now(), Message: "compose up -d failed: " + err.Error()})
 		return
 	}
@@ -415,14 +444,20 @@ func (s *server) recoverCrashedState() {
 
 // dockerCompose shells out to the `docker` CLI (the compose plugin ships
 // in the docker:27-cli image). stdout+stderr are captured so a failure
-// includes the compose error text in state.json.
-func dockerCompose(ctx context.Context, args ...string) error {
+// includes the compose error text in state.json. extraEnv is appended
+// to the inherited process environment so callers can set
+// FTW_IMAGE_TAG=<version> for compose's `${FTW_IMAGE_TAG:-latest}`
+// substitution to pin a specific version.
+func dockerCompose(ctx context.Context, extraEnv []string, args ...string) error {
 	cmd := exec.CommandContext(ctx, "docker", args...)
+	if len(extraEnv) > 0 {
+		cmd.Env = append(os.Environ(), extraEnv...)
+	}
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("%w: %s", err, truncate(string(out), 400))
 	}
-	slog.Info("docker compose ok", "args", args, "out", truncate(string(out), 200))
+	slog.Info("docker compose ok", "args", args, "env", extraEnv, "out", truncate(string(out), 200))
 	return nil
 }
 
@@ -438,4 +473,29 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// isSemverTag matches the strict "vX.Y.Z" tag shape that release-please
+// produces. Pre-release suffixes (-rc1, +meta) are intentionally
+// rejected here so the sidecar can't be talked into pinning the deploy
+// to a release candidate via a crafted target string.
+func isSemverTag(s string) bool {
+	if !strings.HasPrefix(s, "v") {
+		return false
+	}
+	parts := strings.Split(s[1:], ".")
+	if len(parts) != 3 {
+		return false
+	}
+	for _, p := range parts {
+		if p == "" {
+			return false
+		}
+		for _, r := range p {
+			if r < '0' || r > '9' {
+				return false
+			}
+		}
+	}
+	return true
 }

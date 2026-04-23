@@ -25,7 +25,10 @@
 
 services:
   forty-two-watts:
-    image: ghcr.io/frahlg/forty-two-watts:latest
+    # Tag is variable so the ftw-updater sidecar can pin to a specific
+    # release on `update`. Manual `docker compose up -d` (no env set)
+    # falls through to :latest. See docs/self-update.md.
+    image: ghcr.io/frahlg/forty-two-watts:${FTW_IMAGE_TAG:-latest}
     container_name: forty-two-watts
     restart: unless-stopped
 

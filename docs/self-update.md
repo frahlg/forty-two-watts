@@ -14,13 +14,14 @@ processes so the main container never touches the Docker socket.
 │  │  forty-two-watts        │     │  ftw-updater (sidecar)       │   │
 │  │  ───────────────        │     │  ─────────────               │   │
 │  │  selfupdate.Checker     │     │  net/http on UDS             │   │
-│  │  - polls GH Releases    │◀────┤  POST /update {action}       │   │
-│  │  - serves /api/version  │ UDS │  GET /status                 │   │
-│  │    /* endpoints         │     │                              │   │
-│  │  - reads state.json     │     │  shells out:                 │   │
-│  │                         │     │   docker compose pull        │   │
-│  │                         │     │   docker compose up -d       │   │
-│  │                         │     │     [--force-recreate]       │   │
+│  │  - lists GHCR semver    │◀────┤  POST /update {action,target}│   │
+│  │    tags                 │ UDS │  GET /status                 │   │
+│  │  - GH Releases for      │     │                              │   │
+│  │    notes only (best-    │     │  shells out (with            │   │
+│  │    effort)              │     │   FTW_IMAGE_TAG=<target>):   │   │
+│  │  - serves /api/version  │     │   docker compose pull        │   │
+│  │    /* endpoints         │     │   docker compose up -d       │   │
+│  │  - reads state.json     │     │     [--force-recreate]       │   │
 │  └─────────┬───────────────┘     └──────────┬───────────────────┘   │
 │            │                                │                       │
 │            │    update-ipc (tmpfs volume)   │    /var/run/docker.sock │
@@ -29,6 +30,50 @@ processes so the main container never touches the Docker socket.
 │                      state.json + sock                              │
 └─────────────────────────────────────────────────────────────────────┘
 ```
+
+## Why version tags, not :latest
+
+A GitHub Release is published the moment release-please's PR merges;
+the GitHub Actions workflow that builds and pushes the image to GHCR
+runs *after* that. The `:latest` tag is also retagged after the build,
+which means there's a window where:
+
+- the GH Release exists,
+- the immutable `vX.Y.Z` tag is in GHCR,
+- but `:latest` still aliases the previous image.
+
+Earlier we polled GH Releases and pulled `:latest` — `docker compose
+pull` happily fetched the previous digest, `up -d` recreated the same
+container, and the sidecar wrote `state=done` against the new tag while
+the running version didn't actually move.
+
+The fix is to ignore `:latest` entirely — both as a probe signal and as
+a pull target:
+
+- The Checker lists semver tags from GHCR's `/v2/<repo>/tags/list` and
+  picks the highest. Tags appear in that list only when their manifest
+  has been pushed, so the existence of `vX.Y.Z` is itself proof the
+  image is deployable. No digest comparison or HEAD on `:latest`
+  needed.
+- The dispatch payload to the sidecar carries the resolved version as
+  `target`. The sidecar passes `FTW_IMAGE_TAG=vX.Y.Z` to docker, and
+  `docker-compose.yml` uses `image: ghcr.io/.../forty-two-watts:${FTW_IMAGE_TAG:-latest}`
+  — so the pull resolves a *specific*, immutable tag and the recreate
+  is guaranteed to move the digest. No race possible.
+
+The sidecar refuses `update` requests without a properly-shaped target
+(`vX.Y.Z`) — falling through to `:latest` is exactly what we're
+preventing, so the boundary check fails fast.
+
+The GH Releases API is still consulted, but only as a best-effort
+lookup for the changelog body shown in the upgrade modal. A 404 there
+(release not yet published, or never paired with the image) doesn't
+block the upgrade.
+
+`restart` is the dev-convenience action — no target required, no env
+override, falls through to compose's `:latest` default and
+`--force-recreate`s. It exists so the full pull→recreate→reload flow
+can be exercised locally without waiting for a real release.
 
 ## Why a sidecar
 
@@ -114,12 +159,21 @@ a version you hid earlier resurfaces as soon as you ask about it.
 
 ## Enabling and disabling
 
-The entire feature is gated on `FTW_SELFUPDATE_ENABLED=1`. The shipped
-`docker-compose.yml` sets this on the main service; any deploy that
-doesn't use the sidecar (bare-metal binary, native OS image, dev build
-started with `go run`, etc.) leaves it unset and the UI hides the badge
+The feature is gated on `FTW_SELFUPDATE_ENABLED=1` for production
+builds. The shipped `docker-compose.yml` sets this on the main service;
+production deploys that don't use the sidecar (bare-metal binary,
+native OS image, etc.) leave it unset and the UI hides the badge
 entirely. Handlers under `/api/version/*` return `503 self-update
 disabled` when the flag is off.
+
+**Dev exception:** when the binary's compile-time `Version` is `"dev"`
+(i.e. no `-ldflags Version=v…` was applied — `make dev`, `go run`, an
+unstamped local build), the probe runs implicitly so the operator can
+click the "dev" version label in the header and exercise the full flow
+without ceremony. The Update button still POSTs to `/api/version/update`
+which calls into the sidecar — without a sidecar socket the call 502s
+and the modal shows the failure cleanly. That's intentional: dev users
+get the visibility, production users get the gate.
 
 Finer-grained knobs, only relevant once the feature is enabled:
 

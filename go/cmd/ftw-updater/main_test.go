@@ -16,18 +16,21 @@ import (
 )
 
 // fakeRunner records the compose commands the server attempted to run so
-// tests can assert on arg order without touching docker.
+// tests can assert on arg order without touching docker. envs[i] is the
+// extra env passed alongside calls[i].
 type fakeRunner struct {
 	mu     sync.Mutex
 	calls  [][]string
+	envs   [][]string
 	fail   bool
 	failOn string
 }
 
-func (f *fakeRunner) run(ctx context.Context, args ...string) error {
+func (f *fakeRunner) run(ctx context.Context, env []string, args ...string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, append([]string{}, args...))
+	f.envs = append(f.envs, append([]string{}, env...))
 	if f.fail {
 		return errors.New("forced failure")
 	}
@@ -49,6 +52,14 @@ func (f *fakeRunner) snapshot() [][]string {
 	return out
 }
 
+func (f *fakeRunner) envSnapshot() [][]string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([][]string, len(f.envs))
+	copy(out, f.envs)
+	return out
+}
+
 func newTestServer(t *testing.T) (*server, *fakeRunner) {
 	t.Helper()
 	dir := t.TempDir()
@@ -65,7 +76,7 @@ func TestSkipPull_BypassesPullStep(t *testing.T) {
 	s, runner := newTestServer(t)
 	s.skipPull = true
 
-	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(`{"action":"update"}`))
+	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(`{"action":"update","target":"v1.2.3"}`))
 	rr := httptest.NewRecorder()
 	s.handleUpdate(rr, req)
 	waitForState(t, s, "done")
@@ -136,7 +147,7 @@ func TestHandleUpdate_PullFailure(t *testing.T) {
 	s, runner := newTestServer(t)
 	runner.fail = true
 
-	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(`{"action":"update"}`))
+	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(`{"action":"update","target":"v1.2.3"}`))
 	rr := httptest.NewRecorder()
 	s.handleUpdate(rr, req)
 	st := waitForState(t, s, "failed")
@@ -149,12 +160,82 @@ func TestHandleUpdate_UpFailure(t *testing.T) {
 	s, runner := newTestServer(t)
 	runner.failOn = "up"
 
-	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(`{"action":"update"}`))
+	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(`{"action":"update","target":"v1.2.3"}`))
 	rr := httptest.NewRecorder()
 	s.handleUpdate(rr, req)
 	st := waitForState(t, s, "failed")
 	if !strings.Contains(st.Message, "up") {
 		t.Errorf("failure should mention up: %+v", st)
+	}
+}
+
+// Update with no target version is rejected at the boundary — the
+// sidecar refuses to pull `:latest`, which is what re-introduced the
+// race in the first place.
+func TestHandleUpdate_RequiresTarget(t *testing.T) {
+	s, _ := newTestServer(t)
+	for _, body := range []string{
+		`{"action":"update"}`,
+		`{"action":"update","target":""}`,
+		`{"action":"update","target":"latest"}`,
+		`{"action":"update","target":"v1.2"}`,
+		`{"action":"update","target":"v1.2.3-rc1"}`,
+		`{"action":"update","target":"v1.2.3 ; rm -rf /"}`,
+	} {
+		req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(body))
+		rr := httptest.NewRecorder()
+		s.handleUpdate(rr, req)
+		if rr.Code != 400 {
+			t.Errorf("body %s: want 400, got %d (%s)", body, rr.Code, rr.Body.String())
+		}
+	}
+}
+
+// The whole point of this redesign: `update` must pin compose to the
+// requested version via FTW_IMAGE_TAG, so `docker compose pull` fetches
+// the exact image and is immune to the :latest-retag race.
+func TestHandleUpdate_PinsImageTagViaEnv(t *testing.T) {
+	s, runner := newTestServer(t)
+	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(`{"action":"update","target":"v0.44.0"}`))
+	rr := httptest.NewRecorder()
+	s.handleUpdate(rr, req)
+	if rr.Code != 202 {
+		t.Fatalf("status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	waitForState(t, s, "done")
+	envs := runner.envSnapshot()
+	if len(envs) != 2 {
+		t.Fatalf("expected 2 docker calls (pull, up); got %d", len(envs))
+	}
+	for i, env := range envs {
+		found := false
+		for _, e := range env {
+			if e == "FTW_IMAGE_TAG=v0.44.0" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("call %d missing FTW_IMAGE_TAG=v0.44.0; env=%v", i, env)
+		}
+	}
+}
+
+// `restart` is the dev path — no target needed, no env override, falls
+// through to compose's :latest default.
+func TestHandleUpdate_RestartLeavesEnvUnset(t *testing.T) {
+	s, runner := newTestServer(t)
+	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(`{"action":"restart"}`))
+	rr := httptest.NewRecorder()
+	s.handleUpdate(rr, req)
+	if rr.Code != 202 {
+		t.Fatalf("status = %d", rr.Code)
+	}
+	waitForState(t, s, "done")
+	for i, env := range runner.envSnapshot() {
+		if len(env) != 0 {
+			t.Errorf("restart call %d should have no extra env, got %v", i, env)
+		}
 	}
 }
 
@@ -263,12 +344,12 @@ func TestHandleUpdate_ConcurrentRejected(t *testing.T) {
 	// Swap the runner for a blocking one so the first job lingers and the
 	// second request arrives while runMu is held.
 	block := make(chan struct{})
-	s.runner = func(ctx context.Context, _ ...string) error {
+	s.runner = func(ctx context.Context, _ []string, _ ...string) error {
 		<-block
 		return nil
 	}
 
-	req1 := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(`{"action":"update"}`))
+	req1 := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(`{"action":"update","target":"v1.2.3"}`))
 	rr1 := httptest.NewRecorder()
 	s.handleUpdate(rr1, req1)
 	if rr1.Code != 202 {
