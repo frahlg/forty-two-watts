@@ -118,6 +118,11 @@ type Loadpoint struct {
 	AllowedStepsW     []float64 `yaml:"allowed_steps_w,omitempty" json:"allowed_steps_w,omitempty"`
 	VehicleCapacityWh float64   `yaml:"vehicle_capacity_wh,omitempty" json:"vehicle_capacity_wh,omitempty"`
 	PluginSoCPct      float64   `yaml:"plugin_soc_pct,omitempty" json:"plugin_soc_pct,omitempty"`
+	// VehicleDriver optionally points to a DerVehicle-emitting driver
+	// (e.g. tesla_vehicle against a TeslaBLEProxy) whose real BMS SoC
+	// overrides the pluginSoC + deliveredWh inference and whose
+	// charge_limit_pct flows through to the UI.
+	VehicleDriver string `yaml:"vehicle_driver,omitempty" json:"vehicle_driver,omitempty"`
 }
 
 // OCPP configures the embedded OCPP 1.6J Central System for EV chargers.

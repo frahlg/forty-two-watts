@@ -48,6 +48,14 @@ type Config struct {
 	// override per-loadpoint or pre-plug-in.
 	PluginSoCPct float64 `yaml:"plugin_soc_pct,omitempty" json:"plugin_soc_pct,omitempty"`
 
+	// VehicleDriver is the optional name of a DerVehicle-emitting
+	// driver (tesla_vehicle.lua + a TeslaBLEProxy today; future
+	// OEM drivers possible) whose readings should override the
+	// PluginSoCPct inference with the vehicle's real BMS SoC and
+	// expose charge_limit_pct in the UI. Empty = no vehicle
+	// integration; manager falls back to the inferred SoC path.
+	VehicleDriver string `yaml:"vehicle_driver,omitempty" json:"vehicle_driver,omitempty"`
+
 	// PhaseMode selects how the controller picks between 1Φ and 3Φ
 	// delivery each tick. "3p" (default) and "1p" lock the install to
 	// one mode and filter AllowedStepsW accordingly. "auto" lets the
@@ -136,6 +144,26 @@ func filterStepsByPhase(steps []float64, phases int, splitW float64) []float64 {
 	return out
 }
 
+// VehicleSample is the subset of a DerVehicle reading the manager
+// consumes: the real SoC from the car's BMS, the vehicle-configured
+// charge limit (from e.g. the Tesla app), and a freshness flag set
+// by the driver when no poll has refreshed the data within the
+// configured stale_after_s. `OK` is false when no reading exists
+// yet — the manager falls back to the inferred SoC path.
+type VehicleSample struct {
+	OK             bool
+	SoCPct         float64
+	ChargeLimitPct float64
+	ChargingState  string
+	TimeToFullMin  int
+	Stale          bool
+}
+
+// VehicleTelemetryFunc returns the latest vehicle reading for a
+// driver name. Callers (main.go) wire this to telemetry.Store and
+// parse the Data JSON of the DerVehicle reading.
+type VehicleTelemetryFunc func(driver string) VehicleSample
+
 // Policy captures the energy-source constraints the operator set on
 // the active schedule. Stored per-schedule in state.db and lifted
 // onto the runtime so dispatch + planner can consult it without an
@@ -160,14 +188,26 @@ func DefaultPolicy() Policy {
 type State struct {
 	ID                 string    `json:"id"`
 	DriverName         string    `json:"driver_name"`
+	VehicleDriver      string    `json:"vehicle_driver,omitempty"`
 	PluggedIn          bool      `json:"plugged_in"`
-	CurrentSoCPct      float64   `json:"current_soc_pct"`       // observed or estimated
+	CurrentSoCPct      float64   `json:"current_soc_pct"`       // effective (vehicle or inferred)
 	CurrentPowerW      float64   `json:"current_power_w"`       // actual draw (site sign: + = charging)
 	DeliveredWhSession float64   `json:"delivered_wh_session"`  // since plug-in
 	TargetSoCPct       float64   `json:"target_soc_pct"`        // user intent
 	TargetTime         time.Time `json:"target_time,omitempty"` // user intent
 	Policy             Policy    `json:"policy"`
-	UpdatedAtMs        int64     `json:"updated_at_ms"`
+	// Vehicle-side telemetry (populated when a DerVehicle driver is
+	// configured on VehicleDriver and emitting). Fields are zero when
+	// unavailable. SoCSource is "vehicle" when CurrentSoCPct comes
+	// from the car's BMS, "inferred" when it's the pluginSoC +
+	// deliveredWh path, or "" when not plugged in.
+	VehicleSoCPct         float64 `json:"vehicle_soc_pct,omitempty"`
+	VehicleChargeLimitPct float64 `json:"vehicle_charge_limit_pct,omitempty"`
+	VehicleChargingState  string  `json:"vehicle_charging_state,omitempty"`
+	VehicleTimeToFullMin  int     `json:"vehicle_time_to_full_min,omitempty"`
+	VehicleStale          bool    `json:"vehicle_stale,omitempty"`
+	SoCSource             string  `json:"soc_source,omitempty"`
+	UpdatedAtMs           int64   `json:"updated_at_ms"`
 	// MinChargeW / MaxChargeW / AllowedStepsW are repeated here so the
 	// UI has everything for rendering in one fetch.
 	MinChargeW    float64   `json:"min_charge_w"`
@@ -191,6 +231,11 @@ type Manager struct {
 	// prevent the in-memory state from advancing — the runtime
 	// behaviour is unaffected, only persistence across restart is.
 	onTarget TargetPersister
+	// vehicleTel returns the most recent DerVehicle reading for a
+	// driver name. Optional — when nil, every loadpoint falls back
+	// to the pluginSoC + deliveredWh/capacity SoC inference even if
+	// it has VehicleDriver configured. Wired by main.go.
+	vehicleTel VehicleTelemetryFunc
 }
 
 // loadpointRuntime is the in-memory representation. Its fields are the
@@ -206,7 +251,16 @@ type loadpointRuntime struct {
 	targetSoCPct       float64
 	targetTime         time.Time
 	policy             Policy
-	updatedAtMs        int64
+	// Vehicle telemetry, populated by Observe when VehicleDriver is
+	// wired. socSource records which channel produced currentSoCPct
+	// so the UI can distinguish measured vs inferred.
+	vehicleSoCPct       float64
+	vehicleChargeLimitPct float64
+	vehicleChargingState  string
+	vehicleTimeToFullMin  int
+	vehicleStale        bool
+	socSource           string
+	updatedAtMs         int64
 
 	// Plug-in anchor: the SoC we believe the vehicle was at when
 	// this session began. Persisted across Observe() calls so SoC
@@ -227,6 +281,15 @@ func NewManager() *Manager {
 func (m *Manager) SetTargetPersister(p TargetPersister) {
 	m.mu.Lock()
 	m.onTarget = p
+	m.mu.Unlock()
+}
+
+// SetVehicleTelemetry installs the getter used to fetch vehicle-side
+// readings (SoC, charge limit) from the DerVehicle telemetry store.
+// nil clears it — manager reverts to the inferred-SoC-only path.
+func (m *Manager) SetVehicleTelemetry(f VehicleTelemetryFunc) {
+	m.mu.Lock()
+	m.vehicleTel = f
 	m.mu.Unlock()
 }
 
@@ -280,6 +343,12 @@ func (m *Manager) Load(cfgs []Config) {
 			lp.targetSoCPct = existing.targetSoCPct
 			lp.targetTime = existing.targetTime
 			lp.policy = existing.policy
+			lp.vehicleSoCPct = existing.vehicleSoCPct
+			lp.vehicleChargeLimitPct = existing.vehicleChargeLimitPct
+			lp.vehicleChargingState = existing.vehicleChargingState
+			lp.vehicleTimeToFullMin = existing.vehicleTimeToFullMin
+			lp.vehicleStale = existing.vehicleStale
+			lp.socSource = existing.socSource
 			lp.updatedAtMs = existing.updatedAtMs
 			lp.sessionPluginSoCPct = existing.sessionPluginSoCPct
 		}
@@ -371,11 +440,36 @@ func (m *Manager) Observe(id string, pluggedIn bool, powerW, deliveredWh float64
 	lp.pluggedIn = pluggedIn
 	lp.currentPowerW = powerW
 	lp.deliveredWhSession = deliveredWh
-	if pluggedIn {
+
+	// Vehicle-side telemetry overrides the inferred SoC path when
+	// available and fresh. Even stale readings are stored so the UI
+	// can render the last-known value with a "stale" indicator —
+	// better than a sudden blank. The freshness flag is already set
+	// by the driver (stale_after_s elapsed since last successful
+	// HTTP refresh). A nil getter → same as empty VehicleDriver:
+	// fall back to the inferred path.
+	var vs VehicleSample
+	if lp.VehicleDriver != "" && m.vehicleTel != nil {
+		vs = m.vehicleTel(lp.VehicleDriver)
+	}
+	lp.vehicleSoCPct = vs.SoCPct
+	lp.vehicleChargeLimitPct = vs.ChargeLimitPct
+	lp.vehicleChargingState = vs.ChargingState
+	lp.vehicleTimeToFullMin = vs.TimeToFullMin
+	lp.vehicleStale = vs.Stale
+
+	switch {
+	case !pluggedIn:
+		lp.currentSoCPct = 0
+		lp.socSource = ""
+	case vs.OK && !vs.Stale && vs.SoCPct > 0:
+		// Trust the vehicle's BMS over our delivered-Wh inference.
+		lp.currentSoCPct = vs.SoCPct
+		lp.socSource = "vehicle"
+	default:
 		lp.currentSoCPct = estimateSoCPct(lp.sessionPluginSoCPct,
 			deliveredWh, lp.VehicleCapacityWh)
-	} else {
-		lp.currentSoCPct = 0
+		lp.socSource = "inferred"
 	}
 	lp.updatedAtMs = time.Now().UnixMilli()
 }
@@ -482,18 +576,25 @@ func (lp *loadpointRuntime) snapshot() State {
 	copy(steps, lp.AllowedStepsW)
 	sort.Float64s(steps)
 	return State{
-		ID:                 lp.ID,
-		DriverName:         lp.DriverName,
-		PluggedIn:          lp.pluggedIn,
-		CurrentSoCPct:      lp.currentSoCPct,
-		CurrentPowerW:      lp.currentPowerW,
-		DeliveredWhSession: lp.deliveredWhSession,
-		TargetSoCPct:       lp.targetSoCPct,
-		TargetTime:         lp.targetTime,
-		Policy:             lp.policy,
-		UpdatedAtMs:        lp.updatedAtMs,
-		MinChargeW:         lp.MinChargeW,
-		MaxChargeW:         lp.MaxChargeW,
-		AllowedStepsW:      steps,
+		ID:                    lp.ID,
+		DriverName:            lp.DriverName,
+		VehicleDriver:         lp.VehicleDriver,
+		PluggedIn:             lp.pluggedIn,
+		CurrentSoCPct:         lp.currentSoCPct,
+		CurrentPowerW:         lp.currentPowerW,
+		DeliveredWhSession:    lp.deliveredWhSession,
+		TargetSoCPct:          lp.targetSoCPct,
+		TargetTime:            lp.targetTime,
+		Policy:                lp.policy,
+		VehicleSoCPct:         lp.vehicleSoCPct,
+		VehicleChargeLimitPct: lp.vehicleChargeLimitPct,
+		VehicleChargingState:  lp.vehicleChargingState,
+		VehicleTimeToFullMin:  lp.vehicleTimeToFullMin,
+		VehicleStale:          lp.vehicleStale,
+		SoCSource:             lp.socSource,
+		UpdatedAtMs:           lp.updatedAtMs,
+		MinChargeW:            lp.MinChargeW,
+		MaxChargeW:            lp.MaxChargeW,
+		AllowedStepsW:         steps,
 	}
 }

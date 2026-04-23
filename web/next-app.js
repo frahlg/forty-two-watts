@@ -358,15 +358,42 @@
             soc: d.bat_soc != null ? Math.round(d.bat_soc * 100) : null,
           });
         }
-        // EV — always consumes from the house side.
+        // EV — always consumes from the house side. When a
+        // loadpoint maps to this driver AND a vehicle telemetry
+        // source is reporting, inject the vehicle's own SoC +
+        // charge limit so the bubble can render "24 / 50 %".
         if (d.ev_w != null) {
           var eKw = d.ev_w / 1000;
           var eActive = eKw > 0.05;
+          var lpEv = loadpointsByDriver && loadpointsByDriver[name];
+          var evSoc = null;
+          var evLimit = null;
+          var evSocStale = false;
+          var evSocSource = null;
+          if (lpEv) {
+            // Prefer vehicle-reported when present; fall back to
+            // the inferred SoC the manager computed from session_wh.
+            if (lpEv.vehicle_soc_pct > 0) {
+              evSoc = lpEv.vehicle_soc_pct;
+              evSocSource = "vehicle";
+            } else if (lpEv.current_soc_pct > 0) {
+              evSoc = lpEv.current_soc_pct;
+              evSocSource = lpEv.soc_source || "inferred";
+            }
+            if (lpEv.vehicle_charge_limit_pct > 0) {
+              evLimit = lpEv.vehicle_charge_limit_pct;
+            }
+            evSocStale = !!lpEv.vehicle_stale;
+          }
           planets.push({
             id: "ev-" + name, corner: "bottom-right", title: "EV CHARGER", name: name, role: "ev",
             kw: eKw, toHub: false,
             color: eActive ? "var(--green-e)" : "var(--white-s)",
             sub: eActive ? "charging" : "idle",
+            soc: evSoc,
+            chargeLimit: evLimit,
+            socStale: evSocStale,
+            socSource: evSocSource,
           });
         }
       });
@@ -1340,13 +1367,28 @@
   // ---- API ----
   var firstLoad = true;
   var setupBannerShown = false;
+  // Loadpoint cache — keyed by driver_name so the EV-planet builder
+  // in render() can look up vehicle SoC + charge-limit without a
+  // second round of fetches per status tick. Refreshed in parallel
+  // with /api/status. `null` until the first fetch lands; missing
+  // entries mean "no loadpoint for this driver" and the planet
+  // falls back to legacy kW-only rendering.
+  var loadpointsByDriver = null;
   function fetchStatus() {
-    fetch("/api/status")
-      .then(function (res) {
-        if (!res.ok) throw new Error("HTTP " + res.status);
-        return res.json();
-      })
-      .then(function (data) {
+    Promise.all([
+      fetch("/api/status").then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); }),
+      fetch("/api/loadpoints").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
+    ])
+      .then(function (results) {
+        var data = results[0];
+        var lp = results[1];
+        if (lp && Array.isArray(lp.loadpoints)) {
+          var idx = {};
+          lp.loadpoints.forEach(function (l) {
+            if (l && l.driver_name) idx[l.driver_name] = l;
+          });
+          loadpointsByDriver = idx;
+        }
         setConnected(true);
         if (firstLoad) { firstLoad = false; }
         if (setupBannerShown) { hideSetupBanner(); }

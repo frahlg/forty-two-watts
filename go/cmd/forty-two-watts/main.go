@@ -777,6 +777,35 @@ func main() {
 			MaxAmps: cfg.Fuse.MaxAmps,
 			Voltage: cfg.Fuse.Voltage,
 		})
+		// Vehicle-side telemetry (DerVehicle emitted by tesla_vehicle.lua
+		// et al) — parse the stored JSON and surface it as a
+		// VehicleSample for Manager.Observe. Driver unset or no reading
+		// → OK=false → manager falls back to inferred SoC.
+		lpMgr.SetVehicleTelemetry(func(driver string) loadpoint.VehicleSample {
+			if driver == "" {
+				return loadpoint.VehicleSample{}
+			}
+			r := tel.Get(driver, telemetry.DerVehicle)
+			if r == nil {
+				return loadpoint.VehicleSample{}
+			}
+			var d struct {
+				SoC              float64 `json:"soc"`
+				ChargeLimitPct   float64 `json:"charge_limit_pct"`
+				ChargingState    string  `json:"charging_state"`
+				TimeToFullMin    int     `json:"time_to_full_min"`
+				Stale            bool    `json:"stale"`
+			}
+			_ = json.Unmarshal(r.Data, &d)
+			return loadpoint.VehicleSample{
+				OK:             true,
+				SoCPct:         d.SoC,
+				ChargeLimitPct: d.ChargeLimitPct,
+				ChargingState:  d.ChargingState,
+				TimeToFullMin:  d.TimeToFullMin,
+				Stale:          d.Stale,
+			}
+		})
 	}
 
 	// ---- Self-update checker ----
@@ -1458,6 +1487,7 @@ func buildLoadpointConfigs(src []config.Loadpoint) []loadpoint.Config {
 			AllowedStepsW:     lp.AllowedStepsW,
 			VehicleCapacityWh: lp.VehicleCapacityWh,
 			PluginSoCPct:      lp.PluginSoCPct,
+			VehicleDriver:     lp.VehicleDriver,
 		})
 	}
 	return out
