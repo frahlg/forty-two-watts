@@ -16,21 +16,24 @@
   };
 
   async function fetchAll() {
-    const [p, f, m, c] = await Promise.all([
+    const [p, f, m, c, lp] = await Promise.all([
       fetch('/api/prices').then(r => r.json()).catch(() => ({})),
       fetch('/api/forecast').then(r => r.json()).catch(() => ({})),
       fetch('/api/mpc/plan').then(r => r.json()).catch(() => ({})),
       fetch('/api/config').then(r => r.json()).catch(() => ({})),
+      fetch('/api/loadpoints').then(r => r.json()).catch(() => ({})),
     ]);
     state.prices = (p && p.items) || [];
     state.forecast = (f && f.items) || [];
     state.plan = (m && m.plan) || null;
     state.planMeta = (m && m.meta) || null;
     state.fuse = (c && c.fuse) || null;
+    state.loadpoints = (lp && lp.loadpoints) || [];
     state.enabled = {
       prices: p && p.enabled,
       forecast: f && f.enabled,
       mpc: m && m.enabled,
+      loadpoints: lp && lp.enabled,
     };
     state.lastUpdate = new Date();
     render();
@@ -328,6 +331,31 @@
       ctx.fillText('Battery', pad.l + 4, modeBandY0 + modeBandH - 2);
     }
 
+    // ---- EV action band — green strip wherever the planner allocated
+    // energy to a loadpoint. Rendered as a narrow band offset below the
+    // battery mode band so operators can read both stripes side-by-side
+    // when both are active.
+    const evBandY0 = modeBandY0 + modeBandH + 2;
+    const evBandH = 6;
+    if (plan && plan.actions) {
+      let anyEV = false;
+      for (const a of plan.actions) {
+        if (a.slot_start_ms > tMax) break;
+        if (!a.loadpoint_w || a.loadpoint_w <= 0) continue;
+        anyEV = true;
+        const x0 = xScale(a.slot_start_ms);
+        const x1 = xScale(a.slot_start_ms + a.slot_len_min * 60 * 1000);
+        ctx.fillStyle = 'rgba(34,197,94,0.55)'; // green-500 @ 55%
+        ctx.fillRect(x0, evBandY0, Math.max(1, x1 - x0 - 1), evBandH);
+      }
+      if (anyEV) {
+        ctx.fillStyle = 'rgba(255,255,255,0.45)';
+        ctx.font = '9px system-ui, sans-serif';
+        ctx.textAlign = 'left';
+        ctx.fillText('EV', pad.l + 4, evBandY0 + evBandH - 1);
+      }
+    }
+
     // ---- Plan battery bars ----
     if (!noBattery && plan && plan.actions) {
       for (const a of plan.actions) {
@@ -337,7 +365,34 @@
         const y = powerY(a.battery_w);
         const color = a.battery_w >= 0 ? 'rgba(245,158,11,0.65)' : 'rgba(139,92,246,0.65)';
         ctx.fillStyle = color;
-        ctx.fillRect(x0, Math.min(y, powerYCenter), Math.max(1, x1 - x0 - 1), Math.abs(y - powerYCenter));
+        // When both battery and EV occupy the same slot, render the battery
+        // on the left 55% so the EV bar can sit alongside it instead of
+        // being stacked into invisibility.
+        const hasEV = a.loadpoint_w && a.loadpoint_w > 0;
+        const barW = hasEV
+          ? Math.max(1, (x1 - x0) * 0.55 - 1)
+          : Math.max(1, x1 - x0 - 1);
+        ctx.fillRect(x0, Math.min(y, powerYCenter), barW, Math.abs(y - powerYCenter));
+      }
+
+      // EV bars — always positive (charging), rendered green alongside
+      // (or in place of) the battery bar in each slot. Uses the same
+      // powerY scale so magnitudes compare visually.
+      for (const a of plan.actions) {
+        if (a.slot_start_ms > tMax) break;
+        if (!a.loadpoint_w || a.loadpoint_w <= 0) continue;
+        const x0 = xScale(a.slot_start_ms);
+        const x1 = xScale(a.slot_start_ms + a.slot_len_min * 60 * 1000);
+        const slotW = x1 - x0;
+        const y = powerY(a.loadpoint_w);
+        // Right 45% of slot when battery shares it, else full width.
+        const hasBattery = a.battery_w && Math.abs(a.battery_w) > 100;
+        const evX0 = hasBattery ? x0 + slotW * 0.55 : x0;
+        const evW = hasBattery
+          ? Math.max(1, slotW * 0.45 - 1)
+          : Math.max(1, slotW - 1);
+        ctx.fillStyle = 'rgba(34,197,94,0.7)'; // green-500
+        ctx.fillRect(evX0, y, evW, powerYCenter - y);
       }
       // SoC line
       ctx.strokeStyle = 'rgba(96,165,250,0.95)';
@@ -368,6 +423,35 @@
       ctx.fillText('SoC', pad.l + 4, socY0 + 12);
     }
 
+    // ---- EV SoC line — dashed green on the same SoC axis. Draw whether
+    // or not the site has a battery so single-loadpoint installs still
+    // get the target trajectory.
+    if (plan && plan.actions) {
+      const lp0 = (state.loadpoints && state.loadpoints[0]) || null;
+      const currentEVSoC = lp0 && lp0.plugged_in ? lp0.current_soc_pct : null;
+      ctx.strokeStyle = 'rgba(34,197,94,0.9)';
+      ctx.setLineDash([4, 3]);
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      let f = true;
+      if (currentEVSoC != null) {
+        ctx.moveTo(xScale(now), socY(currentEVSoC));
+        f = false;
+      }
+      let drawnAny = false;
+      for (const a of plan.actions) {
+        if (a.slot_start_ms > tMax) break;
+        if (a.loadpoint_soc_pct == null) continue;
+        const x = xScale(a.slot_start_ms + a.slot_len_min * 60 * 1000);
+        const y = socY(a.loadpoint_soc_pct);
+        if (f) { ctx.moveTo(x, y); f = false; }
+        else ctx.lineTo(x, y);
+        drawnAny = true;
+      }
+      if (drawnAny) ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
     // ---- Summary ----
     const summary = document.getElementById('plan-summary');
     if (summary) {
@@ -387,9 +471,32 @@
           const ageTxt = age < 60 ? `${age}s` : `${Math.round(age/60)}m`;
           suffix = ` · replanned ${ageTxt} ago (${reason})`;
         }
+        // EV annotation: pull the first loadpoint with a real target
+        // and append a "EV target: X% by HH:MM (N kWh planned)" segment.
+        let evSuffix = '';
+        const lp0 = (state.loadpoints && state.loadpoints[0]) || null;
+        const hasTarget = lp0 && lp0.target_soc_pct > 0 &&
+          lp0.target_time && !lp0.target_time.startsWith('0001-');
+        if (hasTarget) {
+          const tgtDate = new Date(lp0.target_time);
+          const tgtHHMM = tgtDate.getHours().toString().padStart(2, '0') + ':' +
+            tgtDate.getMinutes().toString().padStart(2, '0');
+          let plannedWh = 0, plannedSlots = 0;
+          for (const a of plan.actions) {
+            if (a.loadpoint_w && a.loadpoint_w > 0) {
+              plannedWh += a.loadpoint_w * a.slot_len_min / 60;
+              plannedSlots++;
+            }
+          }
+          const plannedKWh = plannedWh / 1000;
+          evSuffix = ` · EV ${lp0.target_soc_pct.toFixed(0)}% by ${tgtHHMM}` +
+            (plannedSlots > 0
+              ? ` (${plannedKWh.toFixed(1)} kWh over ${plannedSlots} slot${plannedSlots === 1 ? '' : 's'})`
+              : ' (no slots allocated yet)');
+        }
         summary.textContent =
           `${plan.mode} · ${hh.toFixed(0)}h horizon · ${plan.horizon_slots} slots · ` +
-          `SoC ${plan.initial_soc_pct.toFixed(0)}% → ${cost.toFixed(2)} SEK${suffix}`;
+          `SoC ${plan.initial_soc_pct.toFixed(0)}% → ${cost.toFixed(2)} SEK${suffix}${evSuffix}`;
       }
     }
   }
@@ -434,6 +541,12 @@
       if (a.battery_w != null) {
         const dir = a.battery_w > 100 ? 'charge' : a.battery_w < -100 ? 'discharge' : 'idle';
         lines.push(`<div class="tip-row"><span>Battery</span><b>${(a.battery_w / 1000).toFixed(1)} kW (${dir})</b></div>`);
+      }
+      if (a.loadpoint_w && a.loadpoint_w > 0) {
+        lines.push(`<div class="tip-row"><span>EV</span><b>${(a.loadpoint_w / 1000).toFixed(1)} kW</b></div>`);
+      }
+      if (a.loadpoint_soc_pct != null) {
+        lines.push(`<div class="tip-row"><span>EV SoC (end)</span><b>${a.loadpoint_soc_pct.toFixed(0)}%</b></div>`);
       }
       if (a.grid_w != null) {
         const gdir = a.grid_w > 0 ? 'import' : 'export';
