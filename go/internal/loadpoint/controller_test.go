@@ -19,17 +19,19 @@ type sentCommand struct {
 	driver string
 	power  float64
 	action string
+	phases int
 }
 
 func (f *fakeSender) Send(ctx context.Context, driver string, payload []byte) error {
 	var d struct {
 		Action string  `json:"action"`
 		PowerW float64 `json:"power_w"`
+		Phases int     `json:"phases"`
 	}
 	if err := json.Unmarshal(payload, &d); err != nil {
 		return err
 	}
-	f.calls = append(f.calls, sentCommand{driver: driver, power: d.PowerW, action: d.Action})
+	f.calls = append(f.calls, sentCommand{driver: driver, power: d.PowerW, action: d.Action, phases: d.Phases})
 	return f.err
 }
 

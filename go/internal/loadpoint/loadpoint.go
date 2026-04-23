@@ -47,6 +47,93 @@ type Config struct {
 	// 0 defaults to 20 % (conservative). Operators who care can
 	// override per-loadpoint or pre-plug-in.
 	PluginSoCPct float64 `yaml:"plugin_soc_pct,omitempty" json:"plugin_soc_pct,omitempty"`
+
+	// PhaseMode selects how the controller picks between 1Φ and 3Φ
+	// delivery each tick. "3p" (default) and "1p" lock the install to
+	// one mode and filter AllowedStepsW accordingly. "auto" lets the
+	// controller switch based on the MPC budget, with a hysteresis
+	// timer (MinPhaseHoldS) preventing flap. Empty == "3p" for
+	// backward compatibility with pre-switching configs.
+	PhaseMode string `yaml:"phase_mode,omitempty" json:"phase_mode,omitempty"`
+
+	// PhaseSplitW is the wantW threshold below which "auto" picks 1Φ.
+	// Zero defaults to 3680 W — the ceiling a 16 A fuse can sustain
+	// on a single phase. Also used to classify AllowedStepsW entries:
+	// steps ≤ split are 1Φ-eligible, > split are 3Φ-eligible.
+	PhaseSplitW float64 `yaml:"phase_split_w,omitempty" json:"phase_split_w,omitempty"`
+
+	// MinPhaseHoldS is the minimum dwell time before the controller
+	// will flip phase again. Easee's cloud API + contactor transition
+	// is not instantaneous (~5-10 s observed), and MPC slots can flap
+	// across the split threshold on noisy wantW. Default 60 s.
+	MinPhaseHoldS int `yaml:"min_phase_hold_s,omitempty" json:"min_phase_hold_s,omitempty"`
+}
+
+// SiteFuse describes the shared grid-boundary breaker in terms the
+// loadpoint controller needs: max amps per phase (the rated trip
+// current) and nominal voltage. Zero MaxAmps disables clamping —
+// used in tests that don't care about the clamp.
+type SiteFuse struct {
+	MaxAmps float64
+	Voltage float64
+}
+
+// PerPhaseMaxW is the maximum sustained power per phase under this
+// fuse. 16 A @ 230 V = 3680 W. Multiply by phase count to get the
+// total three-phase ceiling.
+func (f SiteFuse) PerPhaseMaxW() float64 {
+	v := f.Voltage
+	if v <= 0 {
+		v = 230
+	}
+	return f.MaxAmps * v
+}
+
+// phaseFor returns the phase count chosen for wantW given the mode
+// and split threshold. "auto" below split → 1Φ, above → 3Φ. Unknown
+// modes fall back to 3Φ for safety (the pre-switching default).
+func phaseFor(mode string, wantW, splitW float64) int {
+	if splitW <= 0 {
+		splitW = 3680
+	}
+	switch mode {
+	case "1p":
+		return 1
+	case "auto":
+		if wantW < splitW {
+			return 1
+		}
+		return 3
+	default: // "", "3p"
+		return 3
+	}
+}
+
+// filterStepsByPhase narrows AllowedStepsW to only the entries that
+// match the chosen phase count. The classifier is purely magnitude-
+// based: step ≤ splitW → 1Φ, step > splitW → 3Φ. 0 (off) is always
+// included. Returns nil when the input is nil so downstream
+// SnapChargeW falls through to its continuous-passthrough behaviour.
+func filterStepsByPhase(steps []float64, phases int, splitW float64) []float64 {
+	if len(steps) == 0 {
+		return nil
+	}
+	if splitW <= 0 {
+		splitW = 3680
+	}
+	out := make([]float64, 0, len(steps))
+	out = append(out, 0)
+	for _, s := range steps {
+		if s <= 0 {
+			continue
+		}
+		if phases == 1 && s <= splitW {
+			out = append(out, s)
+		} else if phases == 3 && s > splitW {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // State is the observable snapshot of one loadpoint at a point in time.

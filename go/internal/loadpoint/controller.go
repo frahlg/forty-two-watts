@@ -28,6 +28,24 @@ type Controller struct {
 	plan    PlanFunc
 	tel     TelemetryFunc
 	send    SenderFunc
+
+	// site is the grid-boundary fuse the per-phase clamp applies.
+	// Zero means "no clamp" (tests that don't care about the fuse).
+	// Set at startup via SetSiteFuse from main.go.
+	site SiteFuse
+
+	// phases tracks the most recently-commanded phase count per
+	// loadpoint ID so MinPhaseHoldS can prevent flap. A zero
+	// lastPhase means "no commitment yet" — first non-zero command
+	// seeds it without triggering the hold.
+	phases map[string]*lpPhaseState
+}
+
+// lpPhaseState is the per-loadpoint hold record used to rate-limit
+// 1Φ↔3Φ flips.
+type lpPhaseState struct {
+	lastPhase    int
+	lastChangeTs time.Time
 }
 
 // Directive is the loadpoint-relevant slice of mpc.SlotDirective.
@@ -66,7 +84,21 @@ type SenderFunc func(ctx context.Context, driver string, payload []byte) error
 // NewController wires the dependencies. Passing nil for plan, tel,
 // or send disables the corresponding step — useful in tests.
 func NewController(mgr *Manager, plan PlanFunc, tel TelemetryFunc, send SenderFunc) *Controller {
-	return &Controller{manager: mgr, plan: plan, tel: tel, send: send}
+	return &Controller{
+		manager: mgr, plan: plan, tel: tel, send: send,
+		phases: map[string]*lpPhaseState{},
+	}
+}
+
+// SetSiteFuse installs the grid-boundary fuse limit used by the
+// per-phase EV clamp. Must be called once at startup from main.go
+// after config load; a zero-value fuse leaves the clamp disabled
+// (useful for unit tests and sites without a configured fuse).
+func (c *Controller) SetSiteFuse(f SiteFuse) {
+	if c == nil {
+		return
+	}
+	c.site = f
 }
 
 // Tick runs one dispatch cycle for every configured loadpoint.
@@ -111,10 +143,11 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config) {
 	if !sample.Connected {
 		return
 	}
-	cmdW := c.computeCommand(now, lpCfg, sample.PowerW)
+	cmdW, phases := c.computeCommand(now, lpCfg, sample.PowerW)
 	payload, err := json.Marshal(map[string]any{
 		"action":  "ev_set_current",
 		"power_w": cmdW,
+		"phases":  phases,
 	})
 	if err != nil {
 		return
@@ -128,25 +161,30 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config) {
 	}
 }
 
-// computeCommand resolves the W setpoint for a plugged loadpoint.
-// Returns 0 when the planner has no allocation for this slot — an
-// explicit standdown, not a lazy last-command.
-func (c *Controller) computeCommand(now time.Time, lpCfg Config, currentPowerW float64) float64 {
+// computeCommand resolves the (W, phases) setpoint for a plugged
+// loadpoint. Returns (0, 0) when no plan allocation exists — an
+// explicit standdown, not a lazy last-command. Otherwise:
+//
+//  1. MPC slot budget → wantW (continuous)
+//  2. phaseFor(...) picks 1Φ vs 3Φ based on PhaseMode + wantW,
+//     subject to MinPhaseHoldS hysteresis so we don't flap.
+//  3. Fuse clamp: wantW ≤ fuse.MaxAmps × V × phases — the
+//     non-negotiable site invariant.
+//  4. AllowedStepsW filtered to the chosen phase's subset.
+//  5. SnapChargeW picks the nearest feasible step.
+func (c *Controller) computeCommand(now time.Time, lpCfg Config, currentPowerW float64) (float64, int) {
 	if c.plan == nil {
-		return 0
+		return 0, 0
 	}
 	d, ok := c.plan(now)
 	if !ok {
-		return 0
+		return 0, 0
 	}
 	budgetWh, hasBudget := d.LoadpointEnergyWh[lpCfg.ID]
 	if !hasBudget {
-		return 0
+		return 0, 0
 	}
 	remainingS := d.SlotEnd.Sub(now).Seconds()
-	// Subtract what's already been delivered so a mid-slot dispatch
-	// doesn't overshoot. Approximated from current power × fraction
-	// of slot elapsed.
 	elapsed := d.SlotEnd.Sub(d.SlotStart).Seconds() - remainingS
 	if elapsed < 0 {
 		elapsed = 0
@@ -154,5 +192,71 @@ func (c *Controller) computeCommand(now time.Time, lpCfg Config, currentPowerW f
 	alreadyWh := currentPowerW * elapsed / 3600.0
 	remainingWh := budgetWh - alreadyWh
 	wantW := EnergyBudgetToPowerW(remainingWh, remainingS)
-	return SnapChargeW(wantW, lpCfg.MinChargeW, lpCfg.MaxChargeW, lpCfg.AllowedStepsW)
+
+	phases := c.decidePhase(now, lpCfg, wantW)
+
+	// Per-phase fuse clamp. This is the safety invariant — it must
+	// apply BEFORE step filtering / snapping so the step search can
+	// never return a value the fuse wouldn't tolerate.
+	if c.site.MaxAmps > 0 && phases > 0 {
+		ceiling := c.site.PerPhaseMaxW() * float64(phases)
+		if wantW > ceiling {
+			wantW = ceiling
+		}
+	}
+
+	steps := filterStepsByPhase(lpCfg.AllowedStepsW, phases, lpCfg.PhaseSplitW)
+	snapped := SnapChargeW(wantW, lpCfg.MinChargeW, lpCfg.MaxChargeW, steps)
+
+	// Second-line safety: even if a step somehow exceeded the fuse
+	// ceiling (misconfigured step list), never send it.
+	if c.site.MaxAmps > 0 && phases > 0 {
+		ceiling := c.site.PerPhaseMaxW() * float64(phases)
+		if snapped > ceiling {
+			snapped = ceiling
+		}
+	}
+
+	return snapped, phases
+}
+
+// decidePhase picks 1 or 3 based on PhaseMode + wantW, applying
+// MinPhaseHoldS hysteresis so an MPC budget oscillating around the
+// split threshold doesn't trigger a contactor flip every tick. The
+// hold is a minimum dwell, not a moving average — once we flip, the
+// next flip can't happen until `hold` seconds elapsed since the last
+// change.
+func (c *Controller) decidePhase(now time.Time, lpCfg Config, wantW float64) int {
+	desired := phaseFor(lpCfg.PhaseMode, wantW, lpCfg.PhaseSplitW)
+
+	// Locked modes: no hysteresis to apply, just return.
+	if lpCfg.PhaseMode != "auto" {
+		return desired
+	}
+
+	hold := time.Duration(lpCfg.MinPhaseHoldS) * time.Second
+	if lpCfg.MinPhaseHoldS <= 0 {
+		hold = 60 * time.Second
+	}
+
+	if c.phases == nil {
+		c.phases = map[string]*lpPhaseState{}
+	}
+	ps, ok := c.phases[lpCfg.ID]
+	if !ok {
+		ps = &lpPhaseState{lastPhase: desired, lastChangeTs: now}
+		c.phases[lpCfg.ID] = ps
+		return desired
+	}
+	if ps.lastPhase == desired {
+		return desired
+	}
+	if now.Sub(ps.lastChangeTs) < hold {
+		// Flip suppressed — keep the previous phase until the
+		// hold window elapses.
+		return ps.lastPhase
+	}
+	ps.lastPhase = desired
+	ps.lastChangeTs = now
+	return desired
 }

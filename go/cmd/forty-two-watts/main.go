@@ -706,6 +706,10 @@ func main() {
 			}, true
 		}
 		lpController = loadpoint.NewController(lpMgr, planAdapter, telAdapter, reg.Send)
+		lpController.SetSiteFuse(loadpoint.SiteFuse{
+			MaxAmps: cfg.Fuse.MaxAmps,
+			Voltage: cfg.Fuse.Voltage,
+		})
 	}
 
 	// ---- Self-update checker ----
