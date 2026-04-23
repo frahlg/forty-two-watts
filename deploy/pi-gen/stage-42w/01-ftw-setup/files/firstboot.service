@@ -1,0 +1,17 @@
+[Unit]
+Description=forty-two-watts first-boot provisioner
+Documentation=https://github.com/frahlg/forty-two-watts/blob/master/docs/rpi-image.md
+Wants=network-online.target docker.service
+After=network-online.target docker.service
+ConditionPathExists=!/var/lib/ftw/firstboot.done
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/ftw-firstboot
+RemainAfterExit=yes
+# The script is already idempotent + logs retries internally. We rely
+# on that instead of systemd-level Restart= so the retry cadence is
+# expressed in one place (firstboot.sh).
+
+[Install]
+WantedBy=multi-user.target
