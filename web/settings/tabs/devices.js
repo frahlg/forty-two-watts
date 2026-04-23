@@ -162,19 +162,23 @@
       var bodyEl = ctx.bodyEl;
 
       // Driver catalog picker — fetch async, render into select.
+      // The re-render trick below was causing an infinite loop: after
+      // populates → fetch resolves → renderTab → after runs again →
+      // fetch again → … Every refresh wiped the <select> before the
+      // user could click an option. Guard: only re-render ONCE when
+      // the cache was empty, then rely on that cached value on every
+      // subsequent tab open.
+      var needRerender = !S.catalogByLua;
       fetch("/api/drivers/catalog").then(function (r) { return r.json(); }).then(function (data) {
-        // Cache {lua_path: entry} on the settings namespace so the
-        // per-driver form (rendered synchronously before this fetch
-        // lands) can decide whether to show the Site-meter checkbox.
         var byLua = {};
         (data && data.entries || []).forEach(function (e) {
           if (e && e.path) byLua[e.path] = e;
         });
         S.catalogByLua = byLua;
-        // Re-render so the canBeSiteMeter gate sees the cache. One-
-        // shot flicker on first tab open; cached across subsequent
-        // opens since S.catalogByLua persists on window.FTWSettings.
-        ctx.renderTab("devices");
+        if (needRerender) {
+          ctx.renderTab("devices");
+          return; // the re-render's own `after` pass will populate the select
+        }
         var sel = document.getElementById("driver-catalog-picker");
         if (!sel) return;
         sel.innerHTML = "";
