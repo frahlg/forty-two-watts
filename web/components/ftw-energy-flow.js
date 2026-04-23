@@ -67,6 +67,24 @@ const H_BASE = 580;
 // doesn't shift ~150 px when the first /api/status response arrives
 // on a multi-inverter setup.
 const EF_SIZING_CACHE_KEY = "ftw-ef-sizing-n";
+// localStorage key for the last-seen populated-corner map. Used by the
+// loading skeleton so the placeholder silhouette matches the user's
+// actual config — a Y-shape for no-EV setups, three corners for no-
+// battery, full X for the all-corners case — instead of always
+// painting four placeholder bubbles that the first /api/status
+// response immediately tears down.
+//
+// Value shape: { "top-left": 2, "bottom-left": 1, … } — corner name
+// to planet count. The count lets individual-mode skeletons pre-draw
+// the right number of bubbles per corner (dual PV inverters render as
+// two at top-left) so the skeleton lines up with the post-load layout.
+// Legacy array form ["top-left","bottom-left"] is read-compatible
+// (each entry treated as count = 1).
+const EF_LAYOUT_CACHE_KEY = "ftw-ef-corners";
+// localStorage key for the combined/individual aggregation choice.
+// Persisted so reloads / new sessions restore the user's last pick
+// instead of always defaulting to "combined".
+const EF_AGGREGATED_CACHE_KEY = "ftw-ef-aggregated";
 
 // Corner → anchor angle in screen coordinates (0°=east, 90°=south).
 // Fixed at exactly 45° so the whole diagram reads as a uniform X
@@ -191,6 +209,7 @@ class FtwEnergyFlow extends FtwElement {
     .sv-node-sub   { font-family: var(--mono); font-size: 10px; letter-spacing: 0.04em; }
     .sv-hub-value  { font-family: var(--mono); font-size: 18px; font-weight: 700; font-variant-numeric: tabular-nums; }
     .sv-hub-label  { font-family: var(--mono); font-size: 9px; letter-spacing: 0.1em; }
+    .sv-hub-sub    { font-family: var(--mono); font-size: 9px; letter-spacing: 0.06em; font-variant-numeric: tabular-nums; }
     .ef-clickable { cursor: pointer; outline: none; }
     .ef-clickable:focus-visible > circle { stroke-width: 3; filter: drop-shadow(0 0 4px var(--accent, #6cf)); }
     /* One dash cycle advances by exactly (dash + gap). The fwd/rev pair
@@ -390,6 +409,7 @@ class FtwEnergyFlow extends FtwElement {
       .sv-node-sub   { font-size: 13px; }
       .sv-hub-value  { font-size: 22px; }
       .sv-hub-label  { font-size: 11px; }
+      .sv-hub-sub    { font-size: 11px; }
     }
     @media (max-width: 600px) {
       svg { height: calc(var(--efl-h-factor, 1) * 460px); }
@@ -398,6 +418,7 @@ class FtwEnergyFlow extends FtwElement {
       .sv-node-sub   { font-size: 16px; }
       .sv-hub-value  { font-size: 28px; }
       .sv-hub-label  { font-size: 14px; }
+      .sv-hub-sub    { font-size: 14px; }
     }
   `;
 
@@ -420,10 +441,16 @@ class FtwEnergyFlow extends FtwElement {
     // multiple planets (dual PV inverters, dual batteries, …) render
     // as a single summed bubble; when false, each planet draws in its
     // own slot. The button is only shown when at least one corner
-    // actually has >1 planet. Persisted across renders; the fade is
-    // done in CSS by stacking both layers in the SVG and toggling
-    // their opacity via data-agg on the svg element.
+    // actually has >1 planet. Persisted across renders AND across
+    // reloads via localStorage; the fade is done in CSS by stacking
+    // both layers in the SVG and toggling their opacity via data-agg
+    // on the svg element.
     this._aggregated = true;
+    try {
+      const stored = localStorage.getItem(EF_AGGREGATED_CACHE_KEY);
+      if (stored === "0") this._aggregated = false;
+      else if (stored === "1") this._aggregated = true;
+    } catch (e) {}
     // JS-driven particle system — one rAF loop animates every "electron"
     // independently. Each particle has its own amp/phase/freq/speed plus
     // a low-frequency 2D noise term, so even at high particle counts
@@ -632,6 +659,7 @@ class FtwEnergyFlow extends FtwElement {
         toggleBtn.setAttribute("title", this._aggregated
           ? "Split multi-device corners into individual bubbles"
           : "Combine multi-device corners into one bubble");
+        try { localStorage.setItem(EF_AGGREGATED_CACHE_KEY, this._aggregated ? "1" : "0"); } catch (e) {}
       });
     }
     // Delegated click on the SVG — one listener per render covers every
@@ -742,6 +770,27 @@ class FtwEnergyFlow extends FtwElement {
   render() {
     const { load } = this._readings;
 
+    // Self-powered % from the load's perspective — fraction of the
+    // current house demand met by on-site sources (PV direct OR
+    // battery discharge), as opposed to being pulled from the grid.
+    // Derived from the energy balance at the hub: anything not coming
+    // in via the grid is by definition coming in from PV or battery,
+    // so SP = 1 − min(grid_import, load) / load. Null when the house
+    // is essentially idle (load below threshold) so we don't render
+    // a noisy "100 %" against nothing.
+    let selfPoweredPct = null;
+    {
+      let gridImport = 0;
+      for (const p of (this._readings.planets || [])) {
+        if (p.role === "grid" && p.toHub) gridImport += Math.max(0, p.kw || 0);
+      }
+      const loadKw = Math.abs(load) || 0;
+      if (loadKw > 0.05) {
+        const fromGrid = Math.min(gridImport, loadKw);
+        selfPoweredPct = Math.max(0, Math.min(100, (1 - fromGrid / loadKw) * 100));
+      }
+    }
+
     // Two tiers of base parameters. Desktop keeps the full 0..1000 viewBox
     // with larger circles + hub; compact crops to 180..820 and shrinks the
     // base orbit so phone widths render legibly. Both tiers are FLOORS:
@@ -761,6 +810,43 @@ class FtwEnergyFlow extends FtwElement {
     for (const p of this._readings.planets) {
       if (groups[p.corner]) groups[p.corner].push(p);
     }
+
+    // Persist (loaded) / restore (loading) the populated-corner map so
+    // the loading skeleton on the next visit matches THIS user's
+    // hardware — Y-shape if no EV, 3-corner if no battery, full X
+    // otherwise — AND the per-corner planet count, so individual-mode
+    // skeletons render the right number of bubbles per corner (dual
+    // PV inverters → two placeholders at top-left). Writes only when
+    // the map changes (adding/removing a driver, not every 2 s poll).
+    if (this._loaded) {
+      try {
+        const counts = {};
+        for (const c of Object.keys(groups)) {
+          if (groups[c].length > 0) counts[c] = groups[c].length;
+        }
+        const serialized = JSON.stringify(counts);
+        if (localStorage.getItem(EF_LAYOUT_CACHE_KEY) !== serialized) {
+          localStorage.setItem(EF_LAYOUT_CACHE_KEY, serialized);
+        }
+      } catch (e) {}
+    }
+    let expectedCounts = null;
+    if (!this._loaded) {
+      try {
+        const raw = localStorage.getItem(EF_LAYOUT_CACHE_KEY);
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+            expectedCounts = parsed;
+          } else if (Array.isArray(parsed) && parsed.length > 0) {
+            // Legacy shape: array of corner names → treat each as count=1.
+            expectedCounts = {};
+            for (const c of parsed) expectedCounts[c] = 1;
+          }
+        }
+      } catch (e) {}
+    }
+
     for (const c of Object.keys(groups)) {
       if (groups[c].length === 0) {
         // Placeholders fill empty corners during the initial loading
@@ -777,18 +863,32 @@ class FtwEnergyFlow extends FtwElement {
         //     configure would misrepresent absent hardware as
         //     present-but-idle, so those corners render nothing.
         if (this._loaded && c !== "bottom-left") continue;
-        groups[c].push({
-          id: `_placeholder-${c}`, corner: c,
-          title: CORNER_PLACEHOLDER_TITLE[c], name: null,
-          role: CORNER_PLACEHOLDER_ROLE[c],
-          kw: 0, toHub: true,
-          // Loaded-but-empty grid reads as muted ("broken") rather
-          // than role-colored; unloaded corners keep the lively
-          // role-native color so the skeleton doesn't look dead.
-          color: this._loaded ? "var(--fg-muted)" : CORNER_PLACEHOLDER_COLOR[c],
-          sub: "no data", soc: null,
-          placeholder: true,
-        });
+        // Loading + cached layout: only the corners that were
+        // populated last session get a placeholder. First-ever visit
+        // (no cache) keeps the full X silhouette as before.
+        if (!this._loaded && expectedCounts && !expectedCounts[c]) continue;
+        // How many placeholder bubbles to draw at this corner.
+        // Loading + individual mode + cache → use cached count so a
+        // 2-PV user sees 2 placeholders at top-left (matches the
+        // post-load layout). Loaded-empty-grid, combined mode, or
+        // no-cache visits all stay at 1.
+        const n = (!this._loaded && !this._aggregated && expectedCounts && expectedCounts[c])
+          ? expectedCounts[c]
+          : 1;
+        for (let i = 0; i < n; i++) {
+          groups[c].push({
+            id: n > 1 ? `_placeholder-${c}-${i}` : `_placeholder-${c}`, corner: c,
+            title: CORNER_PLACEHOLDER_TITLE[c], name: null,
+            role: CORNER_PLACEHOLDER_ROLE[c],
+            kw: 0, toHub: true,
+            // Loaded-but-empty grid reads as muted ("broken") rather
+            // than role-colored; unloaded corners keep the lively
+            // role-native color so the skeleton doesn't look dead.
+            color: this._loaded ? "var(--fg-muted)" : CORNER_PLACEHOLDER_COLOR[c],
+            sub: "no data", soc: null,
+            placeholder: true,
+          });
+        }
       }
     }
     // Y layout (no EV): bottom-right is empty, so Grid collapses to
@@ -902,6 +1002,7 @@ class FtwEnergyFlow extends FtwElement {
       hubIconY: cy - (this._compact ? 49 : 50),
       hubValueY: cy + 10,
       hubLabelY: cy + (this._compact ? 34 : 36),
+      hubSubY:   cy + (this._compact ? 50 : 54),
     };
     // -- /Dynamic sizing -------------------------------------------------
 
@@ -983,6 +1084,11 @@ class FtwEnergyFlow extends FtwElement {
                 fill="var(--hero-label-text)" class="sv-hub-label">
             CONSUMING
           </text>
+          ${selfPoweredPct !== null ? `
+          <text x="${CX}" y="${P.hubSubY}" text-anchor="middle"
+                fill="var(--hero-sub-text)" class="sv-hub-sub">
+            ${Math.round(selfPoweredPct)}% SELF-POWERED
+          </text>` : ""}
         </g>
       </svg>
     `;

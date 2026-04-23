@@ -156,31 +156,39 @@
       </div>
     </section>
 
-    <!-- Energy cards — today's kWh totals -->
-    <section class="energy-cards">
-      <div class="card energy-card">
-        <div class="card-label">Import today</div>
-        <div class="card-value val-import" id="e-import">-- kWh</div>
-      </div>
-      <div class="card energy-card">
-        <div class="card-label">Export today</div>
-        <div class="card-value val-export" id="e-export">-- kWh</div>
-      </div>
-      <div class="card energy-card">
-        <div class="card-label">PV today</div>
-        <div class="card-value val-generation" id="e-pv">-- kWh</div>
-      </div>
-      <div class="card energy-card bat-only">
-        <div class="card-label">Bat charged</div>
-        <div class="card-value val-charging" id="e-charged">-- kWh</div>
-      </div>
-      <div class="card energy-card bat-only">
-        <div class="card-label">Bat discharged</div>
-        <div class="card-value val-discharging" id="e-discharged">-- kWh</div>
-      </div>
-      <div class="card energy-card">
-        <div class="card-label">Load today</div>
-        <div class="card-value val-neutral" id="e-load">-- kWh</div>
+    <!-- Energy today — one wrapper card with six sub-tiles. Mirrors the
+         fuse-card pattern: outer card owns the label; each inner tile
+         has its own sub-label + kWh value. Sub-labels drop the "today"
+         since the outer heading already implies it. -->
+    <section class="energy-row">
+      <div class="card energy-group">
+        <div class="card-label">Energy today</div>
+        <div class="energy-tiles">
+          <div class="energy-tile">
+            <div class="card-label">Import</div>
+            <div class="card-value val-import" id="e-import">-- kWh</div>
+          </div>
+          <div class="energy-tile">
+            <div class="card-label">Export</div>
+            <div class="card-value val-export" id="e-export">-- kWh</div>
+          </div>
+          <div class="energy-tile">
+            <div class="card-label">PV</div>
+            <div class="card-value val-generation" id="e-pv">-- kWh</div>
+          </div>
+          <div class="energy-tile bat-only">
+            <div class="card-label">Bat charged</div>
+            <div class="card-value val-charging" id="e-charged">-- kWh</div>
+          </div>
+          <div class="energy-tile bat-only">
+            <div class="card-label">Bat discharged</div>
+            <div class="card-value val-discharging" id="e-discharged">-- kWh</div>
+          </div>
+          <div class="energy-tile">
+            <div class="card-label">Consumption</div>
+            <div class="card-value val-neutral" id="e-load">-- kWh</div>
+          </div>
+        </div>
       </div>
     </section>
 
@@ -193,7 +201,7 @@
     <section class="history-row">
       <div class="card history-group">
         <div class="history-head">
-          <div class="card-label">Daily energy</div>
+          <div class="card-label">History in numbers</div>
           <div class="history-toggle" id="history-toggle" role="tablist" data-active="week">
             <button type="button" role="tab" data-range="week"  class="active" aria-selected="true">Week</button>
             <button type="button" role="tab" data-range="month" aria-selected="false">Month</button>
