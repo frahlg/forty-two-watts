@@ -49,35 +49,27 @@ jobs:
 
       - name: Register binfmt_misc handlers for arm / arm64
         # Requirements for pi-gen on amd64:
+        #
         #   1. /usr/bin/qemu-arm on the HOST so pi-gen's `which qemu-arm`
-        #      check passes. qemu-user ships the binary without the
-        #      conflicting binfmt registration that qemu-user-binfmt's
-        #      postinst would do (we let tonistiigi/binfmt own that).
+        #      check passes. qemu-user provides the binary. We pass
+        #      --no-install-recommends to block qemu-user-binfmt (which
+        #      qemu-user Recommends): its postinst auto-registers
+        #      handlers pointing at /usr/libexec/qemu-binfmt/arm-binfmt-P
+        #      wrappers that DON'T exist inside pi-gen's Raspberry Pi OS
+        #      chroot, and arch-test fails with "armhf: not supported".
+        #      Diagnosed on run 24875338536 of this workflow — the
+        #      wrapper path was baked into binfmt_misc before
+        #      tonistiigi/binfmt got a chance to register its own.
+        #
         #   2. binfmt_misc handlers with the F (fix-binary) flag so the
-        #      interpreter is usable inside pi-gen's nested chroot.
-        #      tonistiigi/binfmt is the canonical way to register this
-        #      on GHA — docker/setup-qemu-action uses the same image.
+        #      interpreter stays valid across mount namespaces. With
+        #      qemu-user-binfmt held out, tonistiigi/binfmt installs its
+        #      own handlers that resolve /usr/bin/qemu-aarch64-static
+        #      into a kept-open fd — survives the chroot.
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq qemu-user
+          sudo apt-get install -y -qq --no-install-recommends qemu-user
           sudo docker run --privileged --rm tonistiigi/binfmt --install arm,arm64
-
-      - name: Diagnose binfmt_misc state
-        # Temporary: the previous two attempts died with "armhf: not
-        # supported" inside pi-gen's container despite the registration
-        # above. Dump the kernel's view so we can tell whether the
-        # handler is actually there and what interpreter path it holds.
-        run: |
-          echo "=== which qemu-arm ==="
-          which qemu-arm && ls -la "$(which qemu-arm)" || true
-          echo "=== binfmt_misc mount ==="
-          mount | grep -i binfmt || echo "not mounted"
-          echo "=== binfmt_misc entries ==="
-          ls -la /proc/sys/fs/binfmt_misc/ || true
-          echo "=== qemu-arm handler ==="
-          cat /proc/sys/fs/binfmt_misc/qemu-arm 2>/dev/null || echo "no qemu-arm entry"
-          echo "=== qemu-aarch64 handler ==="
-          cat /proc/sys/fs/binfmt_misc/qemu-aarch64 2>/dev/null || echo "no qemu-aarch64 entry"
 
       - name: Checkout
         uses: actions/checkout@v5
