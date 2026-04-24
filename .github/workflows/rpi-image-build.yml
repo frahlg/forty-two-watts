@@ -48,27 +48,36 @@ jobs:
           df -h /
 
       - name: Register binfmt_misc handlers for arm / arm64
-        # Two things have to be true for pi-gen to build on an amd64
-        # GHA runner:
-        #
-        #   1. /usr/bin/qemu-arm must exist on the HOST so pi-gen's
-        #      `which qemu-arm` check at the top of build-docker.sh
-        #      passes. qemu-user-binfmt provides it.
-        #
-        #   2. The kernel's binfmt_misc must have a WORKING arm
-        #      handler registered — one where the interpreter is
-        #      accessible from inside pi-gen's chroot (not just the
-        #      host). pi-gen tries to register this itself, but the
-        #      registration uses `|| true`, so silent failures hide
-        #      behind the later "armhf: not supported" arch-test
-        #      error. tonistiigi/binfmt registers handlers with the
-        #      `F` (fix-binary) flag, which resolves the interpreter
-        #      at registration time and keeps the fd valid across
-        #      mount namespaces — the only reliable setup on GHA.
+        # Requirements for pi-gen on amd64:
+        #   1. /usr/bin/qemu-arm on the HOST so pi-gen's `which qemu-arm`
+        #      check passes. qemu-user ships the binary without the
+        #      conflicting binfmt registration that qemu-user-binfmt's
+        #      postinst would do (we let tonistiigi/binfmt own that).
+        #   2. binfmt_misc handlers with the F (fix-binary) flag so the
+        #      interpreter is usable inside pi-gen's nested chroot.
+        #      tonistiigi/binfmt is the canonical way to register this
+        #      on GHA — docker/setup-qemu-action uses the same image.
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq qemu-user-binfmt
+          sudo apt-get install -y -qq qemu-user
           sudo docker run --privileged --rm tonistiigi/binfmt --install arm,arm64
+
+      - name: Diagnose binfmt_misc state
+        # Temporary: the previous two attempts died with "armhf: not
+        # supported" inside pi-gen's container despite the registration
+        # above. Dump the kernel's view so we can tell whether the
+        # handler is actually there and what interpreter path it holds.
+        run: |
+          echo "=== which qemu-arm ==="
+          which qemu-arm && ls -la "$(which qemu-arm)" || true
+          echo "=== binfmt_misc mount ==="
+          mount | grep -i binfmt || echo "not mounted"
+          echo "=== binfmt_misc entries ==="
+          ls -la /proc/sys/fs/binfmt_misc/ || true
+          echo "=== qemu-arm handler ==="
+          cat /proc/sys/fs/binfmt_misc/qemu-arm 2>/dev/null || echo "no qemu-arm entry"
+          echo "=== qemu-aarch64 handler ==="
+          cat /proc/sys/fs/binfmt_misc/qemu-aarch64 2>/dev/null || echo "no qemu-aarch64 entry"
 
       - name: Checkout
         uses: actions/checkout@v5
