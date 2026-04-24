@@ -1823,11 +1823,16 @@ func (s *Server) handleLoadpointTarget(w http.ResponseWriter, r *http.Request) {
 	}
 	var policy *loadpoint.Policy
 	if req.AllowGrid != nil || req.AllowBatterySupport != nil || req.OnlySurplus != nil {
-		// Any policy field present → build a Policy. For fields the
-		// caller didn't send, start from the permissive default so
-		// partial updates (e.g. only_surplus=true alone) don't
-		// silently flip the other two to false.
+		// Any policy field present → build a Policy. Start from the
+		// loadpoint's CURRENT policy so partial updates only touch
+		// the explicitly-sent fields — sending only_surplus=true must
+		// not revert allow_grid/allow_battery_support to their
+		// permissive defaults. Fall back to DefaultPolicy only if the
+		// loadpoint doesn't exist yet (SetTarget will 404 below).
 		p := loadpoint.DefaultPolicy()
+		if st, ok := s.deps.Loadpoints.State(id); ok {
+			p = st.Policy
+		}
 		if req.AllowGrid != nil {
 			p.AllowGrid = *req.AllowGrid
 		}

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"log/slog"
@@ -12,6 +13,74 @@ import (
 	"github.com/pmezard/go-difflib/difflib"
 	"gopkg.in/yaml.v3"
 )
+
+// YAML-document complexity caps. Guards against alias-bomb / billion-laughs
+// style inputs that stay under the 64 KB byte cap but expand catastrophically
+// during Unmarshal. Numbers chosen well above any legit operator config
+// (hand-reviewed real configs top out at ~8 anchors and depth ~6).
+const (
+	rawConfigMaxAnchors = 64
+	rawConfigMaxDepth   = 64
+)
+
+// scanYAMLComplexity rejects documents that exceed the anchor or depth
+// caps. Returns nil on acceptable input. Runs pre-Unmarshal so the parser
+// never sees a pathological document.
+func scanYAMLComplexity(body []byte) error {
+	dec := yaml.NewDecoder(bytes.NewReader(body))
+	for {
+		var root yaml.Node
+		if err := dec.Decode(&root); err != nil {
+			if err == io.EOF {
+				return nil
+			}
+			// Malformed YAML — let the real Unmarshal produce the
+			// operator-facing line number. Scan phase just bails.
+			return nil
+		}
+		var walk func(n *yaml.Node, depth int, anchors *int) error
+		walk = func(n *yaml.Node, depth int, anchors *int) error {
+			if n == nil {
+				return nil
+			}
+			if depth > rawConfigMaxDepth {
+				return fmt.Errorf("yaml nesting exceeds %d levels", rawConfigMaxDepth)
+			}
+			if n.Anchor != "" {
+				*anchors++
+				if *anchors > rawConfigMaxAnchors {
+					return fmt.Errorf("yaml defines > %d anchors", rawConfigMaxAnchors)
+				}
+			}
+			for _, c := range n.Content {
+				if err := walk(c, depth+1, anchors); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+		anchors := 0
+		if err := walk(&root, 0, &anchors); err != nil {
+			return err
+		}
+	}
+}
+
+// strictYAMLUnmarshal parses into a typed struct with KnownFields(true) so
+// typo'd keys (e.g. `max_anps`) are rejected instead of silently dropped.
+// Shared by POST and Validate so both gates stop the same classes of bad
+// input.
+func strictYAMLUnmarshal(body []byte, out any) error {
+	dec := yaml.NewDecoder(bytes.NewReader(body))
+	dec.KnownFields(true)
+	if err := dec.Decode(out); err != nil {
+		if err == io.EOF {
+			return fmt.Errorf("empty document")
+		}
+		return err
+	}
+	return nil
+}
 
 // Raw-YAML endpoints backing the Settings → Advanced tab. Pipes the
 // on-disk config.yaml (with secrets resolved from state.db) through
@@ -72,6 +141,35 @@ func (s *Server) handleGetConfigRaw(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(data)
 }
 
+// stripEVPassword returns a copy of the YAML body with
+// ev_charger.password removed. Needed because strict-unmarshal (the
+// KnownFields gate against typos) would otherwise reject the field —
+// config.EVCharger tags password as yaml:"-" since it persists in
+// state.db, not config.yaml. Callers should pair this with
+// extractEVPassword to re-inject the value into the parsed struct.
+// Returns the original bytes unchanged when the document has no
+// ev_charger block or any parse hiccup — downstream unmarshal will
+// produce the real error.
+func stripEVPassword(body []byte) []byte {
+	var m map[string]any
+	if err := yaml.Unmarshal(body, &m); err != nil {
+		return body
+	}
+	ev, ok := m["ev_charger"].(map[string]any)
+	if !ok {
+		return body
+	}
+	if _, present := ev["password"]; !present {
+		return body
+	}
+	delete(ev, "password")
+	out, err := yaml.Marshal(m)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
 // extractEVPassword pulls ev_charger.password out of a raw YAML
 // body via a generic-map unmarshal. The typed config.EVCharger
 // struct tags the field with yaml:"-" so the standard Unmarshal
@@ -128,18 +226,41 @@ func (s *Server) handlePostConfigRaw(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var newCfg config.Config
-	if err := yaml.Unmarshal(body, &newCfg); err != nil {
-		writeJSON(w, 400, map[string]string{"error": formatYAMLError(err)})
+	// Anchor / depth guard before we hand the bytes to yaml.v3 — bails
+	// out billion-laughs-style documents that stay under the byte cap
+	// but expand pathologically on unmarshal.
+	if err := scanYAMLComplexity(body); err != nil {
+		writeJSON(w, 400, map[string]string{"error": err.Error()})
 		return
 	}
 
-	// EV charger password is tagged `yaml:"-"` on the struct so it
-	// never lands on disk and doesn't come back through Unmarshal.
-	// GET /api/config/raw emits it via post-marshal injection, so the
-	// editor *can* hold a password in the YAML — we need a parallel
-	// extract-from-map pass to recover it before Validate.
-	if extractedPw, ok := extractEVPassword(body); ok && newCfg.EVCharger != nil {
+	// Extract EV charger password out of the body first: it's tagged
+	// yaml:"-" on the struct (persisted in state.db, not config.yaml),
+	// which KnownFields(true) would flag as an unknown field. Scrub it
+	// from the body, then strict-unmarshal the rest.
+	extractedPw, hasExtracted := extractEVPassword(body)
+	strictBody := body
+	if hasExtracted {
+		strictBody = stripEVPassword(body)
+	}
+
+	var newCfg config.Config
+	// Strict unmarshal (KnownFields=true) — typo'd keys like
+	// `max_anps: 16` would otherwise be silently dropped and Validate()
+	// would pass, leaving the operator's actual intent unapplied.
+	if err := strictYAMLUnmarshal(strictBody, &newCfg); err != nil {
+		writeJSON(w, 400, map[string]string{"error": formatYAMLError(err)})
+		return
+	}
+	// Fill zero-valued defaults (SafetyMarginAmps etc.) the same way
+	// Parse() does for on-disk loads. Without this, the brief window
+	// between in-memory swap and fsnotify reload runs with reduced
+	// safety-margin budgets.
+	config.ApplyDefaults(&newCfg)
+
+	// Re-inject the extracted password into the parsed struct so
+	// downstream Validate() + state.db persistence see it.
+	if hasExtracted && newCfg.EVCharger != nil {
 		newCfg.EVCharger.Password = extractedPw
 	}
 
@@ -207,14 +328,31 @@ func (s *Server) handleValidateConfigRaw(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	if err := scanYAMLComplexity(body); err != nil {
+		writeJSON(w, 200, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+
+	// See handlePostConfigRaw for why we extract+scrub ev_charger.password
+	// before strict-unmarshal.
+	extractedPw, hasExtracted := extractEVPassword(body)
+	strictBody := body
+	if hasExtracted {
+		strictBody = stripEVPassword(body)
+	}
+
 	var proposed config.Config
-	if err := yaml.Unmarshal(body, &proposed); err != nil {
+	if err := strictYAMLUnmarshal(strictBody, &proposed); err != nil {
 		resp := map[string]any{"ok": false, "error": formatYAMLError(err)}
 		if line := yamlErrorLine(err); line > 0 {
 			resp["line"] = line
 		}
 		writeJSON(w, 200, resp)
 		return
+	}
+	config.ApplyDefaults(&proposed)
+	if hasExtracted && proposed.EVCharger != nil {
+		proposed.EVCharger.Password = extractedPw
 	}
 
 	s.deps.CfgMu.RLock()

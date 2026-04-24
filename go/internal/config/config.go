@@ -136,6 +136,12 @@ type Loadpoint struct {
 	AutoChargeEnabled         bool    `yaml:"auto_charge_enabled,omitempty" json:"auto_charge_enabled,omitempty"`
 	AutoChargeTargetSoCPct    float64 `yaml:"auto_charge_target_soc_pct,omitempty" json:"auto_charge_target_soc_pct,omitempty"`
 	AutoChargeTargetTimeLocal string  `yaml:"auto_charge_target_time_local,omitempty" json:"auto_charge_target_time_local,omitempty"`
+
+	// PhaseMode selects how the controller picks 1Φ vs 3Φ delivery:
+	// "3p" (default) | "1p" | "auto". See loadpoint.Config for details.
+	PhaseMode     string  `yaml:"phase_mode,omitempty" json:"phase_mode,omitempty"`
+	PhaseSplitW   float64 `yaml:"phase_split_w,omitempty" json:"phase_split_w,omitempty"`
+	MinPhaseHoldS int     `yaml:"min_phase_hold_s,omitempty" json:"min_phase_hold_s,omitempty"`
 }
 
 // OCPP configures the embedded OCPP 1.6J Central System for EV chargers.
@@ -679,6 +685,13 @@ func relToBaseDir(baseDir, p string) string {
 	return rel
 }
 
+// ApplyDefaults is the exported entry point for the unexported
+// applyDefaults. The raw-YAML config editor needs to run the same
+// defaulting path Parse() uses so a POST that omits e.g. fuse.safety_margin_amps
+// doesn't momentarily drop it to 0 in-memory before the fsnotify
+// re-read catches up.
+func ApplyDefaults(c *Config) { applyDefaults(c) }
+
 // applyDefaults fills in sensible zero-value defaults.
 func applyDefaults(c *Config) {
 	if c.Site.ControlIntervalS == 0 {
@@ -848,6 +861,27 @@ func (c *Config) Validate() error {
 	}
 	if c.Fuse.MaxAmps <= 0 {
 		return errors.New("fuse.max_amps must be > 0")
+	}
+	// Hardware sanity caps. A remote-writable config editor with no
+	// bounds on MaxAmps can instruct every clamp in the system to
+	// allow 230 kW — "safe" by the controller's own reckoning but
+	// physically past the breaker and beyond. Ceiling chosen above
+	// any residential + small-commercial install we've seen (80 A ×
+	// 3Φ = 55 kW). See PR #184 review M1.
+	if c.Fuse.MaxAmps > 250 {
+		return errors.New("fuse.max_amps must be <= 250 A")
+	}
+	if c.Fuse.Phases != 0 && c.Fuse.Phases != 1 && c.Fuse.Phases != 3 {
+		return errors.New("fuse.phases must be 1 or 3")
+	}
+	if c.Fuse.Voltage < 0 || c.Fuse.Voltage > 260 {
+		return errors.New("fuse.voltage must be in [0, 260] V (0 = default 230)")
+	}
+	if c.Fuse.SafetyMarginAmps < 0 {
+		return errors.New("fuse.safety_margin_amps must be >= 0")
+	}
+	if c.Fuse.SafetyMarginAmps >= c.Fuse.MaxAmps {
+		return errors.New("fuse.safety_margin_amps must be < fuse.max_amps")
 	}
 	if n := c.Notifications; n != nil {
 		if n.DefaultPriority < 0 || n.DefaultPriority > 5 {

@@ -368,10 +368,14 @@ function driver_command(action, power_w, cmd)
                 last_sent_phases = requested_phases
                 host.log("info", "Easee: phaseMode → " .. tostring(requested_phases))
             else
-                host.log("warn", "Easee: phaseMode write failed: " ..
+                host.log("warn", "Easee: phaseMode write failed; skipping current write to avoid overcurrent on stale phase: " ..
                     redact_http_err(pm_err))
-                -- Don't update amp math with a phase the charger didn't
-                -- accept — keep using the last known-good phase count.
+                -- CRITICAL: power_w was budgeted against requested_phases
+                -- (e.g. 7400 W on 3Φ). Computing amps against the old
+                -- phases (1) would send 32 A single-phase — tripping a
+                -- 16 A breaker. Fail the command; controller retries
+                -- next tick.
+                return false
             end
         end
 

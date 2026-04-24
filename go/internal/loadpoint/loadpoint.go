@@ -235,9 +235,16 @@ type TargetPersister func(loadpointID string, socPct float64, targetTime time.Ti
 
 // Manager holds the running set of loadpoints. Thread-safe.
 type Manager struct {
-	mu     sync.RWMutex
-	byID   map[string]*loadpointRuntime
-	order  []string // insertion-preserving id list for deterministic listing
+	mu    sync.RWMutex
+	byID  map[string]*loadpointRuntime
+	order []string // insertion-preserving id list for deterministic listing
+	// persistMu serializes the window between m.mu-protected state
+	// mutations and their follow-up TargetPersister callback. Holders
+	// acquire persistMu BEFORE m.mu and keep it until after persist()
+	// returns — that prevents an Observe-unplug persisting stale "cleared"
+	// values AFTER a concurrent SetTarget has already written 80%. See
+	// the race documented at Observe()'s unplug branch.
+	persistMu sync.Mutex
 	// onTarget is invoked from SetTarget to persist user intent to
 	// state.db. Failures are logged (by main.go's wrapper) but do not
 	// prevent the in-memory state from advancing — the runtime
@@ -695,11 +702,27 @@ func (m *Manager) Observe(id string, pluggedIn bool, powerW, deliveredWh float64
 
 	if unplugTransition && persist != nil {
 		// Persist the cleared target so the schedule is gone from
-		// state.db too. Reuses the standard TargetPersister callback
-		// (state.UpsertPrimaryLoadpointSchedule via main.go); a 0
-		// soc + zero target_time is treated as "no schedule" by every
-		// downstream consumer.
-		_ = persist(lpID, 0, time.Time{}, policySnap)
+		// state.db too. Hold persistMu across the re-read + write so
+		// a concurrent SetTarget (which also holds persistMu) cannot
+		// slip a new target between our m.mu release above and this
+		// callback. Re-read under m.mu.RLock in case a SetTarget that
+		// WAS blocked on persistMu already ran — its value is now
+		// authoritative and we shouldn't clobber it with 0.
+		m.persistMu.Lock()
+		m.mu.RLock()
+		var (
+			persistSoc  float64
+			persistTime time.Time
+			persistPol  = policySnap
+		)
+		if lp2, ok := m.byID[lpID]; ok {
+			persistSoc = lp2.targetSoCPct
+			persistTime = lp2.targetTime
+			persistPol = lp2.policy
+		}
+		m.mu.RUnlock()
+		_ = persist(lpID, persistSoc, persistTime, persistPol)
+		m.persistMu.Unlock()
 	}
 	if autoArm {
 		m.applyAutoSchedule(lpID, autoSoc, autoTimeLocal, vehLimit)
@@ -741,6 +764,11 @@ func estimateSoCPct(pluginSoCPct, deliveredWh, capacityWh float64) float64 {
 // (if any); failures are swallowed — in-memory state advances
 // regardless so dispatch keeps working even when the DB is readonly.
 func (m *Manager) SetTarget(id string, socPct float64, targetTime time.Time, policy *Policy) bool {
+	// Hold persistMu across the state mutation AND the persist call so a
+	// concurrent Observe-unplug can't interleave and overwrite our new
+	// target with a stale clear. See Manager.persistMu docs.
+	m.persistMu.Lock()
+	defer m.persistMu.Unlock()
 	m.mu.Lock()
 	lp, ok := m.byID[id]
 	if !ok {

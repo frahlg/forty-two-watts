@@ -123,6 +123,9 @@ func (r *Registry) Add(ctx context.Context, cfg config.Driver) error {
 	}
 	if cfg.Capabilities.HTTP != nil {
 		env.WithHTTP()
+		if hosts := cfg.Capabilities.HTTP.AllowedHosts; len(hosts) > 0 {
+			env.WithHTTPAllowedHosts(hosts)
+		}
 	}
 
 	luaDrv, err := NewLuaDriver(cfg.Lua, env)

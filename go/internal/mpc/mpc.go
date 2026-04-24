@@ -513,7 +513,17 @@ func Optimize(slots []Slot, p Params) Plan {
 							lp.TargetSoCPct > lp.InitialSoCPct &&
 							battW > 100 && evW == 0 {
 							battChargeKWh := battW * dtH / 1000.0
-							cost += 0.25 * effPrice(slot) * battChargeKWh
+							// Clamp to max(effPrice, 0) so negative spot
+							// prices don't invert the tie-break into a
+							// BONUS for charging the home battery over
+							// the EV — which would defeat the feature
+							// exactly when cheap/free grid energy is
+							// available. See PR #184 review B4.
+							tiePrice := effPrice(slot)
+							if tiePrice < 0 {
+								tiePrice = 0
+							}
+							cost += 0.25 * tiePrice * battChargeKWh
 						}
 
 						// Deadline slot: if this slot is the EV's

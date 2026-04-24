@@ -1190,7 +1190,15 @@ func main() {
 
 	// ---- Control loop ----
 	controlInterval := time.Duration(cfg.Site.ControlIntervalS) * time.Second
-	fuseMaxW := cfg.Fuse.SafeMaxPowerW()
+	// Dispatch-time fuse guard uses the RAW breaker rating, not the
+	// margined value — the safety margin is a PLAN-TIME budget for
+	// controlled loads (EV) and the MPC DP, not a reduction of the
+	// legacy battery dispatch ceiling. Tightening this silently would
+	// shrink every existing battery-only install's headroom by
+	// ~345 W on a 16 A/3Φ site on upgrade. The margin stays applied
+	// via cfg.Fuse.SafeMaxPowerW() at the MPC + loadpoint layers.
+	// See PR #184 review B6.
+	fuseMaxW := cfg.Fuse.MaxPowerW()
 	dtS := float64(cfg.Site.ControlIntervalS)
 
 	// Graceful shutdown
@@ -1582,6 +1590,9 @@ func buildLoadpointConfigs(src []config.Loadpoint) []loadpoint.Config {
 			AutoChargeEnabled:         lp.AutoChargeEnabled,
 			AutoChargeTargetSoCPct:    lp.AutoChargeTargetSoCPct,
 			AutoChargeTargetTimeLocal: lp.AutoChargeTargetTimeLocal,
+			PhaseMode:                 lp.PhaseMode,
+			PhaseSplitW:               lp.PhaseSplitW,
+			MinPhaseHoldS:             lp.MinPhaseHoldS,
 		})
 	}
 	return out
