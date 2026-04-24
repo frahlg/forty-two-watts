@@ -259,14 +259,14 @@ jobs:
 
       - name: Register binfmt_misc handlers for arm / arm64
         # See rpi-image-build.yml for the full rationale. Short version:
-        # install qemu-user with --no-install-recommends to keep
-        # qemu-user-binfmt out (its postinst auto-registers handlers
-        # that don't work inside pi-gen's chroot), then let
-        # tonistiigi/binfmt install F-flagged handlers that survive
-        # the mount-namespace switch.
+        # install qemu-user-static with --no-install-recommends (pi-gen's
+        # bookworm-arm64 branch wants /usr/bin/qemu-aarch64-static, and
+        # the flag keeps the wrapper-registering qemu-user-binfmt out),
+        # then let tonistiigi/binfmt install F-flagged handlers that
+        # survive pi-gen's chroot mount-namespace switch.
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends qemu-user
+          sudo apt-get install -y -qq --no-install-recommends qemu-user-static
           sudo docker run --privileged --rm tonistiigi/binfmt --install arm,arm64
 
       - name: Checkout tag

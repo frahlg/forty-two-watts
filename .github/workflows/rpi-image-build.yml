@@ -48,27 +48,24 @@ jobs:
           df -h /
 
       - name: Register binfmt_misc handlers for arm / arm64
-        # Requirements for pi-gen on amd64:
+        # pi-gen's bookworm-arm64 branch checks for
+        # /usr/bin/qemu-aarch64-static (STATIC, with -static suffix,
+        # from the qemu-user-static package) — NOT /usr/bin/qemu-arm
+        # like master does. Observed on run 24878263028: "qemu-
+        # aarch64-static not found (please install qemu-user-static)".
         #
-        #   1. /usr/bin/qemu-arm on the HOST so pi-gen's `which qemu-arm`
-        #      check passes. qemu-user provides the binary. We pass
-        #      --no-install-recommends to block qemu-user-binfmt (which
-        #      qemu-user Recommends): its postinst auto-registers
-        #      handlers pointing at /usr/libexec/qemu-binfmt/arm-binfmt-P
-        #      wrappers that DON'T exist inside pi-gen's Raspberry Pi OS
-        #      chroot, and arch-test fails with "armhf: not supported".
-        #      Diagnosed on run 24875338536 of this workflow — the
-        #      wrapper path was baked into binfmt_misc before
-        #      tonistiigi/binfmt got a chance to register its own.
+        # --no-install-recommends prevents qemu-user-binfmt from
+        # being pulled as a recommend. Its postinst registers wrapper
+        # handlers at /usr/libexec/qemu-binfmt/*-binfmt-P that don't
+        # exist inside pi-gen's chroot (arch-test then fails with
+        # "armhf: not supported"). Diagnosed on run 24875338536.
         #
-        #   2. binfmt_misc handlers with the F (fix-binary) flag so the
-        #      interpreter stays valid across mount namespaces. With
-        #      qemu-user-binfmt held out, tonistiigi/binfmt installs its
-        #      own handlers that resolve /usr/bin/qemu-aarch64-static
-        #      into a kept-open fd — survives the chroot.
+        # tonistiigi/binfmt registers F-flagged handlers that resolve
+        # the interpreter at registration time and keep the fd valid
+        # across pi-gen's mount-namespace switch.
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends qemu-user
+          sudo apt-get install -y -qq --no-install-recommends qemu-user-static
           sudo docker run --privileged --rm tonistiigi/binfmt --install arm,arm64
 
       - name: Checkout
