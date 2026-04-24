@@ -1506,6 +1506,32 @@ footer {
 .plan-tip .tip-pred { font-size: 0.7rem; color: #fbbf24; font-weight: normal; }
 .plan-tip .tip-row { display: flex; justify-content: space-between; padding: 1px 0; }
 .plan-tip .tip-row span { color: var(--text-dim, #94a3b8); }
+.plan-tip .tip-breakdown {
+  margin: 4px 0 2px;
+  padding: 4px 0 2px;
+  border-top: 1px dashed rgba(255,255,255,0.08);
+  border-bottom: 1px dashed rgba(255,255,255,0.08);
+  font-size: 0.72rem;
+}
+.plan-tip .tip-break-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1px 0;
+}
+.plan-tip .tip-break-row > span:nth-child(2) {
+  flex: 1;
+  color: var(--text-dim, #94a3b8);
+  opacity: 0.85;
+}
+.plan-tip .tip-break-sw {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  margin-right: 6px;
+  flex-shrink: 0;
+}
+.plan-tip .tip-break-row b { color: #ddd; font-weight: 500; }
 .plan-tip .tip-reason {
   margin-top: 6px;
   padding-top: 6px;

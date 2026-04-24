@@ -138,6 +138,11 @@ type Action struct {
 	SlotStartMs int64   `json:"slot_start_ms"`
 	SlotLenMin  int     `json:"slot_len_min"`
 	PriceOre    float64 `json:"price_ore"`
+	// SpotOre is the raw wholesale spot price (öre/kWh, ex grid tariff
+	// and VAT). Surfaced so the UI can break the price bar into
+	// components (spot + grid tariff + VAT) — pedagogical view of
+	// where the kr/kWh actually goes. Mirrors Slot.SpotOre.
+	SpotOre     float64 `json:"spot_ore"`
 	PVW         float64 `json:"pv_w"`
 	LoadW       float64 `json:"load_w"`
 	BatteryW    float64 `json:"battery_w"`  // decision (site sign, AC terminals)
@@ -656,6 +661,7 @@ func Optimize(slots []Slot, p Params) Plan {
 			SlotStartMs: slot.StartMs,
 			SlotLenMin:  slot.LenMin,
 			PriceOre:    slot.PriceOre,
+			SpotOre:     slot.SpotOre,
 			Confidence:  slot.Confidence,
 			PVW:         slot.PVW,
 			LoadW:       slot.LoadW,
