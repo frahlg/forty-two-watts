@@ -126,9 +126,21 @@
         }
         if (isLocalHTTP) {
           var lcfg = d.config || {};
+          // Render the Disable-PV checkbox for every HTTP driver; the
+          // post-fetch pass in `after` reveals it only for drivers
+          // whose catalog entry advertises BOTH meter + pv. Hidden
+          // via DOM edit instead of conditional render so the catalog
+          // fetch race doesn't leave the checkbox missing on first
+          // paint for a zap driver.
           html += '<fieldset><legend>HTTP</legend>' +
             '<label>Host / IP ' + help('Hostname (e.g. zap.local) or IP address of the device. mDNS names work when your OS resolver supports them; otherwise use the LAN IP.') + '</label>' +
             '<input type="text" data-path="drivers.' + idx + '.config.host" value="' + escHtml(lcfg.host || '') + '" placeholder="zap.local">' +
+            '<label class="drv-disable-pv" data-drv-lua="' + escHtml(d.lua || '') + '" style="margin-top:8px;display:none;align-items:center;gap:6px;font-weight:normal">' +
+              '<input type="checkbox" data-checkbox-path="drivers.' + idx + '.config.disable_pv"' +
+              (lcfg.disable_pv ? ' checked' : '') + '>' +
+              'Disable PV readings ' +
+              help('Use this gateway for the P1 meter only. When another driver already owns PV aggregation, set this so the two drivers don\'t double-count generation.') +
+            '</label>' +
             '</fieldset>';
         }
         if (isCloudDriver) {
@@ -203,6 +215,18 @@
             caps.indexOf("pv") >= 0 ||
             caps.indexOf("battery") >= 0;
           if (!canBeSiteMeter) lbl.style.display = "none";
+        });
+        // Show the Disable-PV checkbox only on drivers whose catalog
+        // advertises BOTH meter and pv — those are the ones where a
+        // second instance on the same site can double-count PV.
+        bodyEl.querySelectorAll(".drv-disable-pv").forEach(function (lbl) {
+          var lua = lbl.getAttribute("data-drv-lua");
+          var entry = lua && byLua[lua];
+          if (!entry) return;
+          var caps = entry.capabilities || [];
+          if (caps.indexOf("meter") >= 0 && caps.indexOf("pv") >= 0) {
+            lbl.style.display = "flex";
+          }
         });
         var sel = document.getElementById("driver-catalog-picker");
         if (!sel) return;
