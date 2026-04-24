@@ -24,7 +24,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 PI_GEN_DIR="${SCRIPT_DIR}/pi-gen"
-PI_GEN_REF="${PI_GEN_REF:-master}"
+# pi-gen's `master` has moved on to Debian trixie. Pin to the
+# bookworm-arm64 branch to keep the image line on Debian 12
+# (Raspberry Pi OS Lite 64-bit bookworm) — matches what the
+# curl|bash installer and docs target. Bump deliberately when we
+# choose to jump to trixie.
+PI_GEN_REF="${PI_GEN_REF:-bookworm-arm64}"
 
 # Sync repo-owned files into the stage's files/ directory. We copy
 # rather than symlink because pi-gen's stage runner treats files/ as

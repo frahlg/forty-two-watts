@@ -80,7 +80,9 @@ jobs:
 
       - name: Build image
         env:
-          PI_GEN_REF: master
+          # Pin to pi-gen's bookworm-arm64 branch. master is on trixie
+          # now; keep us on bookworm until we deliberately jump.
+          PI_GEN_REF: bookworm-arm64
         run: deploy/pi-gen/build.sh
 
       - name: Locate artifact

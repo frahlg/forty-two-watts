@@ -278,11 +278,12 @@ jobs:
           ref: v${{ needs.release.outputs.new_release_version }}
 
       - name: Build image
-        # PI_GEN_REF pins the upstream pi-gen checkout so a breaking
-        # change on their master (e.g. a Raspberry Pi OS base bump)
-        # doesn't silently change what we ship. Bump this deliberately.
+        # Pin to pi-gen's bookworm-arm64 branch. Upstream master has
+        # advanced to Debian trixie; we keep the image on bookworm
+        # so the curl|bash installer and the SD image deploy to the
+        # same base OS. Bump this when we choose to jump to trixie.
         env:
-          PI_GEN_REF: master
+          PI_GEN_REF: bookworm-arm64
         run: deploy/pi-gen/build.sh
 
       - name: Locate + rename artifact
