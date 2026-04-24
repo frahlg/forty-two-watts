@@ -60,7 +60,7 @@ Klicka på **Next**. Programmet frågar om du vill anpassa inställningar — sv
 
 Fyll i så här:
 
-- **Hostname:** `fortytwo.local`
+- **Hostname:** `fortytwo`
 - **Localization:** **Sweden / SE**
 - **Användarnamn:** t.ex. `pi`
 - **Lösenord:** välj något du kommer ihåg, men inte "1234"
@@ -131,7 +131,7 @@ Skriv in ditt lösenord en gång till. Nu installeras allt. Det tar några minut
 Öppna webbläsaren på din vanliga dator och gå till webb-gränssnittet:
 
 ```
-http://fortytwo.local:8080/
+http://fortytwo:8080/
 ```
 
 Fungerar inte den adressen — prova IP-adressen du skrev ner, t.ex. `http://192.168.1.123:8080/`.
