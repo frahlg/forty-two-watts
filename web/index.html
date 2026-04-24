@@ -317,18 +317,24 @@
             <button id="plan-replan" class="btn-send" title="Force a fresh plan">Replan</button>
           </div>
         </div>
+        <p class="plan-help">
+          Forecast-driven battery schedule for the next 48&nbsp;h, recomputed every few minutes.
+          Each bar is a 15-minute slot. Prices after the day-ahead publication window are filled in by the ML price twin.
+          Hover any slot for the full breakdown. The dashed vertical line marks &ldquo;now&rdquo;.
+        </p>
+        <div id="plan-savings" class="plan-savings"></div>
         <div class="chart-container">
           <canvas id="plan-chart" width="800" height="260"></canvas>
         </div>
         <div class="chart-legend">
-          <span class="legend-item"><span class="legend-color" style="background:rgba(34,197,94,0.60)"></span> Cheap</span>
-          <span class="legend-item"><span class="legend-color" style="background:rgba(239,68,68,0.60)"></span> Expensive</span>
-          <span class="legend-item"><span class="legend-color legend-ghost"></span> Predicted (ML)</span>
-          <span class="legend-item"><span class="legend-color" style="background:#22c55e"></span> PV fc</span>
-          <span class="legend-item"><span class="legend-color legend-dash" style="border-color:#fde68a"></span> Load fc</span>
-          <span class="legend-item bat-only"><span class="legend-color" style="background:#f59e0b"></span> Charge</span>
-          <span class="legend-item bat-only"><span class="legend-color" style="background:#8b5cf6"></span> Discharge</span>
-          <span class="legend-item bat-only"><span class="legend-color" style="background:#60a5fa"></span> SoC</span>
+          <span class="legend-item" title="Price falls in the cheapest third of the horizon"><span class="legend-color" style="background:rgba(34,197,94,0.60)"></span> Cheap</span>
+          <span class="legend-item" title="Price falls in the most expensive third of the horizon"><span class="legend-color" style="background:rgba(239,68,68,0.60)"></span> Expensive</span>
+          <span class="legend-item" title="Beyond day-ahead publication — price filled in by the ML price twin"><span class="legend-color legend-ghost"></span> Predicted (ML)</span>
+          <span class="legend-item" title="PV generation the plan expects (solar forecast, site-signed)"><span class="legend-color" style="background:#22c55e"></span> PV forecast</span>
+          <span class="legend-item" title="Household load the plan expects (load twin)"><span class="legend-color legend-dash" style="border-color:#fde68a"></span> Load forecast</span>
+          <span class="legend-item bat-only" title="Slot where the plan charges the battery"><span class="legend-color" style="background:#f59e0b"></span> Charge</span>
+          <span class="legend-item bat-only" title="Slot where the plan discharges the battery"><span class="legend-color" style="background:#8b5cf6"></span> Discharge</span>
+          <span class="legend-item bat-only" title="State of charge — battery fill %, 0–100"><span class="legend-color" style="background:#60a5fa"></span> SoC</span>
         </div>
       </section>
     </section>

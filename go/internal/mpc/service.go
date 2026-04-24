@@ -594,6 +594,16 @@ func (s *Service) replan(_ context.Context) *Plan {
 		plan.Actions[i].EMSMode = mode
 	}
 
+	// Baselines — counter-factual dispatch costs over the same horizon
+	// so the UI can show savings-vs-X numbers. Skip when already in
+	// self-consumption mode: the SC baseline is the plan itself, which
+	// makes the badge trivially zero and distracts from the price
+	// signal. For SC runs the UI still has the plan cost on its own.
+	if p.Mode != ModeSelfConsumption {
+		bl := ComputeBaselines(slots, p)
+		plan.Baselines = &bl
+	}
+
 	s.mu.Lock()
 	s.last = &plan
 	s.lastSlots = slots

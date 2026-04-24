@@ -165,15 +165,60 @@ type Action struct {
 	LoadpointSoCPct float64 `json:"loadpoint_soc_pct,omitempty"`
 }
 
+// Baselines are counter-factual dispatch costs over the same horizon,
+// included alongside the plan so the UI can show "savings vs X" numbers
+// without re-deriving the cost model client-side. All values in öre.
+//
+// NoBatteryOre is the cost if the battery didn't exist at all (grid =
+// load + pv each slot, priced with the same import/export model the DP
+// uses). SelfConsumptionOre comes from re-running Optimize with
+// ModeSelfConsumption — so it uses the real efficiency, power, and SoC
+// constraints, not a simplified simulation. FlatAvgOre is net
+// consumption priced at the horizon's mean — shows the value of
+// *timing* (shifting load to cheap hours), separate from the value of
+// having a battery.
+type Baselines struct {
+	NoBatteryOre       float64 `json:"no_battery_ore"`
+	SelfConsumptionOre float64 `json:"self_consumption_ore"`
+	FlatAvgOre         float64 `json:"flat_avg_ore"`
+	AvgPriceOre        float64 `json:"avg_price_ore"`
+	NetKWh             float64 `json:"net_kwh"`
+}
+
 // Plan is the output.
 type Plan struct {
-	GeneratedAtMs int64    `json:"generated_at_ms"`
-	Mode          Mode     `json:"mode"`
-	HorizonSlots  int      `json:"horizon_slots"`
-	CapacityWh    float64  `json:"capacity_wh"`
-	InitialSoCPct float64  `json:"initial_soc_pct"`
-	TotalCostOre  float64  `json:"total_cost_ore"`
-	Actions       []Action `json:"actions"`
+	GeneratedAtMs int64      `json:"generated_at_ms"`
+	Mode          Mode       `json:"mode"`
+	HorizonSlots  int        `json:"horizon_slots"`
+	CapacityWh    float64    `json:"capacity_wh"`
+	InitialSoCPct float64    `json:"initial_soc_pct"`
+	TotalCostOre  float64    `json:"total_cost_ore"`
+	Actions       []Action   `json:"actions"`
+	Baselines     *Baselines `json:"baselines,omitempty"`
+}
+
+// SlotGridCostOre returns the öre cost of flowing gridKWh across the
+// meter during a slot, using the same import/export model the DP loop
+// uses (see Optimize). Positive gridKWh = importing at consumer price;
+// negative = exporting, revenue = spot + bonus − fee (or a flat rate
+// if p.ExportOrePerKWh > 0). Clamped so a negative export price never
+// becomes a reward for not exporting.
+//
+// Shared between the DP and ComputeBaselines so they agree on the cost
+// model exactly — baselines must use the same formula as the plan
+// they're compared against, otherwise "savings" are misleading.
+func SlotGridCostOre(slot Slot, gridKWh float64, p Params) float64 {
+	if gridKWh > 0 {
+		return slot.PriceOre * gridKWh
+	}
+	rawExport := p.ExportOrePerKWh
+	if rawExport <= 0 {
+		rawExport = slot.SpotOre + p.ExportBonusOreKwh - p.ExportFeeOreKwh
+		if rawExport < 0 {
+			rawExport = 0
+		}
+	}
+	return -rawExport * (-gridKWh)
 }
 
 // Optimize runs DP and returns the cost-minimizing plan.

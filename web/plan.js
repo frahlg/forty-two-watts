@@ -299,9 +299,16 @@
     ctx.fillStyle = 'rgba(255,255,255,0.55)';
     ctx.textAlign = 'right';
     ctx.fillText('+' + (pMagMax / 1000).toFixed(1) + 'kW', pad.l - 6, powerY(pMagMax) + 4);
-    ctx.fillText((-pMagMax / 1000).toFixed(1) + 'kW', pad.l - 6, powerY(-pMagMax) + 4);
+    ctx.fillText('−' + (pMagMax / 1000).toFixed(1) + 'kW', pad.l - 6, powerY(-pMagMax) + 4);
     ctx.textAlign = 'left';
+    // "Power" heading + tiny sign-convention legend so readers don't have
+    // to remember that positive means "into the site". Placed just below
+    // the heading at lower opacity to read as a subtitle.
     ctx.fillText('Power', pad.l + 4, powerY0 + 12);
+    ctx.fillStyle = 'rgba(255,255,255,0.35)';
+    ctx.font = '9px system-ui, sans-serif';
+    ctx.fillText('+ import / charge   − export / discharge', pad.l + 40, powerY0 + 12);
+    ctx.font = '11px system-ui, sans-serif';
 
     // Skip every battery-related draw layer (action band, bars, SoC
     // line + axis labels) when the site has no battery reporter.
@@ -369,6 +376,10 @@
     }
 
     // ---- Summary ----
+    // Structured as labeled pieces with `title=` tooltips so every number
+    // in the header is self-explanatory on hover. Was a single flat string
+    // which left operators guessing what (e.g.) "SoC 17% → 123.09 SEK"
+    // meant.
     const summary = document.getElementById('plan-summary');
     if (summary) {
       if (!state.enabled || !state.enabled.mpc) {
@@ -378,18 +389,98 @@
           ? 'Waiting for first plan…'
           : 'Waiting for price data…';
       } else {
-        const hh = plan.horizon_slots * (plan.actions[0] ? plan.actions[0].slot_len_min : 15) / 60;
+        const slotMin = plan.actions[0] ? plan.actions[0].slot_len_min : 15;
+        const hh = plan.horizon_slots * slotMin / 60;
         const cost = plan.total_cost_ore / 100;
-        let suffix = '';
+        const costLabel = cost >= 0 ? 'expected cost' : 'expected earnings';
+        const parts = [];
+        parts.push(
+          `<span title="Active planner strategy — choose from the Mode picker above">` +
+          `<span class="s-value">${plan.mode}</span></span>`
+        );
+        parts.push(
+          `<span title="How far ahead the planner is optimising">` +
+          `<span class="s-value">${hh.toFixed(0)}h horizon</span></span>`
+        );
+        parts.push(
+          `<span title="Number of ${slotMin}-minute slots inside the horizon">` +
+          `<span class="s-value">${plan.horizon_slots} slots</span></span>`
+        );
+        parts.push(
+          `<span title="Battery state of charge right now — the plan starts from here">` +
+          `<span class="s-label">start SoC </span>` +
+          `<span class="s-value">${plan.initial_soc_pct.toFixed(0)}%</span></span>`
+        );
+        parts.push(
+          `<span title="Total grid spend the plan expects over the full ${hh.toFixed(0)} h horizon. Negative means the plan expects to earn money (net export).">` +
+          `<span class="s-label">${costLabel} </span>` +
+          `<span class="s-value">${cost.toFixed(2)} SEK</span></span>`
+        );
         if (state.planMeta && state.planMeta.last_replan_ms) {
           const age = Math.round((Date.now() - state.planMeta.last_replan_ms) / 1000);
           const reason = state.planMeta.last_replan_reason || '';
           const ageTxt = age < 60 ? `${age}s` : `${Math.round(age/60)}m`;
-          suffix = ` · replanned ${ageTxt} ago (${reason})`;
+          parts.push(
+            `<span title="Time since the last optimisation pass. Reason: ${reason}. Click Replan to force a fresh pass.">` +
+            `<span class="s-label">replanned </span>` +
+            `<span class="s-value">${ageTxt} ago</span>` +
+            `<span class="s-label"> (${reason})</span></span>`
+          );
         }
-        summary.textContent =
-          `${plan.mode} · ${hh.toFixed(0)}h horizon · ${plan.horizon_slots} slots · ` +
-          `SoC ${plan.initial_soc_pct.toFixed(0)}% → ${cost.toFixed(2)} SEK${suffix}`;
+        summary.innerHTML = parts.join('<span class="s-sep">·</span>');
+      }
+    }
+
+    // ---- Savings badges ----
+    // Three baselines computed server-side in mpc.ComputeBaselines so the
+    // numbers are guaranteed apples-to-apples with plan.total_cost_ore
+    // (same cost model, including export pricing, and a real SC
+    // dispatch from the DP itself rather than a client-side
+    // approximation). Absent in self-consumption mode — the backend
+    // skips the extra Optimize call since the SC baseline would equal
+    // the plan itself.
+    const savingsEl = document.getElementById('plan-savings');
+    if (savingsEl) {
+      const b = plan && plan.baselines;
+      if (!b) {
+        savingsEl.innerHTML = '';
+      } else {
+        const sekPlan = plan.total_cost_ore / 100;
+        const sekFlat = b.flat_avg_ore / 100;
+        const sekSC   = b.self_consumption_ore / 100;
+        const sekNoBat = b.no_battery_ore / 100;
+        const savedFlat = sekFlat - sekPlan;
+        const savedSC = sekSC - sekPlan;
+        const savedNoBat = sekNoBat - sekPlan;
+        const pct = (saved, base) => Math.abs(base) > 0.01 ? (saved / base) * 100 : 0;
+        const cls = v => v >= 0 ? 'saving-pos' : 'saving-neg';
+        const sign = v => (v >= 0 ? '+' : '−');
+        const fmt = v => Math.abs(v).toFixed(2);
+        const badge = (label, saved, base, title) => {
+          const p = pct(saved, base);
+          return `<span class="saving-badge ${cls(saved)}" title="${title}">` +
+            `<span class="saving-label">${label}</span> ` +
+            `<b>${sign(saved)}${fmt(saved)} SEK</b>` +
+            (Math.abs(p) > 0.1 ? ` <span class="saving-pct">(${sign(p)}${Math.abs(p).toFixed(0)}%)</span>` : '') +
+            `</span>`;
+        };
+        savingsEl.innerHTML = [
+          badge(
+            'vs no battery',
+            savedNoBat, sekNoBat,
+            `What this horizon would cost with no battery at all — grid flow = load + PV each slot, priced at the actual spot + consumer tariffs. Captures the combined value of battery + planner.`
+          ),
+          badge(
+            'vs self-consumption',
+            savedSC, sekSC,
+            `Cost of running self-consumption mode over the same forecast (re-computed by the planner with Mode=SelfConsumption — same battery, efficiency, and power constraints). Captures the extra value from arbitrage / cheap-charge on top of passive SC.`
+          ),
+          badge(
+            'vs flat avg price',
+            savedFlat, sekFlat,
+            `Net consumption (${b.net_kwh.toFixed(1)} kWh) × horizon mean price (${b.avg_price_ore.toFixed(1)} öre/kWh). Captures the value of *timing* — shifting consumption into cheap hours — independently of battery.`
+          ),
+        ].join('');
       }
     }
   }
@@ -425,29 +516,37 @@
       const dayStr = d.toLocaleDateString(undefined, { weekday: 'short' });
       const predicted = a.confidence != null && a.confidence < 1.0;
       const price = a.total_ore_kwh ?? a.price_ore;
+      // PV is site-signed internally (generation = negative). Flip it for
+      // display so the tooltip reads as a positive production number —
+      // that's what everyone expects when they see the word "PV".
       const lines = [
         `<div class="tip-head">${dayStr} ${hh}${predicted ? ' <span class="tip-pred">predicted</span>' : ''}</div>`,
-        `<div class="tip-row"><span>Price</span><b>${price.toFixed(1)} öre/kWh</b></div>`,
+        `<div class="tip-row"><span title="Spot + taxes + transfer fee for the 15-minute slot">Price</span><b>${price.toFixed(1)} öre/kWh</b></div>`,
       ];
-      if (a.pv_w != null) lines.push(`<div class="tip-row"><span>PV</span><b>${(a.pv_w / 1000).toFixed(1)} kW</b></div>`);
-      if (a.load_w != null) lines.push(`<div class="tip-row"><span>Load</span><b>${(a.load_w / 1000).toFixed(1)} kW</b></div>`);
+      if (a.pv_w != null) {
+        const pvGen = Math.max(0, -a.pv_w) / 1000;
+        lines.push(`<div class="tip-row"><span title="Solar generation the plan assumes for this slot">PV forecast</span><b>${pvGen.toFixed(1)} kW</b></div>`);
+      }
+      if (a.load_w != null) lines.push(`<div class="tip-row"><span title="Household consumption the plan assumes for this slot">Load forecast</span><b>${(a.load_w / 1000).toFixed(1)} kW</b></div>`);
       if (a.battery_w != null) {
         const dir = a.battery_w > 100 ? 'charge' : a.battery_w < -100 ? 'discharge' : 'idle';
-        lines.push(`<div class="tip-row"><span>Battery</span><b>${(a.battery_w / 1000).toFixed(1)} kW (${dir})</b></div>`);
+        lines.push(`<div class="tip-row"><span title="Planned battery power. + = charging, − = discharging">Battery</span><b>${(a.battery_w / 1000).toFixed(1)} kW (${dir})</b></div>`);
       }
       if (a.grid_w != null) {
         const gdir = a.grid_w > 0 ? 'import' : 'export';
-        lines.push(`<div class="tip-row"><span>Grid</span><b>${(Math.abs(a.grid_w) / 1000).toFixed(1)} kW ${gdir}</b></div>`);
+        lines.push(`<div class="tip-row"><span title="Net grid flow the plan expects. Import = buy from grid, export = sell back">Grid</span><b>${(Math.abs(a.grid_w) / 1000).toFixed(1)} kW ${gdir}</b></div>`);
       }
-      if (a.soc_pct != null) lines.push(`<div class="tip-row"><span>SoC (end)</span><b>${a.soc_pct.toFixed(0)}%</b></div>`);
+      if (a.soc_pct != null) lines.push(`<div class="tip-row"><span title="Battery state of charge at the end of this slot">SoC (end)</span><b>${a.soc_pct.toFixed(0)}%</b></div>`);
       if (a.battery_w != null) {
-        let action;
-        if (a.battery_w > 100) action = 'Charging';
-        else if (a.battery_w < -100) action = 'Discharging';
-        else action = 'Idle';
-        lines.push(`<div class="tip-row"><span>Plan</span><b>${action}</b></div>`);
+        let action, actionHint;
+        if (a.battery_w > 100) { action = 'Charging'; actionHint = 'import to cover load + top up battery'; }
+        else if (a.battery_w < -100) { action = 'Discharging'; actionHint = 'battery covers load (and may export)'; }
+        else { action = 'Idle'; actionHint = 'battery neither charges nor discharges'; }
+        lines.push(`<div class="tip-row"><span title="Battery action this slot">Plan</span><b>${action}</b></div>`);
+        lines.push(`<div class="tip-reason">${a.reason ? a.reason : `${action.toLowerCase()} — ${actionHint}${predicted ? ' (predicted)' : ''}`}</div>`);
+      } else if (a.reason) {
+        lines.push(`<div class="tip-reason">${a.reason}</div>`);
       }
-      if (a.reason) lines.push(`<div class="tip-reason">${a.reason}</div>`);
       tip.innerHTML = lines.join('');
       tip.style.left = (e.clientX + 14) + 'px';
       tip.style.top = (e.clientY + 14) + 'px';
