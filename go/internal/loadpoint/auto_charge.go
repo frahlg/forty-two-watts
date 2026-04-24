@@ -9,6 +9,19 @@ import "time"
 // charge_limit_soc). Helpers here also translate operator-friendly
 // "HH:MM in local time" strings into the next concrete deadline.
 
+// autoScheduleZone is the timezone HH:MM deadlines are interpreted in.
+// Europe/Stockholm is DST-aware (CEST = UTC+2 in summer, CET = UTC+1
+// in winter) and matches the site convention used elsewhere in the
+// project. If tzdata isn't compiled in (stripped container), we fall
+// back to a fixed UTC+2 offset — still preferable to UTC, which would
+// fire the auto plan at 04:00 Swedish wall-clock time.
+var autoScheduleZone = func() *time.Location {
+	if loc, err := time.LoadLocation("Europe/Stockholm"); err == nil {
+		return loc
+	}
+	return time.FixedZone("UTC+2", 2*3600)
+}()
+
 // applyAutoSchedule posts a target on the loadpoint matching the
 // configured plug-in defaults. When a vehicle driver is bound and
 // reports a charge_limit_soc, the SoC target clamps to min(config,
@@ -66,8 +79,12 @@ func nextLocalTimeOfDay(hhmm, fallback string, now time.Time) time.Time {
 	if !ok {
 		return now.Add(8 * time.Hour)
 	}
-	loc := now.Location()
-	candidate := time.Date(now.Year(), now.Month(), now.Day(), h, mi, 0, 0, loc)
+	// HH:MM is interpreted in autoScheduleZone (Europe/Stockholm with
+	// fallback to UTC+2), NOT the process's local timezone — the
+	// container's TZ is typically UTC, which would push "06:00" to
+	// 08:00 Swedish wall-clock and miss the morning commute.
+	nowLocal := now.In(autoScheduleZone)
+	candidate := time.Date(nowLocal.Year(), nowLocal.Month(), nowLocal.Day(), h, mi, 0, 0, autoScheduleZone)
 	if !candidate.After(now) {
 		candidate = candidate.Add(24 * time.Hour)
 	}
