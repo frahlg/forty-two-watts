@@ -592,6 +592,9 @@ class FtwEnergyFlow extends FtwElement {
         sub: p.sub,
         color: p.color,
         soc: p.placeholder ? null : p.soc,
+        chargeLimit: p.placeholder ? null : p.chargeLimit,
+        socStale: !p.placeholder && !!p.socStale,
+        socSource: p.placeholder ? null : p.socSource,
         radius: p._r,
         clickable: !p.placeholder && !!p.role,
         role: p.role || "",
@@ -1324,7 +1327,9 @@ function hashStr(s) {
 // a multi-device 55 px circle both read proportionally. Stroke is the
 // accent color so each node carries its identity on the edge of the
 // circle — no separate stripe needed the way rectangular boxes have.
-function renderCircleNode({ pos, title, nameLabel, value, sub, color, soc, radius = 86,
+function renderCircleNode({ pos, title, nameLabel, value, sub, color, soc,
+                            chargeLimit = null, socStale = false, socSource = null,
+                            radius = 86,
                             clickable = false, role = "", name = "", id = "",
                             aggregated = false }) {
   const r = radius;
@@ -1360,11 +1365,26 @@ function renderCircleNode({ pos, title, nameLabel, value, sub, color, soc, radiu
   // the aggregation layer, "SoC" for a single-battery reading.
   // Honest about provenance — a 72 % on the aggregated bubble is not
   // the same fact as a 72 % on one inverter.
+  //
+  // EV planets gain two extra honesty markers:
+  //  - `~` prefix when SoC came from the "inferred" path (pluginSoC
+  //    + deliveredWh) rather than the vehicle's own BMS.
+  //  - `★` suffix when the vehicle reading is stale (driver has
+  //    lost contact with the car for > stale_after_s).
+  // When a charge-limit is also known (Tesla app "charge to 50 %"
+  // etc.), render as "SoC 24 / 50 %" so the operator sees both
+  // current and the vehicle-configured ceiling in one glance.
   const socLabel = aggregated ? "Avg SoC" : "SoC";
-  const socText = soc != null
-    ? `<text x="${x}" y="${y + socY}" text-anchor="middle"
-             fill="var(--cyan)" class="sv-node-sub">${socLabel} ${Math.round(soc)}%</text>`
-    : "";
+  let socText = "";
+  if (soc != null) {
+    const socPrefix = socSource === "inferred" ? "~" : "";
+    const staleMark = socStale ? " ★" : "";
+    const socBody = chargeLimit != null
+      ? `${socPrefix}${Math.round(soc)} / ${Math.round(chargeLimit)}%`
+      : `${socPrefix}${Math.round(soc)}%`;
+    socText = `<text x="${x}" y="${y + socY}" text-anchor="middle"
+             fill="var(--cyan)" class="sv-node-sub">${socLabel} ${socBody}${staleMark}</text>`;
+  }
   // Icon swapped in during the loading + fade-in phases. Scale chosen
   // so a full-size planet (r ≈ 86) hosts a ~30 px icon — readable at
   // the overview zoom without competing with the text once it fades

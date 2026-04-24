@@ -372,9 +372,64 @@ func Optimize(slots []Slot, p Params) Plan {
 								continue
 							}
 						}
+						// Energy-source policy gates. Each flag on the
+						// attached policy can veto this (battW, evW)
+						// combo when evW > 0:
+						//
+						//  - OnlySurplus clamps daytime evW to the
+						//    forecast PV surplus. Night (PVW ≈ 0)
+						//    untouched here (AllowGrid picks up the
+						//    no-grid-import case if set).
+						//  - AllowBatterySupport=false rejects pairs
+						//    where the battery discharges to cover
+						//    EV draw.
+						//  - AllowGrid=false rejects any pair that
+						//    forces net site import (gridW > 0).
+						//
+						// nil policy ≡ unrestricted legacy behaviour.
+						if evActive && evW > 0 && lp != nil && lp.Policy != nil {
+							pol := lp.Policy
+							eps := pol.SurplusEpsilonW
+							if eps <= 0 {
+								eps = 100
+							}
+							if pol.OnlySurplus && slot.PVW < -eps {
+								// Daytime surplus window. Clamp evW
+								// to what the forecast says we can
+								// export. Night slots pass through
+								// this branch untouched.
+								availableSurplus := -(slot.LoadW + slot.PVW)
+								if availableSurplus < 0 {
+									availableSurplus = 0
+								}
+								if evW > availableSurplus+eps {
+									continue
+								}
+							}
+							if !pol.AllowBatterySupport && battW < 0 {
+								// Battery is discharging (< 0) while
+								// EV is drawing. Policy disallows —
+								// the home battery must not prop up
+								// the EV charger.
+								continue
+							}
+						}
 						// EV appears as a site load (+ site-signed).
 						// GridW = load + PV + battery + EV.
 						gridW := slot.LoadW + slot.PVW + battW + evW
+
+						// AllowGrid check requires gridW, so it runs
+						// here. Rejects any action where EV draw
+						// causes net site import beyond eps.
+						if evActive && evW > 0 && lp != nil && lp.Policy != nil && !lp.Policy.AllowGrid {
+							eps := lp.Policy.SurplusEpsilonW
+							if eps <= 0 {
+								eps = 100
+							}
+							if gridW > eps {
+								continue
+							}
+						}
 
 						// Mode-based feasibility. Baseline includes
 						// EV so the mode check asks "is the extra
@@ -437,6 +492,28 @@ func Optimize(slots []Slot, p Params) Plan {
 								houseKWh := houseGridW * dtH / 1000.0
 								cost += 2.0 * effPrice(slot) * houseKWh
 							}
+						}
+
+						// EV-first preference: when the operator has a
+						// car plugged with outstanding charge demand
+						// AND the DP is weighing charging the HOME
+						// battery in the same slot, nudge the cost up
+						// on the battery side. Effect: when limited
+						// surplus can only feed one, DP prefers EV.
+						// When there's enough for both, they share.
+						// Factor 0.25×effPrice per kWh of battery
+						// charge is small enough that genuine
+						// price/SoC decisions dominate, big enough to
+						// break the tie when (battW>0, evW=0) and
+						// (battW=0, evW>0) would otherwise cost
+						// identically. Only activates when an EV is
+						// actually plugged AND has demand, so sites
+						// without an EV loadpoint see zero change.
+						if evActive && lp != nil &&
+							lp.TargetSoCPct > lp.InitialSoCPct &&
+							battW > 100 && evW == 0 {
+							battChargeKWh := battW * dtH / 1000.0
+							cost += 0.25 * effPrice(slot) * battChargeKWh
 						}
 
 						// Deadline slot: if this slot is the EV's

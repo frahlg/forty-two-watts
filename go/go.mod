@@ -8,6 +8,7 @@ require (
 	github.com/lorenzodonini/ocpp-go v0.19.0
 	github.com/mochi-mqtt/server/v2 v2.7.9
 	github.com/parquet-go/parquet-go v0.29.0
+	github.com/pmezard/go-difflib v1.0.0
 	github.com/shirou/gopsutil/v4 v4.26.3
 	github.com/simonvetter/modbus v1.6.4
 	github.com/yuin/gopher-lua v1.1.2

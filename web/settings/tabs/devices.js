@@ -31,20 +31,37 @@
         var modbus = cap.modbus || d.modbus;
         var protocol = mqtt ? "mqtt" : (modbus ? "modbus" : (cap.http ? "http" : "?"));
         var driverFile = d.lua || "(none)";
+        var headerLabel = d.alias ? (escHtml(d.alias) + ' <span style="color:var(--text-dim);font-weight:400">(' + escHtml(d.name) + ')</span>') : escHtml(d.name);
         html += '<div class="device-item">' +
           '<div class="device-item-header">' +
-          '<strong>' + escHtml(d.name) + '</strong>' +
+          '<strong>' + headerLabel + '</strong>' +
           '<span style="color:var(--text-dim);font-size:0.75rem">lua · ' + protocol + ' · ' + escHtml(driverFile) + '</span>' +
           '<button class="btn-remove" data-remove-idx="' + idx + '">Remove</button>' +
           '</div>' +
+          '<div class="field-row"><div>' +
+          '<label>Name (stable ID) ' + help('Internal identifier — used by telemetry, schedule references (loadpoint.vehicle_driver etc.), and device registry. Must be unique across drivers. Change with care: renaming orphans any persisted state keyed on this name.') + '</label>' +
+          '<input type="text" data-path="drivers.' + idx + '.name" value="' + escHtml(d.name || "") + '">' +
+          '</div><div>' +
+          '<label>Alias ' + help('Optional friendly label for the UI (e.g. "My Model Y"). When empty, UIs fall back to the stable name.') + '</label>' +
+          '<input type="text" data-path="drivers.' + idx + '.alias" value="' + escHtml(d.alias || "") + '" placeholder="e.g. Garage Tesla">' +
+          '</div></div>' +
           '<div class="field-row"><div>' +
           '<label>Driver file ' + help('Path to the .lua driver. Absolute or relative to the config file directory.') + '</label>' +
           '<input type="text" data-path="drivers.' + idx + '.lua" value="' + escHtml(driverFile) + '">' +
           '</div><div>' +
           '<label>Battery capacity (kWh) ' + help('Nameplate storage capacity in kilowatt-hours. Stored internally as Wh.') + '</label>' +
           '<input type="number" step="0.1" data-path="drivers.' + idx + '.battery_capacity_wh" data-unit-scale="1000" value="' + ((d.battery_capacity_wh || 0) / 1000) + '">' +
-          '</div></div>' +
-          '<label><input type="checkbox" data-checkbox-path="drivers.' + idx + '.is_site_meter"' + (d.is_site_meter ? ' checked' : '') + '> Site meter ' + help('Exactly one driver should be the site meter — its grid reading defines the point-of-measurement the PI loop balances.') + '</label>';
+          '</div></div>';
+        // Site-meter checkbox. Always rendered here so the DOM is
+        // stable regardless of when the catalog arrives — the
+        // post-fetch pass in `after` visits each `.drv-site-meter`
+        // and hides the ones whose driver only has a "vehicle"
+        // capability (no grid reading to offer). Hiding via a
+        // post-render DOM edit instead of a re-render avoids the
+        // select-wiping bug where a user clicking the catalog
+        // dropdown had it disappear under them every time the
+        // fetch resolved.
+        html += '<label class="drv-site-meter" data-drv-lua="' + escHtml(d.lua || '') + '"><input type="checkbox" data-checkbox-path="drivers.' + idx + '.is_site_meter"' + (d.is_site_meter ? ' checked' : '') + '> Site meter ' + help('Exactly one driver should be the site meter — its grid reading defines the point-of-measurement the PI loop balances.') + '</label>';
         if (mqtt) {
           html += '<fieldset><legend>MQTT</legend>' +
             '<div class="field-row"><div>' +
@@ -71,18 +88,59 @@
             '<input type="number" data-path="drivers.' + idx + '.capabilities.modbus.unit_id" value="' + (modbus.unit_id || 1) + '">' +
             '</fieldset>';
         }
-        // Local-HTTP vs cloud-HTTP driver detection by declared config shape.
+        // Local-HTTP vs cloud-HTTP vs vehicle-over-proxy detection
+        // by declared config shape + catalog capabilities.
         var dcfg = d.config || {};
         var hasHostField = Object.prototype.hasOwnProperty.call(dcfg, 'host');
         var hasAuthField = Object.prototype.hasOwnProperty.call(dcfg, 'email') ||
                            Object.prototype.hasOwnProperty.call(dcfg, 'password');
-        var isLocalHTTP = cap.http != null && hasHostField;
-        var isCloudDriver = cap.http != null && !hasHostField && (hasAuthField || Object.keys(dcfg).length === 0);
+        var catalogEntry = (S.catalogByLua || {})[d.lua];
+        var caps = (catalogEntry && catalogEntry.capabilities) || [];
+        var isVehicleDriver = cap.http != null &&
+          (caps.indexOf("vehicle") >= 0 ||
+           Object.prototype.hasOwnProperty.call(dcfg, 'vin') ||
+           Object.prototype.hasOwnProperty.call(dcfg, 'ip'));
+        var isLocalHTTP = !isVehicleDriver && cap.http != null && hasHostField;
+        var isCloudDriver = !isVehicleDriver && cap.http != null && !hasHostField &&
+          (hasAuthField || Object.keys(dcfg).length === 0);
+        if (isVehicleDriver) {
+          // TeslaBLEProxy-style drivers only need the LAN IP of the
+          // proxy and the VIN the proxy is paired to — no cloud
+          // credentials, no charger serial. "Verify connection"
+          // makes the backend issue a one-shot vehicle_data poll so
+          // the operator can confirm pairing before saving.
+          var vcfg = d.config || {};
+          html += '<fieldset><legend>Vehicle</legend>' +
+            '<div class="field-row"><div>' +
+            '<label>Proxy IP ' + help('LAN address of the TeslaBLEProxy. Bare IP uses port 8080; append ":port" to override (e.g. 192.168.1.50:1234).') + '</label>' +
+            '<input type="text" data-path="drivers.' + idx + '.config.ip" value="' + escHtml(vcfg.ip || '') + '" placeholder="192.168.1.50 (or 192.168.1.50:1234)">' +
+            '</div><div>' +
+            '<label>VIN ' + help('Vehicle Identification Number the proxy is paired to.') + '</label>' +
+            '<input type="text" data-path="drivers.' + idx + '.config.vin" value="' + escHtml(vcfg.vin || '') + '" placeholder="5YJ3E1EA1KF000000">' +
+            '</div></div>' +
+            '<div style="margin-top:8px;display:flex;gap:10px;align-items:center">' +
+            '<button class="btn-add tesla-verify-btn" type="button" data-driver-idx="' + idx + '">Verify connection</button>' +
+            '<span class="tesla-verify-status" data-driver-idx="' + idx + '" style="font-size:0.82rem;color:var(--text-dim)"></span>' +
+            '</div>' +
+            '</fieldset>';
+        }
         if (isLocalHTTP) {
           var lcfg = d.config || {};
+          // Render the Disable-PV checkbox for every HTTP driver; the
+          // post-fetch pass in `after` reveals it only for drivers
+          // whose catalog entry advertises BOTH meter + pv. Hidden
+          // via DOM edit instead of conditional render so the catalog
+          // fetch race doesn't leave the checkbox missing on first
+          // paint for a zap driver.
           html += '<fieldset><legend>HTTP</legend>' +
             '<label>Host / IP ' + help('Hostname (e.g. zap.local) or IP address of the device. mDNS names work when your OS resolver supports them; otherwise use the LAN IP.') + '</label>' +
             '<input type="text" data-path="drivers.' + idx + '.config.host" value="' + escHtml(lcfg.host || '') + '" placeholder="zap.local">' +
+            '<label class="drv-disable-pv" data-drv-lua="' + escHtml(d.lua || '') + '" style="margin-top:8px;display:none;align-items:center;gap:6px;font-weight:normal">' +
+              '<input type="checkbox" data-checkbox-path="drivers.' + idx + '.config.disable_pv"' +
+              (lcfg.disable_pv ? ' checked' : '') + '>' +
+              'Disable PV readings ' +
+              help('Use this gateway for the P1 meter only. When another driver already owns PV aggregation, set this so the two drivers don\'t double-count generation.') +
+            '</label>' +
             '</fieldset>';
         }
         if (isCloudDriver) {
@@ -125,8 +183,51 @@
       var config = ctx.config;
       var bodyEl = ctx.bodyEl;
 
-      // Driver catalog picker — fetch async, render into select.
-      fetch("/api/drivers/catalog").then(function (r) { return r.json(); }).then(function (data) {
+      // Driver catalog picker — fetch async, populate the select +
+      // post-process the per-driver Site-meter labels. Fetch is
+      // module-cached on window.FTWSettings so opening the tab
+      // again doesn't re-hit the endpoint; the in-DOM <select>
+      // still gets repopulated on every open.
+      var catalogPromise = S._catalogPromise;
+      if (!catalogPromise) {
+        catalogPromise = fetch("/api/drivers/catalog")
+          .then(function (r) { return r.json(); })
+          .catch(function () { return { entries: [] }; });
+        S._catalogPromise = catalogPromise;
+      }
+      catalogPromise.then(function (data) {
+        var byLua = {};
+        (data && data.entries || []).forEach(function (e) {
+          if (e && e.path) byLua[e.path] = e;
+        });
+        S.catalogByLua = byLua;
+        // Hide Site-meter on drivers whose catalog advertises only
+        // "vehicle" (or similar non-meter-capable capability sets).
+        // Legacy drivers without a catalog entry keep the checkbox.
+        bodyEl.querySelectorAll(".drv-site-meter").forEach(function (lbl) {
+          var lua = lbl.getAttribute("data-drv-lua");
+          var entry = lua && byLua[lua];
+          if (!entry) return;
+          var caps = entry.capabilities || [];
+          if (caps.length === 0) return;
+          var canBeSiteMeter =
+            caps.indexOf("meter") >= 0 ||
+            caps.indexOf("pv") >= 0 ||
+            caps.indexOf("battery") >= 0;
+          if (!canBeSiteMeter) lbl.style.display = "none";
+        });
+        // Show the Disable-PV checkbox only on drivers whose catalog
+        // advertises BOTH meter and pv — those are the ones where a
+        // second instance on the same site can double-count PV.
+        bodyEl.querySelectorAll(".drv-disable-pv").forEach(function (lbl) {
+          var lua = lbl.getAttribute("data-drv-lua");
+          var entry = lua && byLua[lua];
+          if (!entry) return;
+          var caps = entry.capabilities || [];
+          if (caps.indexOf("meter") >= 0 && caps.indexOf("pv") >= 0) {
+            lbl.style.display = "flex";
+          }
+        });
         var sel = document.getElementById("driver-catalog-picker");
         if (!sel) return;
         sel.innerHTML = "";
@@ -146,6 +247,7 @@
           opt.dataset.protocols = protoLabel;
           opt.dataset.id = e.id || "";
           opt.dataset.httpHosts = (e.http_hosts || []).join(",");
+          opt.dataset.capabilities = (e.capabilities || []).join(",");
           opt.dataset.connectionHost = (e.connection_defaults && e.connection_defaults.host) || "";
           opt.dataset.verificationStatus = e.verification_status || "experimental";
           if (e.verification_notes) opt.title = e.verification_notes;
@@ -160,7 +262,21 @@
         if (!sel || !sel.value) return;
         var chosen = sel.options[sel.selectedIndex];
         var protocols = (chosen.dataset.protocols || "").split("+");
-        var name = (nameEl.value || "").trim() || chosen.dataset.id || ("driver-" + config.drivers.length);
+        var baseName = (nameEl.value || "").trim() || chosen.dataset.id || ("driver-" + config.drivers.length);
+        // Auto-dedupe against existing driver names so adding a second
+        // tesla_vehicle for a two-car household doesn't collide with
+        // the first. "garage-tesla" → "garage-tesla-2" → "garage-tesla-3"…
+        // The operator can still edit to whatever they want — this
+        // only protects against the default picker producing the same
+        // string twice in a row.
+        var takenNames = {};
+        (config.drivers || []).forEach(function (d) { if (d.name) takenNames[d.name] = true; });
+        var name = baseName;
+        if (takenNames[name]) {
+          var i = 2;
+          while (takenNames[baseName + "-" + i]) i++;
+          name = baseName + "-" + i;
+        }
         var driver = { name: name, lua: sel.value };
         driver.capabilities = {};
         if (protocols.indexOf("mqtt") >= 0) driver.capabilities.mqtt = { host: "", port: 1883 };
@@ -169,11 +285,87 @@
           var hosts = (chosen.dataset.httpHosts || "").split(",").filter(Boolean);
           driver.capabilities.http = { allowed_hosts: hosts };
           var connHost = chosen.dataset.connectionHost || "";
-          if (connHost) driver.config = { host: connHost };
-          else driver.config = { email: "", password: "", serial: "" };
+          var chosenCaps = (chosen.dataset.capabilities || "").split(",").filter(Boolean);
+          if (chosenCaps.indexOf("vehicle") >= 0) {
+            // TeslaBLEProxy-style: ip + vin only, no cloud creds.
+            driver.config = { ip: "", vin: "" };
+          } else if (connHost) {
+            driver.config = { host: connHost };
+          } else {
+            driver.config = { email: "", password: "", serial: "" };
+          }
         }
         config.drivers.push(driver);
         ctx.renderTab("devices");
+      });
+
+      // For vehicle drivers: keep capabilities.http.allowed_hosts
+      // in sync with the configured IP. The capability layer gates
+      // every outbound HTTP on this list — an empty list means the
+      // driver can't talk to anything and gets stuck in watchdog
+      // stale state (exactly what a freshly-added Tesla driver with
+      // an empty list hit). We rewrite the list to [host] (port
+      // stripped) whenever the operator edits the IP.
+      bodyEl.querySelectorAll('[data-path$=".config.ip"]').forEach(function (ipInput) {
+        var m = /^drivers\.(\d+)\.config\.ip$/.exec(ipInput.dataset.path);
+        if (!m) return;
+        var dIdx = parseInt(m[1], 10);
+        function syncHost() {
+          var raw = (ipInput.value || "").trim();
+          if (!raw) return;
+          var host = raw.split(":")[0];
+          var drv = config.drivers[dIdx];
+          if (!drv) return;
+          drv.capabilities = drv.capabilities || {};
+          drv.capabilities.http = drv.capabilities.http || {};
+          drv.capabilities.http.allowed_hosts = [host];
+        }
+        ipInput.addEventListener("input", syncHost);
+        ipInput.addEventListener("blur", syncHost);
+        syncHost(); // catch pre-existing configs that arrived with an empty list
+      });
+
+      // Tesla Verify-connection buttons.
+      bodyEl.querySelectorAll(".tesla-verify-btn").forEach(function (vbtn) {
+        vbtn.addEventListener("click", function () {
+          var dIdx = vbtn.dataset.driverIdx;
+          var statusEl = bodyEl.querySelector('.tesla-verify-status[data-driver-idx="' + dIdx + '"]');
+          var ipInput = bodyEl.querySelector('[data-path="drivers.' + dIdx + '.config.ip"]');
+          var vinInput = bodyEl.querySelector('[data-path="drivers.' + dIdx + '.config.vin"]');
+          var ip = ipInput ? ipInput.value.trim() : "";
+          var vin = vinInput ? vinInput.value.trim() : "";
+          if (!ip || !vin) {
+            if (statusEl) { statusEl.style.color = "#e57373"; statusEl.textContent = "Fill in both IP and VIN first"; }
+            return;
+          }
+          if (statusEl) { statusEl.style.color = "var(--text-dim)"; statusEl.textContent = "Verifying…"; }
+          vbtn.disabled = true;
+          fetch("/api/drivers/verify_tesla", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ip: ip, vin: vin }),
+          })
+            .then(function (r) { return r.json(); })
+            .then(function (j) {
+              if (j && j.ok) {
+                if (statusEl) {
+                  statusEl.style.color = "#81c995";
+                  statusEl.textContent = "✓ SoC " + Math.round(j.soc_pct) +
+                    " / " + Math.round(j.charge_limit_pct) + "% · " +
+                    (j.charging_state || "idle");
+                }
+              } else {
+                if (statusEl) {
+                  statusEl.style.color = "#e57373";
+                  statusEl.textContent = "✗ " + (j && j.error ? j.error : "unknown error");
+                }
+              }
+            })
+            .catch(function (e) {
+              if (statusEl) { statusEl.style.color = "#e57373"; statusEl.textContent = "✗ " + e.message; }
+            })
+            .finally(function () { vbtn.disabled = false; });
+        });
       });
 
       // Cloud-driver Connect buttons.

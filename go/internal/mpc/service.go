@@ -103,6 +103,16 @@ type Service struct {
 	GridTariffOreKwh float64
 	VATPercent       float64
 
+	// FuseMaxImportW caps per-slot grid import the DP may plan. When
+	// > 0, every built slot gets Limits.MaxImportW set so the DP
+	// rejects action combos whose predicted gridW would exceed the
+	// site fuse. Zero = legacy unlimited (dispatch's applyFuseGuard
+	// still clamps batteries reactively, but a plan asking for 15 kW
+	// import on an 11 kW fuse is a bad user signal — better to plan
+	// within bounds in the first place). Operators wire this from
+	// cfg.Fuse.SafeMaxPowerW() in main.go.
+	FuseMaxImportW float64
+
 	Defaults Params
 
 	mu              sync.RWMutex
@@ -517,6 +527,18 @@ func (s *Service) replan(_ context.Context) *Plan {
 	slots := buildSlots(prices, forecasts, s.BaseLoad, now.UnixMilli(), s.PV, s.Load)
 	if len(slots) == 0 {
 		return nil
+	}
+
+	// Fuse-based per-slot import cap. Applied uniformly across every
+	// slot — no dynamic-tariff variation today. A future per-slot
+	// override (e.g. DSO curtailment window) can merge here.
+	if s.FuseMaxImportW > 0 {
+		for i := range slots {
+			if slots[i].Limits.MaxImportW <= 0 ||
+				slots[i].Limits.MaxImportW > s.FuseMaxImportW {
+				slots[i].Limits.MaxImportW = s.FuseMaxImportW
+			}
+		}
 	}
 
 	// Current SoC: average of battery readings (weighted by capacity is

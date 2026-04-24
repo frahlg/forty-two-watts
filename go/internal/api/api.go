@@ -159,6 +159,10 @@ func (s *Server) routes() {
 	s.handle("GET  /api/system/info", s.handleSysInfo)
 	s.handle("GET  /api/config", s.handleGetConfig)
 	s.handle("POST /api/config", s.handlePostConfig)
+	s.handle("GET  /api/config/raw", s.handleGetConfigRaw)
+	s.handle("POST /api/config/raw", s.handlePostConfigRaw)
+	s.handle("POST /api/config/validate", s.handleValidateConfigRaw)
+	s.handle("POST /api/drivers/verify_tesla", s.handleVerifyTesla)
 	s.handle("GET  /api/mode", s.handleGetMode)
 	s.handle("POST /api/mode", s.handleSetMode)
 	s.handle("POST /api/target", s.handleSetTarget)
@@ -362,6 +366,30 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 				d["bat_soc"] = *r.SoC
 			}
 		}
+		// Vehicle (DerVehicle) — read-only BMS readings emitted by
+		// drivers like tesla_vehicle.lua. Surfaced so the per-driver
+		// card can render SoC + charge_limit + charging_state. RawW
+		// is always 0 for vehicle readings (no power channel).
+		if r := s.deps.Tel.Get(name, telemetry.DerVehicle); r != nil {
+			var v struct {
+				SoC                  *float64 `json:"soc"`
+				ChargeLimitPct       *float64 `json:"charge_limit_pct"`
+				ChargingState        *string  `json:"charging_state"`
+				TimeToFullMin        *int     `json:"time_to_full_min"`
+				ChargeAmps           *float64 `json:"charge_amps"`
+				ChargerActualCurrent *float64 `json:"charger_actual_current"`
+				Stale                *bool    `json:"stale"`
+			}
+			if r.Data != nil && json.Unmarshal(r.Data, &v) == nil {
+				if v.SoC != nil                  { d["vehicle_soc"] = *v.SoC }
+				if v.ChargeLimitPct != nil       { d["vehicle_charge_limit_pct"] = *v.ChargeLimitPct }
+				if v.ChargingState != nil        { d["vehicle_charging_state"] = *v.ChargingState }
+				if v.TimeToFullMin != nil        { d["vehicle_time_to_full_min"] = *v.TimeToFullMin }
+				if v.ChargeAmps != nil           { d["vehicle_charge_amps"] = *v.ChargeAmps }
+				if v.ChargerActualCurrent != nil { d["vehicle_charger_actual_current"] = *v.ChargerActualCurrent }
+				if v.Stale != nil                { d["vehicle_stale"] = *v.Stale }
+			}
+		}
 		if r := s.deps.Tel.Get(name, telemetry.DerEV); r != nil {
 			d["ev_w"] = r.SmoothedW
 			// Surface the structured fields the driver put in Data so the
@@ -406,12 +434,20 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	s.deps.CfgMu.RLock()
 	for _, dc := range s.deps.Cfg.Drivers {
 		if _, ok := drivers[dc.Name]; ok {
+			// Already populated from telemetry — just stamp the alias
+			// so the UI can show the friendly label.
+			if dc.Alias != "" {
+				if m, mok := drivers[dc.Name].(map[string]any); mok {
+					m["alias"] = dc.Alias
+				}
+			}
 			continue
 		}
 		if dc.Disabled {
 			drivers[dc.Name] = map[string]any{
 				"status":   "disabled",
 				"disabled": true,
+				"alias":    dc.Alias,
 			}
 		} else {
 			// Configured but not running — spawn probably failed. Show
@@ -419,6 +455,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			drivers[dc.Name] = map[string]any{
 				"status":      "offline",
 				"not_running": true,
+				"alias":       dc.Alias,
 			}
 		}
 	}
@@ -1766,9 +1803,15 @@ func (s *Server) handleLoadpointTarget(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]string{"error": "id required"})
 		return
 	}
+	// Optional policy fields. Absent = keep current (nil policy arg to
+	// SetTarget); present = override and persist. Pointers let us
+	// distinguish "not sent" from "explicitly false".
 	var req struct {
-		SoCPct       float64 `json:"soc_pct"`
-		TargetTimeMs int64   `json:"target_time_ms"`
+		SoCPct              float64 `json:"soc_pct"`
+		TargetTimeMs        int64   `json:"target_time_ms"`
+		AllowGrid           *bool   `json:"allow_grid,omitempty"`
+		AllowBatterySupport *bool   `json:"allow_battery_support,omitempty"`
+		OnlySurplus         *bool   `json:"only_surplus,omitempty"`
 	}
 	if err := readJSON(r, &req); err != nil {
 		writeJSON(w, 400, map[string]string{"error": err.Error()})
@@ -1778,7 +1821,25 @@ func (s *Server) handleLoadpointTarget(w http.ResponseWriter, r *http.Request) {
 	if req.TargetTimeMs > 0 {
 		deadline = time.UnixMilli(req.TargetTimeMs).UTC()
 	}
-	if !s.deps.Loadpoints.SetTarget(id, req.SoCPct, deadline) {
+	var policy *loadpoint.Policy
+	if req.AllowGrid != nil || req.AllowBatterySupport != nil || req.OnlySurplus != nil {
+		// Any policy field present → build a Policy. For fields the
+		// caller didn't send, start from the permissive default so
+		// partial updates (e.g. only_surplus=true alone) don't
+		// silently flip the other two to false.
+		p := loadpoint.DefaultPolicy()
+		if req.AllowGrid != nil {
+			p.AllowGrid = *req.AllowGrid
+		}
+		if req.AllowBatterySupport != nil {
+			p.AllowBatterySupport = *req.AllowBatterySupport
+		}
+		if req.OnlySurplus != nil {
+			p.OnlySurplus = *req.OnlySurplus
+		}
+		policy = &p
+	}
+	if !s.deps.Loadpoints.SetTarget(id, req.SoCPct, deadline, policy) {
 		writeJSON(w, 404, map[string]string{"error": "loadpoint not found"})
 		return
 	}

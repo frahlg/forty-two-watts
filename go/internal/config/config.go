@@ -118,6 +118,24 @@ type Loadpoint struct {
 	AllowedStepsW     []float64 `yaml:"allowed_steps_w,omitempty" json:"allowed_steps_w,omitempty"`
 	VehicleCapacityWh float64   `yaml:"vehicle_capacity_wh,omitempty" json:"vehicle_capacity_wh,omitempty"`
 	PluginSoCPct      float64   `yaml:"plugin_soc_pct,omitempty" json:"plugin_soc_pct,omitempty"`
+	// VehicleDriver optionally points to a DerVehicle-emitting driver
+	// (e.g. tesla_vehicle against a TeslaBLEProxy) whose real BMS SoC
+	// overrides the pluginSoC + deliveredWh inference and whose
+	// charge_limit_pct flows through to the UI. Empty = manager
+	// auto-discovers on each plug-in by scoring live DerVehicle
+	// readings.
+	VehicleDriver string `yaml:"vehicle_driver,omitempty" json:"vehicle_driver,omitempty"`
+
+	// Auto-charge-on-plug-in. When AutoChargeEnabled and a plug-in
+	// transition finds no existing target, the manager posts one
+	// automatically: reach AutoChargeTargetSoCPct (default 80 %) by
+	// AutoChargeTargetTimeLocal (HH:MM, default "06:00" local tz).
+	// If a vehicle driver is bound AND reports a tighter
+	// charge_limit_soc, the SoC target clamps to min(config,
+	// vehicle_limit). Existing manual targets are respected.
+	AutoChargeEnabled         bool    `yaml:"auto_charge_enabled,omitempty" json:"auto_charge_enabled,omitempty"`
+	AutoChargeTargetSoCPct    float64 `yaml:"auto_charge_target_soc_pct,omitempty" json:"auto_charge_target_soc_pct,omitempty"`
+	AutoChargeTargetTimeLocal string  `yaml:"auto_charge_target_time_local,omitempty" json:"auto_charge_target_time_local,omitempty"`
 }
 
 // OCPP configures the embedded OCPP 1.6J Central System for EV chargers.
@@ -197,17 +215,46 @@ type Fuse struct {
 	MaxAmps float64 `yaml:"max_amps" json:"max_amps"`
 	Phases  int     `yaml:"phases" json:"phases"`
 	Voltage float64 `yaml:"voltage" json:"voltage"`
+	// SafetyMarginAmps keeps controlled loads (battery dispatch, MPC
+	// plan, EV loadpoint) this many amps below MaxAmps. When a battery
+	// and an EV charger both race for the fuse ceiling, a small live
+	// load swing can push predicted grid flow above the breaker; the
+	// margin is the cushion the controller never spends. Default 0.5 A.
+	// The fuse_over_limit alarm still uses the true MaxAmps — the
+	// margin protects against our own dispatch, not against the alert.
+	SafetyMarginAmps float64 `yaml:"safety_margin_amps,omitempty" json:"safety_margin_amps,omitempty"`
 }
 
-// MaxPowerW returns the total power budget for the fuse guard.
+// MaxPowerW returns the total breaker power rating — the absolute
+// ceiling at which a hardware trip is imminent. Use for alarms.
 func (f Fuse) MaxPowerW() float64 {
 	return f.MaxAmps * f.Voltage * float64(f.Phases)
+}
+
+// SafeMaxPowerW returns the controllable power budget: MaxPowerW minus
+// the safety-margin headroom. This is what dispatch/MPC/loadpoint
+// clamp against so controlled loads don't walk the breaker line.
+func (f Fuse) SafeMaxPowerW() float64 {
+	a := f.MaxAmps - f.SafetyMarginAmps
+	if a < 0 {
+		a = 0
+	}
+	return a * f.Voltage * float64(f.Phases)
 }
 
 // Driver is one driver entry. Each driver is a Lua script loaded by
 // the driver host at startup (or on hot-reload via the file watcher).
 type Driver struct {
 	Name               string  `yaml:"name" json:"name"`
+	// Alias is a human-readable label for the UI — e.g. "My Model Y",
+	// "Spouse car", "Workshop battery". Operator-facing only; the
+	// stable identifier used by all code paths (telemetry, dispatch,
+	// device registry, state.db keys) remains Name. When empty the UI
+	// falls back to Name. Two drivers of the same kind (two
+	// tesla_vehicle entries for a two-car household) MUST have
+	// distinct Names; distinct aliases are a convenience layer on
+	// top of that, not a substitute.
+	Alias              string  `yaml:"alias,omitempty" json:"alias,omitempty"`
 	Lua                string  `yaml:"lua,omitempty" json:"lua,omitempty"` // path to .lua file
 	IsSiteMeter        bool    `yaml:"is_site_meter,omitempty" json:"is_site_meter,omitempty"`
 	BatteryCapacityWh  float64 `yaml:"battery_capacity_wh,omitempty" json:"battery_capacity_wh,omitempty"`
@@ -660,6 +707,9 @@ func applyDefaults(c *Config) {
 	}
 	if c.Fuse.Voltage == 0 {
 		c.Fuse.Voltage = 230
+	}
+	if c.Fuse.SafetyMarginAmps == 0 {
+		c.Fuse.SafetyMarginAmps = 0.5
 	}
 	if c.API.Port == 0 {
 		c.API.Port = 8080

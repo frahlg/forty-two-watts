@@ -288,6 +288,67 @@ func main() {
 		slog.Info("loadpoints configured", "count", len(cfg.Loadpoints))
 	}
 
+	// Persist target changes to state.db so user intent survives
+	// restart. Every POST /api/loadpoints/{id}/target (and the
+	// corresponding SetTarget call) flows through here. Failures are
+	// logged but do not block the in-memory mutation — user intent
+	// continues to drive dispatch even when the DB is read-only.
+	lpMgr.SetTargetPersister(func(id string, socPct float64, targetTime time.Time, policy loadpoint.Policy) error {
+		tt := targetTime.UTC().UnixMilli()
+		if targetTime.IsZero() {
+			tt = 0
+		}
+		sched, err := st.UpsertPrimaryLoadpointSchedule(id, socPct, tt)
+		if err != nil {
+			slog.Warn("loadpoint target persist failed",
+				"lp", id, "soc_pct", socPct, "err", err)
+			return err
+		}
+		// Apply the policy flags the user sent and save again so the
+		// schedule row carries the current energy-source constraints.
+		sched.AllowGrid = policy.AllowGrid
+		sched.AllowBatterySupport = policy.AllowBatterySupport
+		sched.OnlySurplus = policy.OnlySurplus
+		if _, err := st.SaveLoadpointSchedule(sched); err != nil {
+			slog.Warn("loadpoint policy persist failed",
+				"lp", id, "err", err)
+			return err
+		}
+		return nil
+	})
+
+	// Restore persisted schedules into the in-memory manager. One row
+	// per loadpoint → one RestoreTarget call; extra rows (multi-schedule
+	// future) are ignored here until the selection logic lands.
+	if schedules, err := st.AllLoadpointSchedules(); err == nil {
+		for _, sched := range schedules {
+			if sched.Name != "primary" {
+				continue
+			}
+			if !sched.Enabled {
+				continue
+			}
+			var tt time.Time
+			if sched.TargetTimeMs > 0 {
+				tt = time.UnixMilli(sched.TargetTimeMs).UTC()
+			}
+			pol := loadpoint.Policy{
+				AllowGrid:           sched.AllowGrid,
+				AllowBatterySupport: sched.AllowBatterySupport,
+				OnlySurplus:         sched.OnlySurplus,
+			}
+			if lpMgr.RestoreTarget(sched.LoadpointID, sched.TargetSoCPct, tt, pol) {
+				slog.Info("loadpoint target restored",
+					"lp", sched.LoadpointID,
+					"soc_pct", sched.TargetSoCPct,
+					"target_time", tt,
+					"only_surplus", pol.OnlySurplus)
+			}
+		}
+	} else {
+		slog.Warn("loadpoint schedules restore failed", "err", err)
+	}
+
 	// Forward-declared so the hot-reload closure below can push
 	// capacity changes into the running planner. Assigned at line
 	// ~450 after all its dependencies (pvSvc, loadSvc, priceFc) are
@@ -335,8 +396,10 @@ func main() {
 			if mpcSvc != nil {
 				totalCap, maxChg, maxDis := aggregateBatteryLimits(newCfg, capacities)
 				mpcSvc.UpdateCapacity(totalCap, maxChg, maxDis)
+				mpcSvc.FuseMaxImportW = newCfg.Fuse.SafeMaxPowerW()
 				slog.Info("mpc: capacity updated via hot-reload",
-					"capacity_wh", totalCap, "max_charge_w", maxChg, "max_discharge_w", maxDis)
+					"capacity_wh", totalCap, "max_charge_w", maxChg, "max_discharge_w", maxDis,
+					"fuse_import_w", mpcSvc.FuseMaxImportW)
 			}
 
 			// Hot-reload EV loadpoints so operators can add / remove /
@@ -536,6 +599,7 @@ func main() {
 		mpcSvc.Load = loadSvc.Predict
 		mpcSvc.Price = priceFc.Predict
 		mpcSvc.SiteMeter = cfg.SiteMeterDriver()
+		mpcSvc.FuseMaxImportW = cfg.Fuse.SafeMaxPowerW()
 		// Wire the loadpoint probe so the DP extends its state space
 		// when an EV is plugged in. Single-loadpoint for now: picks
 		// the first plugged-in one.
@@ -567,19 +631,48 @@ func main() {
 						targetSlot = int(delta / (time.Duration(slotLenMin) * time.Minute))
 					}
 				}
+				// Effective target respects the vehicle's own charge-limit
+				// setting (set in the Tesla app: "charge to 50 %") when
+				// we know it. The EV physically stops at that value even
+				// if the operator asked MPC to charge higher, so planning
+				// past it wastes DP cycles and misleads the UI's "kWh
+				// planned" count. MinOf the two. When the charge_limit is
+				// unknown (no vehicle driver wired), the user's target is
+				// the only signal — use it as-is.
+				effectiveTarget := st.TargetSoCPct
+				if st.VehicleChargeLimitPct > 0 && st.VehicleChargeLimitPct < effectiveTarget {
+					effectiveTarget = st.VehicleChargeLimitPct
+					slog.Debug("loadpoint target clamped by vehicle charge_limit",
+						"lp", st.ID,
+						"user_target", st.TargetSoCPct,
+						"vehicle_limit", st.VehicleChargeLimitPct,
+						"effective", effectiveTarget)
+				}
 				return &mpc.LoadpointSpec{
 					ID:              st.ID,
 					CapacityWh:      capWh,
 					Levels:          11,
 					MinPct:          0,
 					MaxPct:          100,
+					// CurrentSoCPct already prefers the vehicle BMS
+					// reading when a DerVehicle source is live (set in
+					// Manager.Observe). When no vehicle driver is wired
+					// it falls back to the pluginSoC + deliveredWh
+					// inference. Either way we hand the DP the best
+					// number we have.
 					InitialSoCPct:   st.CurrentSoCPct,
 					PluggedIn:       true,
-					TargetSoCPct:    st.TargetSoCPct,
+					TargetSoCPct:    effectiveTarget,
 					TargetSlotIdx:   targetSlot,
 					MaxChargeW:      st.MaxChargeW,
 					AllowedStepsW:   st.AllowedStepsW,
 					ChargeEfficiency: 0.9,
+					Policy: &mpc.Policy{
+						AllowGrid:           st.Policy.AllowGrid,
+						AllowBatterySupport: st.Policy.AllowBatterySupport,
+						OnlySurplus:         st.Policy.OnlySurplus,
+						// SurplusEpsilonW left 0 → DP uses 100 W default.
+					},
 				}
 			}
 			return nil
@@ -696,6 +789,7 @@ func main() {
 			}
 			var d struct {
 				Connected bool    `json:"connected"`
+				Charging  bool    `json:"charging"`
 				SessionWh float64 `json:"session_wh"`
 			}
 			_ = json.Unmarshal(r.Data, &d)
@@ -703,9 +797,106 @@ func main() {
 				PowerW:    r.SmoothedW,
 				SessionWh: d.SessionWh,
 				Connected: d.Connected,
+				Charging:  d.Charging,
 			}, true
 		}
 		lpController = loadpoint.NewController(lpMgr, planAdapter, telAdapter, reg.Send)
+		// Loadpoint clamps against the safe budget (MaxAmps − safety
+		// margin), not the raw breaker rating — otherwise an 11 kW EV
+		// charger plus a battery both allowed up to full fuse would
+		// predict zero headroom and push a brief live-load spike past
+		// the breaker. The fuse_over_limit alarm still fires on the
+		// true MaxAmps.
+		lpSafeAmps := cfg.Fuse.MaxAmps - cfg.Fuse.SafetyMarginAmps
+		if lpSafeAmps < 0 {
+			lpSafeAmps = 0
+		}
+		lpController.SetSiteFuse(loadpoint.SiteFuse{
+			MaxAmps:  lpSafeAmps,
+			Voltage:  cfg.Fuse.Voltage,
+			PhaseCnt: cfg.Fuse.Phases,
+		})
+		// Live grid + EV readings for the dynamic fuse clamp. Every
+		// controller tick subtracts non-EV load from the fuse budget
+		// so a house-load spike (oven, kettle, heat pump) forces the
+		// EV to back off in the same dispatch cycle instead of
+		// waiting for MPC to replan. Read values come straight from
+		// telemetry; no coordination required.
+		lpController.SetLiveSiteReader(func() (float64, float64, bool) {
+			siteMeter := cfg.SiteMeterDriver()
+			if siteMeter == "" {
+				return 0, 0, false
+			}
+			r := tel.Get(siteMeter, telemetry.DerMeter)
+			if r == nil {
+				return 0, 0, false
+			}
+			return r.SmoothedW, tel.SumOnlineEVW(), true
+		})
+		// Vehicle-side telemetry (DerVehicle emitted by tesla_vehicle.lua
+		// et al) — parse the stored JSON and surface it as a
+		// VehicleSample for Manager.Observe. Driver unset or no reading
+		// → OK=false → manager falls back to inferred SoC.
+		parseVehicle := func(r *telemetry.DerReading) loadpoint.VehicleSample {
+			if r == nil {
+				return loadpoint.VehicleSample{}
+			}
+			var d struct {
+				SoC            float64 `json:"soc"`
+				ChargeLimitPct float64 `json:"charge_limit_pct"`
+				ChargingState  string  `json:"charging_state"`
+				TimeToFullMin  int     `json:"time_to_full_min"`
+				Stale          bool    `json:"stale"`
+			}
+			_ = json.Unmarshal(r.Data, &d)
+			return loadpoint.VehicleSample{
+				OK:             true,
+				SoCPct:         d.SoC,
+				ChargeLimitPct: d.ChargeLimitPct,
+				ChargingState:  d.ChargingState,
+				TimeToFullMin:  d.TimeToFullMin,
+				Stale:          d.Stale,
+			}
+		}
+		lpMgr.SetVehicleTelemetry(func(driver string) loadpoint.VehicleSample {
+			if driver == "" {
+				return loadpoint.VehicleSample{}
+			}
+			return parseVehicle(tel.Get(driver, telemetry.DerVehicle))
+		})
+		// Plug-in auto-discovery: snapshot every live DerVehicle
+		// reading so Manager can pick the most-likely plugged car.
+		lpMgr.SetVehicleSnapshot(func() map[string]loadpoint.VehicleSample {
+			out := map[string]loadpoint.VehicleSample{}
+			for _, r := range tel.ReadingsByType(telemetry.DerVehicle) {
+				out[r.Driver] = parseVehicle(r)
+			}
+			return out
+		})
+		// PokePoll lets Manager refresh vehicle BMS readings on EV
+		// plug-in instead of waiting up to 60 s for the next regular
+		// driver poll. Best-effort + non-blocking.
+		lpMgr.SetVehiclePoke(func(driver string) {
+			if reg != nil {
+				reg.PokePoll(driver)
+			}
+		})
+		// ReplanHint: vehicle data diverged enough from what MPC
+		// last planned against (big SoC delta, charge-limit change,
+		// or proxy just came back online). Fire a replan in a
+		// goroutine so the controller tick isn't blocked. MPC's
+		// DP takes hundreds of ms on a 193-slot horizon; Manager's
+		// built-in cooldown prevents thrashing.
+		lpMgr.SetReplanHint(func(lpID string) {
+			if mpcSvc == nil {
+				return
+			}
+			go func() {
+				slog.Info("loadpoint: replan hint", "lp", lpID,
+					"reason", "vehicle-data-material-change")
+				mpcSvc.Replan(ctx)
+			}()
+		})
 	}
 
 	// ---- Self-update checker ----
@@ -999,7 +1190,7 @@ func main() {
 
 	// ---- Control loop ----
 	controlInterval := time.Duration(cfg.Site.ControlIntervalS) * time.Second
-	fuseMaxW := cfg.Fuse.MaxPowerW()
+	fuseMaxW := cfg.Fuse.SafeMaxPowerW()
 	dtS := float64(cfg.Site.ControlIntervalS)
 
 	// Graceful shutdown
@@ -1380,13 +1571,17 @@ func buildLoadpointConfigs(src []config.Loadpoint) []loadpoint.Config {
 	out := make([]loadpoint.Config, 0, len(src))
 	for _, lp := range src {
 		out = append(out, loadpoint.Config{
-			ID:                lp.ID,
-			DriverName:        lp.DriverName,
-			MinChargeW:        lp.MinChargeW,
-			MaxChargeW:        lp.MaxChargeW,
-			AllowedStepsW:     lp.AllowedStepsW,
-			VehicleCapacityWh: lp.VehicleCapacityWh,
-			PluginSoCPct:      lp.PluginSoCPct,
+			ID:                        lp.ID,
+			DriverName:                lp.DriverName,
+			MinChargeW:                lp.MinChargeW,
+			MaxChargeW:                lp.MaxChargeW,
+			AllowedStepsW:             lp.AllowedStepsW,
+			VehicleCapacityWh:         lp.VehicleCapacityWh,
+			PluginSoCPct:              lp.PluginSoCPct,
+			VehicleDriver:             lp.VehicleDriver,
+			AutoChargeEnabled:         lp.AutoChargeEnabled,
+			AutoChargeTargetSoCPct:    lp.AutoChargeTargetSoCPct,
+			AutoChargeTargetTimeLocal: lp.AutoChargeTargetTimeLocal,
 		})
 	}
 	return out
@@ -1449,14 +1644,14 @@ func aggregateBatteryLimits(cfg *config.Config, capacities map[string]float64) (
 	// reality, and every downstream decision (when to discharge, when to
 	// idle, what the total cost looks like) is based on that fantasy.
 	// Cheaper to keep the plan feasible up-front.
-	if fuseMaxW := cfg.Fuse.MaxPowerW(); fuseMaxW > 0 {
+	if fuseMaxW := cfg.Fuse.SafeMaxPowerW(); fuseMaxW > 0 {
 		if maxChg > fuseMaxW {
-			slog.Info("mpc: clamping MaxChargeW to fuse capacity",
+			slog.Info("mpc: clamping MaxChargeW to safe fuse capacity",
 				"requested_w", maxChg, "fuse_w", fuseMaxW)
 			maxChg = fuseMaxW
 		}
 		if maxDis > fuseMaxW {
-			slog.Info("mpc: clamping MaxDischargeW to fuse capacity",
+			slog.Info("mpc: clamping MaxDischargeW to safe fuse capacity",
 				"requested_w", maxDis, "fuse_w", fuseMaxW)
 			maxDis = fuseMaxW
 		}
