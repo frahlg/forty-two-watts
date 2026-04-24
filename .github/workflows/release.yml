@@ -257,16 +257,17 @@ jobs:
           sudo docker system prune -af
           df -h /
 
-      - name: Install qemu-user-binfmt
-        # pi-gen needs a `qemu-arm` binary (non-static) on the host —
-        # the check is at build-docker.sh lines 40–45 of pi-gen/master.
-        # qemu-user-binfmt installs it at /usr/bin/qemu-arm and pulls
-        # in binfmt_misc registration. qemu-user-static installs the
-        # -static variant, which doesn't satisfy the `which qemu-arm`
-        # check that pi-gen performs before spinning up its container.
+      - name: Register binfmt_misc handlers for arm / arm64
+        # Two requirements: (1) /usr/bin/qemu-arm on the host so
+        # pi-gen's `which qemu-arm` check passes, (2) working arm
+        # binfmt_misc handlers registered with the fix-binary flag
+        # so the interpreter stays valid inside pi-gen's chroot.
+        # See the same step in rpi-image-build.yml for the full
+        # explanation — if you touch one, touch both.
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq qemu-user-binfmt binfmt-support
+          sudo apt-get install -y -qq qemu-user-binfmt
+          sudo docker run --privileged --rm tonistiigi/binfmt --install arm,arm64
 
       - name: Checkout tag
         uses: actions/checkout@v5
