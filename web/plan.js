@@ -27,6 +27,9 @@
     state.plan = (m && m.plan) || null;
     state.planMeta = (m && m.meta) || null;
     state.fuse = (c && c.fuse) || null;
+    // Tariff breakdown pulled from /api/config so the price bars can be
+    // stacked as spot + grid tariff + VAT instead of one opaque number.
+    state.priceCfg = (c && c.price) || null;
     state.enabled = {
       prices: p && p.enabled,
       forecast: f && f.enabled,
@@ -178,13 +181,21 @@
     }
 
     // ---- Price bars ----
-    // Color cheap (low) → green, expensive → red.
+    // Stacked: spot (bottom, tercile-colored) + grid tariff (middle,
+    // neutral slate) + VAT (top, lighter slate). Reads grid tariff +
+    // VAT % from /api/config so the split matches the real tariff
+    // engine (prices.Applier). Spot does all the visual work —
+    // it's the part that drives the planner's timing decisions —
+    // while the fixed portions stay quiet in neutral slate so they
+    // don't distract from the cheap/expensive signal. Falls back to
+    // one opaque bar when spot_ore isn't available (legacy price
+    // points from before the Action.SpotOre surface, or a tariff
+    // engine configured with zero grid tariff + VAT).
     const sortedTotals = [...totals].sort((a, b) => a - b);
-    // Price bars: use plan actions when available (covers full horizon
-    // including ML-forecasted slots). Confidence < 1 → reduced alpha +
-    // dashed top outline so it's obvious which slots are predicted.
     const p25 = sortedTotals[Math.floor(sortedTotals.length * 0.25)] || priceMin;
     const p75 = sortedTotals[Math.floor(sortedTotals.length * 0.75)] || priceMax;
+    const gridTariff = (state.priceCfg && state.priceCfg.grid_tariff_ore_kwh) || 0;
+    const vatPct     = (state.priceCfg && state.priceCfg.vat_percent) || 0;
     state.priceBarBounds = []; // {x0,x1,yMinPx,yMaxPx, action} for hover hit-test
     const barSource = (plan && plan.actions && plan.actions.length) ? plan.actions : prices;
     for (const bar of barSource) {
@@ -195,34 +206,63 @@
       if (ts + len * 60 * 1000 < tMin || ts > tMax) continue;
       const x0 = xScale(ts);
       const x1 = xScale(ts + len * 60 * 1000);
-      const y = priceY(priceVal);
       const zero = priceY(Math.max(0, priceMin));
       const isPredicted = bar.confidence != null && bar.confidence < 1.0;
-      // Color by price tercile (cheap/neutral/expensive). Predicted bars
-      // render as a hollow dashed outline so they read as "uncertain
-      // ghost" vs the solid filled real bars.
-      let baseRgb;
-      if (priceVal <= p25) baseRgb = '34,197,94';       // green
-      else if (priceVal >= p75) baseRgb = '239,68,68';  // red
-      else baseRgb = '148,163,184';                     // slate
+      // Component breakdown. When we have spot_ore AND at least one
+      // of the fixed portions is non-zero, stack three segments so
+      // the bar reads as a breakdown. Otherwise render a single flat
+      // tercile-colored bar (legacy behavior).
+      const spotOre = bar.spot_ore ?? bar.spot_ore_kwh ?? null;
+      let parts; // [{ore, rgb, alpha, label}] bottom→top
+      if (spotOre != null && (gridTariff > 0 || vatPct > 0)) {
+        const vatOre = Math.max(0, (spotOre + gridTariff) * (vatPct / 100));
+        // Tercile color is applied to the SPOT portion only — that's
+        // the number the planner is actually deciding against.
+        let spotRgb;
+        if (priceVal <= p25) spotRgb = '34,197,94';       // green
+        else if (priceVal >= p75) spotRgb = '239,68,68';  // red
+        else spotRgb = '148,163,184';                     // slate
+        parts = [
+          { ore: spotOre,    rgb: spotRgb,       alpha: 0.72, label: 'spot' },
+          { ore: gridTariff, rgb: '100,116,139', alpha: 0.45, label: 'grid' },
+          { ore: vatOre,     rgb: '100,116,139', alpha: 0.25, label: 'vat' },
+        ];
+      } else {
+        let baseRgb;
+        if (priceVal <= p25) baseRgb = '34,197,94';
+        else if (priceVal >= p75) baseRgb = '239,68,68';
+        else baseRgb = '148,163,184';
+        parts = [{ ore: priceVal, rgb: baseRgb, alpha: 0.60, label: 'price' }];
+      }
       const rectX = x0;
-      const rectY = Math.min(y, zero);
       const rectW = Math.max(1, x1 - x0 - 1);
-      const rectH = Math.abs(y - zero);
+      // Stack from zero upward. runningOre accumulates in öre/kWh and
+      // we re-project each segment's top edge through priceY so the
+      // stacked bar lines up pixel-perfect with the axis grid.
+      let runningOre = 0;
+      const topY = priceY(priceVal);
+      for (const part of parts) {
+        if (part.ore <= 0) continue;
+        const segBottomY = priceY(runningOre);
+        const segTopY    = priceY(runningOre + part.ore);
+        const segY = Math.min(segBottomY, segTopY);
+        const segH = Math.abs(segBottomY - segTopY);
+        const alpha = isPredicted ? part.alpha * 0.2 : part.alpha;
+        ctx.fillStyle = `rgba(${part.rgb},${alpha})`;
+        ctx.fillRect(rectX, segY, rectW, segH);
+        runningOre += part.ore;
+      }
       if (isPredicted) {
-        // Very faint fill + clear dashed outline
-        ctx.fillStyle = `rgba(${baseRgb},0.10)`;
-        ctx.fillRect(rectX, rectY, rectW, rectH);
-        ctx.strokeStyle = `rgba(${baseRgb},0.75)`;
+        // Dashed outline across the whole bar so predicted slots still
+        // read as "uncertain ghost" regardless of how it's stacked.
+        const outlineRgb = parts[0].rgb;
+        ctx.strokeStyle = `rgba(${outlineRgb},0.75)`;
         ctx.lineWidth = 1;
         ctx.setLineDash([3, 3]);
-        ctx.strokeRect(rectX + 0.5, rectY + 0.5, rectW - 1, rectH - 1);
+        ctx.strokeRect(rectX + 0.5, Math.min(topY, zero) + 0.5, rectW - 1, Math.abs(topY - zero) - 1);
         ctx.setLineDash([]);
-      } else {
-        ctx.fillStyle = `rgba(${baseRgb},0.60)`;
-        ctx.fillRect(rectX, rectY, rectW, rectH);
       }
-      // Track for hover hit-test
+      // Track for hover hit-test.
       state.priceBarBounds.push({
         x0: x0, x1: x1,
         ts: ts, len: len,
@@ -521,8 +561,30 @@
       // that's what everyone expects when they see the word "PV".
       const lines = [
         `<div class="tip-head">${dayStr} ${hh}${predicted ? ' <span class="tip-pred">predicted</span>' : ''}</div>`,
-        `<div class="tip-row"><span title="Spot + taxes + transfer fee for the 15-minute slot">Price</span><b>${price.toFixed(1)} öre/kWh</b></div>`,
+        `<div class="tip-row"><span title="Consumer total: spot + grid tariff + VAT — the actual öre/kWh you pay during this 15-minute slot">Price</span><b>${price.toFixed(1)} öre/kWh</b></div>`,
       ];
+      // Price breakdown: show where the consumer total comes from.
+      // Same stacking model the chart uses, so hover numbers match
+      // the colored segments one-for-one.
+      const tipSpot = a.spot_ore ?? a.spot_ore_kwh ?? null;
+      const tipGrid = (state.priceCfg && state.priceCfg.grid_tariff_ore_kwh) || 0;
+      const tipVat  = (state.priceCfg && state.priceCfg.vat_percent) || 0;
+      if (tipSpot != null && (tipGrid > 0 || tipVat > 0)) {
+        const tipVatOre = Math.max(0, (tipSpot + tipGrid) * (tipVat / 100));
+        lines.push(
+          `<div class="tip-breakdown">` +
+            `<div class="tip-break-row"><span class="tip-break-sw" style="background:rgba(148,163,184,0.72)"></span>` +
+              `<span title="Raw Nord Pool wholesale price — the part that varies hour by hour and drives the planner's timing decisions">spot</span>` +
+              `<b>${tipSpot.toFixed(1)} öre</b></div>` +
+            `<div class="tip-break-row"><span class="tip-break-sw" style="background:rgba(100,116,139,0.45)"></span>` +
+              `<span title="Fixed transport / network fee added by the grid operator — doesn't change hour to hour">grid tariff</span>` +
+              `<b>+${tipGrid.toFixed(1)} öre</b></div>` +
+            `<div class="tip-break-row"><span class="tip-break-sw" style="background:rgba(100,116,139,0.25)"></span>` +
+              `<span title="Value-added tax (moms) applied on spot + grid tariff">VAT ${tipVat.toFixed(0)}%</span>` +
+              `<b>+${tipVatOre.toFixed(1)} öre</b></div>` +
+          `</div>`
+        );
+      }
       if (a.pv_w != null) {
         const pvGen = Math.max(0, -a.pv_w) / 1000;
         lines.push(`<div class="tip-row"><span title="Solar generation the plan assumes for this slot">PV forecast</span><b>${pvGen.toFixed(1)} kW</b></div>`);

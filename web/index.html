@@ -327,8 +327,10 @@
           <canvas id="plan-chart" width="800" height="260"></canvas>
         </div>
         <div class="chart-legend">
-          <span class="legend-item" title="Price falls in the cheapest third of the horizon"><span class="legend-color" style="background:rgba(34,197,94,0.60)"></span> Cheap</span>
-          <span class="legend-item" title="Price falls in the most expensive third of the horizon"><span class="legend-color" style="background:rgba(239,68,68,0.60)"></span> Expensive</span>
+          <span class="legend-item" title="Raw Nord Pool wholesale price — bottom segment of each stacked bar, colour shifts green→red with the horizon's price tercile"><span class="legend-color" style="background:rgba(34,197,94,0.72)"></span> Spot (cheap)</span>
+          <span class="legend-item" title="Raw Nord Pool wholesale price in the most expensive third of the horizon"><span class="legend-color" style="background:rgba(239,68,68,0.72)"></span> Spot (expensive)</span>
+          <span class="legend-item" title="Fixed transport / network fee from the grid operator — stacked on top of spot, doesn't change hour to hour"><span class="legend-color" style="background:rgba(100,116,139,0.45)"></span> Grid tariff</span>
+          <span class="legend-item" title="Value-added tax (moms) on spot + grid tariff — top segment of each stacked bar"><span class="legend-color" style="background:rgba(100,116,139,0.25)"></span> VAT</span>
           <span class="legend-item" title="Beyond day-ahead publication — price filled in by the ML price twin"><span class="legend-color legend-ghost"></span> Predicted (ML)</span>
           <span class="legend-item" title="PV generation the plan expects (solar forecast, site-signed)"><span class="legend-color" style="background:#22c55e"></span> PV forecast</span>
           <span class="legend-item" title="Household load the plan expects (load twin)"><span class="legend-color legend-dash" style="border-color:#fde68a"></span> Load forecast</span>
