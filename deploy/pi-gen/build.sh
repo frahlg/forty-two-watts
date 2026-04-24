@@ -42,10 +42,15 @@ if [ ! -d "${PI_GEN_DIR}" ]; then
         https://github.com/RPi-Distro/pi-gen.git "${PI_GEN_DIR}"
 fi
 
-# pi-gen reads stages + config from its own working directory, so wire
-# our stage + config in via symlinks. -fn makes this idempotent.
-ln -sfn "${SCRIPT_DIR}/stage-42w" "${PI_GEN_DIR}/stage-42w"
-ln -sfn "${SCRIPT_DIR}/config"    "${PI_GEN_DIR}/config"
+# Copy (not symlink) our stage + config into the pi-gen checkout.
+# build-docker.sh builds an image with `COPY . /pi-gen/` where . is
+# the pi-gen directory — a symlink pointing OUTSIDE the build
+# context becomes a dangling symlink inside the container, and
+# pi-gen's `realpath /pi-gen/stage-42w` then fails with "No such
+# file or directory" before a single stage runs.
+rm -rf "${PI_GEN_DIR}/stage-42w"
+cp -R "${SCRIPT_DIR}/stage-42w" "${PI_GEN_DIR}/stage-42w"
+cp    "${SCRIPT_DIR}/config"    "${PI_GEN_DIR}/config"
 
 # Skip the desktop stages — we only want Lite + our stage on top.
 # pi-gen honours SKIP files dropped into each stage's directory.
