@@ -30,7 +30,17 @@ Adding a new device? See [Writing a driver](docs/writing-a-driver.md) or the [Cl
 
 ## Quick start
 
-### Option A — one-shot Docker installer (recommended for Raspberry Pi)
+### Option A — flash our Raspberry Pi 4 SD-card image (fastest)
+
+A pre-built `42w-rpi4-arm64-vX.Y.Z.img.xz` ships with every release.
+Flash it to an SD card with [Raspberry Pi Imager](https://www.raspberrypi.com/software/),
+boot the Pi, and open `http://42w.local:8080/`. No terminal work
+required. If you don't pre-configure WiFi in Imager's advanced options,
+the Pi exposes a `42w-setup` captive portal for phone-based onboarding.
+
+Full walkthrough in [docs/rpi-image.md](docs/rpi-image.md).
+
+### Option B — one-shot Docker installer (existing Pi or any Linux box)
 
 Works on a freshly-installed Raspberry Pi OS (arm64) and most Debian/Ubuntu
 machines. Installs Docker + compose, pulls the multi-arch image from GHCR,
@@ -42,7 +52,7 @@ curl -fsSL https://raw.githubusercontent.com/frahlg/forty-two-watts/master/scrip
 
 Then open `http://<your-pi>:8080/setup` to run the first-time wizard.
 
-### Option B — build from source
+### Option C — build from source
 
 **Prerequisites:** Go 1.25+, a Raspberry Pi (or any `linux/arm64` machine), and at least one supported inverter/battery on your LAN.
 
