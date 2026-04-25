@@ -5,20 +5,45 @@
 # *-run-chroot.sh scripts are piped to on_chroot as stdin and
 # therefore can't read the files/ directory, hence the split.
 
-# Docker via the official convenience script — same path as
-# scripts/install.sh so bare-metal and image installs converge on
-# the same engine version. Runs inside the chroot so the installed
-# service units end up in the image rootfs.
+# Docker — explicit apt repo + minimal package set. Replaces
+# `curl get.docker.com | sh` which pulls docker-ce-rootless-extras +
+# docker-buildx-plugin + docker-model-plugin (~300 MB combined). We
+# don't run rootless, don't build images on the Pi, and have no AI
+# workloads — so those stay out. The bare four packages below are
+# what `docker compose up -d` against a pulled image actually needs.
+# Same Docker apt repo URL and pinning approach the convenience
+# script uses, so we stay on the same engine version stream.
 on_chroot << 'EOF'
-curl -fsSL https://get.docker.com | sh
+set -e
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
+chmod a+r /etc/apt/keyrings/docker.asc
+echo "deb [arch=arm64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian bookworm stable" \
+    > /etc/apt/sources.list.d/docker.list
+apt-get -qq update
+DEBIAN_FRONTEND=noninteractive apt-get -y -qq install --no-install-recommends \
+    docker-ce docker-ce-cli containerd.io docker-compose-plugin
 systemctl enable docker.service
 systemctl enable avahi-daemon.service
+systemctl enable NetworkManager.service
 # /etc/hosts entry prevents sudo's "unable to resolve host 42w"
 # warning on first boot. pi-gen writes /etc/hostname from
 # TARGET_HOSTNAME but leaves /etc/hosts at the stock Raspberry Pi
 # OS template (which hard-codes `raspberrypi`).
 sed -i 's/^127\.0\.1\.1.*/127.0.1.1\t42w/' /etc/hosts
 EOF
+
+# init=firstboot on first boot — without stage2, nobody else injects
+# this into cmdline.txt. The firstboot script ships with
+# raspberrypi-sys-mods and handles partition resize, ssh enable, and
+# userconf-pi processing on the very first boot, then removes itself
+# from cmdline.txt and reboots. Mirrors what pi-gen's
+# stage2/01-sys-tweaks/01-run.sh does on a stock Lite build.
+# Idempotent — re-running the build won't double-inject.
+CMDLINE="${ROOTFS_DIR}/boot/firmware/cmdline.txt"
+if [ -f "${CMDLINE}" ] && ! grep -q "raspberrypi-sys-mods/firstboot" "${CMDLINE}"; then
+    sed -i 's| rootwait| init=/usr/lib/raspberrypi-sys-mods/firstboot rootwait|' "${CMDLINE}"
+fi
 
 # Deploy directory: docker-compose.yml lives here and
 # `docker compose up -d` runs from it on first boot.
