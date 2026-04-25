@@ -717,7 +717,12 @@ func main() {
 	// disabled, which makes every /api/version/* handler return 503 and the
 	// UI hide the badge.
 	var selfUpdater *selfupdate.Checker
-	if envBool("FTW_SELFUPDATE_ENABLED") {
+	// Implicitly enable for dev binaries (Version=="dev") so `make dev`
+	// users can click the version label and exercise the probe + modal
+	// without setting FTW_SELFUPDATE_ENABLED=1. Production builds (real
+	// vX.Y.Z stamped via -ldflags) still require the explicit env var
+	// so the feature can't surprise an OS-image deploy.
+	if envBool("FTW_SELFUPDATE_ENABLED") || Version == "dev" {
 		// FTW_SELFUPDATE_CURRENT_VERSION overrides what the checker thinks
 		// it's running so dev / QA can force update_available=true without
 		// rebuilding with a fake -ldflags Version. Scoped to the checker

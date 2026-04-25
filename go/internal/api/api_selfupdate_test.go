@@ -35,23 +35,42 @@ func (s *memStore) LoadConfig(k string) (string, bool) {
 	return v, ok
 }
 
-// newCheckerAgainst returns a Checker that fetches from the supplied fake
-// GH response and has already primed the cache with one Check so subsequent
-// handler calls see the right state.
+// newCheckerAgainst returns a Checker primed with one Check against a
+// fake GH /releases/latest pointing at tag and a fake GHCR /tags/list
+// that has the same tag pushed. After the priming Check the Info cache
+// matches what handler tests expect to see.
 func newCheckerAgainst(t *testing.T, tag, current string) *selfupdate.Checker {
 	t.Helper()
-	ghSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	const repo = "frahlg/forty-two-watts"
+
+	regMux := http.NewServeMux()
+	regMux.HandleFunc("/token", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{"token": "stub"})
+	})
+	regMux.HandleFunc("/v2/"+repo+"/tags/list", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"name": repo,
+			"tags": []string{tag},
+		})
+	})
+	regSrv := httptest.NewServer(regMux)
+	t.Cleanup(regSrv.Close)
+
+	relSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"tag_name":     tag,
 			"html_url":     "https://example/releases/" + tag,
 			"published_at": time.Now().Format(time.RFC3339),
 		})
 	}))
-	t.Cleanup(ghSrv.Close)
+	t.Cleanup(relSrv.Close)
+
 	c := selfupdate.New(selfupdate.Config{
-		CurrentVersion: current,
-		ReleasesURL:    ghSrv.URL,
-		CheckInterval:  time.Hour,
+		Repo:             repo,
+		CurrentVersion:   current,
+		RegistryBaseURL:  regSrv.URL,
+		LatestReleaseURL: relSrv.URL,
+		CheckInterval:    time.Hour,
 	}, newMemStore())
 	if _, err := c.Check(t.Context(), true); err != nil {
 		t.Fatalf("priming check: %v", err)
