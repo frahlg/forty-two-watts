@@ -1440,14 +1440,26 @@
     evModalBody.appendChild(p);
   }
 
-  // renderLoadpointSoCSection — operator-facing SoC correction UI.
-  // The Easee cloud API is blind to the vehicle's BMS; our current_soc
-  // is inferred from plug-in anchor + delivered_wh. If that drifts
-  // from reality (wrong anchor, mid-session plug-swap, different car)
-  // the operator needs a way to tell us the actual SoC off the
-  // dashboard. This posts to /api/loadpoints/{id}/soc which re-anchors
-  // the session so future observations accumulate from the correct
-  // baseline.
+  // renderLoadpointSoCSection — operator-facing SoC correction UI +
+  // target deadline input. Two inline controls per loadpoint:
+  //
+  //   (1) SoC correction — the Easee cloud API is blind to the
+  //       vehicle's BMS; our current_soc is inferred from plug-in
+  //       anchor + delivered_wh. If that drifts the operator re-
+  //       anchors via POST /api/loadpoints/{id}/soc.
+  //
+  //   (2) Target SoC + deadline — the MPC uses the terminal
+  //       penalty (mpc.go:445) to force a shortfall commitment
+  //       when the EV can't reach target by target_time. Without a
+  //       target there's no urgency penalty, so arbitrage mode
+  //       rationally defers charging (there's no incentive — PV
+  //       surplus can be exported for revenue instead). Posts to
+  //       /api/loadpoints/{id}/target. target_time_ms == 0 means
+  //       "no deadline — charge opportunistically."
+  //
+  // Target row is reachable even when unplugged — target is user
+  // intent, valid to set before plugging in. Only SoC correction
+  // requires an active session (anchor makes no sense otherwise).
   function renderLoadpointSoCSection(loadpoints) {
     var section = document.createElement("div");
     section.style.marginTop = "1rem";
@@ -1462,77 +1474,227 @@
     h.textContent = "Loadpoints (planner)";
     section.appendChild(h);
     loadpoints.forEach(function (lp) {
-      var row = document.createElement("div");
-      row.style.display = "flex";
-      row.style.alignItems = "center";
-      row.style.gap = "0.5rem";
-      row.style.marginBottom = "0.4rem";
-      var name = document.createElement("span");
-      name.style.flex = "1";
-      name.style.fontWeight = "600";
-      name.textContent = lp.id;
-      var state = document.createElement("span");
-      state.style.fontSize = "0.75rem";
-      state.style.color = "var(--text-dim)";
-      state.textContent = lp.plugged_in
-        ? (lp.current_power_w > 1
-           ? Math.round(lp.current_power_w) + " W"
-           : "plugged, idle")
-        : "unplugged";
-      var socLabel = document.createElement("span");
-      socLabel.style.fontSize = "0.75rem";
-      socLabel.style.color = "var(--text-dim)";
-      socLabel.textContent = "SoC:";
-      var socInput = document.createElement("input");
-      socInput.type = "number";
-      socInput.min = "0";
-      socInput.max = "100";
-      socInput.step = "1";
-      socInput.style.width = "4.5rem";
-      socInput.style.background = "var(--bg)";
-      socInput.style.color = "var(--text)";
-      socInput.style.border = "1px solid var(--border)";
-      socInput.style.borderRadius = "3px";
-      socInput.style.padding = "0.2rem 0.35rem";
-      socInput.disabled = !lp.plugged_in;
-      socInput.title = lp.plugged_in
-        ? "Correct to what your car actually shows"
-        : "Plug in the car to set SoC";
-      socInput.value = lp.plugged_in && lp.current_soc_pct != null
-        ? Math.round(lp.current_soc_pct) : "";
-      var btn = document.createElement("button");
-      btn.textContent = "Set";
-      btn.className = "btn-send";
-      btn.style.padding = "0.2rem 0.55rem";
-      btn.style.fontSize = "0.75rem";
-      btn.disabled = !lp.plugged_in;
-      btn.addEventListener("click", function () {
-        var v = Number(socInput.value);
-        if (!(v >= 0 && v <= 100)) return;
-        btn.disabled = true; btn.textContent = "…";
-        fetch("/api/loadpoints/" + encodeURIComponent(lp.id) + "/soc", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ soc_pct: v }),
-        }).then(function (r) {
-          btn.textContent = r.ok ? "✓" : "×";
-          setTimeout(function () {
-            btn.textContent = "Set"; btn.disabled = !lp.plugged_in;
-            refreshEvModal();
-          }, 800);
-        }).catch(function () {
-          btn.textContent = "×";
-          setTimeout(function () { btn.textContent = "Set"; btn.disabled = false; }, 1200);
-        });
-      });
-      row.appendChild(name);
-      row.appendChild(state);
-      row.appendChild(socLabel);
-      row.appendChild(socInput);
-      row.appendChild(btn);
-      section.appendChild(row);
+      section.appendChild(buildLoadpointBlock(lp));
     });
     return section;
+  }
+
+  // buildLoadpointBlock returns a header + two rows (SoC correction,
+  // target deadline) for one loadpoint.
+  function buildLoadpointBlock(lp) {
+    var block = document.createElement("div");
+    block.style.marginBottom = "0.8rem";
+
+    // Header: name + live state (power or plug status).
+    var header = document.createElement("div");
+    header.style.display = "flex";
+    header.style.alignItems = "baseline";
+    header.style.gap = "0.5rem";
+    header.style.marginBottom = "0.3rem";
+    var name = document.createElement("span");
+    name.style.flex = "1";
+    name.style.fontWeight = "600";
+    name.textContent = lp.id;
+    var state = document.createElement("span");
+    state.style.fontSize = "0.75rem";
+    state.style.color = "var(--text-dim)";
+    state.textContent = lp.plugged_in
+      ? (lp.current_power_w > 1
+         ? Math.round(lp.current_power_w) + " W"
+         : "plugged, idle")
+      : "unplugged";
+    header.appendChild(name);
+    header.appendChild(state);
+    block.appendChild(header);
+
+    block.appendChild(buildSoCRow(lp));
+    block.appendChild(buildTargetRow(lp));
+    return block;
+  }
+
+  function buildSoCRow(lp) {
+    var row = document.createElement("div");
+    row.style.display = "flex";
+    row.style.alignItems = "center";
+    row.style.gap = "0.5rem";
+    row.style.marginBottom = "0.3rem";
+    var socLabel = document.createElement("span");
+    socLabel.style.fontSize = "0.75rem";
+    socLabel.style.color = "var(--text-dim)";
+    socLabel.style.width = "4rem";
+    socLabel.textContent = "SoC now:";
+    var socInput = document.createElement("input");
+    socInput.type = "number";
+    socInput.min = "0";
+    socInput.max = "100";
+    socInput.step = "1";
+    styleNumberInput(socInput);
+    socInput.disabled = !lp.plugged_in;
+    socInput.title = lp.plugged_in
+      ? "Correct to what your car actually shows"
+      : "Plug in the car to set SoC";
+    socInput.value = lp.plugged_in && lp.current_soc_pct != null
+      ? Math.round(lp.current_soc_pct) : "";
+    var btn = document.createElement("button");
+    btn.textContent = "Set";
+    btn.className = "btn-send";
+    btn.style.padding = "0.2rem 0.55rem";
+    btn.style.fontSize = "0.75rem";
+    btn.disabled = !lp.plugged_in;
+    btn.addEventListener("click", function () {
+      var v = Number(socInput.value);
+      if (!(v >= 0 && v <= 100)) return;
+      btn.disabled = true; btn.textContent = "…";
+      fetch("/api/loadpoints/" + encodeURIComponent(lp.id) + "/soc", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ soc_pct: v }),
+      }).then(function (r) {
+        btn.textContent = r.ok ? "✓" : "×";
+        setTimeout(function () {
+          btn.textContent = "Set"; btn.disabled = !lp.plugged_in;
+          refreshEvModal();
+        }, 800);
+      }).catch(function () {
+        btn.textContent = "×";
+        setTimeout(function () { btn.textContent = "Set"; btn.disabled = false; }, 1200);
+      });
+    });
+    row.appendChild(socLabel);
+    row.appendChild(socInput);
+    row.appendChild(document.createTextNode("%"));
+    row.appendChild(btn);
+    return row;
+  }
+
+  // buildTargetRow — "Target: [SoC] by [datetime] [Save] [Clear]".
+  // Sets target_soc_pct + target_time on the loadpoint. Empty time
+  // input → no deadline (still sets the SoC target, which does
+  // nothing alone — the DP only applies the shortfall penalty
+  // when a deadline is present). Clear posts zeroes so the
+  // manager drops both fields.
+  function buildTargetRow(lp) {
+    var row = document.createElement("div");
+    row.style.display = "flex";
+    row.style.alignItems = "center";
+    row.style.gap = "0.5rem";
+    row.style.flexWrap = "wrap";
+    var label = document.createElement("span");
+    label.style.fontSize = "0.75rem";
+    label.style.color = "var(--text-dim)";
+    label.style.width = "4rem";
+    label.textContent = "Target:";
+    var socInput = document.createElement("input");
+    socInput.type = "number";
+    socInput.min = "0";
+    socInput.max = "100";
+    socInput.step = "1";
+    styleNumberInput(socInput);
+    socInput.title = "Target SoC % the MPC plans toward";
+    if (lp.target_soc_pct > 0) socInput.value = Math.round(lp.target_soc_pct);
+    var byLabel = document.createElement("span");
+    byLabel.style.fontSize = "0.75rem";
+    byLabel.style.color = "var(--text-dim)";
+    byLabel.textContent = "% by";
+    var timeInput = document.createElement("input");
+    timeInput.type = "datetime-local";
+    timeInput.style.background = "var(--bg)";
+    timeInput.style.color = "var(--text)";
+    timeInput.style.border = "1px solid var(--border)";
+    timeInput.style.borderRadius = "3px";
+    timeInput.style.padding = "0.2rem 0.35rem";
+    timeInput.style.fontSize = "0.8rem";
+    timeInput.title = "Deadline for reaching the target SoC — empty = no deadline";
+    var parsed = parseTargetTime(lp.target_time);
+    if (parsed) timeInput.value = toLocalInputValue(parsed);
+    var saveBtn = document.createElement("button");
+    saveBtn.textContent = "Save";
+    saveBtn.className = "btn-send";
+    saveBtn.style.padding = "0.2rem 0.55rem";
+    saveBtn.style.fontSize = "0.75rem";
+    saveBtn.addEventListener("click", function () {
+      var soc = Number(socInput.value);
+      if (!(soc >= 0 && soc <= 100)) return;
+      var timeMs = 0;
+      if (timeInput.value) {
+        var d = new Date(timeInput.value);
+        if (!isNaN(d.getTime())) timeMs = d.getTime();
+      }
+      postTarget(lp.id, soc, timeMs, saveBtn);
+    });
+    var clearBtn = document.createElement("button");
+    clearBtn.textContent = "Clear";
+    clearBtn.className = "btn-send";
+    clearBtn.style.padding = "0.2rem 0.55rem";
+    clearBtn.style.fontSize = "0.75rem";
+    clearBtn.style.background = "var(--bg)";
+    clearBtn.title = "Drop the target — charge opportunistically";
+    clearBtn.disabled = !(lp.target_soc_pct > 0 || parsed);
+    clearBtn.addEventListener("click", function () {
+      socInput.value = "";
+      timeInput.value = "";
+      postTarget(lp.id, 0, 0, clearBtn);
+    });
+    row.appendChild(label);
+    row.appendChild(socInput);
+    row.appendChild(byLabel);
+    row.appendChild(timeInput);
+    row.appendChild(saveBtn);
+    row.appendChild(clearBtn);
+    return row;
+  }
+
+  function postTarget(id, socPct, targetTimeMs, btn) {
+    var originalLabel = btn.textContent;
+    btn.disabled = true; btn.textContent = "…";
+    fetch("/api/loadpoints/" + encodeURIComponent(id) + "/target", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ soc_pct: socPct, target_time_ms: targetTimeMs }),
+    }).then(function (r) {
+      btn.textContent = r.ok ? "✓" : "×";
+      setTimeout(function () {
+        btn.textContent = originalLabel;
+        btn.disabled = false;
+        refreshEvModal();
+      }, 800);
+    }).catch(function () {
+      btn.textContent = "×";
+      setTimeout(function () {
+        btn.textContent = originalLabel;
+        btn.disabled = false;
+      }, 1200);
+    });
+  }
+
+  function styleNumberInput(input) {
+    input.style.width = "4.5rem";
+    input.style.background = "var(--bg)";
+    input.style.color = "var(--text)";
+    input.style.border = "1px solid var(--border)";
+    input.style.borderRadius = "3px";
+    input.style.padding = "0.2rem 0.35rem";
+  }
+
+  // parseTargetTime accepts the loadpoint's target_time (RFC3339
+  // string or undefined) and returns a Date — or null when the
+  // value is absent/zero. Go's json.Marshal doesn't omit zero
+  // time.Time even with omitempty, so we treat anything before
+  // year 2000 as "unset" to handle both the missing-field and
+  // 0001-01-01 cases without a format sniff.
+  function parseTargetTime(s) {
+    if (!s) return null;
+    var d = new Date(s);
+    if (isNaN(d.getTime())) return null;
+    if (d.getFullYear() < 2000) return null;
+    return d;
+  }
+
+  // toLocalInputValue turns a Date into the "YYYY-MM-DDTHH:MM"
+  // string a datetime-local input expects (local time, no TZ).
+  function toLocalInputValue(date) {
+    var tz = date.getTimezoneOffset() * 60000;
+    return new Date(date - tz).toISOString().slice(0, 16);
   }
 
   function refreshEvModal() {

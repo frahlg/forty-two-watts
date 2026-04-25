@@ -134,7 +134,7 @@
     .form-group input[type="password"],
     .form-group select {
       width: 100%;
-      padding: 10px 12px;
+      padding: 10px 36px 10px 12px;
       background: var(--ink-raised);
       border: 1px solid var(--line);
       border-radius: 8px;
@@ -142,6 +142,16 @@
       font-family: var(--sans);
       font-size: 0.9rem;
       transition: border-color 0.15s;
+      /* Without appearance:none + an explicit chevron, the field
+         reads as a static text input on the dark theme — operators
+         miss that it's clickable. The inline SVG keeps a single
+         dependency-free file. */
+      appearance: none;
+      -webkit-appearance: none;
+      background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'><path d='M1 1l5 5 5-5' stroke='%23a0a0a0' stroke-width='1.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+      background-repeat: no-repeat;
+      background-position: right 12px center;
+      cursor: pointer;
     }
 
     .form-group input:focus,

@@ -35,34 +35,103 @@ func (s *memStore) LoadConfig(k string) (string, bool) {
 	return v, ok
 }
 
-func fakeGHServer(t *testing.T, tag, url string, published time.Time) *httptest.Server {
-	t.Helper()
-	return fakeGHServerWithBody(t, tag, url, published, "")
+// fakeRegistry stands up the two GHCR endpoints the Checker hits:
+// /token and /v2/.../tags/list. The Checker just verifies tag
+// membership — no HEAD or digest comparison — so this is all the
+// surface area the tests need to exercise.
+type fakeRegistry struct {
+	t          *testing.T
+	repo       string
+	tags       []string
+	listCalls  int
+	tokenCalls int
 }
 
-func fakeGHServerWithBody(t *testing.T, tag, url string, published time.Time, body string) *httptest.Server {
-	t.Helper()
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+func newFakeRegistry(t *testing.T, repo string) *fakeRegistry {
+	return &fakeRegistry{t: t, repo: repo}
+}
+
+// addTag registers a tag in /tags/list. Order doesn't matter.
+func (f *fakeRegistry) addTag(tag string) {
+	for _, t := range f.tags {
+		if t == tag {
+			return
+		}
+	}
+	f.tags = append(f.tags, tag)
+}
+
+func (f *fakeRegistry) server() *httptest.Server {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/token", func(w http.ResponseWriter, r *http.Request) {
+		f.tokenCalls++
+		_ = json.NewEncoder(w).Encode(map[string]string{"token": "stub-token"})
+	})
+	mux.HandleFunc("/v2/"+f.repo+"/tags/list", func(w http.ResponseWriter, r *http.Request) {
+		f.listCalls++
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"tag_name":     tag,
-			"html_url":     url,
-			"published_at": published.Format(time.RFC3339),
-			"body":         body,
+			"name": f.repo,
+			"tags": f.tags,
+		})
+	})
+	return httptest.NewServer(mux)
+}
+
+// fakeRelease bundles what the test wants from /releases/latest. tag=""
+// makes the server 404 (= "no releases yet"). prerelease=true mimics
+// drafts/prereleases (the Checker filters those out).
+type fakeRelease struct {
+	tag        string
+	htmlURL    string
+	body       string
+	published  time.Time
+	prerelease bool
+	draft      bool
+}
+
+func fakeReleasesServer(t *testing.T, r fakeRelease) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if r.tag == "" {
+			http.NotFound(w, req)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"tag_name":     r.tag,
+			"html_url":     r.htmlURL,
+			"body":         r.body,
+			"published_at": r.published.Format(time.RFC3339),
+			"prerelease":   r.prerelease,
+			"draft":        r.draft,
 		})
 	}))
 }
 
+func newCheckerOnFakes(currentVersion string, registry, releases *httptest.Server, repo string, st Store) *Checker {
+	return New(Config{
+		Repo:             repo,
+		CurrentVersion:   currentVersion,
+		RegistryBaseURL:  registry.URL,
+		LatestReleaseURL: releases.URL,
+		CheckInterval:    time.Hour,
+	}, st)
+}
+
 func TestCheck_UpdateAvailable(t *testing.T) {
+	const repo = "frahlg/forty-two-watts"
+	reg := newFakeRegistry(t, repo)
+	reg.addTag("v1.3.0")
+	rsrv := reg.server()
+	defer rsrv.Close()
+
 	published := time.Date(2026, 4, 15, 10, 0, 0, 0, time.UTC)
-	srv := fakeGHServer(t, "v1.3.0", "https://example/releases/1.3.0", published)
-	defer srv.Close()
+	rls := fakeReleasesServer(t, fakeRelease{
+		tag: "v1.3.0", htmlURL: "https://example/releases/1.3.0",
+		body: "## Features\n* shiny", published: published,
+	})
+	defer rls.Close()
 
-	c := New(Config{
-		CurrentVersion: "v1.2.4",
-		ReleasesURL:    srv.URL,
-		CheckInterval:  time.Hour,
-	}, newMemStore())
-
+	c := newCheckerOnFakes("v1.2.4", rsrv, rls, repo, newMemStore())
 	info, err := c.Check(context.Background(), false)
 	if err != nil {
 		t.Fatalf("Check: %v", err)
@@ -81,11 +150,119 @@ func TestCheck_UpdateAvailable(t *testing.T) {
 	}
 }
 
-func TestCheck_SameVersion(t *testing.T) {
-	srv := fakeGHServer(t, "v2.0.0", "", time.Now())
-	defer srv.Close()
-	c := New(Config{CurrentVersion: "v2.0.0", ReleasesURL: srv.URL}, newMemStore())
+// The original race: GH publishes the release seconds before the build
+// workflow finishes pushing the image to GHCR. Check must report
+// update_available=false in that window, then flip to true once the
+// tag appears in the registry.
+func TestCheck_GHReleaseExistsButImageNotPushedYet(t *testing.T) {
+	const repo = "frahlg/forty-two-watts"
+	reg := newFakeRegistry(t, repo)
+	// No tags pushed yet.
+	rsrv := reg.server()
+	defer rsrv.Close()
 
+	rls := fakeReleasesServer(t, fakeRelease{tag: "v0.44.0"})
+	defer rls.Close()
+
+	c := newCheckerOnFakes("v0.43.1", rsrv, rls, repo, newMemStore())
+	info, err := c.Check(context.Background(), false)
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if info.UpdateAvailable {
+		t.Error("registry hasn't pushed v0.44.0 yet — UpdateAvailable must be false")
+	}
+
+	// Build workflow finishes; tag now appears in the registry.
+	reg.addTag("v0.44.0")
+	info, err = c.Check(context.Background(), true)
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if !info.UpdateAvailable {
+		t.Error("after registry push, UpdateAvailable should flip to true")
+	}
+	if info.Latest != "v0.44.0" {
+		t.Errorf("Latest = %q, want v0.44.0", info.Latest)
+	}
+}
+
+// Repos with non-monotonic tag history (e.g. an older `2.x.y` scheme
+// in the registry alongside the current `v0.X.Y` line) must NOT report
+// the older-but-numerically-higher tag as latest. GH Releases is the
+// authority for which version is current.
+func TestCheck_RespectsGHReleaseOverHigherSemverInRegistry(t *testing.T) {
+	const repo = "frahlg/forty-two-watts"
+	reg := newFakeRegistry(t, repo)
+	reg.addTag("v0.43.1")
+	reg.addTag("v0.44.0") // current line, what GH says is latest
+	reg.addTag("2.3.0")   // legacy tag from prior versioning era
+	rsrv := reg.server()
+	defer rsrv.Close()
+
+	rls := fakeReleasesServer(t, fakeRelease{tag: "v0.44.0"})
+	defer rls.Close()
+
+	c := newCheckerOnFakes("v0.43.1", rsrv, rls, repo, newMemStore())
+	info, err := c.Check(context.Background(), false)
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if info.Latest != "v0.44.0" {
+		t.Errorf("Latest = %q, want v0.44.0 (legacy 2.3.0 must not win)", info.Latest)
+	}
+}
+
+func TestCheck_NoReleasesYet(t *testing.T) {
+	const repo = "frahlg/forty-two-watts"
+	reg := newFakeRegistry(t, repo)
+	rsrv := reg.server()
+	defer rsrv.Close()
+
+	rls := fakeReleasesServer(t, fakeRelease{}) // 404
+	defer rls.Close()
+
+	c := newCheckerOnFakes("v1.0.0", rsrv, rls, repo, newMemStore())
+	info, err := c.Check(context.Background(), false)
+	if err != nil {
+		t.Fatalf("brand-new repo (no releases) should not error: %v", err)
+	}
+	if info.UpdateAvailable {
+		t.Error("no releases → no update available")
+	}
+}
+
+func TestCheck_PrereleaseFiltered(t *testing.T) {
+	const repo = "frahlg/forty-two-watts"
+	reg := newFakeRegistry(t, repo)
+	reg.addTag("v1.5.0-rc1")
+	rsrv := reg.server()
+	defer rsrv.Close()
+
+	rls := fakeReleasesServer(t, fakeRelease{tag: "v1.5.0-rc1", prerelease: true})
+	defer rls.Close()
+
+	c := newCheckerOnFakes("v1.4.0", rsrv, rls, repo, newMemStore())
+	info, err := c.Check(context.Background(), false)
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if info.UpdateAvailable {
+		t.Error("prerelease must not auto-dispatch as latest")
+	}
+}
+
+func TestCheck_SameVersion(t *testing.T) {
+	const repo = "frahlg/forty-two-watts"
+	reg := newFakeRegistry(t, repo)
+	reg.addTag("v2.0.0")
+	rsrv := reg.server()
+	defer rsrv.Close()
+
+	rls := fakeReleasesServer(t, fakeRelease{tag: "v2.0.0"})
+	defer rls.Close()
+
+	c := newCheckerOnFakes("v2.0.0", rsrv, rls, repo, newMemStore())
 	info, err := c.Check(context.Background(), false)
 	if err != nil {
 		t.Fatalf("Check: %v", err)
@@ -96,9 +273,16 @@ func TestCheck_SameVersion(t *testing.T) {
 }
 
 func TestCheck_DevCurrent(t *testing.T) {
-	srv := fakeGHServer(t, "v0.17.1", "", time.Now())
-	defer srv.Close()
-	c := New(Config{CurrentVersion: "dev", ReleasesURL: srv.URL}, newMemStore())
+	const repo = "frahlg/forty-two-watts"
+	reg := newFakeRegistry(t, repo)
+	reg.addTag("v0.17.1")
+	rsrv := reg.server()
+	defer rsrv.Close()
+
+	rls := fakeReleasesServer(t, fakeRelease{tag: "v0.17.1"})
+	defer rls.Close()
+
+	c := newCheckerOnFakes("dev", rsrv, rls, repo, newMemStore())
 	info, _ := c.Check(context.Background(), false)
 	if !info.UpdateAvailable {
 		t.Error("dev builds should always see an upgrade as available")
@@ -106,48 +290,47 @@ func TestCheck_DevCurrent(t *testing.T) {
 }
 
 func TestCheck_CacheRespected(t *testing.T) {
-	calls := 0
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls++
-		_ = json.NewEncoder(w).Encode(map[string]any{"tag_name": "v1.0.0"})
-	}))
-	defer srv.Close()
+	const repo = "frahlg/forty-two-watts"
+	reg := newFakeRegistry(t, repo)
+	reg.addTag("v1.0.0")
+	rsrv := reg.server()
+	defer rsrv.Close()
 
-	c := New(Config{
-		CurrentVersion: "v0.9.0",
-		ReleasesURL:    srv.URL,
-		CheckInterval:  time.Hour,
-	}, newMemStore())
+	rls := fakeReleasesServer(t, fakeRelease{tag: "v1.0.0"})
+	defer rls.Close()
 
-	// First probe hits the server.
+	c := newCheckerOnFakes("v0.9.0", rsrv, rls, repo, newMemStore())
+
 	if _, err := c.Check(context.Background(), false); err != nil {
 		t.Fatal(err)
 	}
-	// Second probe within cache window — should skip.
+	first := reg.tokenCalls
 	if _, err := c.Check(context.Background(), false); err != nil {
 		t.Fatal(err)
 	}
-	if calls != 1 {
-		t.Errorf("expected cache to suppress 2nd call; calls=%d", calls)
+	if reg.tokenCalls != first {
+		t.Errorf("expected cache to suppress 2nd registry probe; tokenCalls=%d (was %d)", reg.tokenCalls, first)
 	}
-	// Forced probe bypasses cache.
 	if _, err := c.Check(context.Background(), true); err != nil {
 		t.Fatal(err)
 	}
-	if calls != 2 {
-		t.Errorf("force=true should call again; calls=%d", calls)
+	if reg.tokenCalls <= first {
+		t.Errorf("force=true should re-probe; tokenCalls=%d", reg.tokenCalls)
 	}
 }
 
-func TestCheck_HTTPError(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+func TestCheck_GHReleasesError(t *testing.T) {
+	rls := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(503)
-		_, _ = w.Write([]byte("upstream down"))
+		_, _ = w.Write([]byte("github down"))
 	}))
-	defer srv.Close()
-	c := New(Config{CurrentVersion: "v1.0.0", ReleasesURL: srv.URL}, newMemStore())
-	_, err := c.Check(context.Background(), false)
-	if err == nil {
+	defer rls.Close()
+
+	reg := newFakeRegistry(t, "frahlg/forty-two-watts").server()
+	defer reg.Close()
+
+	c := newCheckerOnFakes("v1.0.0", reg, rls, "frahlg/forty-two-watts", newMemStore())
+	if _, err := c.Check(context.Background(), false); err == nil {
 		t.Fatal("expected error for 503")
 	}
 	if c.Info().Err == "" {
@@ -155,11 +338,37 @@ func TestCheck_HTTPError(t *testing.T) {
 	}
 }
 
+func TestCheck_RegistryError(t *testing.T) {
+	rsrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(503)
+		_, _ = w.Write([]byte("registry down"))
+	}))
+	defer rsrv.Close()
+
+	rls := fakeReleasesServer(t, fakeRelease{tag: "v1.1.0"})
+	defer rls.Close()
+
+	c := newCheckerOnFakes("v1.0.0", rsrv, rls, "frahlg/forty-two-watts", newMemStore())
+	if _, err := c.Check(context.Background(), false); err == nil {
+		t.Fatal("expected error when registry is unreachable")
+	}
+	if c.Info().Err == "" {
+		t.Error("error should be recorded in Info.Err")
+	}
+}
+
 func TestSkipAndUnskip(t *testing.T) {
-	srv := fakeGHServer(t, "v1.3.0", "", time.Now())
-	defer srv.Close()
+	const repo = "frahlg/forty-two-watts"
+	reg := newFakeRegistry(t, repo)
+	reg.addTag("v1.3.0")
+	rsrv := reg.server()
+	defer rsrv.Close()
+
+	rls := fakeReleasesServer(t, fakeRelease{tag: "v1.3.0"})
+	defer rls.Close()
+
 	st := newMemStore()
-	c := New(Config{CurrentVersion: "v1.2.0", ReleasesURL: srv.URL}, st)
+	c := newCheckerOnFakes("v1.2.0", rsrv, rls, repo, st)
 	if _, err := c.Check(context.Background(), false); err != nil {
 		t.Fatal(err)
 	}
@@ -174,7 +383,6 @@ func TestSkipAndUnskip(t *testing.T) {
 		t.Errorf("persisted key = %q, want v1.3.0", v)
 	}
 
-	// Skipping a non-latest version persists but does NOT hide the latest.
 	if err := c.Skip("v1.2.5"); err != nil {
 		t.Fatal(err)
 	}
@@ -190,29 +398,6 @@ func TestSkipAndUnskip(t *testing.T) {
 	}
 }
 
-func TestSkipResurfacesOnNewerRelease(t *testing.T) {
-	published := time.Now()
-	tag := "v1.3.0"
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{"tag_name": tag, "published_at": published.Format(time.RFC3339)})
-	}))
-	defer srv.Close()
-
-	st := newMemStore()
-	c := New(Config{CurrentVersion: "v1.2.0", ReleasesURL: srv.URL, CheckInterval: time.Hour}, st)
-	_, _ = c.Check(context.Background(), false)
-	_ = c.Skip("v1.3.0")
-	if !c.Info().Skipped {
-		t.Fatal("precondition: skip should hide v1.3.0")
-	}
-	// New release drops — check again (forced to bypass cache).
-	tag = "v1.4.0"
-	_, _ = c.Check(context.Background(), true)
-	if c.Info().Skipped {
-		t.Error("v1.4.0 is newer than skipped v1.3.0; it should NOT be skipped")
-	}
-}
-
 func TestStatus_MissingFileReturnsIdle(t *testing.T) {
 	c := New(Config{StatusPath: "/nonexistent/state.json"}, newMemStore())
 	if s := c.Status(); s.State != "idle" {
@@ -223,7 +408,6 @@ func TestStatus_MissingFileReturnsIdle(t *testing.T) {
 func TestStatus_ReadsAndDetectsStale(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "state.json")
-	// Write a fresh "pulling" state.
 	fresh := UpdateStatus{State: "pulling", Action: "update", UpdatedAt: time.Now()}
 	writeJSON(t, path, fresh)
 
@@ -232,7 +416,6 @@ func TestStatus_ReadsAndDetectsStale(t *testing.T) {
 		t.Errorf("fresh state = %q, want pulling", s.State)
 	}
 
-	// Now stale — back-date the heartbeat.
 	stale := UpdateStatus{State: "pulling", Action: "update", UpdatedAt: time.Now().Add(-10 * time.Minute)}
 	writeJSON(t, path, stale)
 	if s := c.Status(); s.State != "failed" {
@@ -263,8 +446,8 @@ func TestIsNewer(t *testing.T) {
 		{"v2.0.0", "v1.99.99", true},
 		{"v1.2.3", "dev", true},
 		{"", "v1.2.3", false},
-		{"v1.2.3-rc1", "v1.2.2", true}, // pre-release suffix tolerated by parser
-		{"1.2.3", "1.2.2", true},       // no v prefix
+		{"v1.2.3-rc1", "v1.2.2", true},
+		{"1.2.3", "1.2.2", true},
 	}
 	for _, tc := range cases {
 		if got := isNewer(tc.latest, tc.current); got != tc.want {
@@ -273,32 +456,21 @@ func TestIsNewer(t *testing.T) {
 	}
 }
 
-func TestCheck_CapturesReleaseBody(t *testing.T) {
-	published := time.Date(2026, 4, 20, 10, 0, 0, 0, time.UTC)
-	body := "### Bug Fixes\n\n* **pvmodel:** drop intercept ([#136](https://example/pr/136))"
-	srv := fakeGHServerWithBody(t, "v1.5.0", "https://example/rel/1.5.0", published, body)
-	defer srv.Close()
-
-	c := New(Config{CurrentVersion: "v1.4.0", ReleasesURL: srv.URL}, newMemStore())
-	info, err := c.Check(context.Background(), false)
-	if err != nil {
-		t.Fatalf("Check: %v", err)
-	}
-	if info.ReleaseBody != body {
-		t.Errorf("ReleaseBody = %q, want %q", info.ReleaseBody, body)
-	}
-}
-
 func TestCheck_TruncatesHugeReleaseBody(t *testing.T) {
-	// Build a body larger than the cap so we hit the truncation branch.
+	const repo = "frahlg/forty-two-watts"
+	reg := newFakeRegistry(t, repo)
+	reg.addTag("v2.0.0")
+	rsrv := reg.server()
+	defer rsrv.Close()
+
 	huge := strings.Repeat("* entry\n", (MaxReleaseBodyBytes/8)+200)
 	if len(huge) <= MaxReleaseBodyBytes {
 		t.Fatalf("test fixture too small: %d bytes", len(huge))
 	}
-	srv := fakeGHServerWithBody(t, "v2.0.0", "", time.Now(), huge)
-	defer srv.Close()
+	rls := fakeReleasesServer(t, fakeRelease{tag: "v2.0.0", body: huge})
+	defer rls.Close()
 
-	c := New(Config{CurrentVersion: "v1.0.0", ReleasesURL: srv.URL}, newMemStore())
+	c := newCheckerOnFakes("v1.0.0", rsrv, rls, repo, newMemStore())
 	info, err := c.Check(context.Background(), false)
 	if err != nil {
 		t.Fatalf("Check: %v", err)

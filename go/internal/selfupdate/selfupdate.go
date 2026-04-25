@@ -1,6 +1,35 @@
-// Package selfupdate probes the GitHub Releases API for newer versions of
-// forty-two-watts and triggers pull+restart via the ftw-updater sidecar
-// over a Unix socket.
+// Package selfupdate decides what version of forty-two-watts is the
+// "current latest release" and triggers pull+restart via the
+// ftw-updater sidecar over a Unix socket.
+//
+// Two signals are required, both for safety reasons:
+//
+//   1. The GitHub Releases API's "latest release" endpoint identifies
+//      the *semantic* current release — the most recently published
+//      non-prerelease, per release-please's ordering. We can't use
+//      raw semver descending over GHCR tags because the repo's tag
+//      history isn't monotonic (e.g. an older `2.x.y` tag scheme
+//      still in the registry would outrank the current `v0.X.Y` line
+//      numerically).
+//
+//   2. The OCI registry's /tags/list confirms the image for that tag
+//      has actually been pushed. A GH Release is published the moment
+//      release-please's PR merges, but the build workflow that pushes
+//      the image runs after that. Without this verification we'd
+//      dispatch a pull whose only guaranteed-resolvable target is
+//      :latest — still aliased to the previous image, no digest
+//      change, sidecar writes state=done with the version unmoved.
+//
+// Both signals required: GH Releases tells us *what's released*, GHCR
+// tells us *is it deployable yet*. When the registry doesn't have the
+// release yet, Check returns update_available=false this cycle and
+// retries on the next probe — the immutable version tag will appear
+// once the build workflow finishes.
+//
+// Dispatch passes the resolved version tag (not :latest) to the
+// sidecar, which sets FTW_IMAGE_TAG=<target> on the docker exec so
+// `docker compose pull` resolves a specific, immutable tag. No race
+// possible.
 //
 // The check is probe-only — nothing mutates the host until the user
 // explicitly POSTs /api/version/update or /api/version/restart and the
@@ -46,7 +75,17 @@ const (
 // Config configures the Checker.
 type Config struct {
 	// Repo is the GitHub "owner/name" slug. Defaults to frahlg/forty-two-watts.
+	// Doubles as the registry path under RegistryBaseURL when Image is unset.
 	Repo string
+	// Image overrides the registry path if it differs from Repo (rare —
+	// normally the GH repo and the GHCR image share a name). Defaults to Repo.
+	Image string
+	// RegistryBaseURL is the OCI registry root. Defaults to https://ghcr.io.
+	// Overridable for tests.
+	RegistryBaseURL string
+	// RegistryService is the audience claim sent to /token. Defaults to "ghcr.io".
+	RegistryService string
+
 	// CurrentVersion is the running binary's version (from main.Version).
 	CurrentVersion string
 	// CheckInterval is the probe cadence. 0 = 1 h.
@@ -59,10 +98,15 @@ type Config struct {
 	// discovers a new, non-skipped release tag. Nil disables emission.
 	Bus *events.Bus
 
+	// LatestReleaseURL is the GitHub-Releases "latest" endpoint for the
+	// repo. The Checker reads tag_name + body + html_url + published_at
+	// from the response in one call. Default returns the public
+	// api.github.com endpoint for cfg.Repo. Overrideable for tests.
+	LatestReleaseURL string
+
 	// Overrides for tests.
-	HTTPClient  *http.Client
-	ReleasesURL string
-	Now         func() time.Time
+	HTTPClient *http.Client
+	Now        func() time.Time
 }
 
 // Info is the cached view returned to the UI.
@@ -131,8 +175,17 @@ func New(cfg Config, store Store) *Checker {
 	if cfg.Repo == "" {
 		cfg.Repo = "frahlg/forty-two-watts"
 	}
-	if cfg.ReleasesURL == "" {
-		cfg.ReleasesURL = "https://api.github.com/repos/" + cfg.Repo + "/releases/latest"
+	if cfg.Image == "" {
+		cfg.Image = cfg.Repo
+	}
+	if cfg.RegistryBaseURL == "" {
+		cfg.RegistryBaseURL = "https://ghcr.io"
+	}
+	if cfg.RegistryService == "" {
+		cfg.RegistryService = "ghcr.io"
+	}
+	if cfg.LatestReleaseURL == "" {
+		cfg.LatestReleaseURL = "https://api.github.com/repos/" + cfg.Repo + "/releases/latest"
 	}
 	if cfg.HTTPClient == nil {
 		cfg.HTTPClient = &http.Client{Timeout: defaultHTTPTimeout}
@@ -178,9 +231,11 @@ func (c *Checker) loop(ctx context.Context) {
 	}
 }
 
-// Check contacts GitHub and refreshes cached Info. A non-force call that
-// finds the cache younger than half the check interval returns early and
-// never hits the network.
+// Check asks GitHub Releases for the current latest release tag, then
+// confirms the matching image is actually pushed to the registry, and
+// (if newer than current) flips UpdateAvailable. A non-force call that
+// finds the cache younger than half the check interval returns early
+// and never hits the network.
 func (c *Checker) Check(ctx context.Context, force bool) (Info, error) {
 	c.mu.RLock()
 	cached := c.info
@@ -189,42 +244,43 @@ func (c *Checker) Check(ctx context.Context, force bool) (Info, error) {
 		return cached, nil
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "GET", c.cfg.ReleasesURL, nil)
-	if err != nil {
-		return cached, err
-	}
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("User-Agent", "forty-two-watts-selfupdate/"+cached.Current)
-
-	resp, err := c.cfg.HTTPClient.Do(req)
+	rel, err := c.fetchLatestRelease(ctx)
 	if err != nil {
 		return c.recordErr(err)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
-		return c.recordErr(fmt.Errorf("github releases %d: %s", resp.StatusCode, strings.TrimSpace(string(body))))
-	}
 
-	var rel struct {
-		TagName     string    `json:"tag_name"`
-		HtmlURL     string    `json:"html_url"`
-		Body        string    `json:"body"`
-		PublishedAt time.Time `json:"published_at"`
-		Prerelease  bool      `json:"prerelease"`
-		Draft       bool      `json:"draft"`
+	// Verify the registry actually has this tag pushed before flipping
+	// update_available. Skipping this re-introduces the race where GH
+	// publishes the release seconds before the build workflow finishes,
+	// and the sidecar dispatches a pull that resolves the previous
+	// digest.
+	rp := &registryProbe{
+		httpClient: c.cfg.HTTPClient,
+		base:       c.cfg.RegistryBaseURL,
+		repo:       c.cfg.Image,
+		service:    c.cfg.RegistryService,
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
-		return c.recordErr(err)
+	deployable := false
+	if rel.TagName != "" {
+		ok, err := rp.hasTag(ctx, rel.TagName)
+		if err != nil {
+			return c.recordErr(fmt.Errorf("registry probe: %w", err))
+		}
+		deployable = ok
 	}
 
 	c.mu.Lock()
-	if !rel.Draft && !rel.Prerelease && rel.TagName != "" {
+	if deployable {
 		c.info.Latest = rel.TagName
 		c.info.PublishedAt = rel.PublishedAt
 		c.info.ReleaseNotesURL = rel.HtmlURL
 		c.info.ReleaseBody = truncateBody(rel.Body)
 		c.info.UpdateAvailable = isNewer(rel.TagName, c.info.Current)
+	} else {
+		// Either GH has no published release yet, or the build workflow
+		// hasn't pushed the image for this release yet. Keep the prior
+		// Latest visible (so the UI doesn't flicker) but don't dispatch.
+		c.info.UpdateAvailable = false
 	}
 	c.info.CheckedAt = c.cfg.Now()
 	c.info.Err = ""
@@ -255,6 +311,51 @@ func (c *Checker) recordErr(err error) (Info, error) {
 	defer c.mu.Unlock()
 	c.info.Err = err.Error()
 	return c.info, err
+}
+
+// ghRelease mirrors the subset of fields we read from the GitHub
+// Releases API.
+type ghRelease struct {
+	TagName     string    `json:"tag_name"`
+	HtmlURL     string    `json:"html_url"`
+	Body        string    `json:"body"`
+	PublishedAt time.Time `json:"published_at"`
+	Draft       bool      `json:"draft"`
+	Prerelease  bool      `json:"prerelease"`
+}
+
+// fetchLatestRelease asks GitHub for the most-recently-published
+// non-prerelease release. Drafts/prereleases are filtered out — they
+// shouldn't auto-dispatch to production. A 404 (no releases yet)
+// returns a zero ghRelease and nil error so Check can treat it as
+// "nothing to offer".
+func (c *Checker) fetchLatestRelease(ctx context.Context) (ghRelease, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", c.cfg.LatestReleaseURL, nil)
+	if err != nil {
+		return ghRelease{}, err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("User-Agent", "forty-two-watts-selfupdate")
+	resp, err := c.cfg.HTTPClient.Do(req)
+	if err != nil {
+		return ghRelease{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return ghRelease{}, nil
+	}
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+		return ghRelease{}, fmt.Errorf("github releases %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var rel ghRelease
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&rel); err != nil {
+		return ghRelease{}, err
+	}
+	if rel.Draft || rel.Prerelease {
+		return ghRelease{}, nil
+	}
+	return rel, nil
 }
 
 // Info returns the cached view. Skip state is re-read from the store on each

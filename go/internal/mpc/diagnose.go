@@ -25,6 +25,18 @@ type DiagnosticSlot struct {
 	Reason   string  `json:"reason"`
 	EMSMode  string  `json:"ems_mode"`
 	PVLimitW float64 `json:"pv_limit_w,omitempty"`
+
+	// EV outputs — present only when the plan included a loadpoint.
+	// `omitempty` + the web renderer's `lpActive` gate mean plans
+	// without an EV look identical to the pre-loadpoint diagnostic
+	// shape; plans WITH an EV surface two extra columns so the
+	// LOAD / BATTERY math in the table is actually complete. Before
+	// these fields were plumbed, operators saw `BATTERY -5.6 kW`
+	// against `LOAD 1.6 kW` and reasonably assumed the battery was
+	// exporting — reality was `LOAD 1.6 + EV 4.0 = 5.6 kW covered`,
+	// grid ≈ 0. See issue #174.
+	LoadpointW      float64 `json:"loadpoint_w,omitempty"`
+	LoadpointSoCPct float64 `json:"loadpoint_soc_pct,omitempty"`
 }
 
 // DiagnosticParams is a JSON-friendly subset of the Params struct —
@@ -102,22 +114,24 @@ func buildDiagnostic(plan *Plan, slots []Slot, p Params, zone string,
 		slot := slots[i]
 		action := plan.Actions[i]
 		out[i] = DiagnosticSlot{
-			Idx:         i,
-			SlotStartMs: slot.StartMs,
-			SlotEndMs:   slot.StartMs + int64(slot.LenMin)*60*1000,
-			LenMin:      slot.LenMin,
-			PriceOre:    slot.PriceOre,
-			SpotOre:     slot.SpotOre,
-			Confidence:  slot.Confidence,
-			PVW:         slot.PVW,
-			LoadW:       slot.LoadW,
-			BatteryW:    action.BatteryW,
-			GridW:       action.GridW,
-			SoCPct:      action.SoCPct,
-			CostOre:     action.CostOre,
-			Reason:      action.Reason,
-			EMSMode:     action.EMSMode,
-			PVLimitW:    action.PVLimitW,
+			Idx:             i,
+			SlotStartMs:     slot.StartMs,
+			SlotEndMs:       slot.StartMs + int64(slot.LenMin)*60*1000,
+			LenMin:          slot.LenMin,
+			PriceOre:        slot.PriceOre,
+			SpotOre:         slot.SpotOre,
+			Confidence:      slot.Confidence,
+			PVW:             slot.PVW,
+			LoadW:           slot.LoadW,
+			BatteryW:        action.BatteryW,
+			GridW:           action.GridW,
+			SoCPct:          action.SoCPct,
+			CostOre:         action.CostOre,
+			Reason:          action.Reason,
+			EMSMode:         action.EMSMode,
+			PVLimitW:        action.PVLimitW,
+			LoadpointW:      action.LoadpointW,
+			LoadpointSoCPct: action.LoadpointSoCPct,
 		}
 	}
 	return &Diagnostic{

@@ -32,7 +32,10 @@ func runBootstrap(configPath, webDir, driverDir string) {
 	// is no SQLite yet; skip persistence falls back to no-op which is fine
 	// for one-shot setup (dismiss is session-only anyway).
 	var selfUpdater *selfupdate.Checker
-	if envBool("FTW_SELFUPDATE_ENABLED") {
+	// See main.go for the rationale; mirror the dev-implicit-enable so
+	// the setup wizard also reports "Update available" when the operator
+	// is running an old dev binary against a new release.
+	if envBool("FTW_SELFUPDATE_ENABLED") || Version == "dev" {
 		current := Version
 		if v, ok := os.LookupEnv("FTW_SELFUPDATE_CURRENT_VERSION"); ok && v != "" {
 			current = v
