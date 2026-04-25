@@ -795,6 +795,42 @@ body.ftw-next .plan-summary {
   font-size: 11px;
   color: var(--fg-muted);
 }
+body.ftw-next .plan-summary .s-sep { opacity: 0.45; margin: 0 4px; }
+body.ftw-next .plan-summary .s-label { color: var(--fg-muted); opacity: 0.75; }
+body.ftw-next .plan-summary .s-value { color: var(--fg-dim); }
+body.ftw-next .plan-help {
+  font-family: var(--sans);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--fg-muted);
+  margin: 6px 0 4px;
+  max-width: 68ch;
+}
+body.ftw-next .plan-savings {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 6px 0 10px;
+}
+body.ftw-next .plan-savings:empty { display: none; }
+body.ftw-next .saving-badge {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--fg-dim);
+  background: rgba(255,255,255,0.03);
+  border: 1px solid var(--line);
+  padding: 4px 8px;
+  border-radius: 6px;
+  cursor: help;
+}
+body.ftw-next .saving-badge b {
+  font-weight: 700;
+  margin-left: 2px;
+}
+body.ftw-next .saving-badge .saving-label { opacity: 0.7; }
+body.ftw-next .saving-badge .saving-pct { opacity: 0.6; }
+body.ftw-next .saving-badge.saving-pos { border-color: rgba(34,197,94,0.45); color: #4ade80; }
+body.ftw-next .saving-badge.saving-neg { border-color: rgba(239,68,68,0.45); color: #f87171; }
 body.ftw-next .plan-actions { gap: 10px; display: flex; align-items: center; }
 
 /* ---- ML twins / drivers / calibration sections ---- */

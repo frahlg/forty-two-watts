@@ -42,6 +42,12 @@
   // below don't stumble over a nested object.
   var chartBatteries = {};
 
+  // Per-EV-charger chart series. Same discovery pattern as batteries,
+  // triggered by any driver exposing `ev_w` (EV charge power in W,
+  // positive = charging). One series per charger so multi-charger
+  // homes see each car separately. Shape: { [driverName]: { ev: [...] } }.
+  var chartEVs = {};
+
   // Deterministic color palette for battery series — each driver gets a
   // stable color based on name hash so reload is consistent.
   var BATTERY_PALETTE = [
@@ -92,6 +98,51 @@
       swatch.style.background = batteryColor(name);
       span.appendChild(swatch);
       span.appendChild(document.createTextNode(" " + batteryLabel(name)));
+      host.appendChild(span);
+    });
+  }
+
+  // EV chargers use a distinct palette (magenta/fuchsia family) so they
+  // can't be confused with batteries (amber/purple) or PV (green) in
+  // the live chart. Deterministic hash → stable color across reloads.
+  var EV_PALETTE = [
+    "#ec4899", "#d946ef", "#f97316", "#0ea5e9",
+    "#84cc16", "#f43f5e", "#a855f7", "#14b8a6",
+  ];
+  function evColor(name) {
+    var h = 0;
+    for (var i = 0; i < name.length; i++) {
+      h = ((h << 5) - h + name.charCodeAt(i)) | 0;
+    }
+    return EV_PALETTE[Math.abs(h) % EV_PALETTE.length];
+  }
+  function evLabel(name) {
+    if (!name) return name;
+    return name.charAt(0).toUpperCase() + name.slice(1) + " EV";
+  }
+  function ensureEVDriver(name) {
+    if (chartEVs[name]) return chartEVs[name];
+    var pad = chartHistory.timestamps.length;
+    var slot = { ev: new Array(pad).fill(0) };
+    chartEVs[name] = slot;
+    syncEVLegend();
+    return slot;
+  }
+  function syncEVLegend() {
+    var host = document.getElementById("chart-legend");
+    if (!host) return;
+    Object.keys(chartEVs).forEach(function (name) {
+      var key = "ev:" + name;
+      if (host.querySelector('[data-toggle="' + cssEscape(key) + '"]')) return;
+      var span = document.createElement("span");
+      span.className = "legend-item";
+      span.dataset.toggle = key;
+      if (legendHidden[key]) span.classList.add("legend-off");
+      var swatch = document.createElement("span");
+      swatch.className = "legend-color";
+      swatch.style.background = evColor(name);
+      span.appendChild(swatch);
+      span.appendChild(document.createTextNode(" " + evLabel(name)));
       host.appendChild(span);
     });
   }
@@ -569,13 +620,20 @@
     // bat_w is considered battery-capable and gets its own chart series.
     var drivers = data.drivers || {};
     var seenBatteries = {};
+    var seenEVs = {};
     Object.keys(drivers).forEach(function (name) {
       var d = drivers[name] || {};
-      if (d.bat_w == null) return;
-      seenBatteries[name] = true;
-      var slot = ensureBatteryDriver(name);
-      slot.bat.push(d.bat_w || 0);
-      slot.target.push((targetsByDriver && targetsByDriver[name]) || 0);
+      if (d.bat_w != null) {
+        seenBatteries[name] = true;
+        var bslot = ensureBatteryDriver(name);
+        bslot.bat.push(d.bat_w || 0);
+        bslot.target.push((targetsByDriver && targetsByDriver[name]) || 0);
+      }
+      if (d.ev_w != null) {
+        seenEVs[name] = true;
+        var eslot = ensureEVDriver(name);
+        eslot.ev.push(d.ev_w || 0);
+      }
     });
     // Drivers that have history but didn't report this cycle: push a
     // 0 so index alignment with chartHistory.timestamps stays intact.
@@ -587,6 +645,10 @@
       slot.bat.push(0);
       slot.target.push(0);
     });
+    Object.keys(chartEVs).forEach(function (name) {
+      if (seenEVs[name]) return;
+      chartEVs[name].ev.push(0);
+    });
 
     if (chartHistory.grid.length > CHART_POINTS) {
       Object.keys(chartHistory).forEach(function(k) { chartHistory[k].shift(); });
@@ -594,6 +656,9 @@
         var slot = chartBatteries[name];
         slot.bat.shift();
         slot.target.shift();
+      });
+      Object.keys(chartEVs).forEach(function (name) {
+        chartEVs[name].ev.shift();
       });
     }
     lastDataTs = now;
@@ -658,6 +723,18 @@
         var label = batteryLabel(name);
         series.push({ data: slot.bat,    color: color, width: 2,   dash: [],     name: label,         fill: false, toggle: toggle });
         series.push({ data: slot.target, color: color, width: 1.5, dash: [6, 4], name: label + " tgt", fill: false, toggle: toggle });
+      });
+      // Append one line per EV charger. EV power is always ≥ 0 (pure
+      // consumer — never exports), so a single actual-value line is
+      // enough. No target dashed line like batteries have, because the
+      // charger's "command" is just a current setpoint the driver sends
+      // to the wallbox, not a separate power target worth charting.
+      Object.keys(chartEVs).sort().forEach(function (name) {
+        var slot = chartEVs[name];
+        var color = evColor(name);
+        var toggle = "ev:" + name;
+        var label = evLabel(name);
+        series.push({ data: slot.ev, color: color, width: 2, dash: [], name: label, fill: false, toggle: toggle });
       });
       // Respect click-to-hide from legend.
       series = series.filter(function (s) { return !legendHidden[s.toggle]; });
@@ -1031,6 +1108,10 @@
       Object.keys(chartBatteries).sort().forEach(function (name) {
         var slot = chartBatteries[name];
         rows.push({ name: batteryLabel(name), data: slot.bat, color: batteryColor(name), target: slot.target });
+      });
+      Object.keys(chartEVs).sort().forEach(function (name) {
+        var slot = chartEVs[name];
+        rows.push({ name: evLabel(name), data: slot.ev, color: evColor(name) });
       });
       return rows;
     })();
@@ -1751,10 +1832,11 @@
         if (!data || !data.items) return;
         // Populate chart history from persisted data
         Object.keys(chartHistory).forEach(function(k) { chartHistory[k] = []; });
-        // Reset the dynamic battery set and rediscover from the history
-        // items themselves — drivers that existed earlier but no longer
-        // appear in /api/status will simply not be recreated.
+        // Reset the dynamic battery + EV sets and rediscover from the
+        // history items themselves — drivers that existed earlier but no
+        // longer appear in /api/status will simply not be recreated.
         chartBatteries = {};
+        chartEVs = {};
         data.items.forEach(function (it) {
           var et = it.energy_today || {};
           chartHistory.grid.push(it.grid_w || 0);
@@ -1768,26 +1850,37 @@
           chartHistory.e_discharged.push(et.bat_discharged_wh || 0);
           chartHistory.e_load.push(et.load_wh || 0);
 
-          // Per-battery discovery from this item's drivers + targets maps.
+          // Per-driver discovery from this item's drivers + targets maps.
+          // A driver can expose bat_w, ev_w, or both.
           var itDrivers = it.drivers || {};
           var itTargets = it.targets || {};
-          var seen = {};
+          var seenBat = {}, seenEV = {};
           Object.keys(itDrivers).forEach(function (name) {
             var d = itDrivers[name] || {};
-            if (d.bat_w == null) return;
-            seen[name] = true;
-            var slot = ensureBatteryDriver(name);
-            slot.bat.push(d.bat_w || 0);
-            slot.target.push(itTargets[name] || 0);
+            if (d.bat_w != null) {
+              seenBat[name] = true;
+              var bslot = ensureBatteryDriver(name);
+              bslot.bat.push(d.bat_w || 0);
+              bslot.target.push(itTargets[name] || 0);
+            }
+            if (d.ev_w != null) {
+              seenEV[name] = true;
+              ensureEVDriver(name).ev.push(d.ev_w || 0);
+            }
           });
           Object.keys(chartBatteries).forEach(function (name) {
-            if (seen[name]) return;
+            if (seenBat[name]) return;
             var slot = chartBatteries[name];
             slot.bat.push(0);
             slot.target.push(0);
           });
+          Object.keys(chartEVs).forEach(function (name) {
+            if (seenEV[name]) return;
+            chartEVs[name].ev.push(0);
+          });
         });
         syncBatteryLegend();
+        syncEVLegend();
         renderChart();
       })
       .catch(function () { /* silent */ });
