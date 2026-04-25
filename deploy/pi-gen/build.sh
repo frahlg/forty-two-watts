@@ -57,20 +57,16 @@ rm -rf "${PI_GEN_DIR}/stage-42w"
 cp -R "${SCRIPT_DIR}/stage-42w" "${PI_GEN_DIR}/stage-42w"
 cp    "${SCRIPT_DIR}/config"    "${PI_GEN_DIR}/config"
 
-# Skip the desktop stages entirely — we only want Lite as the base
-# for stage-42w to layer on top of. pi-gen honours SKIP files
-# dropped into each stage's directory.
-for stage in stage3 stage4 stage5; do
+# Skip stage2 (Lite "comfort" CLI tooling) and stage3-5 (desktop +
+# NOOBS) entirely — the only stages we run are stage0 + stage1 +
+# stage-42w. Stage-42w explicitly installs the few stage2 packages
+# we actually need (avahi-daemon, network-manager). pi-gen honours
+# SKIP files dropped into each stage's directory; SKIP prevents the
+# stage from running, SKIP_IMAGES prevents an .img export.
+for stage in stage2 stage3 stage4 stage5; do
     touch "${PI_GEN_DIR}/${stage}/SKIP" \
           "${PI_GEN_DIR}/${stage}/SKIP_IMAGES" 2>/dev/null || true
 done
-
-# Stage2 must still RUN (it's the base rootfs for stage-42w), but
-# we don't want pi-gen to also export a separate `…-lite.img.xz`
-# from it. Without this, `deploy/` ends up with two images and a
-# naive `ls deploy/*.img.xz | head -n1` picks the wrong one
-# alphabetically (the -lite variant sorts ahead of ours).
-touch "${PI_GEN_DIR}/stage2/SKIP_IMAGES" 2>/dev/null || true
 
 cd "${PI_GEN_DIR}"
 

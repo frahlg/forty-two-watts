@@ -2,3 +2,5 @@ avahi-daemon
 ca-certificates
 curl
 jq
+network-manager
+raspberrypi-sys-mods
