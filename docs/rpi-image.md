@@ -1,70 +1,171 @@
 # Raspberry Pi SD-card image
 
-A pre-built `42w-rpi4-arm64-vX.Y.Z.img.xz` ships with every tagged
-release. Flash it to an SD card, drop it in a Raspberry Pi 4, and the
-dashboard comes up at `http://42w.local:8080/` with zero terminal
-work on the user's side.
+A pre-built `.img.xz` ships with every release. Flash it to an SD
+card, drop the card into a Raspberry Pi 4, plug in power + Ethernet
+(or follow the WiFi-onboarding flow below), and the dashboard is at
+`http://42w.local:8080/` within ~90 s of first boot. No terminal, no
+manual install.
 
-The image is plain Raspberry Pi OS Lite (64-bit, Bookworm) with:
+This is the recommended path for new users.
 
-- **Docker + compose plugin** — installed from the official Docker
-  apt repo, same version stream as the `scripts/install.sh` bare-metal
-  installer.
-- **`docker-compose.yml` baked in** — a copy of the compose file at
-  the release tag, placed at `/home/ftw/forty-two-watts/`. The stack
-  is not started at image-build time; it's pulled + started on first
-  boot against GHCR.
-- **mDNS via avahi** — `TARGET_HOSTNAME=42w` makes the Pi reachable
-  at `42w.local` on any LAN that respects mDNS (essentially all of
-  them).
-- **`ftw-firstboot.service`** — a systemd oneshot that runs
-  `docker compose pull && up -d` with a 6-attempt retry loop, then
-  touches `/var/lib/ftw/firstboot.done` so subsequent boots are no-ops.
-- **WiFi captive portal** — `42w-wifi-onboarding.service` brings up a
-  `42w-setup` access point + captive portal if NetworkManager doesn't
-  have a live connection ~30 s after boot. Backed by balena-os's
-  [`wifi-connect`](https://github.com/balena-os/wifi-connect).
+---
 
-## Flash it
+## TL;DR
 
-1. Download the latest `42w-rpi4-arm64-vX.Y.Z.img.xz` from
-   [Releases](https://github.com/frahlg/forty-two-watts/releases).
-2. Flash with [Raspberry Pi Imager](https://www.raspberrypi.com/software/)
-   — **Choose OS** → **Use custom** → pick the `.img.xz`. Imager handles
-   xz decompression + writing.
-3. Before writing, open Imager's advanced-options panel (gear icon) to
-   pre-configure hostname (default `42w` is fine), SSH key, WiFi SSID +
-   password, and timezone. Anything you set here overrides the image
-   defaults.
-4. Insert the card, power on the Pi. First boot pulls the docker
-   images (~60–90 s on a decent connection) and brings up the stack.
+1. Download `42w-rpi4-arm64-vX.Y.Z.img.xz` from [Releases](https://github.com/frahlg/forty-two-watts/releases/latest).
+2. Flash to an SD card with [Raspberry Pi Imager](https://www.raspberrypi.com/software/) (recommended) or [balenaEtcher](https://etcher.balena.io/). Both handle `.img.xz` natively — no need to decompress first.
+3. Insert SD card → power on the Pi → wait ~90 s.
+4. Open `http://42w.local:8080/` in any browser on the same network.
 
-## WiFi onboarding
+If you don't have Ethernet, see [WiFi onboarding](#connect-to-your-network).
 
-You have two paths. Pick whichever the flashing user can actually
-execute.
+---
 
-### Path 1 — Raspberry Pi Imager (preferred)
+## What's on the image
 
-Pre-configure WiFi credentials in Imager's advanced options before
-flashing. The Pi connects to the named network at first boot and the
-captive-portal fallback never triggers.
+| Component | Version |
+|---|---|
+| Base OS | **Raspberry Pi OS Lite** (64-bit, Debian Bookworm) |
+| Kernel | Stock Pi kernel (whatever the matching Pi OS Lite ships) |
+| Init | systemd |
+| Container engine | Docker CE + compose plugin (from Docker's official apt repo) |
+| Network | NetworkManager + Avahi (mDNS) |
+| WiFi onboarding | [`wifi-connect`](https://github.com/balena-os/wifi-connect) captive portal |
+| Stack | `forty-two-watts`, `mosquitto`, `ftw-updater` (pulled from GHCR on first boot) |
 
-### Path 2 — captive portal
+Image size: ~410 MB compressed, ~2.4 GB written to SD card. Any 8 GB
+or larger card works; 16 GB+ recommended for headroom.
 
-If WiFi wasn't pre-configured, the Pi exposes a `42w-setup` access
-point about 30 seconds after boot. From a phone or laptop:
+The base is **stock Raspberry Pi OS Lite** with stage2 trimmed off
+and a single custom stage layered on top. SSH is enabled by default
+so you have a recovery path if the dashboard ever gets stuck.
 
-1. Connect to `42w-setup` (no password).
-2. Your device should auto-open the captive portal. If not, visit
+---
+
+## Download
+
+### Stable releases (recommended)
+
+Each tagged release publishes the image as a release asset:
+
+```
+https://github.com/frahlg/forty-two-watts/releases/latest
+```
+
+Look for `42w-rpi4-arm64-vX.Y.Z.img.xz` under "Assets". This is a
+**direct file download** — your browser saves the `.img.xz` and you
+flash it as-is.
+
+### PR previews (for testers)
+
+Open pull requests that touch the image scaffolding auto-publish a
+draft pre-release tagged `pr-<N>-image-preview`. Repo collaborators
+can find these under [Releases → Drafts](https://github.com/frahlg/forty-two-watts/releases) — same direct
+`.img.xz` download, no zip wrapper.
+
+> **Don't use the GitHub Actions "Artifacts" download for flashing.**
+> GitHub auto-wraps every workflow artifact in a `.zip`, and neither
+> Imager nor Etcher knows how to look inside that wrapper. The
+> Releases page (above) gives you the raw `.img.xz` directly.
+
+---
+
+## Flash
+
+Both supported flashers handle `.img.xz` natively — they decompress
+on the fly while writing to the card. **You do not need to extract
+the file before flashing.**
+
+### Path A — Raspberry Pi Imager (recommended)
+
+1. Install [Raspberry Pi Imager](https://www.raspberrypi.com/software/).
+2. **CHOOSE OS** → scroll to bottom → **Use custom** → select your
+   downloaded `42w-rpi4-arm64-*.img.xz`.
+3. **CHOOSE STORAGE** → pick the SD card.
+4. Click the **gear icon** (advanced options). Recommended settings:
+   - **Hostname**: leave as `42w` (so the dashboard URL stays
+     `http://42w.local:8080/`).
+   - **Set username and password**: optional. The image ships with
+     `ftw / fortytwowatts` for SSH recovery; override here if you
+     want something else.
+   - **Configure wireless LAN**: paste your WiFi SSID + password.
+     The Pi connects directly at first boot — no captive portal
+     needed. Skip this if you're using Ethernet.
+   - **Set locale settings**: pick your timezone.
+5. **WRITE**. Imager handles xz decompression + verification.
+
+When it finishes, eject the card cleanly.
+
+### Path B — balenaEtcher
+
+1. Install [balenaEtcher](https://etcher.balena.io/) (1.18 or newer
+   handles `.img.xz` directly).
+2. **Flash from file** → select the `.img.xz`.
+3. **Select target** → SD card.
+4. **Flash!**
+
+Etcher doesn't have Imager's pre-configuration panel, so:
+- The Pi will boot with **default credentials** (`ftw` / `fortytwowatts`).
+- WiFi is configured at first boot via the **captive portal** flow
+  (see below). If you want to skip the portal, use Imager instead
+  and pre-configure WiFi.
+
+> **Common pitfall — wrong file.** If Etcher complains about a
+> missing partition table or "not a valid disk image", you probably
+> selected the GitHub Actions `.zip` wrapper instead of the `.img.xz`
+> inside it. Download from the [Releases](https://github.com/frahlg/forty-two-watts/releases) page (not the Actions
+> tab) — that gives you the raw `.img.xz`.
+
+---
+
+## First boot
+
+Insert the SD card, plug in Ethernet (or rely on the captive
+portal), connect power. Two things happen automatically:
+
+1. **Partition resize.** The image is ~2.4 GB; the resize step grows
+   the rootfs to fill your SD card on the very first boot. The Pi
+   reboots once to pick up the resized partition. Adds ~30 s.
+2. **First-boot service** (`ftw-firstboot.service`). Pulls the
+   container images from GHCR (`forty-two-watts`, `mosquitto`,
+   `ftw-updater`), brings up the stack with `docker compose up -d`.
+   Takes ~60–90 s on a decent connection.
+
+After that, the dashboard is up and stays up across reboots.
+
+---
+
+## Connect to your network
+
+### Ethernet — just plug it in
+
+If the Pi is wired, nothing else to do. DHCP runs at boot, mDNS
+publishes `42w.local`, the dashboard is reachable.
+
+### WiFi — pre-configured in Imager (best)
+
+If you used Path A above with WiFi credentials filled in, the Pi
+joins your network at first boot. Skip to [Open the dashboard](#open-the-dashboard).
+
+### WiFi — captive portal (Etcher path or no Ethernet)
+
+If WiFi wasn't pre-configured, ~30 s after boot the Pi exposes its
+own access point named **`42w-setup`** (no password).
+
+From a phone or laptop:
+
+1. Connect to `42w-setup`.
+2. A captive portal opens automatically. If it doesn't, visit
    `http://192.168.42.1/` in a browser.
-3. Pick your home network from the list, enter the password, submit.
-4. The Pi joins your network, the AP disappears, and the dashboard
-   comes up at `http://42w.local:8080/` within 30–60 s.
+3. Pick your home network → enter the password → submit.
+4. The Pi joins the network, the AP disappears, the dashboard comes
+   up at `http://42w.local:8080/` within 30–60 s.
 
-Captive-portal detection is reliable on Android and older iOS. iOS 17+
-occasionally requires you to manually open a browser and visit any
-HTTP (not HTTPS) URL — the portal will intercept it.
+iOS 17 and later occasionally suppress captive-portal popups —
+manually open Safari to any `http://` (not `https://`) URL like
+`http://example.com` and the portal will intercept it.
+
+---
 
 ## Open the dashboard
 
@@ -72,29 +173,69 @@ HTTP (not HTTPS) URL — the portal will intercept it.
 http://42w.local:8080/
 ```
 
-First-time users land in the setup wizard at `/setup`. If `42w.local`
-doesn't resolve, find the Pi's IP on your router's client list and
-use that instead.
+First time you visit, you land in the setup wizard at `/setup`. Walk
+through: location (for solar forecast), price zone, drivers (your
+inverter / battery / EV charger), fuse capacity. The dashboard takes
+over once you click "Finish".
+
+If `42w.local` doesn't resolve (some routers block mDNS, especially
+mesh systems): find the Pi in your router's client list and use the
+IP directly — `http://192.168.x.y:8080/`.
+
+---
+
+## Default credentials
+
+| What | Default | How to change |
+|---|---|---|
+| SSH user | `ftw` | Imager advanced options |
+| SSH password | `fortytwowatts` | Imager advanced options, or `passwd` after first SSH |
+| Hostname | `42w` (mDNS: `42w.local`) | Imager advanced options |
+| Dashboard | no auth on the LAN | (planned for a future release) |
+
+The defaults exist so you have a recovery path if something goes
+wrong — they're not meant for production. Override them in Imager
+when you flash for real use.
+
+---
 
 ## Troubleshooting
 
-**The Pi boots but `42w.local` doesn't respond.**
-SSH in (`ssh ftw@42w.local`, default password `fortytwowatts` unless
-you overrode it in Imager) and check:
+### Dashboard doesn't load at `42w.local:8080`
+
+SSH in:
 
 ```bash
-systemctl status ftw-firstboot     # first-boot provisioner
-journalctl -u ftw-firstboot -b     # its log (since this boot)
-tail -f /var/log/ftw-firstboot.log # its durable log
+ssh ftw@42w.local                        # password: fortytwowatts
+```
+
+Diagnose:
+
+```bash
+systemctl status ftw-firstboot           # first-boot provisioner
+journalctl -u ftw-firstboot -b           # its log (this boot)
+tail -f /var/log/ftw-firstboot.log       # durable log
 docker compose -f /home/ftw/forty-two-watts/docker-compose.yml ps
 ```
 
-If `ftw-firstboot` failed (bad network, GHCR outage), the service is
+If `ftw-firstboot` failed (bad network, GHCR outage), it's
 idempotent — `systemctl restart ftw-firstboot` re-runs it.
 
-**I want to re-onboard WiFi from scratch.**
+### `42w.local` doesn't resolve from my Mac/phone
+
+Some routers (Eero, ASUS mesh, corporate Wi-Fi) block mDNS
+broadcasts. Workarounds:
+
+- Find the Pi's IP in the router's client list, use that instead.
+- On macOS: `dns-sd -B _http._tcp` will list mDNS services if any
+  are visible at all. If empty, mDNS is blocked at the router level.
+- On Windows: install [Bonjour Print Services](https://support.apple.com/kb/DL999)
+  to get mDNS resolution.
+
+### Re-onboard WiFi from scratch
 
 ```bash
+ssh ftw@42w.local
 sudo rm /var/lib/ftw/wifi-configured
 sudo nmcli connection delete "<your old SSID>"
 sudo reboot
@@ -102,33 +243,49 @@ sudo reboot
 
 Next boot, the captive portal comes up again.
 
-**The dashboard is up but I want to reinstall from zero.**
+### Reinstall from zero (drop all state)
 
 ```bash
+ssh ftw@42w.local
 cd /home/ftw/forty-two-watts
-sudo docker compose down -v         # drops state — PV model, battery
-                                    # model, price/load history
+sudo docker compose down -v       # drops PV model, battery model,
+                                  # price + load history, EV state
 sudo rm -rf data mosquitto/data
 sudo rm /var/lib/ftw/firstboot.done
 sudo reboot
 ```
 
+The Pi re-pulls images and runs the setup wizard from scratch.
+
+### Dashboard works but I want to upgrade
+
+Two ways:
+
+- Click **Update** in the dashboard's Settings → System tab. The
+  in-app sidecar (`ftw-updater`) handles the pull + restart.
+- Or manually:
+
+  ```bash
+  ssh ftw@42w.local
+  cd /home/ftw/forty-two-watts
+  sudo docker compose pull && sudo docker compose up -d
+  ```
+
+---
+
 ## Building the image yourself
 
-All the image provisioning lives in `deploy/pi-gen/`. Any Linux host
-with Docker (or macOS with Docker Desktop) can build it:
+All image provisioning lives in `deploy/pi-gen/`. Any Linux host
+with Docker (or macOS with Docker Desktop) can build:
 
 ```bash
 deploy/pi-gen/build.sh
 ```
 
-The script clones [pi-gen](https://github.com/RPi-Distro/pi-gen) into
-`deploy/pi-gen/pi-gen/`, symlinks our `config` + `stage-42w/` in, and
-runs pi-gen's dockerised build. Output lands at
-`deploy/pi-gen/pi-gen/deploy/42w-rpi4-arm64-*.img.xz`. A full build
-takes ~30–45 minutes on a decent laptop and ~15 GB of working disk.
+Output lands at `deploy/pi-gen/pi-gen/deploy/42w-rpi4-arm64-*.img.xz`.
+Build takes ~25–30 minutes on a decent laptop and uses ~15 GB of
+working disk.
 
-CI runs the same script from
-[`.github/workflows/release.yml`](../.github/workflows/release.yml) —
-see the `rpi-image` job — and uploads the result to the GitHub
-release that triggered it.
+CI runs the same script on every PR that touches `deploy/pi-gen/**`
+or the workflow itself (`.github/workflows/rpi-image-build.yml`),
+plus on every tagged release (`.github/workflows/release.yml`).
