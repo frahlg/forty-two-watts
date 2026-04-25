@@ -15,9 +15,14 @@ KEYBOARD_KEYMAP="us"
 KEYBOARD_LAYOUT="English (US)"
 TIMEZONE_DEFAULT="UTC"
 
-# The Lite stages stop after stage2; our stage-42w bakes on top.
-# stage3-5 (desktop + NOOBS) are skipped via SKIP files in build.sh.
-STAGE_LIST="stage0 stage1 stage2 stage-42w"
+# Skip stage2 (Pi OS Lite "comfort" packages: vim, less, raspi-config,
+# build-essential, python3-pip, network-manager-gnome, etc.) — none of
+# its additions are needed for "boot → docker compose up". Stage-42w
+# explicitly pulls the bits we DO need (avahi-daemon for mDNS,
+# network-manager for wifi-connect) so we don't lose mDNS or WiFi
+# onboarding by dropping stage2. Stage3-5 (desktop + NOOBS) are
+# skipped separately via SKIP files in build.sh.
+STAGE_LIST="stage0 stage1 stage-42w"
 
 # First-login creds. Users who flash with Raspberry Pi Imager will
 # override these via Imager's advanced-options panel (which writes to
