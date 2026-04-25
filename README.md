@@ -33,10 +33,13 @@ Adding a new device? See [Writing a driver](docs/writing-a-driver.md) or the [Cl
 ### Option A — flash our Raspberry Pi 4 SD-card image (fastest)
 
 A pre-built `42w-rpi4-arm64-vX.Y.Z.img.xz` ships with every release.
-Flash it to an SD card with [Raspberry Pi Imager](https://www.raspberrypi.com/software/),
-boot the Pi, and open `http://42w.local:8080/`. No terminal work
-required. If you don't pre-configure WiFi in Imager's advanced options,
-the Pi exposes a `42w-setup` captive portal for phone-based onboarding.
+Flash it to an SD card with [Raspberry Pi Imager](https://www.raspberrypi.com/software/)
+or [balenaEtcher](https://etcher.balena.io/) (both handle `.img.xz`
+natively — no need to decompress first), boot the Pi, and open
+`http://42w.local:8080/`. No terminal work required.
+
+If you don't pre-configure WiFi in Imager's advanced options, the Pi
+exposes a `42w-setup` captive portal for phone-based onboarding.
 
 Full walkthrough in [docs/rpi-image.md](docs/rpi-image.md).
 
