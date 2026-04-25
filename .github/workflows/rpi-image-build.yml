@@ -33,7 +33,12 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  contents: read
+  # `contents: write` lets the "Attach to PR-preview release" step
+  # below upsert a tag + release with the .img.xz attached. Without
+  # this, gh-release can't create or update the preview release.
+  # Read access is enough for everything else (checkout, build).
+  contents: write
+  pull-requests: read
 
 jobs:
   build:
@@ -120,3 +125,42 @@ jobs:
           # across a normal review cycle.
           retention-days: 14
           if-no-files-found: error
+
+      # ---- PR-preview release ----
+      # GitHub auto-wraps every workflow artifact in a .zip, which
+      # Raspberry Pi Imager and balenaEtcher refuse to accept (they
+      # expect raw .img / .img.xz). Testers had to manually unzip the
+      # wrapper before flashing — clunky and surprising.
+      #
+      # For pull_request events from the same repo (forks get
+      # restricted GITHUB_TOKEN scopes and can't write releases), we
+      # also attach the .img.xz to a per-PR pre-release tagged
+      # `pr-<N>-image-preview`. The release is marked draft so it
+      # doesn't pollute the public Releases page; collaborators can
+      # still grab the asset from the Releases tab → Drafts. Each
+      # rebuild upserts the same tag, so a PR has at most one
+      # preview release at any time.
+      #
+      # Tagged production releases still flow through release.yml
+      # untouched.
+      - name: Attach to PR-preview release
+        if: |
+          github.event_name == 'pull_request' &&
+          github.event.pull_request.head.repo.full_name == github.repository
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: pr-${{ github.event.pull_request.number }}-image-preview
+          name: PR #${{ github.event.pull_request.number }} — image preview
+          body: |
+            Auto-built `.img.xz` for PR #${{ github.event.pull_request.number }}
+            (commit `${{ github.event.pull_request.head.sha }}`).
+
+            **Download the asset below directly** — no zip wrapper, ready
+            to flash with Raspberry Pi Imager / Etcher / `dd`. This
+            release is automatically replaced on each new push to the PR
+            and deleted when the PR closes.
+
+            For tagged production releases see the main Releases page.
+          files: ${{ steps.artifact.outputs.path }}
+          draft: true
+          prerelease: true
