@@ -122,8 +122,10 @@ curl -fsSL "$COMPOSE_URL" -o "$INSTALL_DIR/docker-compose.yml"
 # Run docker as the invoking user, not via sudo. If they were just added
 # to the docker group in step 2, their current shell hasn't picked it up
 # yet — `sg docker -c ...` executes under the new primary group without
-# requiring a re-login.
-if [ "$(id -u)" -eq 0 ] || id -nG "$USER" 2>/dev/null | grep -qw docker; then
+# requiring a re-login. NEED_RELOGIN from step 2 is authoritative here:
+# `id -nG "$USER"` reads /etc/group (already updated by usermod), not the
+# current process's credentials, so it can't answer this question.
+if [ "$(id -u)" -eq 0 ] || [ "$NEED_RELOGIN" = "0" ]; then
   run_docker() { docker "$@"; }
 else
   run_docker() { sg docker -c "docker $*"; }

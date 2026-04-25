@@ -71,6 +71,10 @@ local pv_serials = {}     -- list of inverter serials that carry an enabled pv D
 local discovered   = false  -- true once discover_devices has succeeded
                              -- (even with zero PV). Prevents re-hitting
                              -- /api/devices every poll on meter-only sites.
+local disable_pv   = false  -- operator opt-out: when a site has a second
+                             -- Zap used for metering only, set `disable_pv:
+                             -- true` in config to skip PV discovery + emit.
+                             -- The primary Zap keeps owning PV aggregation.
 
 -- Backoff state for *discovery* (/api/devices) failures. Separate from
 -- data-fetch failures: discovery backoff must NOT gate the site meter
@@ -191,6 +195,10 @@ function driver_init(config)
         host.set_sn(p1_serial)
         host.log("info", "Zap: using pinned P1 serial " .. p1_serial)
     end
+    if config and config.disable_pv then
+        disable_pv = true
+        host.log("info", "Zap: PV aggregation disabled via config")
+    end
 
     host.log("info", "Zap: driver initialized (host=" .. zap_host .. ")")
 end
@@ -217,12 +225,17 @@ function driver_poll()
             host.set_sn(p1_serial)
             host.log("info", "Zap: discovered P1 meter " .. p1_serial)
         end
-        pv_serials = pvs
-        if #pv_serials > 0 then
-            host.log("info", "Zap: discovered " .. #pv_serials
-                .. " PV inverter(s): " .. table.concat(pv_serials, ","))
+        if disable_pv then
+            pv_serials = {}
+            host.log("info", "Zap: PV inverters ignored (disable_pv=true)")
         else
-            host.log("info", "Zap: no PV inverters found")
+            pv_serials = pvs
+            if #pv_serials > 0 then
+                host.log("info", "Zap: discovered " .. #pv_serials
+                    .. " PV inverter(s): " .. table.concat(pv_serials, ","))
+            else
+                host.log("info", "Zap: no PV inverters found")
+            end
         end
         discovered = true
         clear_backoff()

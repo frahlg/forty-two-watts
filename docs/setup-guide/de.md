@@ -60,7 +60,7 @@ Klicke auf **Next**. Das Programm fragt, ob du die Einstellungen anpassen möcht
 
 Trage ein:
 
-- **Hostname:** `fortytwo.local`
+- **Hostname:** `fortytwo`
 - **Localization:** wähle dein Land
 - **Benutzername:** z.B. `pi`
 - **Passwort:** wähle eins, das du dir merken kannst — aber nicht "1234"
@@ -131,7 +131,7 @@ Gib dein Passwort noch einmal ein. Jetzt wird alles installiert. Das dauert ein 
 Öffne den Browser auf deinem normalen Computer und rufe die Web-Oberfläche auf:
 
 ```
-http://fortytwo.local:8080/
+http://fortytwo:8080/
 ```
 
 Wenn diese Adresse nicht funktioniert — probiere die IP-Adresse, die du aufgeschrieben hast, z.B. `http://192.168.1.123:8080/`.

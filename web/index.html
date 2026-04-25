@@ -99,6 +99,7 @@
         <button data-tab="planner">Planner</button>
         <button data-tab="ha">Home Assistant</button>
         <button data-tab="notifications">Notifications</button>
+        <button data-tab="system">System</button>
       </div>
       <div class="modal-body" id="settings-body">
         <!-- Filled by JS -->
@@ -156,31 +157,39 @@
       </div>
     </section>
 
-    <!-- Energy cards — today's kWh totals -->
-    <section class="energy-cards">
-      <div class="card energy-card">
-        <div class="card-label">Import today</div>
-        <div class="card-value val-import" id="e-import">-- kWh</div>
-      </div>
-      <div class="card energy-card">
-        <div class="card-label">Export today</div>
-        <div class="card-value val-export" id="e-export">-- kWh</div>
-      </div>
-      <div class="card energy-card">
-        <div class="card-label">PV today</div>
-        <div class="card-value val-generation" id="e-pv">-- kWh</div>
-      </div>
-      <div class="card energy-card bat-only">
-        <div class="card-label">Bat charged</div>
-        <div class="card-value val-charging" id="e-charged">-- kWh</div>
-      </div>
-      <div class="card energy-card bat-only">
-        <div class="card-label">Bat discharged</div>
-        <div class="card-value val-discharging" id="e-discharged">-- kWh</div>
-      </div>
-      <div class="card energy-card">
-        <div class="card-label">Load today</div>
-        <div class="card-value val-neutral" id="e-load">-- kWh</div>
+    <!-- Energy today — one wrapper card with six sub-tiles. Mirrors the
+         fuse-card pattern: outer card owns the label; each inner tile
+         has its own sub-label + kWh value. Sub-labels drop the "today"
+         since the outer heading already implies it. -->
+    <section class="energy-row">
+      <div class="card energy-group">
+        <div class="card-label">Energy today</div>
+        <div class="energy-tiles">
+          <div class="energy-tile">
+            <div class="card-label">Import</div>
+            <div class="card-value val-import" id="e-import">-- kWh</div>
+          </div>
+          <div class="energy-tile">
+            <div class="card-label">Export</div>
+            <div class="card-value val-export" id="e-export">-- kWh</div>
+          </div>
+          <div class="energy-tile">
+            <div class="card-label">PV</div>
+            <div class="card-value val-generation" id="e-pv">-- kWh</div>
+          </div>
+          <div class="energy-tile bat-only">
+            <div class="card-label">Bat charged</div>
+            <div class="card-value val-charging" id="e-charged">-- kWh</div>
+          </div>
+          <div class="energy-tile bat-only">
+            <div class="card-label">Bat discharged</div>
+            <div class="card-value val-discharging" id="e-discharged">-- kWh</div>
+          </div>
+          <div class="energy-tile">
+            <div class="card-label">Consumption</div>
+            <div class="card-value val-neutral" id="e-load">-- kWh</div>
+          </div>
+        </div>
       </div>
     </section>
 
@@ -193,7 +202,7 @@
     <section class="history-row">
       <div class="card history-group">
         <div class="history-head">
-          <div class="card-label">Daily energy</div>
+          <div class="card-label">History in numbers</div>
           <div class="history-toggle" id="history-toggle" role="tablist" data-active="week">
             <button type="button" role="tab" data-range="week"  class="active" aria-selected="true">Week</button>
             <button type="button" role="tab" data-range="month" aria-selected="false">Month</button>
@@ -201,6 +210,7 @@
         </div>
         <div class="history-tiles">
           <ftw-history-card metric="import" label="Imported" hide-toggle range="week"></ftw-history-card>
+          <ftw-history-card metric="pv"     label="Produced" hide-toggle range="week"></ftw-history-card>
           <ftw-history-card metric="load"   label="Consumed" hide-toggle range="week"></ftw-history-card>
           <ftw-history-card metric="export" label="Exported" hide-toggle range="week"></ftw-history-card>
         </div>
@@ -307,18 +317,26 @@
             <button id="plan-replan" class="btn-send" title="Force a fresh plan">Replan</button>
           </div>
         </div>
+        <p class="plan-help">
+          Forecast-driven battery schedule for the next 48&nbsp;h, recomputed every few minutes.
+          Each bar is a 15-minute slot. Prices after the day-ahead publication window are filled in by the ML price twin.
+          Hover any slot for the full breakdown. The dashed vertical line marks &ldquo;now&rdquo;.
+        </p>
+        <div id="plan-savings" class="plan-savings"></div>
         <div class="chart-container">
           <canvas id="plan-chart" width="800" height="260"></canvas>
         </div>
         <div class="chart-legend">
-          <span class="legend-item"><span class="legend-color" style="background:rgba(34,197,94,0.60)"></span> Cheap</span>
-          <span class="legend-item"><span class="legend-color" style="background:rgba(239,68,68,0.60)"></span> Expensive</span>
-          <span class="legend-item"><span class="legend-color legend-ghost"></span> Predicted (ML)</span>
-          <span class="legend-item"><span class="legend-color" style="background:#22c55e"></span> PV fc</span>
-          <span class="legend-item"><span class="legend-color legend-dash" style="border-color:#fde68a"></span> Load fc</span>
-          <span class="legend-item bat-only"><span class="legend-color" style="background:#f59e0b"></span> Charge</span>
-          <span class="legend-item bat-only"><span class="legend-color" style="background:#8b5cf6"></span> Discharge</span>
-          <span class="legend-item bat-only"><span class="legend-color" style="background:#60a5fa"></span> SoC</span>
+          <span class="legend-item" title="Raw Nord Pool wholesale price — bottom segment of each stacked bar, colour shifts green→red with the horizon's price tercile"><span class="legend-color" style="background:rgba(34,197,94,0.72)"></span> Spot (cheap)</span>
+          <span class="legend-item" title="Raw Nord Pool wholesale price in the most expensive third of the horizon"><span class="legend-color" style="background:rgba(239,68,68,0.72)"></span> Spot (expensive)</span>
+          <span class="legend-item" title="Fixed transport / network fee from the grid operator — stacked on top of spot, doesn't change hour to hour"><span class="legend-color" style="background:rgba(100,116,139,0.45)"></span> Grid tariff</span>
+          <span class="legend-item" title="Value-added tax (moms) on spot + grid tariff — top segment of each stacked bar"><span class="legend-color" style="background:rgba(100,116,139,0.25)"></span> VAT</span>
+          <span class="legend-item" title="Beyond day-ahead publication — price filled in by the ML price twin"><span class="legend-color legend-ghost"></span> Predicted (ML)</span>
+          <span class="legend-item" title="PV generation the plan expects (solar forecast, site-signed)"><span class="legend-color" style="background:#22c55e"></span> PV forecast</span>
+          <span class="legend-item" title="Household load the plan expects (load twin)"><span class="legend-color legend-dash" style="border-color:#fde68a"></span> Load forecast</span>
+          <span class="legend-item bat-only" title="Slot where the plan charges the battery"><span class="legend-color" style="background:#f59e0b"></span> Charge</span>
+          <span class="legend-item bat-only" title="Slot where the plan discharges the battery"><span class="legend-color" style="background:#8b5cf6"></span> Discharge</span>
+          <span class="legend-item bat-only" title="State of charge — battery fill %, 0–100"><span class="legend-color" style="background:#60a5fa"></span> SoC</span>
         </div>
       </section>
     </section>
@@ -434,6 +452,7 @@
   <script src="/settings/tabs/ha.js?v=tabsplit1"></script>
   <script src="/settings/tabs/notifications.js?v=tabsplit1"></script>
   <script src="/settings/tabs/ev.js?v=tabsplit1"></script>
+  <script src="/settings/tabs/system.js?v=tabsplit1"></script>
   <script src="/models.js?v=diag1"></script>
   <script src="/plan.js?v=diag1"></script>
   <script src="/twins.js?v=diag1"></script>

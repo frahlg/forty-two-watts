@@ -531,36 +531,48 @@ body.ftw-next .history-toggle button:focus-visible {
   outline-offset: 2px;
   border-radius: 999px;
 }
-/* Inner 3-tile grid. Same column layout the old row used; collapses
-   to one column on narrow viewports. */
+/* Inner tile grid — 2×2 on desktop (Imported / Produced / Consumed /
+   Exported), collapses to one column on narrow viewports so each
+   chart keeps a readable bar width. */
 body.ftw-next .history-tiles {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(2, 1fr);
   gap: 10px;
 }
 @media (max-width: 900px) {
   body.ftw-next .history-tiles { grid-template-columns: 1fr; }
 }
 
-/* ---- Energy cards (today) ---- */
-body.ftw-next .energy-cards {
-  grid-template-columns: repeat(6, 1fr);
-  gap: 12px;
-  margin-top: 0;
+/* ---- Energy today — one outer card with sub-tiles, mirrors fuse-card ---- */
+body.ftw-next .energy-row {
+  display: block;
+  margin: 12px 0;
 }
-body.ftw-next .energy-card {
+body.ftw-next .energy-group {
   background: var(--ink-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  padding: var(--card-pad, 14px 16px);
+}
+body.ftw-next .energy-group > .card-label {
+  margin-bottom: 10px;
+}
+body.ftw-next .energy-tiles {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 10px;
+}
+body.ftw-next .energy-tile {
+  background: var(--ink-sunken);
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
   padding: var(--card-pad-tight, 12px 14px);
 }
-body.ftw-next .energy-card .card-label {
-  /* Override base letter-spacing (0.1em) — tighter tracking reads
-     better on the smaller energy-card tiles without crowding. */
+body.ftw-next .energy-tile .card-label {
   letter-spacing: 0.08em;
   margin-bottom: 6px;
 }
-body.ftw-next .energy-card .card-value {
+body.ftw-next .energy-tile .card-value {
   font-family: var(--mono);
   font-size: 1.15rem;
   font-weight: 700;
@@ -568,7 +580,7 @@ body.ftw-next .energy-card .card-value {
   letter-spacing: -0.01em;
 }
 @media (max-width: 900px) {
-  body.ftw-next .energy-cards { grid-template-columns: repeat(2, 1fr); }
+  body.ftw-next .energy-tiles  { grid-template-columns: repeat(2, 1fr); }
   body.ftw-next .summary-cards { grid-template-columns: repeat(2, 1fr); }
 }
 
@@ -783,6 +795,42 @@ body.ftw-next .plan-summary {
   font-size: 11px;
   color: var(--fg-muted);
 }
+body.ftw-next .plan-summary .s-sep { opacity: 0.45; margin: 0 4px; }
+body.ftw-next .plan-summary .s-label { color: var(--fg-muted); opacity: 0.75; }
+body.ftw-next .plan-summary .s-value { color: var(--fg-dim); }
+body.ftw-next .plan-help {
+  font-family: var(--sans);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--fg-muted);
+  margin: 6px 0 4px;
+  max-width: 68ch;
+}
+body.ftw-next .plan-savings {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 6px 0 10px;
+}
+body.ftw-next .plan-savings:empty { display: none; }
+body.ftw-next .saving-badge {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--fg-dim);
+  background: rgba(255,255,255,0.03);
+  border: 1px solid var(--line);
+  padding: 4px 8px;
+  border-radius: 6px;
+  cursor: help;
+}
+body.ftw-next .saving-badge b {
+  font-weight: 700;
+  margin-left: 2px;
+}
+body.ftw-next .saving-badge .saving-label { opacity: 0.7; }
+body.ftw-next .saving-badge .saving-pct { opacity: 0.6; }
+body.ftw-next .saving-badge.saving-pos { border-color: rgba(34,197,94,0.45); color: #4ade80; }
+body.ftw-next .saving-badge.saving-neg { border-color: rgba(239,68,68,0.45); color: #f87171; }
 body.ftw-next .plan-actions { gap: 10px; display: flex; align-items: center; }
 
 /* ---- ML twins / drivers / calibration sections ---- */
@@ -964,9 +1012,9 @@ body.ftw-next .diagnose-detail {
      don't waste vertical space. */
   body.ftw-next .summary-card { padding: 10px 12px; }
   body.ftw-next .summary-card .card-value { font-size: 1.25rem; }
-  body.ftw-next .energy-cards { grid-template-columns: repeat(2, 1fr); gap: 8px; }
-  body.ftw-next .energy-card { padding: 9px 11px; }
-  body.ftw-next .energy-card .card-value { font-size: 1rem; }
+  body.ftw-next .energy-tiles { grid-template-columns: repeat(2, 1fr); gap: 8px; }
+  body.ftw-next .energy-tile  { padding: 9px 11px; }
+  body.ftw-next .energy-tile .card-value { font-size: 1rem; }
 
   /* Charts stack vertically — the side-by-side live + plan layout
      squeezes canvases too narrow to read on phones. */
