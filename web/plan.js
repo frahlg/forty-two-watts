@@ -518,7 +518,7 @@
           badge(
             'vs flat avg price',
             savedFlat, sekFlat,
-            `Net consumption (${b.net_kwh.toFixed(1)} kWh) × horizon mean price (${b.avg_price_ore.toFixed(1)} öre/kWh). Captures the value of *timing* — shifting consumption into cheap hours — independently of battery.`
+            `No-battery imports priced at the horizon mean import price (${b.avg_price_ore.toFixed(1)} öre/kWh) and exports at the horizon mean export revenue, separately. Net no-battery flow is ${b.net_kwh.toFixed(1)} kWh. Captures the value of *timing* — shifting consumption into cheap hours — independently of battery.`
           ),
         ].join('');
       }
