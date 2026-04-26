@@ -48,6 +48,7 @@ build:
 	cd go && go build -ldflags="$(LDFLAGS)" -o ../bin/forty-two-watts ./cmd/forty-two-watts
 	cd go && go build -ldflags="$(LDFLAGS)" -o ../bin/sim-ferroamp ./cmd/sim-ferroamp
 	cd go && go build -ldflags="$(LDFLAGS)" -o ../bin/sim-sungrow ./cmd/sim-sungrow
+	cd go && go build -ldflags="$(LDFLAGS)" -o ../bin/ftw-driver-harness ./cmd/ftw-driver-harness
 	@ls -la bin/
 
 build-arm64:
