@@ -57,38 +57,51 @@ local last_phase_change_ms = 0 -- monotonic ms of the last phase flip (hysteresi
 local EASEE_MIN_A = 6
 local EASEE_MAX_A = 32
 
--- easee_phase_mode maps the operator-supplied phase_mode preference
--- (from cmd.phase_mode) to the Easee API's phaseMode wire value:
+-- pick_phases is the driver-level phase decision: given the requested
+-- charging power, the per-phase fuse ceiling, the operator's mode
+-- preference, and the time since the last flip, return how many
+-- phases (1 or 3) to actually commit to this command.
 --
---   ""      → 3 (locked-3p, legacy default — backward compat)
---   "3p"    → 3 (locked-3p)
---   "1p"    → 1 (locked-1p)
---   "auto"  → 2 (delegate to Easee firmware's automatic phase switching)
---
--- Earlier iterations of this driver implemented the auto decision in
--- Lua, picking 1Φ vs 3Φ from a split-W threshold. That fights with
--- Easee's own firmware-auto path when the operator has enabled it on
--- the box; it also adds a 5 s controller-tick + cloud round-trip to
--- every flip, which firmware-auto handles in sub-seconds. We now
--- delegate the decision when the operator asks for "auto", and only
--- fall back to driver-side locking for the explicit 1p / 3p modes.
-local function easee_phase_mode(mode)
-    if mode == "1p" then return 1 end
-    if mode == "auto" then return 2 end
-    return 3 -- "" / "3p" / unknown → locked-3p
-end
+--   * mode "1p" / "3p": locked, no hysteresis
+--   * mode "auto" or empty + missing fuse data: legacy 3Φ fallback
+--     (preserves pre-switching behaviour for sites that don't pass
+--     fuse data in the cmd)
+--   * mode "auto" with fuse data: pick 1Φ when wantW fits below the
+--     1Φ ceiling (= max_a × voltage), else 3Φ. Hysteresis suppresses
+--     a flip when less than `hold_s` seconds have passed since the
+--     last change — Easee's contactor + cloud-API round-trip is
+--     ~5-10 s, so flapping at every controller tick would burn the
+--     contactor and never deliver useful power.
+local function pick_phases(mode, want_w, voltage, max_a_per_phase, split_w, hold_s, now_ms)
+    local locked = mode
+    if locked == "1p" then return 1 end
+    if locked ~= "auto" then return 3 end -- "" / "3p" / unknown
 
--- amps_phase_count returns the phase count to use for the W → A
--- conversion below. For locked modes this is unambiguous. For auto
--- (firmware decides) we assume 3Φ — Easee's firmware-auto preference
--- when the requested current is above the EV minimum on three phases.
--- A 1Φ fall-back from firmware-auto delivers 1/3 the power we
--- intended; a 3Φ commit delivers exactly the intended power. Better
--- to undershoot than overshoot: the controller tick will close the
--- gap on the next iteration.
-local function amps_phase_count(easee_pm)
-    if easee_pm == 1 then return 1 end
-    return 3
+    -- Effective split: operator override → site fuse → 230 V × 16 A default.
+    local s = split_w
+    if (s == nil) or (s <= 0) then
+        if voltage and voltage > 0 and max_a_per_phase and max_a_per_phase > 0 then
+            s = voltage * max_a_per_phase
+        else
+            s = 3680
+        end
+    end
+
+    local desired = (want_w < s) and 1 or 3
+
+    -- Hysteresis: once we've committed to a phase count, hold it for
+    -- at least `hold_s` seconds before flipping the other way.
+    if last_sent_phases == nil then
+        return desired
+    end
+    if desired == last_sent_phases then
+        return desired
+    end
+    local hold = (hold_s and hold_s > 0) and hold_s or 60
+    if (now_ms - last_phase_change_ms) < (hold * 1000) then
+        return last_sent_phases
+    end
+    return desired
 end
 
 -- per_phase_amps converts the requested W into the dynamicChargerCurrent
@@ -406,39 +419,41 @@ function driver_command(action, power_w, cmd)
     elseif action == "ev_resume" then
         return post_command("/commands/resume_charging")
     elseif action == "ev_set_current" then
-        -- Operator's phase preference (cmd.phase_mode) maps directly to
-        -- Easee's phaseMode wire value: 1p / 3p lock the box; "auto"
-        -- delegates to Easee's firmware-side phase switching. Driver-
-        -- side pick_phases is gone — Easee handles "auto" sub-second
-        -- where this driver's 5 s controller-tick + cloud round-trip
-        -- can't compete.
+        -- Driver-level phase decision: read the operator's preferences
+        -- + site fuse from the cmd, decide 1Φ vs 3Φ here based on
+        -- the requested W and the voltage we know about. The Go
+        -- controller does NOT pick phases; it just allocates power.
         local mode    = (cmd and type(cmd.phase_mode)       == "string") and cmd.phase_mode       or ""
+        local split   = (cmd and type(cmd.phase_split_w)    == "number") and cmd.phase_split_w    or 0
+        local hold_s  = (cmd and type(cmd.min_phase_hold_s) == "number") and cmd.min_phase_hold_s or 0
         local voltage = (cmd and type(cmd.voltage)          == "number" and cmd.voltage > 0)          and cmd.voltage          or 230
         local max_a   = (cmd and type(cmd.max_amps_per_phase) == "number" and cmd.max_amps_per_phase > 0) and cmd.max_amps_per_phase or nil
 
-        local target_pm = easee_phase_mode(mode)
         local now_ms = host.millis()
+        local requested_phases = pick_phases(mode, power_w or 0, voltage, max_a, split, hold_s, now_ms)
 
-        -- POST phaseMode FIRST when it differs from what we last sent.
-        -- Easee accepts 1 (locked-1p), 2 (auto — firmware decides), 3
-        -- (locked-3p).
-        if last_sent_phases ~= target_pm then
-            local pm_body = host.json_encode({phaseMode = target_pm})
+        -- POST phaseMode FIRST when it differs. Easee's settings
+        -- endpoint accepts phaseMode = 1 (locked-1p), 2 (auto), 3
+        -- (locked-3p). We only ever lock — "auto" is our concern, not
+        -- the charger's.
+        if last_sent_phases ~= requested_phases then
+            local pm_body = host.json_encode({phaseMode = requested_phases})
             local _, pm_err = host.http_post(
                 BASE_URL .. "/chargers/" .. charger_serial .. "/settings",
                 pm_body, auth_headers())
             if pm_err == nil then
-                phases = amps_phase_count(target_pm)
-                last_sent_phases = target_pm
+                phases = requested_phases
+                last_sent_phases = requested_phases
                 last_phase_change_ms = now_ms
-                host.log("info", "Easee: phaseMode → " .. tostring(target_pm))
+                host.log("info", "Easee: phaseMode → " .. tostring(requested_phases))
             else
                 host.log("warn", "Easee: phaseMode write failed; skipping current write to avoid overcurrent on stale phase: " ..
                     redact_http_err(pm_err))
-                -- CRITICAL: if power_w was budgeted assuming 3Φ but the
-                -- charger is still on the previous (e.g. 1Φ) lock, our
-                -- amps math would overshoot the per-phase fuse. Fail
-                -- the command; controller retries next tick.
+                -- CRITICAL: power_w was budgeted against requested_phases
+                -- (e.g. 7400 W with the intent of 3Φ → 32 A/phase).
+                -- Computing amps against the unchanged phase count would
+                -- command 32 A on a single phase — tripping a 16 A
+                -- breaker. Fail the command; controller retries next tick.
                 return false
             end
         end
