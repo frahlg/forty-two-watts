@@ -178,16 +178,29 @@ type Action struct {
 // load + pv each slot, priced with the same import/export model the DP
 // uses). SelfConsumptionOre comes from re-running Optimize with
 // ModeSelfConsumption — so it uses the real efficiency, power, and SoC
-// constraints, not a simplified simulation. FlatAvgOre is net
-// consumption priced at the horizon's mean — shows the value of
-// *timing* (shifting load to cheap hours), separate from the value of
-// having a battery.
+// constraints, not a simplified simulation. FlatAvgOre prices the
+// no-battery flows at horizon-mean rates (asymmetric: imports at
+// AvgPriceOre, exports at AvgExportPriceOre) — shows the value of
+// *timing* separate from the value of having a battery.
 type Baselines struct {
 	NoBatteryOre       float64 `json:"no_battery_ore"`
 	SelfConsumptionOre float64 `json:"self_consumption_ore"`
 	FlatAvgOre         float64 `json:"flat_avg_ore"`
-	AvgPriceOre        float64 `json:"avg_price_ore"`
-	NetKWh             float64 `json:"net_kwh"`
+	// AvgPriceOre is the time-weighted mean consumer-total price across
+	// the horizon — what an imported kWh costs on average. Used as the
+	// import side of FlatAvgOre.
+	AvgPriceOre float64 `json:"avg_price_ore"`
+	// AvgSpotOre is the time-weighted mean raw spot price across the
+	// horizon, before ExportBonus / ExportFee. Surfaced for the UI's
+	// "what does an exported kWh actually pay" explanation.
+	AvgSpotOre float64 `json:"avg_spot_ore"`
+	// AvgExportPriceOre is the effective per-kWh export revenue at the
+	// horizon-mean spot price, adjusted by the operator's flat
+	// ExportBonus / ExportFee (clamped ≥ 0) — or ExportOrePerKWh when
+	// the flat rate is configured. This is what FlatAvgOre uses on the
+	// export side, mirroring SlotGridCostOre's per-slot model.
+	AvgExportPriceOre float64 `json:"avg_export_price_ore"`
+	NetKWh            float64 `json:"net_kwh"`
 }
 
 // Plan is the output.
