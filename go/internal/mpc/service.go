@@ -166,6 +166,21 @@ func (s *Service) Latest() *Plan {
 	return s.last
 }
 
+// LatestParams returns a snapshot of the planner's current Defaults under
+// RLock. The returned struct is safe to read after the lock releases. Used
+// by the savings API to re-cost historical slots with the same export
+// terms (ExportOrePerKWh / ExportBonusOreKwh / ExportFeeOreKwh) the live
+// plan applies — keeping "savings vs no battery" numbers comparable
+// between the live MPC card and the historical ledger.
+func (s *Service) LatestParams() Params {
+	if s == nil {
+		return Params{}
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.Defaults
+}
+
 // MaxPlanAge is the staleness cutoff. Once a plan's `generated_at_ms`
 // is older than this, we consider it stale and the control loop falls
 // back to self_consumption. Picked to be ~2× the replan interval so a
