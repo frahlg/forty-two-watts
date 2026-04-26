@@ -178,10 +178,12 @@ type Action struct {
 // load + pv each slot, priced with the same import/export model the DP
 // uses). SelfConsumptionOre comes from re-running Optimize with
 // ModeSelfConsumption — so it uses the real efficiency, power, and SoC
-// constraints, not a simplified simulation. FlatAvgOre is net
-// consumption priced at the horizon's mean — shows the value of
-// *timing* (shifting load to cheap hours), separate from the value of
-// having a battery.
+// constraints, not a simplified simulation. FlatAvgOre re-prices the
+// no-battery flows at horizon-mean prices (import and export each at
+// their own mean) — shows the value of *timing* (shifting load to
+// cheap hours), separate from the value of having a battery.
+// AvgPriceOre is the time-weighted mean import price over the horizon;
+// NetKWh is import minus export volume.
 type Baselines struct {
 	NoBatteryOre       float64 `json:"no_battery_ore"`
 	SelfConsumptionOre float64 `json:"self_consumption_ore"`
@@ -216,14 +218,23 @@ func SlotGridCostOre(slot Slot, gridKWh float64, p Params) float64 {
 	if gridKWh > 0 {
 		return slot.PriceOre * gridKWh
 	}
-	rawExport := p.ExportOrePerKWh
-	if rawExport <= 0 {
-		rawExport = slot.SpotOre + p.ExportBonusOreKwh - p.ExportFeeOreKwh
-		if rawExport < 0 {
-			rawExport = 0
-		}
+	return -SlotExportPriceOre(slot, p) * (-gridKWh)
+}
+
+// SlotExportPriceOre returns the öre/kWh a slot's export earns, using the
+// same model SlotGridCostOre uses on the export side: a flat
+// ExportOrePerKWh wins if set, otherwise spot + bonus − fee clamped at
+// zero. Exported here so baseline / reconstruction code can apply the
+// export side of the cost model without duplicating the formula.
+func SlotExportPriceOre(slot Slot, p Params) float64 {
+	if p.ExportOrePerKWh > 0 {
+		return p.ExportOrePerKWh
 	}
-	return -rawExport * (-gridKWh)
+	v := slot.SpotOre + p.ExportBonusOreKwh - p.ExportFeeOreKwh
+	if v < 0 {
+		v = 0
+	}
+	return v
 }
 
 // Optimize runs DP and returns the cost-minimizing plan.
