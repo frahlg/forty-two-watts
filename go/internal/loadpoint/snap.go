@@ -44,13 +44,18 @@ func SnapChargeW(want, min, max float64, steps []float64) float64 {
 	return best
 }
 
-// phaseFor returns the phase count chosen for wantW given the mode
+// PhaseFor returns the phase count chosen for wantW given the mode
 // and split threshold (W). "auto" below split → 1Φ, above → 3Φ.
 // Unknown modes fall back to 3Φ for safety (the pre-switching
-// default). splitW must be > 0; the caller is responsible for
-// deriving it from site voltage × per-phase amperage rather than
-// hard-coding 230 V here. See Controller.effectiveSplit.
-func phaseFor(mode string, wantW, splitW float64) int {
+// default). splitW must be > 0; callers are responsible for deriving
+// it from the actual site voltage × per-phase amperage rather than
+// hard-coding 230 V.
+//
+// This helper is exported as a reference implementation for Go-side
+// drivers (and for tests). The Easee Lua driver implements the same
+// rule locally — phase decisions are a driver-level concern. See
+// drivers/easee_cloud.lua.
+func PhaseFor(mode string, wantW, splitW float64) int {
 	switch mode {
 	case "1p":
 		return 1
@@ -64,21 +69,17 @@ func phaseFor(mode string, wantW, splitW float64) int {
 	}
 }
 
-// filterStepsByPhase narrows AllowedStepsW to only the entries that
+// FilterStepsByPhase narrows AllowedStepsW to only the entries that
 // match the chosen phase count. The classifier is purely magnitude-
 // based: step ≤ splitW → 1Φ, step > splitW → 3Φ. 0 (off) is always
-// included. Returns nil when the input is nil so downstream
-// SnapChargeW falls through to its continuous-passthrough behaviour.
-// splitW must be > 0; caller is responsible for deriving it from
-// the actual site voltage (see Controller.effectiveSplit).
-func filterStepsByPhase(steps []float64, phases int, splitW float64) []float64 {
+// included. Reference implementation paired with PhaseFor.
+func FilterStepsByPhase(steps []float64, phases int, splitW float64) []float64 {
 	if len(steps) == 0 {
 		return nil
 	}
 	if splitW <= 0 {
-		// Defensive: fall back to the historical 16 A × 230 V default
-		// rather than treating "every step" as both 1Φ and 3Φ. Caller
-		// should have computed this from site voltage already.
+		// Defensive fallback to the historical 16 A × 230 V default;
+		// callers should normally derive splitW from real site data.
 		splitW = 3680
 	}
 	out := make([]float64, 0, len(steps))

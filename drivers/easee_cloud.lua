@@ -46,6 +46,85 @@ local token_expires_at = 0   -- millis
 local charger_serial = nil
 local phases = 3   -- populated from config.phases (if present) in driver_init
 local last_sent_phases = nil   -- tracks the last phaseMode posted to Easee
+local last_phase_change_ms = 0 -- monotonic ms of the last phase flip (hysteresis)
+
+-- Easee charger physical limits. These are the manufacturer's hard
+-- bounds, not operator preferences — `dynamicChargerCurrent` written
+-- below the minimum is silently rejected by the unit (returns success
+-- but no current actually flows), and above the max the cloud returns
+-- a 4xx. The min applies when amps > 0; commanding exactly 0 always
+-- pauses cleanly.
+local EASEE_MIN_A = 6
+local EASEE_MAX_A = 32
+
+-- pick_phases is the driver-level phase decision: given the requested
+-- charging power, the per-phase fuse ceiling, the operator's mode
+-- preference, and the time since the last flip, return how many
+-- phases (1 or 3) to actually commit to this command.
+--
+--   * mode "1p" / "3p": locked, no hysteresis
+--   * mode "auto" or empty + missing fuse data: legacy 3Φ fallback
+--     (preserves pre-switching behaviour for sites that don't pass
+--     fuse data in the cmd)
+--   * mode "auto" with fuse data: pick 1Φ when wantW fits below the
+--     1Φ ceiling (= max_a × voltage), else 3Φ. Hysteresis suppresses
+--     a flip when less than `hold_s` seconds have passed since the
+--     last change — Easee's contactor + cloud-API round-trip is
+--     ~5-10 s, so flapping at every controller tick would burn the
+--     contactor and never deliver useful power.
+local function pick_phases(mode, want_w, voltage, max_a_per_phase, split_w, hold_s, now_ms)
+    local locked = mode
+    if locked == "1p" then return 1 end
+    if locked ~= "auto" then return 3 end -- "" / "3p" / unknown
+
+    -- Effective split: operator override → site fuse → 230 V × 16 A default.
+    local s = split_w
+    if (s == nil) or (s <= 0) then
+        if voltage and voltage > 0 and max_a_per_phase and max_a_per_phase > 0 then
+            s = voltage * max_a_per_phase
+        else
+            s = 3680
+        end
+    end
+
+    local desired = (want_w < s) and 1 or 3
+
+    -- Hysteresis: once we've committed to a phase count, hold it for
+    -- at least `hold_s` seconds before flipping the other way.
+    if last_sent_phases == nil then
+        return desired
+    end
+    if desired == last_sent_phases then
+        return desired
+    end
+    local hold = (hold_s and hold_s > 0) and hold_s or 60
+    if (now_ms - last_phase_change_ms) < (hold * 1000) then
+        return last_sent_phases
+    end
+    return desired
+end
+
+-- per_phase_amps converts the requested W into the dynamicChargerCurrent
+-- value Easee expects. Voltage and per-phase fuse ceiling come from
+-- the cmd (controller-supplied) so a 240 V or 220 V mains is handled
+-- without hard-coding 230. The result is rounded (not floored) and
+-- clamped to [0, EASEE_MAX_A] AND to the per-phase fuse ceiling so
+-- the breaker stays safe even if the controller sent a value above
+-- what the fuse tolerates.
+local function per_phase_amps(power_w, voltage, p, max_a_per_phase)
+    local v = (voltage and voltage > 0) and voltage or 230
+    local raw = ((power_w or 0) / v / p) + 0.5
+    local amps = math.floor(raw)
+    if amps < 0 then amps = 0 end
+    if amps > EASEE_MAX_A then amps = EASEE_MAX_A end
+    if max_a_per_phase and max_a_per_phase > 0 and amps > max_a_per_phase then
+        amps = math.floor(max_a_per_phase) -- never breach the fuse
+    end
+    -- Below Easee's hardware minimum, pause cleanly instead of leaving
+    -- the charger in "I requested 4 A but nothing flows" limbo.
+    if amps > 0 and amps < EASEE_MIN_A then amps = 0 end
+    return amps
+end
 
 -- Easee error bodies have historically echoed submitted form data
 -- (credentials, tokens). Strip the body and keep only the status prefix
@@ -340,20 +419,24 @@ function driver_command(action, power_w, cmd)
     elseif action == "ev_resume" then
         return post_command("/commands/resume_charging")
     elseif action == "ev_set_current" then
-        -- Phase handling: the Go controller may send an explicit `phases`
-        -- field (1 or 3) when phase-switching is enabled. When present,
-        -- update our local state AND push a phaseMode change to Easee if
-        -- it differs from the last-sent value. Easee's settings endpoint
-        -- accepts phaseMode = 1 (locked-1p), 2 (auto), 3 (locked-3p). We
-        -- only ever lock — "auto" is our responsibility, not Easee's.
-        local requested_phases = nil
-        if cmd and type(cmd.phases) == "number" then
-            local p = math.floor(cmd.phases)
-            if p == 1 or p == 3 then
-                requested_phases = p
-            end
-        end
-        if requested_phases and requested_phases ~= last_sent_phases then
+        -- Driver-level phase decision: read the operator's preferences
+        -- + site fuse from the cmd, decide 1Φ vs 3Φ here based on
+        -- the requested W and the voltage we know about. The Go
+        -- controller does NOT pick phases; it just allocates power.
+        local mode    = (cmd and type(cmd.phase_mode)       == "string") and cmd.phase_mode       or ""
+        local split   = (cmd and type(cmd.phase_split_w)    == "number") and cmd.phase_split_w    or 0
+        local hold_s  = (cmd and type(cmd.min_phase_hold_s) == "number") and cmd.min_phase_hold_s or 0
+        local voltage = (cmd and type(cmd.voltage)          == "number" and cmd.voltage > 0)          and cmd.voltage          or 230
+        local max_a   = (cmd and type(cmd.max_amps_per_phase) == "number" and cmd.max_amps_per_phase > 0) and cmd.max_amps_per_phase or nil
+
+        local now_ms = host.millis()
+        local requested_phases = pick_phases(mode, power_w or 0, voltage, max_a, split, hold_s, now_ms)
+
+        -- POST phaseMode FIRST when it differs. Easee's settings
+        -- endpoint accepts phaseMode = 1 (locked-1p), 2 (auto), 3
+        -- (locked-3p). We only ever lock — "auto" is our concern, not
+        -- the charger's.
+        if last_sent_phases ~= requested_phases then
             local pm_body = host.json_encode({phaseMode = requested_phases})
             local _, pm_err = host.http_post(
                 BASE_URL .. "/chargers/" .. charger_serial .. "/settings",
@@ -361,38 +444,21 @@ function driver_command(action, power_w, cmd)
             if pm_err == nil then
                 phases = requested_phases
                 last_sent_phases = requested_phases
+                last_phase_change_ms = now_ms
                 host.log("info", "Easee: phaseMode → " .. tostring(requested_phases))
             else
                 host.log("warn", "Easee: phaseMode write failed; skipping current write to avoid overcurrent on stale phase: " ..
                     redact_http_err(pm_err))
                 -- CRITICAL: power_w was budgeted against requested_phases
-                -- (e.g. 7400 W on 3Φ). Computing amps against the old
-                -- phases (1) would send 32 A on a single phase — tripping
-                -- a 16 A breaker. Fail the command; controller retries
-                -- next tick.
+                -- (e.g. 7400 W with the intent of 3Φ → 32 A/phase).
+                -- Computing amps against the unchanged phase count would
+                -- command 32 A on a single phase — tripping a 16 A
+                -- breaker. Fail the command; controller retries next tick.
                 return false
             end
         end
 
-        -- Voltage: prefer the controller-supplied value (the site fuse
-        -- voltage) so amperage math respects the actual mains voltage.
-        -- Falls back to 230 when no value comes in (legacy controller
-        -- code or stand-alone tests).
-        local voltage = 230
-        if cmd and type(cmd.voltage) == "number" and cmd.voltage > 0 then
-            voltage = cmd.voltage
-        end
-
-        -- Easee dynamicChargerCurrent is per-phase amps, so divide by the
-        -- current phase count. Round (not floor) so a request like
-        -- 4000 W on 3φ produces 6 A (4000/3/230≈5.8) rather than 5 A
-        -- which the charger would reject as below its 6 A minimum.
-        local amps = math.floor(((power_w or 0) / voltage / phases) + 0.5)
-        -- Clamp to the Easee 0..32 A permitted band. 0 pauses the session
-        -- cleanly; anything <6 A the charger rejects as below minimum, so
-        -- normalise those to 0 to avoid a silent "no current" state.
-        if amps > 0 and amps < 6 then amps = 0 end
-        if amps > 32 then amps = 32 end
+        local amps = per_phase_amps(power_w, voltage, phases, max_a)
         local body = host.json_encode({dynamicChargerCurrent = amps})
         local _, err = host.http_post(
             BASE_URL .. "/chargers/" .. charger_serial .. "/settings",
