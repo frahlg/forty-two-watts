@@ -20,18 +20,25 @@
   const tabs = document.getElementById('app-tabs');
   const viewLive = document.getElementById('view-live');
   const viewDiag = document.getElementById('view-diagnose');
+  const viewSavings = document.getElementById('view-savings');
+
+  // Allow-list for top-level views the router knows about. Anything else
+  // falls back to "live" (matches the historical behaviour). Add a new
+  // entry here when introducing another <main id="view-X"> block.
+  const KNOWN_VIEWS = new Set(['live', 'savings', 'diagnose']);
 
   function applyHash() {
     const h = (location.hash || '#live').replace(/^#/, '');
     const parts = h.split('/');
-    const view = parts[0] === 'diagnose' ? 'diagnose' : 'live';
+    const view = KNOWN_VIEWS.has(parts[0]) ? parts[0] : 'live';
     viewLive.classList.toggle('hidden', view !== 'live');
     viewDiag.classList.toggle('hidden', view !== 'diagnose');
+    if (viewSavings) viewSavings.classList.toggle('hidden', view !== 'savings');
     // Sync active state across both the top-row .tab-btn cluster AND
     // the drawer-nav-btn duplicates inside the mobile header-right
     // drawer. Query the whole document so both get the active pill.
     document.querySelectorAll('.tab-btn[data-view], .drawer-nav-btn[data-view]').forEach(b => {
-      if (b.dataset.view === 'live' || b.dataset.view === 'diagnose') {
+      if (KNOWN_VIEWS.has(b.dataset.view)) {
         b.classList.toggle('active', b.dataset.view === view);
       }
     });
@@ -54,7 +61,8 @@
     tabs.addEventListener('click', (e) => {
       const b = e.target.closest('.tab-btn');
       if (!b) return;
-      location.hash = b.dataset.view === 'diagnose' ? '#diagnose' : '#live';
+      const v = KNOWN_VIEWS.has(b.dataset.view) ? b.dataset.view : 'live';
+      location.hash = '#' + v;
     });
   }
   // Drawer navigation duplicates (mobile). Same behavior as the
@@ -63,7 +71,7 @@
   document.addEventListener('click', (e) => {
     const b = e.target.closest('.drawer-nav-btn[data-view]');
     if (!b) return;
-    if (b.dataset.view !== 'live' && b.dataset.view !== 'diagnose') return;
+    if (!KNOWN_VIEWS.has(b.dataset.view)) return;
     location.hash = '#' + b.dataset.view;
     const hdr = document.querySelector('body.ftw-next > header');
     if (hdr) {

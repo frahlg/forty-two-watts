@@ -59,6 +59,7 @@
     <img src="/logo.jpg" alt="42W" class="header-logo"><h1>42W</h1>
     <nav class="app-tabs" id="app-tabs" role="tablist">
       <button data-view="live" class="tab-btn active" role="tab">Live</button>
+      <button data-view="savings" class="tab-btn" role="tab" title="How much money the EMS has saved you, day by day">Savings</button>
       <button data-view="diagnose" class="tab-btn" role="tab" title="Time-travel through past planner decisions">Diagnose</button>
     </nav>
     <!-- Hamburger — visible only on narrow viewports. Opens the header
@@ -71,6 +72,7 @@
            router in diagnose.js treats them the same as the top-row
            tabs. Added so the mobile hamburger menu exposes Diagnose. -->
       <button data-view="live" class="drawer-nav-btn" data-menu-label="Live view">&#9654;</button>
+      <button data-view="savings" class="drawer-nav-btn" data-menu-label="Savings">&#128181;</button>
       <button data-view="diagnose" class="drawer-nav-btn" data-menu-label="Diagnose">&#9202;</button>
       <button id="hero-toggle" class="icon-btn" data-menu-label="Hero / tiles" title="Switch between hero diagram and numeric tiles">&#9638;</button>
       <button id="theme-toggle" class="icon-btn" data-menu-label="Dark mode" title="Toggle light / dark theme">&#9790;</button>
@@ -368,6 +370,51 @@
     </section>
   </main>
 
+  <!-- Savings view — historical savings ledger (per-day vs no-battery
+       baseline, with drill-down). Backend endpoints live in
+       go/internal/api/api_savings.go. Wiring + rendering in savings.js. -->
+  <main id="view-savings" class="hidden">
+    <section class="savings-header">
+      <div class="savings-title">
+        <h2>Savings</h2>
+        <span class="plan-summary">How much the EMS has saved you vs running with no battery — using the same cost model the live planner shows on the Plan card.</span>
+      </div>
+    </section>
+
+    <section class="savings-kpi-row" id="savings-kpis">
+      <!-- Filled by savings.js: today / 7 d / 30 d totals as cards. -->
+    </section>
+
+    <section class="savings-chart-section">
+      <div class="chart-header">
+        <h2 style="font-size:0.95rem">Daily savings</h2>
+        <div class="range-buttons" id="savings-range">
+          <button type="button" data-days="7">7 d</button>
+          <button type="button" data-days="30" class="active">30 d</button>
+          <button type="button" data-days="90">90 d</button>
+        </div>
+      </div>
+      <p class="plan-help">
+        Each day shows two stacked bars: red (lighter) is what the day
+        would have cost with no battery, green (solid) is what it
+        actually cost. The gap between them is the saved money. Click
+        a day to drill into per-slot detail.
+      </p>
+      <div class="chart-container">
+        <canvas id="savings-chart" width="800" height="220"></canvas>
+      </div>
+      <div class="chart-legend">
+        <span class="legend-item" title="What the day would have cost with no battery — load + PV at the meter, priced with the same import + export model the planner uses"><span class="legend-color" style="background:rgba(239,68,68,0.5)"></span> No-battery cost</span>
+        <span class="legend-item" title="What the day actually cost — measured grid flows priced the same way"><span class="legend-color" style="background:rgba(34,197,94,0.78)"></span> Actual cost</span>
+      </div>
+    </section>
+
+    <section class="savings-drill">
+      <div class="savings-drill-head" id="savings-drill-head">Click a day to inspect it</div>
+      <div class="savings-drill-body" id="savings-drill-body"></div>
+    </section>
+  </main>
+
   <!-- Diagnose view — time-travel through persisted planner snapshots -->
   <main id="view-diagnose" class="hidden">
     <section class="diagnose-header">
@@ -457,6 +504,7 @@
   <script src="/plan.js?v=diag1"></script>
   <script src="/twins.js?v=diag1"></script>
   <script src="/diagnose.js?v=diag1"></script>
+  <script src="/savings.js?v=savings1"></script>
   <script src="/update-badge.js?v=modal1" defer></script>
   <script>
     // Bridge: clicking the plain-text version span opens the update modal
