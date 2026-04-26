@@ -130,6 +130,10 @@ type Server struct {
 	// ~30 SQL round-trips with ~500k rows shipped to Go to at most one.
 	dailyCacheMu sync.Mutex
 	dailyCache   map[string]state.DayEnergy
+
+	// savingsCache memoizes per-local-day savings reconstructions, same
+	// pattern as dailyCache. Backs /api/savings/{daily,intraday,summary}.
+	savingsCache *savingsCache
 }
 
 // New creates a new API server.
@@ -141,9 +145,10 @@ func New(deps *Deps) *Server {
 		deps.WebDir = "web"
 	}
 	s := &Server{
-		deps:       deps,
-		mux:        http.NewServeMux(),
-		dailyCache: make(map[string]state.DayEnergy),
+		deps:         deps,
+		mux:          http.NewServeMux(),
+		dailyCache:   make(map[string]state.DayEnergy),
+		savingsCache: newSavingsCache(),
 	}
 	s.routes()
 	return s
@@ -182,6 +187,9 @@ func (s *Server) routes() {
 	s.handle("POST /api/self_tune/cancel", s.handleSelfTuneCancel)
 	s.handle("GET  /api/history", s.handleHistory)
 	s.handle("GET  /api/energy/daily", s.handleEnergyDaily)
+	s.handle("GET  /api/savings/daily", s.handleSavingsDaily)
+	s.handle("GET  /api/savings/intraday", s.handleSavingsIntraday)
+	s.handle("GET  /api/savings/summary", s.handleSavingsSummary)
 	s.handle("GET  /api/prices", s.handlePrices)
 	s.handle("GET  /api/forecast", s.handleForecast)
 	s.handle("GET  /api/mpc/plan", s.handleMPCPlan)
