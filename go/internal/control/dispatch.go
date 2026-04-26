@@ -369,7 +369,12 @@ func ComputeDispatch(
 	switch effectiveMode {
 	case ModeIdle:
 		state.LastTargets = nil
-		return nil
+		// Even in idle, the reactive fuse-saver runs: an unplanned
+		// load (manual_hold injecting EV power, oven turning on,
+		// neighbour's pool pump on the same fuse) can push grid
+		// import past the fuse with the battery sitting at 0 W. The
+		// fuse-saver overrides idle and forces discharge.
+		return fuseSaverFromZero(store, state, driverCapacities, fuseMaxW)
 	case ModeCharge:
 		targets := chargeAll(store, driverCapacities, state.DriverLimits)
 		state.LastTargets = targets
@@ -380,7 +385,10 @@ func ComputeDispatch(
 	if state.LastDispatch != nil {
 		elapsed := time.Since(*state.LastDispatch).Seconds()
 		if elapsed < float64(state.MinDispatchIntervalS) {
-			return nil
+			// Holdoff suppresses normal re-dispatch, but the
+			// fuse-saver overrides — an overflow can't wait 5 s for
+			// the next eligible tick.
+			return fuseSaverFromZero(store, state, driverCapacities, fuseMaxW)
 		}
 	}
 
@@ -645,6 +653,7 @@ func ComputeDispatch(
 
 	// ---- Fuse guard (bidirectional, #145) ----
 	raw = applyFuseGuard(raw, store, state.SiteMeterDriver, fuseMaxW)
+	raw = forceFuseDischarge(raw, store, state, driverCapacities, fuseMaxW)
 
 	// Update state
 	now := time.Now()
@@ -950,6 +959,168 @@ func applyFuseGuard(targets []DispatchTarget, store *telemetry.Store, siteMeter 
 				out[i].Clamped = true
 			}
 		}
+	}
+	return out
+}
+
+// fuseSaverFromZero is the early-return entry point for the fuse-saver.
+// Called from ComputeDispatch branches that would otherwise return nil
+// (idle mode, holdoff window) so the safety primary still gets a chance
+// to fire before we walk away from the cycle. Builds zero-W targets for
+// every online battery and runs them through forceFuseDischarge; if no
+// overflow is predicted, the result is nil (caller sees the same
+// empty-dispatch behaviour as before).
+func fuseSaverFromZero(
+	store *telemetry.Store,
+	state *State,
+	driverCapacities map[string]float64,
+	fuseMaxW float64,
+) []DispatchTarget {
+	if fuseMaxW <= 0 || len(driverCapacities) == 0 {
+		return nil
+	}
+	zeros := make([]DispatchTarget, 0, len(driverCapacities))
+	for name := range driverCapacities {
+		zeros = append(zeros, DispatchTarget{Driver: name, TargetW: 0})
+	}
+	out := forceFuseDischarge(zeros, store, state, driverCapacities, fuseMaxW)
+	for _, t := range out {
+		if t.TargetW != 0 || t.Clamped {
+			return out
+		}
+	}
+	return nil
+}
+
+// forceFuseDischarge is the reactive fuse-saver primary. It runs AFTER
+// applyFuseGuard and unconditionally drains the home battery whenever
+// predicted grid import would exceed the fuse, regardless of mode,
+// regardless of operator intent (BatteryCoversEV toggle, planner
+// allocation, manual_hold injecting unplanned EV draw, an oven
+// turning on, or any other off-plan load).
+//
+// The contract: under no software-controllable circumstance should
+// the operator's hardware fuse trip because the EMS sat idle while
+// the meter was over the limit. The hardware breaker remains the
+// final cutoff for sub-tick spikes; this layer eliminates
+// steady-state overflow at the 5 s control-tick rate.
+//
+// Why this exists separately from applyFuseGuard:
+//
+//	applyFuseGuard scales POSITIVE (charge) targets DOWN to 0 when
+//	import is over fuse. That helps when the planner asked for a
+//	charge — it prevents the EMS from making the overflow worse —
+//	but cannot help in the common "battery idle, surprise load" case
+//	because there's no charge to shrink. The PR #206 manual_hold
+//	ramp test surfaced this: the EV was pinned at ~5.5 kW while the
+//	home battery sat at 0 W per the planner's idle slot, and gridW
+//	went over fuseSafeMaxW until the operator stopped the test.
+//
+// Algorithm:
+//
+//  1. Recompute predicted gridW after applyFuseGuard's scaling
+//     (currentGrid − currentBat + sumTarget). currentGrid is the
+//     live meter reading and reflects ALL loads including off-plan
+//     EV draw / manual_hold / unplanned spikes.
+//  2. If predicted ≤ fuseMaxW: nothing to do.
+//  3. Otherwise allocate `overage = predicted − fuseMaxW` of
+//     additional discharge, distributed proportionally to each
+//     online battery's remaining discharge headroom (per-battery
+//     MaxDischargeW − current target magnitude, gated on SoC ≥ 5 %).
+//  4. Mark every modified target Clamped so the dispatch trace
+//     shows the fuse-saver fired.
+//
+// Out of scope: sub-tick reactivity. A 5 s tick is the floor here;
+// going faster requires pushing the dispatch loop down to ~1 s.
+// Hardware fuse trips remain the only protection for sub-tick spikes.
+func forceFuseDischarge(
+	targets []DispatchTarget,
+	store *telemetry.Store,
+	state *State,
+	driverCapacities map[string]float64,
+	fuseMaxW float64,
+) []DispatchTarget {
+	if fuseMaxW <= 0 || len(targets) == 0 || state == nil {
+		return targets
+	}
+	var currentBat float64
+	for _, r := range store.ReadingsByType(telemetry.DerBattery) {
+		currentBat += r.SmoothedW
+	}
+	var currentGrid float64
+	if state.SiteMeterDriver != "" {
+		if r := store.Get(state.SiteMeterDriver, telemetry.DerMeter); r != nil {
+			currentGrid = r.SmoothedW
+		}
+	}
+	var sumTarget float64
+	for _, t := range targets {
+		sumTarget += t.TargetW
+	}
+	predicted := currentGrid - currentBat + sumTarget
+
+	if predicted <= fuseMaxW {
+		return targets
+	}
+	overage := predicted - fuseMaxW
+
+	type slot struct {
+		idx      int
+		headroom float64
+	}
+	slots := make([]slot, 0, len(targets))
+	var totalHeadroom float64
+	for i, t := range targets {
+		cap, ok := driverCapacities[t.Driver]
+		if !ok || cap <= 0 {
+			continue
+		}
+		r := store.Get(t.Driver, telemetry.DerBattery)
+		if r == nil {
+			continue
+		}
+		soc := 0.1
+		if r.SoC != nil {
+			soc = *r.SoC
+		}
+		if soc < 0.05 {
+			continue // empty pack — can't draw on it
+		}
+		lim := state.DriverLimits[t.Driver]
+		dCap := lim.MaxDischargeW
+		if dCap <= 0 {
+			dCap = MaxCommandW
+		}
+		var alreadyDischarging float64
+		if t.TargetW < 0 {
+			alreadyDischarging = -t.TargetW
+		}
+		room := dCap - alreadyDischarging
+		if room <= 0 {
+			continue
+		}
+		slots = append(slots, slot{idx: i, headroom: room})
+		totalHeadroom += room
+	}
+	if totalHeadroom <= 0 {
+		return targets
+	}
+
+	allocate := overage
+	if allocate > totalHeadroom {
+		allocate = totalHeadroom
+	}
+
+	out := make([]DispatchTarget, len(targets))
+	copy(out, targets)
+	for _, s := range slots {
+		share := allocate * (s.headroom / totalHeadroom)
+		if out[s.idx].TargetW > 0 {
+			out[s.idx].TargetW = -share
+		} else {
+			out[s.idx].TargetW -= share
+		}
+		out[s.idx].Clamped = true
 	}
 	return out
 }
