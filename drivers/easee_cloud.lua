@@ -308,12 +308,13 @@ local REASON_LABELS = {
 
 local email, password, configured_max_a
 
--- read_settings GETs the charger's settings block (phaseMode,
+-- read_settings GETs the charger's static config block (phaseMode,
 -- maxChargerCurrent, etc.) so the driver can detect a firmware lock
--- that would silently ignore our phaseMode writes. Returns the
--- decoded table or nil + err string.
+-- that would silently ignore our phaseMode writes. Easee's API uses
+-- `/config` for reads and `/settings` for writes — they're not
+-- symmetric. Returns the decoded table or nil + err string.
 local function read_settings(serial)
-    local resp, err = host.http_get(BASE_URL .. "/chargers/" .. serial .. "/settings", auth_headers())
+    local resp, err = host.http_get(BASE_URL .. "/chargers/" .. serial .. "/config", auth_headers())
     if err then return nil, redact_http_err(err) end
     return host.json_decode(resp), nil
 end
