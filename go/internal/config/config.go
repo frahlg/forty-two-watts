@@ -118,6 +118,13 @@ type Loadpoint struct {
 	AllowedStepsW     []float64 `yaml:"allowed_steps_w,omitempty" json:"allowed_steps_w,omitempty"`
 	VehicleCapacityWh float64   `yaml:"vehicle_capacity_wh,omitempty" json:"vehicle_capacity_wh,omitempty"`
 	PluginSoCPct      float64   `yaml:"plugin_soc_pct,omitempty" json:"plugin_soc_pct,omitempty"`
+
+	// PhaseMode selects how the controller picks between 1Φ and 3Φ
+	// delivery: "3p" (default) | "1p" | "auto". Empty == "3p" for
+	// backward compat with pre-switching configs. See loadpoint.Config.
+	PhaseMode     string  `yaml:"phase_mode,omitempty" json:"phase_mode,omitempty"`
+	PhaseSplitW   float64 `yaml:"phase_split_w,omitempty" json:"phase_split_w,omitempty"`
+	MinPhaseHoldS int     `yaml:"min_phase_hold_s,omitempty" json:"min_phase_hold_s,omitempty"`
 }
 
 // OCPP configures the embedded OCPP 1.6J Central System for EV chargers.

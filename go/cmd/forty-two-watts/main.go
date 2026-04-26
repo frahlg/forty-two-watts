@@ -706,6 +706,14 @@ func main() {
 			}, true
 		}
 		lpController = loadpoint.NewController(lpMgr, planAdapter, telAdapter, reg.Send)
+		// Wire the site fuse so the per-phase EV clamp and the
+		// phase-split derivation can use the actual site voltage and
+		// breaker rating instead of hard-coding 230 V × 16 A.
+		lpController.SetSiteFuse(loadpoint.SiteFuse{
+			MaxAmps:  cfg.Fuse.MaxAmps,
+			Voltage:  cfg.Fuse.Voltage,
+			PhaseCnt: cfg.Fuse.Phases,
+		})
 	}
 
 	// ---- Self-update checker ----
@@ -1392,6 +1400,9 @@ func buildLoadpointConfigs(src []config.Loadpoint) []loadpoint.Config {
 			AllowedStepsW:     lp.AllowedStepsW,
 			VehicleCapacityWh: lp.VehicleCapacityWh,
 			PluginSoCPct:      lp.PluginSoCPct,
+			PhaseMode:         lp.PhaseMode,
+			PhaseSplitW:       lp.PhaseSplitW,
+			MinPhaseHoldS:     lp.MinPhaseHoldS,
 		})
 	}
 	return out

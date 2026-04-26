@@ -12,11 +12,15 @@ import (
 // energy budget, translate to an instantaneous W command, and send
 // to the driver.
 //
-// Extracted verbatim from the monolithic block that used to live in
-// main.go's control tick. Phase 1 is behaviour-preserving only — the
-// main loop calls (*Controller).Tick(ctx, now) where it used to
-// inline the logic. Phase 2 will give each loadpoint its own
-// goroutine + cadence declared by the driver.
+// Phase decisions (1Φ vs 3Φ) live IN THE DRIVER, not here. The
+// controller's job is purely energy allocation: how many watts the
+// MPC budget says we can pour into this loadpoint right now. The
+// driver knows its own physical constraints (minimum amps, contactor
+// switching latency, manufacturer's phaseMode wire format) and
+// decides which phase configuration to use given the requested W,
+// the operator's `phase_mode`/`phase_split_w`/`min_phase_hold_s`
+// preferences, and the site's per-phase fuse ceiling — all of which
+// are passed through in the `ev_set_current` command.
 //
 // Dependencies are injected as function types (not interfaces) to
 // avoid pulling mpc and telemetry into loadpoint's import graph —
@@ -28,6 +32,13 @@ type Controller struct {
 	plan    PlanFunc
 	tel     TelemetryFunc
 	send    SenderFunc
+
+	// site is the grid-boundary fuse. Its values are passed through
+	// to the driver in every ev_set_current cmd so the driver knows
+	// the per-phase ceiling and the mains voltage. Zero MaxAmps
+	// disables the per-phase fields in the cmd; the driver then
+	// falls back to its own configured defaults.
+	site SiteFuse
 }
 
 // Directive is the loadpoint-relevant slice of mpc.SlotDirective.
@@ -69,11 +80,23 @@ func NewController(mgr *Manager, plan PlanFunc, tel TelemetryFunc, send SenderFu
 	return &Controller{manager: mgr, plan: plan, tel: tel, send: send}
 }
 
+// SetSiteFuse installs the grid-boundary fuse so the controller can
+// pass voltage + per-phase amperage to drivers in every command.
+// Called once at startup from main.go after config load. A zero-value
+// fuse causes the controller to omit those fields, which leaves the
+// driver to use its own defaults.
+func (c *Controller) SetSiteFuse(f SiteFuse) {
+	if c == nil {
+		return
+	}
+	c.site = f
+}
+
 // Tick runs one dispatch cycle for every configured loadpoint.
 // Safe to call even when no loadpoints are configured. Idempotent —
 // calling it twice in the same moment produces the same commands.
 //
-// Behaviour is equivalent to the inline block previously in main.go:
+// Behaviour:
 //
 //  1. Read latest charger telemetry for this driver.
 //  2. Feed the observation to the Manager (plug state, session Wh,
@@ -82,18 +105,13 @@ func NewController(mgr *Manager, plan PlanFunc, tel TelemetryFunc, send SenderFu
 //  4. For plugged loadpoints: ask the plan for this slot's Wh
 //     allocation and translate to a W command via the energy-
 //     allocation contract (remaining_wh × 3600 / remaining_s).
-//  5. Snap to the charger's discrete steps.
-//  6. Send `ev_set_current` with the resulting W. When no plan
-//     allocation exists, 0 W is commanded explicitly — without it
-//     the charger rides the previous slot's setpoint.
+//  5. Send `ev_set_current` with that W plus the operator's phase
+//     preferences and the site's fuse parameters; the driver picks
+//     phases and converts W→A given that it knows the voltage.
 func (c *Controller) Tick(ctx context.Context, now time.Time) {
 	if c == nil || c.manager == nil {
 		return
 	}
-	// Preserve the old `len(cfg.Loadpoints) > 0 && mpcSvc != nil` guard:
-	// when the planner isn't wired we stay fully out of the loadpoint
-	// driver's state, the same as before the refactor. Phase 3 will
-	// relax this once the controller owns its own fallback behaviour.
 	if c.plan == nil {
 		return
 	}
@@ -111,11 +129,40 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config) {
 	if !sample.Connected {
 		return
 	}
-	cmdW := c.computeCommand(now, lpCfg, sample.PowerW)
-	payload, err := json.Marshal(map[string]any{
+	cmdW, planReady := c.computeCommand(now, lpCfg, sample.PowerW)
+	if !planReady {
+		// No plan budget for this loadpoint right now — explicit
+		// 0 W standdown so the charger pauses cleanly.
+		cmdW = 0
+	}
+	cmd := map[string]any{
 		"action":  "ev_set_current",
 		"power_w": cmdW,
-	})
+	}
+	// Pass operator's phase preferences through verbatim. The driver
+	// reads these and decides 1Φ vs 3Φ based on its own knowledge of
+	// charger min/max amps, phase-switch latency, and the requested W.
+	if lpCfg.PhaseMode != "" {
+		cmd["phase_mode"] = lpCfg.PhaseMode
+	}
+	if lpCfg.PhaseSplitW > 0 {
+		cmd["phase_split_w"] = lpCfg.PhaseSplitW
+	}
+	if lpCfg.MinPhaseHoldS > 0 {
+		cmd["min_phase_hold_s"] = lpCfg.MinPhaseHoldS
+	}
+	// Pass the site fuse so the driver can compute the per-phase
+	// ceiling using the actual mains voltage instead of hard-coding
+	// 230 V × 16 A. Drivers that don't support phase switching can
+	// safely ignore these fields.
+	if c.site.MaxAmps > 0 {
+		cmd["max_amps_per_phase"] = c.site.MaxAmps
+		cmd["site_phases"] = c.site.Phases()
+	}
+	if v := c.site.Voltage; v > 0 {
+		cmd["voltage"] = v
+	}
+	payload, err := json.Marshal(cmd)
 	if err != nil {
 		return
 	}
@@ -129,24 +176,27 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config) {
 }
 
 // computeCommand resolves the W setpoint for a plugged loadpoint.
-// Returns 0 when the planner has no allocation for this slot — an
-// explicit standdown, not a lazy last-command.
-func (c *Controller) computeCommand(now time.Time, lpCfg Config, currentPowerW float64) float64 {
+// Returns (0, false) when the planner has no allocation for this
+// slot — caller commands an explicit 0 W standdown rather than
+// leaving the charger riding the previous setpoint.
+//
+// The returned W is the CONTINUOUS energy-budget translation; the
+// driver may further snap to its own discrete amperage steps and
+// will clamp to the per-phase fuse ceiling derived from the
+// `voltage` + `max_amps_per_phase` cmd fields.
+func (c *Controller) computeCommand(now time.Time, lpCfg Config, currentPowerW float64) (float64, bool) {
 	if c.plan == nil {
-		return 0
+		return 0, false
 	}
 	d, ok := c.plan(now)
 	if !ok {
-		return 0
+		return 0, false
 	}
 	budgetWh, hasBudget := d.LoadpointEnergyWh[lpCfg.ID]
 	if !hasBudget {
-		return 0
+		return 0, false
 	}
 	remainingS := d.SlotEnd.Sub(now).Seconds()
-	// Subtract what's already been delivered so a mid-slot dispatch
-	// doesn't overshoot. Approximated from current power × fraction
-	// of slot elapsed.
 	elapsed := d.SlotEnd.Sub(d.SlotStart).Seconds() - remainingS
 	if elapsed < 0 {
 		elapsed = 0
@@ -154,5 +204,7 @@ func (c *Controller) computeCommand(now time.Time, lpCfg Config, currentPowerW f
 	alreadyWh := currentPowerW * elapsed / 3600.0
 	remainingWh := budgetWh - alreadyWh
 	wantW := EnergyBudgetToPowerW(remainingWh, remainingS)
-	return SnapChargeW(wantW, lpCfg.MinChargeW, lpCfg.MaxChargeW, lpCfg.AllowedStepsW)
+	// Clamp to the loadpoint's static MaxChargeW (configured cap; the
+	// driver's per-phase fuse clamp is the ultimate safety stop).
+	return SnapChargeW(wantW, lpCfg.MinChargeW, lpCfg.MaxChargeW, lpCfg.AllowedStepsW), true
 }
