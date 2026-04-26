@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"sync"
 	"time"
 )
 
@@ -39,6 +40,33 @@ type Controller struct {
 	// disables the per-phase fields in the cmd; the driver then
 	// falls back to its own configured defaults.
 	site SiteFuse
+
+	// holds is the manual-override registry: per-loadpoint power +
+	// phase parameters that win over the MPC-driven dispatch until
+	// they expire. Used by the diagnostics endpoint
+	// `POST /api/loadpoints/{id}/manual_hold` so an operator can pin
+	// a specific amperage / phase configuration on the charger for
+	// long enough to observe driver behaviour, without fighting the
+	// 5-second control loop. nil entries (or expired ones) fall
+	// through to the normal compute-from-plan path.
+	holdMu sync.Mutex
+	holds  map[string]ManualHold
+}
+
+// ManualHold pins a loadpoint to a specific dispatch payload until
+// ExpiresAt. PowerW is sent verbatim; PhaseMode / PhaseSplitW /
+// MinPhaseHoldS / Voltage / MaxAmpsPerPhase override the loadpoint's
+// configured defaults so the driver receives exactly the inputs the
+// operator wants tested.
+type ManualHold struct {
+	PowerW          float64
+	PhaseMode       string
+	PhaseSplitW     float64
+	MinPhaseHoldS   int
+	Voltage         float64
+	MaxAmpsPerPhase float64
+	SitePhases      int
+	ExpiresAt       time.Time
 }
 
 // Directive is the loadpoint-relevant slice of mpc.SlotDirective.
@@ -92,6 +120,65 @@ func (c *Controller) SetSiteFuse(f SiteFuse) {
 	c.site = f
 }
 
+// SetManualHold pins the given loadpoint to a fixed dispatch payload
+// until h.ExpiresAt. tickOne checks the hold on every cycle and emits
+// the held values verbatim — bypassing the MPC budget translation —
+// until the hold expires (then the controller resumes normal
+// dispatch on the next cycle). Useful for diagnostics: hold a
+// specific amperage on the charger long enough to observe driver
+// behaviour without fighting the 5-second control tick.
+//
+// A zero ExpiresAt clears any hold for this loadpoint (same as
+// ClearManualHold). Setting a hold for an unknown loadpoint ID is
+// silently allowed — the hold has no effect because tickOne only
+// runs for configured loadpoints.
+func (c *Controller) SetManualHold(id string, h ManualHold) {
+	if c == nil {
+		return
+	}
+	c.holdMu.Lock()
+	defer c.holdMu.Unlock()
+	if c.holds == nil {
+		c.holds = map[string]ManualHold{}
+	}
+	if h.ExpiresAt.IsZero() {
+		delete(c.holds, id)
+		return
+	}
+	c.holds[id] = h
+}
+
+// ClearManualHold removes any active hold for the given loadpoint,
+// regardless of expiry. Idempotent.
+func (c *Controller) ClearManualHold(id string) {
+	if c == nil {
+		return
+	}
+	c.holdMu.Lock()
+	defer c.holdMu.Unlock()
+	delete(c.holds, id)
+}
+
+// GetManualHold returns the current hold for a loadpoint. The bool
+// is false when no hold is active. Expired holds are not returned —
+// they're lazily evicted on the next read.
+func (c *Controller) GetManualHold(id string, now time.Time) (ManualHold, bool) {
+	if c == nil {
+		return ManualHold{}, false
+	}
+	c.holdMu.Lock()
+	defer c.holdMu.Unlock()
+	h, ok := c.holds[id]
+	if !ok {
+		return ManualHold{}, false
+	}
+	if !now.Before(h.ExpiresAt) {
+		delete(c.holds, id)
+		return ManualHold{}, false
+	}
+	return h, true
+}
+
 // Tick runs one dispatch cycle for every configured loadpoint.
 // Safe to call even when no loadpoints are configured. Idempotent —
 // calling it twice in the same moment produces the same commands.
@@ -129,39 +216,64 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config) {
 	if !sample.Connected {
 		return
 	}
-	cmdW, planReady := c.computeCommand(now, lpCfg, sample.PowerW)
-	if !planReady {
-		// No plan budget for this loadpoint right now — explicit
-		// 0 W standdown so the charger pauses cleanly.
-		cmdW = 0
+
+	cmd := map[string]any{"action": "ev_set_current"}
+	if hold, ok := c.GetManualHold(lpCfg.ID, now); ok {
+		// Manual override active — use the hold's payload verbatim.
+		// Skips MPC translation AND the loadpoint's own phase
+		// preferences; everything comes from the operator's hold.
+		cmd["power_w"] = hold.PowerW
+		if hold.PhaseMode != "" {
+			cmd["phase_mode"] = hold.PhaseMode
+		}
+		if hold.PhaseSplitW > 0 {
+			cmd["phase_split_w"] = hold.PhaseSplitW
+		}
+		if hold.MinPhaseHoldS > 0 {
+			cmd["min_phase_hold_s"] = hold.MinPhaseHoldS
+		}
+		if hold.Voltage > 0 {
+			cmd["voltage"] = hold.Voltage
+		}
+		if hold.MaxAmpsPerPhase > 0 {
+			cmd["max_amps_per_phase"] = hold.MaxAmpsPerPhase
+		}
+		if hold.SitePhases > 0 {
+			cmd["site_phases"] = hold.SitePhases
+		}
+	} else {
+		cmdW, planReady := c.computeCommand(now, lpCfg, sample.PowerW)
+		if !planReady {
+			// No plan budget for this loadpoint right now — explicit
+			// 0 W standdown so the charger pauses cleanly.
+			cmdW = 0
+		}
+		cmd["power_w"] = cmdW
+		// Pass operator's phase preferences through verbatim. The driver
+		// reads these and decides 1Φ vs 3Φ based on its own knowledge of
+		// charger min/max amps, phase-switch latency, and the requested W.
+		if lpCfg.PhaseMode != "" {
+			cmd["phase_mode"] = lpCfg.PhaseMode
+		}
+		if lpCfg.PhaseSplitW > 0 {
+			cmd["phase_split_w"] = lpCfg.PhaseSplitW
+		}
+		if lpCfg.MinPhaseHoldS > 0 {
+			cmd["min_phase_hold_s"] = lpCfg.MinPhaseHoldS
+		}
+		// Pass the site fuse so the driver can compute the per-phase
+		// ceiling using the actual mains voltage instead of hard-coding
+		// 230 V × 16 A. Drivers that don't support phase switching can
+		// safely ignore these fields.
+		if c.site.MaxAmps > 0 {
+			cmd["max_amps_per_phase"] = c.site.MaxAmps
+			cmd["site_phases"] = c.site.Phases()
+		}
+		if v := c.site.Voltage; v > 0 {
+			cmd["voltage"] = v
+		}
 	}
-	cmd := map[string]any{
-		"action":  "ev_set_current",
-		"power_w": cmdW,
-	}
-	// Pass operator's phase preferences through verbatim. The driver
-	// reads these and decides 1Φ vs 3Φ based on its own knowledge of
-	// charger min/max amps, phase-switch latency, and the requested W.
-	if lpCfg.PhaseMode != "" {
-		cmd["phase_mode"] = lpCfg.PhaseMode
-	}
-	if lpCfg.PhaseSplitW > 0 {
-		cmd["phase_split_w"] = lpCfg.PhaseSplitW
-	}
-	if lpCfg.MinPhaseHoldS > 0 {
-		cmd["min_phase_hold_s"] = lpCfg.MinPhaseHoldS
-	}
-	// Pass the site fuse so the driver can compute the per-phase
-	// ceiling using the actual mains voltage instead of hard-coding
-	// 230 V × 16 A. Drivers that don't support phase switching can
-	// safely ignore these fields.
-	if c.site.MaxAmps > 0 {
-		cmd["max_amps_per_phase"] = c.site.MaxAmps
-		cmd["site_phases"] = c.site.Phases()
-	}
-	if v := c.site.Voltage; v > 0 {
-		cmd["voltage"] = v
-	}
+
 	payload, err := json.Marshal(cmd)
 	if err != nil {
 		return

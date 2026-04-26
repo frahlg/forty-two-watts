@@ -96,6 +96,12 @@ type Deps struct {
 	// wires these into MPC decision surface).
 	Loadpoints *loadpoint.Manager
 
+	// LoadpointCtrl is the dispatch controller. The diagnostics
+	// endpoint POST /api/loadpoints/{id}/manual_hold uses it to
+	// install a temporary override that bypasses the MPC budget
+	// path until expiry. Nil disables the endpoint.
+	LoadpointCtrl *loadpoint.Controller
+
 	// Optional: HA MQTT bridge (nil if disabled).
 	HA *ha.Bridge
 
@@ -203,6 +209,9 @@ func (s *Server) routes() {
 	s.handle("GET  /api/loadpoints", s.handleLoadpoints)
 	s.handle("POST /api/loadpoints/{id}/target", s.handleLoadpointTarget)
 	s.handle("POST /api/loadpoints/{id}/soc", s.handleLoadpointSoC)
+	s.handle("POST /api/loadpoints/{id}/manual_hold", s.handleLoadpointManualHold)
+	s.handle("DELETE /api/loadpoints/{id}/manual_hold", s.handleLoadpointManualHoldClear)
+	s.handle("GET  /api/loadpoints/{id}/manual_hold", s.handleLoadpointManualHoldGet)
 	s.handle("GET  /api/version/check", s.handleVersionCheck)
 	s.handle("POST /api/version/skip", s.handleVersionSkip)
 	s.handle("POST /api/version/unskip", s.handleVersionUnskip)
