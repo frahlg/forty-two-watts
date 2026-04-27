@@ -309,14 +309,21 @@ local REASON_LABELS = {
 local email, password, configured_max_a
 
 -- read_settings GETs the charger's static config block (phaseMode,
--- maxChargerCurrent, etc.) so the driver can detect a firmware lock
--- that would silently ignore our phaseMode writes. Easee's API uses
--- `/config` for reads and `/settings` for writes — they're not
--- symmetric. Returns the decoded table or nil + err string.
+-- maxChargerCurrent, etc.) and surfaces it via the init log so the
+-- operator can spot a firmware-locked phaseMode that would silently
+-- ignore our writes. Easee's API uses `/config` for reads and
+-- `/settings` for writes — they're not symmetric. Returns the
+-- decoded table or nil + err string. Active firmware-lock detection
+-- (compare requested phaseMode after a write) is a follow-up; this
+-- driver's contribution is the diagnostic logging at init.
 local function read_settings(serial)
     local resp, err = host.http_get(BASE_URL .. "/chargers/" .. serial .. "/config", auth_headers())
     if err then return nil, redact_http_err(err) end
-    return host.json_decode(resp), nil
+    local decoded = host.json_decode(resp)
+    if decoded == nil then
+        return nil, "decode failed (non-JSON response)"
+    end
+    return decoded, nil
 end
 
 -- write_setting POSTs a single key:value into the charger's settings
@@ -452,9 +459,16 @@ function driver_poll()
     -- the `max_a` field which only echoes whatever we last wrote.
     -- Operators wanting "is the EV actually drawing what we asked
     -- for?" should compare actual_amps_per_phase against max_a.
-    local actual_amps_per_phase = 0
+    --
+    -- Only computed for the canonical 1Φ / 3Φ configurations. Earlier
+    -- driver_init permitted config.phases=2 (a misconfigured site,
+    -- or a transitional state before the first successful phaseMode
+    -- write). Dividing by 2 there would yield a "per-phase" number
+    -- that doesn't correspond to any real cabling — better to omit
+    -- the field than mislead the operator with a fictitious value.
+    local actual_amps_per_phase = nil
     local v_obs = obs[OBS_VOLTAGE]
-    if power_w > 0 and phases > 0 then
+    if power_w > 0 and (phases == 1 or phases == 3) then
         local vv = (v_obs and v_obs > 0) and v_obs or 230
         actual_amps_per_phase = power_w / vv / phases
     end
@@ -481,16 +495,22 @@ function driver_poll()
     -- (≥ ~5 s later, by which time the cloud has settled) we re-write
     -- our intended amps to overcome the reset. Idempotent — same write
     -- as the controller would issue on its next 5 s tick, just earlier.
+    --
+    -- Only clear the flag on success. A transient network failure or
+    -- 5xx leaves it pending so the NEXT poll retries instead of
+    -- silently leaving the charger pinned at maxChargerCurrent. The
+    -- controller's own 5 s tick is the safety floor; this just
+    -- accelerates convergence in the common case.
     if pending_amp_resend and last_amps_set ~= nil and host.millis() >= pending_amp_resend_at_ms then
         local werr = write_setting(charger_serial, {dynamicChargerCurrent = last_amps_set})
         if werr == nil then
             host.log("info", "Easee: re-asserted dynamicChargerCurrent=" .. tostring(last_amps_set) ..
                 " A after phaseMode reset")
+            pending_amp_resend = false
         else
-            host.log("warn", "Easee: dynamicChargerCurrent re-assert failed: " ..
+            host.log("warn", "Easee: dynamicChargerCurrent re-assert failed (will retry next poll): " ..
                 redact_http_err(werr))
         end
-        pending_amp_resend = false
     end
 
     if obs[OBS_VOLTAGE] then
@@ -545,10 +565,7 @@ function driver_command(action, power_w, cmd)
         -- the charger's.
         local phase_changed = false
         if last_sent_phases ~= requested_phases then
-            local pm_body = host.json_encode({phaseMode = requested_phases})
-            local _, pm_err = host.http_post(
-                BASE_URL .. "/chargers/" .. charger_serial .. "/settings",
-                pm_body, auth_headers())
+            local pm_err = write_setting(charger_serial, {phaseMode = requested_phases})
             if pm_err == nil then
                 phases = requested_phases
                 last_sent_phases = requested_phases
@@ -568,10 +585,7 @@ function driver_command(action, power_w, cmd)
         end
 
         local amps = per_phase_amps(power_w, voltage, phases, max_a)
-        local body = host.json_encode({dynamicChargerCurrent = amps})
-        local _, err = host.http_post(
-            BASE_URL .. "/chargers/" .. charger_serial .. "/settings",
-            body, auth_headers())
+        local err = write_setting(charger_serial, {dynamicChargerCurrent = amps})
         if err == nil then
             last_amps_set = amps
             -- After a phaseMode change, schedule one re-write of

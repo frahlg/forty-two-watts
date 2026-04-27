@@ -381,6 +381,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 				CableLocked          *bool    `json:"cable_locked"`
 				MaxA                 *float64 `json:"max_a"`
 				Phases               *int     `json:"phases"`
+				ActualAmpsPerPhase   *float64 `json:"actual_amps_per_phase"`
 			}
 			if r.Data != nil && json.Unmarshal(r.Data, &ev) == nil {
 				if ev.Connected != nil            { d["ev_connected"] = *ev.Connected }
@@ -394,6 +395,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 				if ev.CableLocked != nil          { d["ev_cable_locked"] = *ev.CableLocked }
 				if ev.MaxA != nil                 { d["ev_max_a"] = *ev.MaxA }
 				if ev.Phases != nil               { d["ev_phases"] = *ev.Phases }
+				if ev.ActualAmpsPerPhase != nil   { d["ev_actual_amps_per_phase"] = *ev.ActualAmpsPerPhase }
 			}
 		}
 		drivers[name] = d
