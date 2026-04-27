@@ -166,6 +166,11 @@ func main() {
 	ctrl.MinDispatchIntervalS = cfg.Site.MinDispatchIntervalS
 	ctrl.InverterGroups = inverterGroupsFrom(cfg.Drivers)
 	ctrl.DriverLimits = driverLimitsFrom(cfg.Drivers)
+	// Per-phase fuse params for the per-phase clamp inside applyFuseGuard
+	// + forceFuseDischarge. Reads l1_a/l2_a/l3_a from the meter driver
+	// when SiteFuseAmps > 0; otherwise the per-phase clamp is disabled.
+	ctrl.SiteFuseAmps = cfg.Fuse.MaxAmps
+	ctrl.SiteFuseVoltage = cfg.Fuse.Voltage
 	// Restore persisted mode + target if present. The planner variants
 	// have to be listed too — without them the strategy the user picked in
 	// the UI (planner_self / planner_cheap / planner_arbitrage) is silently

@@ -141,6 +141,119 @@ Sungrow and Ferroamp both emit per-phase data into
 JSON blob. The aggregate three-phase guard is the floor; per-phase
 logic is opt-in on top.
 
+### 3a. Reactive fuse-saver (PR #208)
+
+`applyFuseGuard` only scales POSITIVE (charge) targets DOWN — it
+prevents the EMS from making an existing overflow worse, but doesn't
+help in the common "battery idle, surprise load" case because there's
+no charge to shrink.
+
+The reactive fuse-saver (`forceFuseDischarge`) closes that gap:
+
+```go
+// go/internal/control/dispatch.go
+func forceFuseDischarge(
+    targets []DispatchTarget,
+    store *telemetry.Store,
+    state *State,
+    capacities map[string]float64,
+    fuseMaxW float64,
+) []DispatchTarget
+```
+
+Runs **after** `applyFuseGuard` on every dispatch cycle, in **every**
+mode (idle, self_consumption, planner_*, holdoff window). Behaviour:
+
+1. Recompute `predicted = currentGrid − currentBat + sumTarget` against
+   the post-`applyFuseGuard` targets. `currentGrid` is the live meter
+   and reflects ALL loads — planned, off-plan, manual_hold-injected,
+   and unplanned spikes.
+2. If `predicted > fuseMaxW`, allocate `overage = predicted − fuseMaxW`
+   of additional discharge across online batteries proportionally to
+   each battery's remaining headroom (`MaxDischargeW − current target
+   magnitude`, gated on `SoC ≥ 5 %`).
+3. Mark every modified target `Clamped = true` so the dispatch trace
+   shows the fuse-saver fired.
+
+Coverage extends to every code path that would normally short-circuit
+`ComputeDispatch` to `nil`:
+
+- **`ModeIdle`**: zeros are generated for every online battery, run
+  through `forceFuseDischarge`. Idle mode + grid spike → battery is
+  overridden to discharge.
+- **Holdoff window**: same — fuse-saver overrides the 5 s holdoff
+  because overflow can't wait.
+
+Edge cases:
+
+- All batteries empty (SoC < 5 %) → fuse-saver returns targets
+  unchanged. Hardware breaker remains the next layer.
+- All batteries already at `MaxDischargeW` → fuse-saver no-op (already
+  doing all it can).
+- `fuseMaxW = 0` → disabled (matches `applyFuseGuard`'s convention).
+
+The 5 s control-tick is the floor. Sub-tick spikes (an oven turning
+on between ticks) still rely on the hardware fuse for protection;
+going faster requires pushing the dispatch loop down to ~1 s.
+
+Surfaced by the manual_hold ramp test in PR #206's session: the EV
+was pinned at ~5.5 kW while the home battery sat at 0 W per the
+planner's idle slot, and `gridW` exceeded `fuseSafeMaxW` until the
+operator stopped the test. The reactive fuse-saver eliminates that
+class of incident at the dispatch level.
+
+### 3b. Per-phase clamp (PR #208 follow-up)
+
+The aggregate fuse-guard above (sections 3 + 3a) protects against
+total grid power exceeding the breaker's combined rating. It does
+**not** see per-phase imbalance: a 16 A 3Φ fuse has each phase trip
+at 16 A, and a single phase can blow even when the three-phase
+aggregate is well below `fuseMaxW`. This was the failure mode the
+operator hit in PR #208's hardware test — the EV was at ~16 A 3Φ
+balanced (3.6 kW per phase), but a single-phase Pixii battery
+charging at 4.4 kW on L1 pushed that one phase past 16 A while the
+aggregate stayed under fuse.
+
+Both `applyFuseGuard` and `forceFuseDischarge` consult an additional
+`perPhaseImportOverageW(store, state)` helper:
+
+```go
+// go/internal/control/dispatch.go
+func perPhaseImportOverageW(store *telemetry.Store, state *State) float64
+```
+
+Reads `l1_a` / `l2_a` / `l3_a` from the meter driver's
+`DerReading.Data` (Pixii, Ferroamp, Sungrow all emit these). Returns
+the wattage by which the worst single phase exceeds
+`state.SiteFuseAmps`, or 0 when within limits / data unavailable /
+clamp disabled.
+
+The dispatch logic then takes the larger of:
+
+- aggregate overage = `predicted_grid − fuseMaxW`
+- per-phase overage = `worst_phase_watts × 3` (balanced-3Φ assumption
+  for the battery — total reduction needed to bring the worst phase
+  back, accepting over-correction on the other phases)
+
+…and uses that as the reduction/discharge target. The existing
+charge-scaling and force-discharge code paths do not change; only
+the input number is now per-phase aware.
+
+**Configuration.** `state.SiteFuseAmps` and `state.SiteFuseVoltage`
+are wired from `cfg.Fuse.MaxAmps` + `cfg.Fuse.Voltage` in `main.go`.
+`SiteFuseAmps == 0` disables the per-phase clamp (back-compat for
+sites without per-phase meter data and the test suite).
+
+**Conservatism for 1Φ batteries.** A balanced 3Φ battery reduces
+each phase by 1/3 of its total output, so `× 3` is exact. A
+single-phase battery (Pixii Home, OCPP single-phase) on the
+overloaded phase reduces it 1:1 — `× 3` over-corrects 3×, but that
+direction is safe (less import on the overloaded phase, slight
+over-export elsewhere that the aggregate guard catches next cycle).
+A single-phase battery on a *different* phase from the overload
+cannot help; this is a real limitation. Per-battery `phase`
+configuration is a follow-up.
+
 ## 4. Dispatch min interval
 
 `cfg.Site.MinDispatchIntervalS` (default **5s**, set in

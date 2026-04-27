@@ -286,7 +286,8 @@ func TestFuseGuardScalesDischargeWhenExportExceedsFuse(t *testing.T) {
 	s.DriverHealthMut("a").RecordSuccess()
 	targets := []DispatchTarget{{Driver: "a", TargetW: -6000}} // add 6 kW discharge on top
 	// Predicted grid = -8000 - 0 + (-6000) = -14000 (exporting). Fuse 11040.
-	scaled := applyFuseGuard(targets, s, "meter", 11040)
+	st := NewState(0, 50, "meter")
+	scaled := applyFuseGuard(targets, s, st, 11040)
 	if !scaled[0].Clamped {
 		t.Error("expected clamped=true")
 	}
@@ -304,7 +305,8 @@ func TestFuseGuardPassesThroughWhenWithinFuse(t *testing.T) {
 	s.Update("a", telemetry.DerBattery, 0, nil, nil)
 	s.DriverHealthMut("a").RecordSuccess()
 	targets := []DispatchTarget{{Driver: "a", TargetW: 3000}}
-	scaled := applyFuseGuard(targets, s, "meter", 11040)
+	st := NewState(0, 50, "meter")
+	scaled := applyFuseGuard(targets, s, st, 11040)
 	if scaled[0].TargetW != 3000 || scaled[0].Clamped {
 		t.Errorf("within fuse: got %f clamped=%v, want 3000 false", scaled[0].TargetW, scaled[0].Clamped)
 	}
@@ -328,7 +330,8 @@ func TestFuseGuardScalesChargingWhenImportExceedsFuse(t *testing.T) {
 	}
 	// Predicted = 8000 - 0 + 10000 = 18000 W. Fuse 11040.
 	// Overage = 6960. Total charge = 10000. New total = 3040. Scale = 0.304.
-	scaled := applyFuseGuard(targets, s, "meter", 11040)
+	st := NewState(0, 50, "meter")
+	scaled := applyFuseGuard(targets, s, st, 11040)
 	var totalCharge float64
 	for _, tgt := range scaled {
 		if tgt.TargetW > 0 {
@@ -353,7 +356,8 @@ func TestFuseGuardNoOpWithoutMeterReading(t *testing.T) {
 	s := telemetry.NewStore()
 	targets := []DispatchTarget{{Driver: "a", TargetW: 5000}}
 	// No meter reading → currentGrid defaults to 0 → predicted = 5000 which is fine.
-	scaled := applyFuseGuard(targets, s, "does-not-exist", 11040)
+	st := NewState(0, 50, "does-not-exist")
+	scaled := applyFuseGuard(targets, s, st, 11040)
 	if scaled[0].TargetW != 5000 || scaled[0].Clamped {
 		t.Errorf("absent meter → no prediction-based clamp, got %f clamped=%v",
 			scaled[0].TargetW, scaled[0].Clamped)

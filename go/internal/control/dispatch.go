@@ -1,6 +1,7 @@
 package control
 
 import (
+	"encoding/json"
 	"log/slog"
 	"math"
 	"time"
@@ -106,6 +107,19 @@ type State struct {
 	GridTargetW    float64
 	GridToleranceW float64
 	SiteMeterDriver string
+
+	// SiteFuseAmps is the per-phase trip current of the site's main
+	// breaker (cfg.Fuse.MaxAmps). Used by the per-phase clamp inside
+	// applyFuseGuard / forceFuseDischarge: when the meter reports
+	// per-phase amps via DerReading.Data (l1_a / l2_a / l3_a, emitted
+	// by Pixii / Ferroamp / Sungrow), any single phase exceeding
+	// SiteFuseAmps is treated as additional aggregate overage so the
+	// existing scaling+discharge logic responds.
+	//
+	// Zero disables the per-phase clamp (back-compat for tests and
+	// sites without per-phase meter data).
+	SiteFuseAmps    float64
+	SiteFuseVoltage float64
 
 	// For Priority mode
 	PriorityOrder []string
@@ -368,8 +382,22 @@ func ComputeDispatch(
 	// ---- Idle + Charge short-circuits ----
 	switch effectiveMode {
 	case ModeIdle:
-		state.LastTargets = nil
-		return nil
+		// Even in idle, the reactive fuse-saver runs: an unplanned
+		// load (manual_hold injecting EV power, oven turning on,
+		// neighbour's pool pump on the same fuse) can push grid
+		// import past the fuse with the battery sitting at 0 W. The
+		// fuse-saver overrides idle and forces discharge.
+		out := fuseSaverFromZero(store, state, driverCapacities, fuseMaxW)
+		// LastTargets reflects what we actually issued: nil when
+		// the fuse-saver no-op'd, the discharge targets when it
+		// fired. /api/status, the history snapshot, and the RLS
+		// model loop all depend on this being accurate.
+		state.LastTargets = out
+		if out != nil {
+			now := time.Now()
+			state.LastDispatch = &now
+		}
+		return out
 	case ModeCharge:
 		targets := chargeAll(store, driverCapacities, state.DriverLimits)
 		state.LastTargets = targets
@@ -380,7 +408,19 @@ func ComputeDispatch(
 	if state.LastDispatch != nil {
 		elapsed := time.Since(*state.LastDispatch).Seconds()
 		if elapsed < float64(state.MinDispatchIntervalS) {
-			return nil
+			// Holdoff suppresses normal re-dispatch, but the
+			// fuse-saver overrides — an overflow can't wait 5 s for
+			// the next eligible tick.
+			out := fuseSaverFromZero(store, state, driverCapacities, fuseMaxW)
+			if out != nil {
+				// Same bookkeeping as the idle path so downstream
+				// consumers (status/history/learner) see the
+				// commanded discharge.
+				state.LastTargets = out
+				now := time.Now()
+				state.LastDispatch = &now
+			}
+			return out
 		}
 	}
 
@@ -644,7 +684,15 @@ func ComputeDispatch(
 	}
 
 	// ---- Fuse guard (bidirectional, #145) ----
-	raw = applyFuseGuard(raw, store, state.SiteMeterDriver, fuseMaxW)
+	raw = applyFuseGuard(raw, store, state, fuseMaxW)
+	// forceFuseDischarge runs LAST, deliberately AFTER the slew loop
+	// at line 625. A fuse overflow can demand a battery target that's
+	// far beyond what slew would normally allow in a single 5 s tick
+	// (e.g. 0 W → −3 kW), and slew-limiting that would leave the
+	// fuse violated for multiple ticks. The fuse is the
+	// non-negotiable ceiling — it bypasses slew. Regression-guarded
+	// by TestFuseSaverBypassesSlew.
+	raw = forceFuseDischarge(raw, store, state, driverCapacities, fuseMaxW)
 
 	// Update state
 	now := time.Now()
@@ -870,10 +918,11 @@ func clampWithSoC(target float64, b batteryInfo) (float64, bool) {
 // can't push aggregate imports past the fuse. The new path also uses
 // live load inference so the discharge side no longer over-scales
 // during high-load hours.
-func applyFuseGuard(targets []DispatchTarget, store *telemetry.Store, siteMeter string, fuseMaxW float64) []DispatchTarget {
-	if fuseMaxW <= 0 {
+func applyFuseGuard(targets []DispatchTarget, store *telemetry.Store, state *State, fuseMaxW float64) []DispatchTarget {
+	if fuseMaxW <= 0 || state == nil {
 		return targets
 	}
+	siteMeter := state.SiteMeterDriver
 	// Aggregate live battery power so we can hold load+pv constant.
 	var currentBat float64
 	for _, r := range store.ReadingsByType(telemetry.DerBattery) {
@@ -891,7 +940,22 @@ func applyFuseGuard(targets []DispatchTarget, store *telemetry.Store, siteMeter 
 	}
 	predicted := currentGrid - currentBat + sumTarget
 
-	if math.Abs(predicted) <= fuseMaxW {
+	// Per-phase import overage: the worst single-phase amperage above
+	// the fuse, expressed as the AGGREGATE battery reduction needed
+	// to bring it back. Assumes a 3Φ balanced battery — each unit of
+	// total battery action contributes 1/3 to each phase, so a worst-
+	// phase overage of N watts requires 3 × N watts of total battery
+	// action to bring it under. Conservative for 1Φ batteries (e.g.
+	// Pixii Home) — they over-correct on the other phases, which
+	// means LESS import on those, still safe. See PR #208 follow-up
+	// in `docs/safety.md` §3a.
+	perPhaseImport := perPhaseImportOverageW(store, state) * 3.0
+	importOverage := predicted - fuseMaxW
+	if perPhaseImport > importOverage {
+		importOverage = perPhaseImport
+	}
+
+	if importOverage <= 0 && math.Abs(predicted) <= fuseMaxW {
 		return targets
 	}
 
@@ -899,9 +963,8 @@ func applyFuseGuard(targets []DispatchTarget, store *telemetry.Store, siteMeter 
 	copy(out, targets)
 
 	switch {
-	case predicted > fuseMaxW:
-		// Too much import → shrink charging.
-		overage := predicted - fuseMaxW
+	case importOverage > 0:
+		// Too much import (aggregate or per-phase) → shrink charging.
 		var totalCharge float64
 		for _, t := range out {
 			if t.TargetW > 0 {
@@ -911,10 +974,11 @@ func applyFuseGuard(targets []DispatchTarget, store *telemetry.Store, siteMeter 
 		if totalCharge <= 0 {
 			// No charge commands to pull back — the overage is load-driven
 			// and nothing this layer can do. Leave targets untouched;
-			// operator/BMS/load shedding is the next lever.
+			// the reactive fuse-saver below (forceFuseDischarge) can
+			// still flip idle batteries to discharge.
 			return out
 		}
-		newTotal := totalCharge - overage
+		newTotal := totalCharge - importOverage
 		if newTotal < 0 {
 			newTotal = 0
 		}
@@ -925,7 +989,7 @@ func applyFuseGuard(targets []DispatchTarget, store *telemetry.Store, siteMeter 
 				out[i].Clamped = true
 			}
 		}
-	default: // predicted < -fuseMaxW
+	case predicted < -fuseMaxW:
 		overage := -fuseMaxW - predicted // positive magnitude over export fuse
 		var totalDischarge float64
 		for _, t := range out {
@@ -950,6 +1014,244 @@ func applyFuseGuard(targets []DispatchTarget, store *telemetry.Store, siteMeter 
 				out[i].Clamped = true
 			}
 		}
+	}
+	return out
+}
+
+// perPhaseImportOverageW returns the wattage by which the worst single
+// phase exceeds the per-phase fuse amperage. 0 when within limits, when
+// per-phase data isn't available, or when the per-phase clamp is
+// disabled (state.SiteFuseAmps == 0). The meter driver must emit
+// l1_a / l2_a / l3_a in DerReading.Data — Pixii, Ferroamp, and Sungrow
+// all do this today.
+func perPhaseImportOverageW(store *telemetry.Store, state *State) float64 {
+	if state == nil || state.SiteFuseAmps <= 0 || state.SiteMeterDriver == "" {
+		return 0
+	}
+	r := store.Get(state.SiteMeterDriver, telemetry.DerMeter)
+	if r == nil || len(r.Data) == 0 {
+		return 0
+	}
+	var d struct {
+		L1A *float64 `json:"l1_a"`
+		L2A *float64 `json:"l2_a"`
+		L3A *float64 `json:"l3_a"`
+	}
+	if err := json.Unmarshal(r.Data, &d); err != nil {
+		return 0
+	}
+	maxA := 0.0
+	for _, p := range []*float64{d.L1A, d.L2A, d.L3A} {
+		if p != nil && *p > maxA {
+			maxA = *p
+		}
+	}
+	if maxA <= state.SiteFuseAmps {
+		return 0
+	}
+	v := state.SiteFuseVoltage
+	if v <= 0 {
+		v = 230 // sensible default; main wires the actual config voltage
+	}
+	return (maxA - state.SiteFuseAmps) * v
+}
+
+// fuseSaverFromZero is the early-return entry point for the fuse-saver.
+// Called from ComputeDispatch branches that would otherwise return nil
+// (idle mode, holdoff window) so the safety primary still gets a chance
+// to fire before we walk away from the cycle. Builds zero-W targets for
+// every battery that is BOTH online (per DriverHealth) AND has a current
+// DerBattery reading, then runs them through forceFuseDischarge; if no
+// overflow is predicted, the result is nil (caller sees the same
+// empty-dispatch behaviour as before). Filtering to online+telemetry
+// matches ComputeDispatch's main path and avoids commanding offline
+// batteries via the fuse-saver back door.
+func fuseSaverFromZero(
+	store *telemetry.Store,
+	state *State,
+	driverCapacities map[string]float64,
+	fuseMaxW float64,
+) []DispatchTarget {
+	if fuseMaxW <= 0 || len(driverCapacities) == 0 || store == nil {
+		return nil
+	}
+	zeros := make([]DispatchTarget, 0, len(driverCapacities))
+	for name := range driverCapacities {
+		h := store.DriverHealth(name)
+		if h == nil || !h.IsOnline() {
+			continue
+		}
+		if r := store.Get(name, telemetry.DerBattery); r == nil {
+			continue
+		}
+		zeros = append(zeros, DispatchTarget{Driver: name, TargetW: 0})
+	}
+	if len(zeros) == 0 {
+		return nil
+	}
+	out := forceFuseDischarge(zeros, store, state, driverCapacities, fuseMaxW)
+	for _, t := range out {
+		if t.TargetW != 0 || t.Clamped {
+			return out
+		}
+	}
+	return nil
+}
+
+// forceFuseDischarge is the reactive fuse-saver primary. It runs AFTER
+// applyFuseGuard and unconditionally drains the home battery whenever
+// predicted grid import would exceed the fuse, regardless of mode,
+// regardless of operator intent (BatteryCoversEV toggle, planner
+// allocation, manual_hold injecting unplanned EV draw, an oven
+// turning on, or any other off-plan load).
+//
+// The contract: under no software-controllable circumstance should
+// the operator's hardware fuse trip because the EMS sat idle while
+// the meter was over the limit. The hardware breaker remains the
+// final cutoff for sub-tick spikes; this layer eliminates
+// steady-state overflow at the 5 s control-tick rate.
+//
+// Why this exists separately from applyFuseGuard:
+//
+//	applyFuseGuard scales POSITIVE (charge) targets DOWN to 0 when
+//	import is over fuse. That helps when the planner asked for a
+//	charge — it prevents the EMS from making the overflow worse —
+//	but cannot help in the common "battery idle, surprise load" case
+//	because there's no charge to shrink. The PR #206 manual_hold
+//	ramp test surfaced this: the EV was pinned at ~5.5 kW while the
+//	home battery sat at 0 W per the planner's idle slot, and gridW
+//	went over fuseSafeMaxW until the operator stopped the test.
+//
+// Algorithm:
+//
+//  1. Recompute predicted gridW after applyFuseGuard's scaling
+//     (currentGrid − currentBat + sumTarget). currentGrid is the
+//     live meter reading and reflects ALL loads including off-plan
+//     EV draw / manual_hold / unplanned spikes.
+//  2. If predicted ≤ fuseMaxW: nothing to do.
+//  3. Otherwise allocate `overage = predicted − fuseMaxW` of
+//     additional discharge, distributed proportionally to each
+//     online battery's remaining discharge headroom (per-battery
+//     MaxDischargeW − current target magnitude, gated on SoC ≥ 5 %).
+//  4. Mark every modified target Clamped so the dispatch trace
+//     shows the fuse-saver fired.
+//
+// Out of scope: sub-tick reactivity. A 5 s tick is the floor here;
+// going faster requires pushing the dispatch loop down to ~1 s.
+// Hardware fuse trips remain the only protection for sub-tick spikes.
+func forceFuseDischarge(
+	targets []DispatchTarget,
+	store *telemetry.Store,
+	state *State,
+	driverCapacities map[string]float64,
+	fuseMaxW float64,
+) []DispatchTarget {
+	if fuseMaxW <= 0 || len(targets) == 0 || state == nil {
+		return targets
+	}
+	// Sum currentBat only across the batteries we're about to control
+	// — uncontrolled or offline batteries' current draw is captured in
+	// the live grid reading already; counting them again would
+	// double-subtract their contribution and mispredict.
+	seenBat := make(map[string]struct{}, len(targets))
+	var currentBat float64
+	for _, t := range targets {
+		if _, seen := seenBat[t.Driver]; seen {
+			continue
+		}
+		seenBat[t.Driver] = struct{}{}
+		if r := store.Get(t.Driver, telemetry.DerBattery); r != nil {
+			currentBat += r.SmoothedW
+		}
+	}
+	var currentGrid float64
+	if state.SiteMeterDriver != "" {
+		if r := store.Get(state.SiteMeterDriver, telemetry.DerMeter); r != nil {
+			currentGrid = r.SmoothedW
+		}
+	}
+	var sumTarget float64
+	for _, t := range targets {
+		sumTarget += t.TargetW
+	}
+	predicted := currentGrid - currentBat + sumTarget
+
+	// Per-phase overage trumps aggregate when bigger. Same balanced-3Φ
+	// assumption as applyFuseGuard (× 3 multiplier on the worst-phase
+	// W to get the equivalent total-battery W needed).
+	perPhaseOverage := perPhaseImportOverageW(store, state) * 3.0
+	overage := predicted - fuseMaxW
+	if perPhaseOverage > overage {
+		overage = perPhaseOverage
+	}
+	if overage <= 0 {
+		return targets
+	}
+
+	type slot struct {
+		idx      int
+		headroom float64
+	}
+	slots := make([]slot, 0, len(targets))
+	var totalHeadroom float64
+	for i, t := range targets {
+		cap, ok := driverCapacities[t.Driver]
+		if !ok || cap <= 0 {
+			continue
+		}
+		r := store.Get(t.Driver, telemetry.DerBattery)
+		if r == nil {
+			continue
+		}
+		soc := 0.1
+		if r.SoC != nil {
+			soc = *r.SoC
+		}
+		if soc < 0.05 {
+			continue // empty pack — can't draw on it
+		}
+		lim := state.DriverLimits[t.Driver]
+		dCap := lim.MaxDischargeW
+		if dCap <= 0 {
+			dCap = MaxCommandW
+		}
+		var alreadyDischarging float64
+		if t.TargetW < 0 {
+			alreadyDischarging = -t.TargetW
+		}
+		room := dCap - alreadyDischarging
+		if room <= 0 {
+			continue
+		}
+		slots = append(slots, slot{idx: i, headroom: room})
+		totalHeadroom += room
+	}
+	if totalHeadroom <= 0 {
+		return targets
+	}
+
+	allocate := overage
+	if allocate > totalHeadroom {
+		allocate = totalHeadroom
+	}
+
+	out := make([]DispatchTarget, len(targets))
+	copy(out, targets)
+	for _, s := range slots {
+		share := allocate * (s.headroom / totalHeadroom)
+		// Subtract `share` from the existing target — that gives the
+		// algorithm one consistent rule across all signs:
+		//   +3000 - 2960 = +40   (still charging, but reduced)
+		//    0    - 2960 = -2960 (idle → discharge)
+		//   -1000 - 960  = -1960 (already discharging → more)
+		// The net change to sumTarget is exactly `share`, so the
+		// post-dispatch predicted gridW lands at fuseMaxW. Setting
+		// TargetW = -share when positive (the prior implementation)
+		// over-corrected by the original charge magnitude — letting
+		// out`predicted` undershoot the fuse and discharging more
+		// than necessary.
+		out[s.idx].TargetW -= share
+		out[s.idx].Clamped = true
 	}
 	return out
 }
