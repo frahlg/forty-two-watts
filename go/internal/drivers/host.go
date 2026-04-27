@@ -53,6 +53,14 @@ type HostEnv struct {
 	MQTT       MQTTCap    // nil → mqtt_* calls return ErrNoCapability
 	Modbus     ModbusCap  // nil → modbus_* calls return ErrNoCapability
 	HTTP       bool       // false → http_* calls return ErrNoCapability
+	// HTTPAllowedHosts, when non-empty, restricts which hosts this
+	// driver can reach via host.http_get / host.http_post. Each entry
+	// is matched case-insensitively against the URL's host component
+	// (not the port) — so "192.168.1.50" matches both port 80 and 8080
+	// on that host. Empty list (nil or len==0) = any host allowed, for
+	// backward compat with existing drivers that didn't declare a list.
+	// Populated from driver config `capabilities.http.allowed_hosts`.
+	HTTPAllowedHosts []string
 	Start      time.Time  // monotonic start; host.millis() computed from here
 
 	mu sync.Mutex
@@ -88,6 +96,13 @@ func (h *HostEnv) WithModbus(m ModbusCap) *HostEnv { h.Modbus = m; return h }
 
 // WithHTTP enables the HTTP capability.
 func (h *HostEnv) WithHTTP() *HostEnv { h.HTTP = true; return h }
+
+// WithHTTPAllowedHosts installs an allowlist. An empty / nil slice
+// means "any host" (backward compatible). Matched against URL host.
+func (h *HostEnv) WithHTTPAllowedHosts(hosts []string) *HostEnv {
+	h.HTTPAllowedHosts = hosts
+	return h
+}
 
 // millis returns monotonic milliseconds since host startup.
 func (h *HostEnv) millis() int64 {

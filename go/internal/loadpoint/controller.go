@@ -34,6 +34,15 @@ type Controller struct {
 	tel     TelemetryFunc
 	send    SenderFunc
 
+	// fuseEVMax is the joint fuse-budget allocator's verdict for how much
+	// W this controller may command to the EV this tick. Set by the
+	// dispatch package each control cycle; nil/zero-returning func means
+	// "no fuse constraint" (loadpoint runs at its planner-determined
+	// budget). When the function returns (cap, true) with cap > 0, the
+	// controller clamps the planner's wantW to that cap so battery and
+	// EV cooperatively share the site fuse.
+	fuseEVMax func() (float64, bool)
+
 	// site is the grid-boundary fuse. Its values are passed through
 	// to the driver in every ev_set_current cmd so the driver knows
 	// the per-phase ceiling and the mains voltage. Zero MaxAmps
@@ -113,6 +122,17 @@ type SenderFunc func(ctx context.Context, driver string, payload []byte) error
 // or send disables the corresponding step — useful in tests.
 func NewController(mgr *Manager, plan PlanFunc, tel TelemetryFunc, send SenderFunc) *Controller {
 	return &Controller{manager: mgr, plan: plan, tel: tel, send: send}
+}
+
+// SetFuseEVMax wires the joint allocator's verdict from control.State.
+// Called once at startup from main.go. The returned (cap_w, true) is
+// honored as a hard upper bound on this tick's EV command; (_, false)
+// means no constraint. Pass nil to disable.
+func (c *Controller) SetFuseEVMax(f func() (float64, bool)) {
+	if c == nil {
+		return
+	}
+	c.fuseEVMax = f
 }
 
 // SetSiteFuse installs the grid-boundary fuse so the controller can
@@ -343,6 +363,14 @@ func (c *Controller) computeCommand(now time.Time, lpCfg Config, currentPowerW f
 	alreadyWh := currentPowerW * elapsed / 3600.0
 	remainingWh := budgetWh - alreadyWh
 	wantW := EnergyBudgetToPowerW(remainingWh, remainingS)
+	// Joint fuse allocator (dispatch.go) caps EV demand when battery + EV
+	// would together bust the fuse. Honour it before snapping to the
+	// charger's discrete steps so the snap chooses a level under the cap.
+	if c.fuseEVMax != nil {
+		if cap, ok := c.fuseEVMax(); ok && cap >= 0 && wantW > cap {
+			wantW = cap
+		}
+	}
 	// Clamp to the loadpoint's static MaxChargeW (configured cap; the
 	// driver's per-phase fuse clamp is the ultimate safety stop).
 	return SnapChargeW(wantW, lpCfg.MinChargeW, lpCfg.MaxChargeW, lpCfg.AllowedStepsW), true

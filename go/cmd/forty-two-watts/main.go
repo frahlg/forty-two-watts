@@ -535,6 +535,10 @@ func main() {
 	// ---- Start MPC planner (optional) ----
 	mpcSvc = buildMPC(cfg, st, tel, capacities)
 	if mpcSvc != nil {
+		// Plumb the site fuse so the DP joint-plans battery + EV under
+		// the fuse from the start (instead of producing plans that
+		// dispatch later has to scale via the joint allocator).
+		mpcSvc.FuseMaxW = cfg.Fuse.MaxPowerW()
 		if pvSvc != nil {
 			mpcSvc.PV = pvSvc.Predict
 		}
@@ -549,6 +553,18 @@ func main() {
 				if !st.PluggedIn {
 					continue
 				}
+				// Schedule gate: only extend the DP with an EV-SoC
+				// dimension when the operator has set BOTH a target SoC
+				// and a future deadline. Without a schedule the DP
+				// previously planned EV charging speculatively across
+				// the full 48 h horizon — drawing battery + grid budget
+				// against a target the operator never asked for. With
+				// no schedule, EV is left to the loadpoint controller's
+				// reactive surplus-only behaviour.
+				if st.TargetSoCPct <= 0 || st.TargetTime.IsZero() ||
+					!st.TargetTime.After(time.Now()) {
+					continue
+				}
 				// Pull capacity off the configured loadpoint.
 				var capWh float64 = 60000 // 60 kWh fallback
 				for _, c := range cfg.Loadpoints {
@@ -556,6 +572,54 @@ func main() {
 						capWh = c.VehicleCapacityWh
 						break
 					}
+				}
+				// Prefer live DerVehicle SoC over the loadpoint manager's
+				// inferred plugin-anchor + delivered-Wh estimate. The
+				// inference is blind to BMS truth (Easee can't see the
+				// car); when a vehicle driver such as TeslaBLEProxy is
+				// online, its SoC reading is ground truth.
+				//
+				// Multi-vehicle case: one charger may be paired with N
+				// vehicle drivers (a household with 2 Teslas sharing one
+				// wallbox). Pick the one most likely to be the car
+				// physically connected right now: rank by charging_state
+				// (Charging > NoPower/Starting > Stopped/Complete >
+				// Disconnected/unknown), tiebreak by freshness. Falls
+				// back to inferred SoC when nothing online matches.
+				initSoC := st.CurrentSoCPct
+				socSource := "inferred"
+				var vehicleChargeLimit float64 // 0 = unknown
+				var bestRank = -1
+				var bestUpdated time.Time
+				for _, vr := range tel.ReadingsByType(telemetry.DerVehicle) {
+					if vr.SoC == nil {
+						continue
+					}
+					if h := tel.DriverHealth(vr.Driver); h == nil || !h.IsOnline() {
+						continue
+					}
+					var meta struct {
+						ChargingState  string  `json:"charging_state"`
+						ChargeLimitPct float64 `json:"charge_limit_pct"`
+					}
+					if len(vr.Data) > 0 {
+						_ = json.Unmarshal(vr.Data, &meta)
+					}
+					rank := vehicleConnectedRank(meta.ChargingState)
+					if rank < 0 {
+						continue // explicitly disconnected — not this car
+					}
+					if rank < bestRank {
+						continue
+					}
+					if rank == bestRank && !vr.UpdatedAt.After(bestUpdated) {
+						continue
+					}
+					bestRank = rank
+					bestUpdated = vr.UpdatedAt
+					initSoC = *vr.SoC
+					socSource = "vehicle:" + vr.Driver
+					vehicleChargeLimit = meta.ChargeLimitPct
 				}
 				// Map target time → slot index using the DP's
 				// actual slot length (hour-of-prices vs. 15-min
@@ -572,13 +636,34 @@ func main() {
 						targetSlot = int(delta / (time.Duration(slotLenMin) * time.Minute))
 					}
 				}
+				// Operational ceiling: the lower of the user's target
+				// and the vehicle-configured charge limit. The car
+				// won't accept current beyond charge_limit_pct anyway,
+				// so planning past it is wasted DP grid space. When
+				// the limit is unknown, fall back to the deadline
+				// target itself; never plan beyond what was requested.
+				maxPct := st.TargetSoCPct
+				if vehicleChargeLimit > 0 && vehicleChargeLimit < maxPct {
+					maxPct = vehicleChargeLimit
+				}
+				// Guard against degenerate grids: if current SoC > maxPct
+				// (already over target), grow the ceiling to current so
+				// the DP can at least represent it (no charging will be
+				// scheduled). The deadline penalty handles the rest.
+				if initSoC > maxPct {
+					maxPct = initSoC
+				}
+				slog.Debug("mpc: loadpoint spec",
+					"id", st.ID, "soc_pct", initSoC, "soc_source", socSource,
+					"target_pct", st.TargetSoCPct, "target_slot", targetSlot,
+					"max_pct", maxPct, "vehicle_limit_pct", vehicleChargeLimit)
 				return &mpc.LoadpointSpec{
 					ID:              st.ID,
 					CapacityWh:      capWh,
 					Levels:          11,
 					MinPct:          0,
-					MaxPct:          100,
-					InitialSoCPct:   st.CurrentSoCPct,
+					MaxPct:          maxPct,
+					InitialSoCPct:   initSoC,
 					PluggedIn:       true,
 					TargetSoCPct:    st.TargetSoCPct,
 					TargetSlotIdx:   targetSlot,
@@ -667,6 +752,15 @@ func main() {
 			"horizon", mpcSvc.Horizon,
 			"interval", mpcSvc.Interval,
 			"pvtwin", pvSvc != nil)
+		// Startup replan: the scheduled tick is up to mpcSvc.Interval
+		// (15 min) away. Don't make the operator wait — fire one
+		// immediately so /api/mpc/plan is populated as soon as
+		// telemetry, prices, and forecasts have settled.
+		go func() {
+			time.Sleep(2 * time.Second) // give drivers a moment to seed SoC
+			_ = mpcSvc.Replan(ctx)
+			slog.Info("mpc: startup replan completed")
+		}()
 	}
 
 	// ---- EV loadpoint controller ----
@@ -718,6 +812,18 @@ func main() {
 			MaxAmps:  cfg.Fuse.MaxAmps,
 			Voltage:  cfg.Fuse.Voltage,
 			PhaseCnt: cfg.Fuse.Phases,
+		})
+		// Wire the joint fuse-budget allocator: when battery + EV would
+		// together bust the fuse, dispatch publishes a cap on EV W; the
+		// loadpoint controller honours it so battery and EV cooperatively
+		// share the budget instead of oscillating against the fuse guard.
+		lpController.SetFuseEVMax(func() (float64, bool) {
+			ctrlMu.Lock()
+			defer ctrlMu.Unlock()
+			if !ctrl.FuseSaturated {
+				return 0, false
+			}
+			return ctrl.FuseEVMaxW, true
 		})
 	}
 
@@ -1028,6 +1134,18 @@ func main() {
 	ticker := time.NewTicker(controlInterval)
 	defer ticker.Stop()
 	var saveCount uint64
+	// Track FuseSaturated edge so we replan once when the joint allocator
+	// kicks in — the plan was made without knowledge of the live overage,
+	// and a replan with current EV/PV/load state usually finds a feasible
+	// schedule that doesn't fight the fuse.
+	var prevFuseSaturated bool
+	var lastFuseReplan time.Time
+	const fuseReplanCooldown = 60 * time.Second
+	// One-shot replan when the FIRST DerVehicle reading arrives. The
+	// startup replan ran with whatever fallback SoC was available; once
+	// the Tesla / vehicle driver gets ground truth from the car, the
+	// plan should incorporate it (especially for EV target deadlines).
+	var vehicleReplanFired bool
 	for {
 		select {
 		case <-sigc:
@@ -1140,6 +1258,42 @@ func main() {
 			// → snap → send) is owned by loadpoint.Controller so the
 			// main tick stays a thin orchestrator. See issue #172.
 			lpController.Tick(ctx, time.Now())
+
+			// ---- Trigger MPC replan on fuse-saturation rising edge ----
+			// The joint allocator (control.dispatch) just throttled
+			// battery and EV to fit under the fuse. The plan was built
+			// without seeing this overage, so let MPC redraw with current
+			// state — usually it finds a slot allocation that doesn't
+			// require both battery charge and full-bore EV simultaneously.
+			ctrlMu.Lock()
+			fuseSatNow := ctrl.FuseSaturated
+			ctrlMu.Unlock()
+			if mpcSvc != nil && fuseSatNow && !prevFuseSaturated && time.Since(lastFuseReplan) > fuseReplanCooldown {
+				lastFuseReplan = time.Now()
+				go mpcSvc.Replan(ctx)
+				slog.Info("fuse-saturated → MPC replan triggered")
+			}
+			prevFuseSaturated = fuseSatNow
+
+			// First-vehicle-SoC replan trigger: as soon as any
+			// DerVehicle driver is online and reporting SoC, redo the
+			// plan once with measured-truth instead of the pluginSoC
+			// estimate the startup replan used.
+			if mpcSvc != nil && !vehicleReplanFired {
+				for _, vr := range tel.ReadingsByType(telemetry.DerVehicle) {
+					if vr.SoC == nil {
+						continue
+					}
+					if h := tel.DriverHealth(vr.Driver); h == nil || !h.IsOnline() {
+						continue
+					}
+					vehicleReplanFired = true
+					go mpcSvc.Replan(ctx)
+					slog.Info("first vehicle SoC seen → MPC replan triggered",
+						"driver", vr.Driver, "soc", *vr.SoC)
+					break
+				}
+			}
 
 			// ---- Record history snapshot ----
 			recordHistory(st, tel, ctrl, nowMs)
@@ -1343,10 +1497,12 @@ func isLikelyEVDriver(luaPath string) bool {
 	}
 	base = strings.TrimSuffix(base, ".lua")
 	for _, p := range []string{
-		"easee",       // easee_cloud.lua, easee.lua
-		"ocpp",        // ocpp_cp.lua, ocpp_csms.lua
-		"ctek",        // ctek.lua, ctek_mqtt.lua, ctek_v2.lua
-		"chargestorm", // CTEK Chargestorm variants
+		"easee",         // easee_cloud.lua, easee.lua
+		"ocpp",          // ocpp_cp.lua, ocpp_csms.lua
+		"ctek",          // ctek.lua, ctek_mqtt.lua, ctek_v2.lua
+		"chargestorm",   // CTEK Chargestorm variants
+		"tesla_vehicle", // tesla_vehicle.lua — DerVehicle emitter (BLE proxy)
+		"vehicle",       // generic vehicle drivers — anything emitting DerVehicle should NOT be counted as a stationary battery
 	} {
 		if strings.HasPrefix(base, p) {
 			return true
@@ -1563,6 +1719,26 @@ func isConfigMissing(err error) bool {
 		return true
 	}
 	return strings.Contains(err.Error(), "no such file")
+}
+
+// vehicleConnectedRank scores how likely a DerVehicle driver is to be the
+// one physically plugged into the loadpoint right now, based on Tesla
+// Owner-API charging_state semantics (other vendors use the same
+// vocabulary). Higher rank = more likely connected. Negative = explicitly
+// not connected; caller should skip.
+func vehicleConnectedRank(chargingState string) int {
+	switch chargingState {
+	case "Charging", "Starting":
+		return 3 // actively pulling power — definitely this car
+	case "NoPower":
+		return 2 // plugged but wallbox not delivering yet
+	case "Stopped", "Complete":
+		return 1 // plugged + idle (charge limit reached, paused, etc.)
+	case "Disconnected":
+		return -1 // explicitly unplugged — never pick this one
+	default:
+		return 0 // unknown/missing — usable but de-prioritised
+	}
 }
 
 func recordHistory(st *state.Store, tel *telemetry.Store, ctrl *control.State, nowMs int64) {

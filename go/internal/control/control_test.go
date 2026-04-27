@@ -702,6 +702,208 @@ func TestEnergyDispatchDoesNotAbsorbPVSurprise(t *testing.T) {
 	}
 }
 
+// Regression: BatteryCoversEV=false must hold on the energy-allocation
+// path too. Operator report 2026-04-27: "I have 'let battery cover ev'
+// disabled now, even though it discharges into the EV." Cause: the
+// energy-dispatch branch consulted neither BatteryCoversEV nor the
+// EV draw, blindly executing the plan's BatteryEnergyWh directive.
+//
+// Scenario: EV pulling 4 kW, house side importing 200 W, plan wants
+// to discharge ~1 kWh this slot (≈ 4 kW). Toggle says battery shall
+// not feed the EV. Expected: battery discharges only as much as the
+// house alone needs (~200 W), NOT the planner's 4 kW.
+func TestEnergyDispatchHonorsBatteryCoversEVOff(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: -1000, // plan: discharge 1 kWh this slot (~ -4 kW)
+		Strategy:        "arbitrage",
+	}
+	// rawGridW = 4200 W (200 W house + 4000 W EV importing). Battery 0.
+	store := seedStore(4200, []struct {
+		name    string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	st := newStateWithEnergyDispatch(dir, "ferroamp")
+	st.EVChargingW = 4000     // manual injection — no EV driver in store
+	st.BatteryCoversEV = false // explicit; the contended toggle
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	got := targets[0].TargetW
+	// Allowed: discharge up to ~ house import (200 W). Forbidden:
+	// discharge of EV magnitude (~ -4000 W).
+	if got < -500 {
+		t.Errorf("TargetW = %f W — battery is discharging into the EV despite BatteryCoversEV=false. "+
+			"Expected at most ~ -200 W (house side only).", got)
+	}
+}
+
+// Counter-test: with BatteryCoversEV=true, the energy path stays unchanged —
+// plan's full discharge is honored.
+func TestEnergyDispatchBatteryCoversEVOnLetsPlanRun(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: -1000,
+		Strategy:        "arbitrage",
+	}
+	store := seedStore(4200, []struct {
+		name    string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	st := newStateWithEnergyDispatch(dir, "ferroamp")
+	st.EVChargingW = 4000
+	st.BatteryCoversEV = true // opt-in: planner runs as-is
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	got := targets[0].TargetW
+	// Plan wanted ~ -4000 W. Tolerate slew/clamp drift but expect heavy discharge.
+	if got > -1500 {
+		t.Errorf("TargetW = %f W — plan wanted ~ -4000 W, but battery is barely discharging. "+
+			"BatteryCoversEV=true should let the planner's directive run.", got)
+	}
+}
+
+// Joint fuse-budget allocator: when EV draw + plan's battery charge would
+// exceed the fuse, both should be scaled proportionally — battery charge
+// reduced AND state.FuseEVMaxW published so the loadpoint controller can
+// curtail the EV. Operator report: oscillation loop where plan ramps
+// battery, fuse guard cuts it, plan ramps again.
+//
+// Scenario: house 200 W, EV at 8 kW, plan wants battery +5 kW, fuse 11 kW.
+// Naive: total grid = 200+8000+5000 = 13.2 kW → fuse busts.
+// Joint allocator: scale = (11000-200-0)/(5000+8000) ≈ 0.831.
+//   battery charge → ~4150 W
+//   FuseEVMaxW    → ~6650 W
+//   sum + house    ≈ 11.0 kW. Fuse respected.
+func TestJointFuseAllocatorScalesBothBatteryAndEV(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: 1250, // ~5 kW for 15 min
+		Strategy:        "arbitrage",
+	}
+	// rawGridW = 13.2 kW (importing — house 200 + EV 8000 + plan-imminent
+	// battery 5000, but battery currentW=0 means it's not yet charging,
+	// so right now grid is 200+8000=8200. Plan WANTS battery to add 5kW.
+	// Use 8200 to model the live state at the start of the tick.)
+	store := seedStore(8200, []struct {
+		name    string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	st := newStateWithEnergyDispatch(dir, "ferroamp")
+	st.EVChargingW = 8000
+	st.BatteryCoversEV = true // not the toggle under test; let plan run
+
+	const fuseMaxW = 11000
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), fuseMaxW)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	got := targets[0].TargetW
+	// Allocator contract: FuseEVMaxW published so loadpoint can throttle.
+	// In *this* tick, EV is still at 8 kW (hasn't seen the cap yet), so the
+	// existing fuse guard further clamps battery to ~2800 W (= 11000 −
+	// 8200). Within 1 follow-up tick (after EV throttles to ~6650 W),
+	// battery climbs to ~4150 W. Joint stable point: 4150 + 6650 = 10800
+	// + 200 house = 11 kW = fuse.
+	if got > 4500 {
+		t.Errorf("TargetW = %.0f W — battery charge not cut by joint allocator (want ≤ 4500)", got)
+	}
+	if got < 0 {
+		t.Errorf("TargetW = %.0f W — battery shouldn't be discharging here", got)
+	}
+	if !st.FuseSaturated {
+		t.Errorf("FuseSaturated = false; want true after joint scaling")
+	}
+	// EV cap is the allocator's verdict (independent of fuse guard's
+	// in-tick safety net): scale × current EV ≈ 0.831 × 8000 ≈ 6650.
+	if st.FuseEVMaxW < 6000 || st.FuseEVMaxW > 7200 {
+		t.Errorf("FuseEVMaxW = %.0f — want ~6650 (scaled EV cap)", st.FuseEVMaxW)
+	}
+	// Sanity: post-dispatch projected grid stays at or below fuse.
+	projected := 8200.0 + got
+	if projected > fuseMaxW+50 {
+		t.Errorf("projected grid %.0f W > fuse %.0f after dispatch", projected, float64(fuseMaxW))
+	}
+}
+
+// Counter-test: when battery wants to discharge, no scaling — discharge
+// helps the fuse rather than competing with the EV.
+func TestJointFuseAllocatorIgnoresDischarge(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: -1000, // discharge
+		Strategy:        "arbitrage",
+	}
+	store := seedStore(8200, []struct {
+		name    string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	st := newStateWithEnergyDispatch(dir, "ferroamp")
+	st.EVChargingW = 8000
+	st.BatteryCoversEV = true // discharge into EV explicitly OK
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11000)
+	got := targets[0].TargetW
+	// Plan wanted ~ -4000 W discharge. Should run roughly as planned —
+	// discharge counts AGAINST grid, so doesn't fight EV.
+	if got > -1500 {
+		t.Errorf("TargetW = %.0f W — discharge unexpectedly cut", got)
+	}
+	if st.FuseSaturated {
+		t.Errorf("FuseSaturated = true; want false (discharge helps fuse, no joint scaling needed)")
+	}
+}
+
+// No EV competition: plan wants battery charge, no EV active. Allocator
+// must not interfere even if rawGridW is high (fuse guard handles that).
+func TestJointFuseAllocatorNoOpWithoutEV(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: 1250,
+		Strategy:        "arbitrage",
+	}
+	store := seedStore(200, []struct {
+		name    string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	st := newStateWithEnergyDispatch(dir, "ferroamp")
+	st.EVChargingW = 0
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11000)
+	got := targets[0].TargetW
+	if got < 4500 || got > 5500 {
+		t.Errorf("TargetW = %.0f — no EV present, plan should run as-is (~5000 W)", got)
+	}
+	if st.FuseSaturated {
+		t.Errorf("FuseSaturated = true with no EV — should be false")
+	}
+}
+
 // Slot rollover: when SlotDirective returns a new SlotStart, the delivered
 // accumulator must reset so the next slot starts from zero.
 func TestEnergyDispatchResetsOnSlotRollover(t *testing.T) {

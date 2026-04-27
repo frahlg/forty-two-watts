@@ -592,6 +592,9 @@ class FtwEnergyFlow extends FtwElement {
         sub: p.sub,
         color: p.color,
         soc: p.placeholder ? null : p.soc,
+        chargeLimit: p.placeholder ? null : p.chargeLimit,
+        socStale: !p.placeholder && !!p.socStale,
+        socSource: p.placeholder ? null : p.socSource,
         radius: p._r,
         clickable: !p.placeholder && !!p.role,
         role: p.role || "",
@@ -1324,7 +1327,9 @@ function hashStr(s) {
 // a multi-device 55 px circle both read proportionally. Stroke is the
 // accent color so each node carries its identity on the edge of the
 // circle — no separate stripe needed the way rectangular boxes have.
-function renderCircleNode({ pos, title, nameLabel, value, sub, color, soc, radius = 86,
+function renderCircleNode({ pos, title, nameLabel, value, sub, color, soc,
+                            chargeLimit = null, socStale = false, socSource = null,
+                            radius = 86,
                             clickable = false, role = "", name = "", id = "",
                             aggregated = false }) {
   const r = radius;
@@ -1360,11 +1365,26 @@ function renderCircleNode({ pos, title, nameLabel, value, sub, color, soc, radiu
   // the aggregation layer, "SoC" for a single-battery reading.
   // Honest about provenance — a 72 % on the aggregated bubble is not
   // the same fact as a 72 % on one inverter.
-  const socLabel = aggregated ? "Avg SoC" : "SoC";
-  const socText = soc != null
-    ? `<text x="${x}" y="${y + socY}" text-anchor="middle"
-             fill="var(--cyan)" class="sv-node-sub">${socLabel} ${Math.round(soc)}%</text>`
-    : "";
+  // The "%" makes "SoC" redundant — drop the label, keep only the
+  // value. Aggregated batteries still get an "Avg" prefix to flag the
+  // value is a cross-battery mean. EV planets gain two honesty markers:
+  //  - "~" prefix when the value came from the inferred path (pluginSoC
+  //    + deliveredWh) instead of the vehicle's own BMS.
+  //  - "★" suffix when the vehicle reading is stale (driver lost
+  //    contact with the car for more than its stale_after_s window).
+  // When a charge-limit is also known, render as "24/50%" — no spaces
+  // around the slash, the format reads as "current of limit".
+  let socText = "";
+  if (soc != null) {
+    const socPrefix = socSource === "inferred" ? "~" : "";
+    const aggPrefix = aggregated ? "Avg " : "";
+    const staleMark = socStale ? " ★" : "";
+    const socBody = chargeLimit != null && chargeLimit > 0
+      ? `${socPrefix}${Math.round(soc)}/${Math.round(chargeLimit)}%`
+      : `${socPrefix}${Math.round(soc)}%`;
+    socText = `<text x="${x}" y="${y + socY}" text-anchor="middle"
+             fill="var(--cyan)" class="sv-node-sub">${aggPrefix}${socBody}${staleMark}</text>`;
+  }
   // Icon swapped in during the loading + fade-in phases. Scale chosen
   // so a full-size planet (r ≈ 86) hosts a ~30 px icon — readable at
   // the overview zoom without competing with the text once it fades
