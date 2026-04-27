@@ -173,14 +173,21 @@ function driver_poll()
   --
   -- BUT once every WAKEUP_INTERVAL_MS (30 min) we DO request a
   -- wakeup so cached data can't drift forever while the car sleeps.
+  -- last_wakeup_ms == 0 is the "never woken since process start" sentinel
+  -- so the FIRST poll after startup always forces a wakeup. The car may
+  -- have been asleep for hours while forty-two-watts was down — we want
+  -- ground-truth SoC on the dashboard immediately, not the proxy's stale
+  -- cache from the previous run. After this initial wake, the 30-min
+  -- cadence takes over.
   local now = host.millis()
-  local do_wakeup = (now - last_wakeup_ms) >= WAKEUP_INTERVAL_MS
+  local do_wakeup = (last_wakeup_ms == 0) or ((now - last_wakeup_ms) >= WAKEUP_INTERVAL_MS)
   local url = base_url .. "/api/1/vehicles/" .. vin ..
               "/vehicle_data?endpoints=charge_state"
   if do_wakeup then
     url = url .. "&wakeup=true"
+    local reason = (last_wakeup_ms == 0) and "startup" or "30-min cadence"
     last_wakeup_ms = now
-    host.log("info", "tesla: forcing BLE wakeup on this poll (30-min cadence)")
+    host.log("info", "tesla: forcing BLE wakeup on this poll (" .. reason .. ")")
   end
   -- host.http_get returns (body_string, nil) or (nil, error_string) —
   -- first return is the body directly, NOT a table with .body. The
