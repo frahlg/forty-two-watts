@@ -1365,25 +1365,25 @@ function renderCircleNode({ pos, title, nameLabel, value, sub, color, soc,
   // the aggregation layer, "SoC" for a single-battery reading.
   // Honest about provenance — a 72 % on the aggregated bubble is not
   // the same fact as a 72 % on one inverter.
-  const socLabel = aggregated ? "Avg SoC" : "SoC";
-  // EV planets gain two extra honesty markers beyond plain SoC%:
+  // The "%" makes "SoC" redundant — drop the label, keep only the
+  // value. Aggregated batteries still get an "Avg" prefix to flag the
+  // value is a cross-battery mean. EV planets gain two honesty markers:
   //  - "~" prefix when the value came from the inferred path (pluginSoC
-  //    + deliveredWh) instead of the vehicle's own BMS — operator can
-  //    see at a glance which number is measured vs estimated.
+  //    + deliveredWh) instead of the vehicle's own BMS.
   //  - "★" suffix when the vehicle reading is stale (driver lost
   //    contact with the car for more than its stale_after_s window).
-  // When a charge-limit is also known (e.g. the Tesla app's "charge
-  // to 50 %"), render as "SoC 24 / 50 %" so the operator sees current
-  // and the vehicle-configured ceiling in one line.
+  // When a charge-limit is also known, render as "24/50%" — no spaces
+  // around the slash, the format reads as "current of limit".
   let socText = "";
   if (soc != null) {
     const socPrefix = socSource === "inferred" ? "~" : "";
+    const aggPrefix = aggregated ? "Avg " : "";
     const staleMark = socStale ? " ★" : "";
     const socBody = chargeLimit != null && chargeLimit > 0
-      ? `${socPrefix}${Math.round(soc)} / ${Math.round(chargeLimit)}%`
+      ? `${socPrefix}${Math.round(soc)}/${Math.round(chargeLimit)}%`
       : `${socPrefix}${Math.round(soc)}%`;
     socText = `<text x="${x}" y="${y + socY}" text-anchor="middle"
-             fill="var(--cyan)" class="sv-node-sub">${socLabel} ${socBody}${staleMark}</text>`;
+             fill="var(--cyan)" class="sv-node-sub">${aggPrefix}${socBody}${staleMark}</text>`;
   }
   // Icon swapped in during the loading + fade-in phases. Scale chosen
   // so a full-size planet (r ≈ 86) hosts a ~30 px icon — readable at

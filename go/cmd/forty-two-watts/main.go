@@ -719,6 +719,15 @@ func main() {
 			"horizon", mpcSvc.Horizon,
 			"interval", mpcSvc.Interval,
 			"pvtwin", pvSvc != nil)
+		// Startup replan: the scheduled tick is up to mpcSvc.Interval
+		// (15 min) away. Don't make the operator wait — fire one
+		// immediately so /api/mpc/plan is populated as soon as
+		// telemetry, prices, and forecasts have settled.
+		go func() {
+			time.Sleep(2 * time.Second) // give drivers a moment to seed SoC
+			_ = mpcSvc.Replan(ctx)
+			slog.Info("mpc: startup replan completed")
+		}()
 	}
 
 	// ---- EV loadpoint controller ----
@@ -1099,6 +1108,11 @@ func main() {
 	var prevFuseSaturated bool
 	var lastFuseReplan time.Time
 	const fuseReplanCooldown = 60 * time.Second
+	// One-shot replan when the FIRST DerVehicle reading arrives. The
+	// startup replan ran with whatever fallback SoC was available; once
+	// the Tesla / vehicle driver gets ground truth from the car, the
+	// plan should incorporate it (especially for EV target deadlines).
+	var vehicleReplanFired bool
 	for {
 		select {
 		case <-sigc:
@@ -1227,6 +1241,26 @@ func main() {
 				slog.Info("fuse-saturated → MPC replan triggered")
 			}
 			prevFuseSaturated = fuseSatNow
+
+			// First-vehicle-SoC replan trigger: as soon as any
+			// DerVehicle driver is online and reporting SoC, redo the
+			// plan once with measured-truth instead of the pluginSoC
+			// estimate the startup replan used.
+			if mpcSvc != nil && !vehicleReplanFired {
+				for _, vr := range tel.ReadingsByType(telemetry.DerVehicle) {
+					if vr.SoC == nil {
+						continue
+					}
+					if h := tel.DriverHealth(vr.Driver); h == nil || !h.IsOnline() {
+						continue
+					}
+					vehicleReplanFired = true
+					go mpcSvc.Replan(ctx)
+					slog.Info("first vehicle SoC seen → MPC replan triggered",
+						"driver", vr.Driver, "soc", *vr.SoC)
+					break
+				}
+			}
 
 			// ---- Record history snapshot ----
 			recordHistory(st, tel, ctrl, nowMs)
