@@ -1464,10 +1464,12 @@ func isLikelyEVDriver(luaPath string) bool {
 	}
 	base = strings.TrimSuffix(base, ".lua")
 	for _, p := range []string{
-		"easee",       // easee_cloud.lua, easee.lua
-		"ocpp",        // ocpp_cp.lua, ocpp_csms.lua
-		"ctek",        // ctek.lua, ctek_mqtt.lua, ctek_v2.lua
-		"chargestorm", // CTEK Chargestorm variants
+		"easee",         // easee_cloud.lua, easee.lua
+		"ocpp",          // ocpp_cp.lua, ocpp_csms.lua
+		"ctek",          // ctek.lua, ctek_mqtt.lua, ctek_v2.lua
+		"chargestorm",   // CTEK Chargestorm variants
+		"tesla_vehicle", // tesla_vehicle.lua — DerVehicle emitter (BLE proxy)
+		"vehicle",       // generic vehicle drivers — anything emitting DerVehicle should NOT be counted as a stationary battery
 	} {
 		if strings.HasPrefix(base, p) {
 			return true
