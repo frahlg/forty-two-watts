@@ -46,9 +46,16 @@ PROTOCOL = "http"
 local PROXY_PORT        = 8080
 local POLL_INTERVAL_MS  = 60000
 local STALE_AFTER_MS    = 900000
+-- Every WAKEUP_INTERVAL_MS we attach `wakeup=true` to ONE poll so the
+-- proxy forces a BLE wake. Without this the proxy serves cached data
+-- indefinitely while the car sleeps and our SoC slowly drifts from
+-- reality. 30 min is a balance between freshness and not draining the
+-- 12 V battery from constant BLE wakes.
+local WAKEUP_INTERVAL_MS = 1800000
 
 local base_url = nil
 local vin = nil
+local last_wakeup_ms = 0
 
 -- Cached last-known reading so we can keep publishing a value while
 -- the vehicle is asleep. Tesla returns 408 "vehicle unavailable" when
@@ -158,16 +165,23 @@ function driver_poll()
   -- endpoints=charge_state narrows the response to just what we
   -- care about (SoC + limit + charging_state + time_to_full).
   --
-  -- wakeup=true is intentionally OMITTED. The proxy returns
+  -- wakeup=true is OFF on the steady-state poll. The proxy returns
   -- cached data from its own background sync (typically ≤ 5 s
-  -- fresh, fine for our 60 s poll cadence + pokes). Forcing a
-  -- BLE wake on every poll caused HTTP 503 "Command Disallowed"
-  -- storms when the driver was poked alongside regular polls —
-  -- BLE radio can only service one command at a time and our
-  -- poke-on-plug-in + poke-on-charging-start stacked queries
-  -- faster than the proxy could complete them.
+  -- fresh, fine for our 60 s poll cadence + pokes). Forcing a BLE
+  -- wake on every poll caused HTTP 503 "Command Disallowed" storms
+  -- when the driver was poked alongside regular polls.
+  --
+  -- BUT once every WAKEUP_INTERVAL_MS (30 min) we DO request a
+  -- wakeup so cached data can't drift forever while the car sleeps.
+  local now = host.millis()
+  local do_wakeup = (now - last_wakeup_ms) >= WAKEUP_INTERVAL_MS
   local url = base_url .. "/api/1/vehicles/" .. vin ..
               "/vehicle_data?endpoints=charge_state"
+  if do_wakeup then
+    url = url .. "&wakeup=true"
+    last_wakeup_ms = now
+    host.log("info", "tesla: forcing BLE wakeup on this poll (30-min cadence)")
+  end
   -- host.http_get returns (body_string, nil) or (nil, error_string) —
   -- first return is the body directly, NOT a table with .body. The
   -- earlier tesla_vehicle iterations treated it as a table and got
