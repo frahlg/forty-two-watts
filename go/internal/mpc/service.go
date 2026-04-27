@@ -89,6 +89,15 @@ type Service struct {
 	// derive actual load = grid − pv − bat. Empty = skip load check.
 	SiteMeter string
 
+	// FuseMaxW is the site's grid fuse ceiling (W). When > 0, every slot
+	// passed to Optimize gets `Limits.MaxImportW = FuseMaxW`, so the DP
+	// joint-plans battery + EV in a way that respects the fuse from the
+	// start — battery charge + EV charge + house net can't exceed this.
+	// Without this, the DP can prescribe (battery_charge + EV_charge)
+	// totals that bust the fuse, and dispatch has to scale them at
+	// execution time. Wired from main.go (cfg.Fuse → fuseMaxW).
+	FuseMaxW float64
+
 	lastReplanAt time.Time
 	lastReason   string // "scheduled" | "reactive-pv" | "reactive-load" | "manual"
 
@@ -517,6 +526,18 @@ func (s *Service) replan(_ context.Context) *Plan {
 	slots := buildSlots(prices, forecasts, s.BaseLoad, now.UnixMilli(), s.PV, s.Load)
 	if len(slots) == 0 {
 		return nil
+	}
+
+	// Plumb the site fuse into per-slot limits so the DP joint-plans
+	// battery + EV under the fuse constraint instead of producing plans
+	// that dispatch then has to scale at execution time. The DP already
+	// honours Slot.Limits.MaxImportW (mpc.go:450); we just feed it.
+	if s.FuseMaxW > 0 {
+		for i := range slots {
+			if slots[i].Limits.MaxImportW <= 0 || slots[i].Limits.MaxImportW > s.FuseMaxW {
+				slots[i].Limits.MaxImportW = s.FuseMaxW
+			}
+		}
 	}
 
 	// Current SoC: average of battery readings (weighted by capacity is

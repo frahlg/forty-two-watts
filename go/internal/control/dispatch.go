@@ -195,6 +195,18 @@ type State struct {
 	// preserves the capacity-proportional default. Issue #143.
 	InverterGroups map[string]string
 
+	// FuseEVMaxW is the joint allocator's verdict for the EV's allowed
+	// wattage this tick. Only meaningful when FuseSaturated is true.
+	// Read by the loadpoint controller (via a hook) to curtail the EV
+	// command so battery and EV cooperatively share the fuse budget.
+	// Recomputed every dispatch tick.
+	FuseEVMaxW float64
+	// FuseSaturated signals that the joint allocator had to scale battery
+	// and/or EV demand to fit under the fuse this tick. Used to gate the
+	// loadpoint controller's read of FuseEVMaxW and as the trigger for
+	// an MPC reactive replan from main.go.
+	FuseSaturated bool
+
 	// DriverLimits maps driver name → per-battery charge/discharge cap.
 	// Missing entries (or zero fields) fall through to the global
 	// MaxCommandW default. Consulted in every clamp step — per-battery
@@ -549,6 +561,23 @@ func ComputeDispatch(
 		// GridTargetW, producing wrong corrections.
 		state.SetGridTarget(0)
 		state.PI.Reset()
+
+		// BatteryCoversEV=false safety net: the energy path executes the
+		// plan's BatteryEnergyWh directive blindly, but the MPC may have
+		// planned battery→EV transfers (it joint-optimises both). Cap any
+		// commanded discharge to the level the reactive path would target
+		// — i.e. enough to zero the *house* side, not to feed the EV.
+		// Charging is left untouched. Mirrors the dispatch.go:453 rule on
+		// the legacy path. The MPC also gets a NoBatteryToEV constraint
+		// so the plan stops prescribing what dispatch then has to censor.
+		if !state.BatteryCoversEV && state.EVChargingW > 0 && targetTotalW < 0 {
+			houseGridW := rawGridW - state.EVChargingW
+			reactiveTotal := currentTotal - houseGridW
+			if targetTotalW < reactiveTotal {
+				targetTotalW = reactiveTotal
+			}
+		}
+
 		totalCorrection = targetTotalW - currentTotal
 	default:
 		// Legacy PI-on-grid-target path. Used by:
@@ -591,6 +620,51 @@ func ComputeDispatch(
 		}
 		out := state.PI.Update(piMeasurement)
 		totalCorrection = out.Output
+	}
+
+	// ---- Joint fuse-budget allocator ----
+	// When EV draw + commanded battery charge would exceed the site fuse,
+	// scale BOTH proportionally so they share the budget rather than
+	// oscillating against each other (battery ramps up per plan → fuse
+	// guard cuts it → plan ramps again next tick — operator report
+	// 2026-04-27). The battery side is mutated here; the EV side is
+	// published via state.FuseEVMaxW + FuseSaturated for the loadpoint
+	// controller to read on its next Tick.
+	//
+	// Math (site sign, + = import):
+	//   targetTotal = currentTotal + totalCorrection
+	//   B  = max(0, targetTotal)        battery charge component (≥0)
+	//   Bn = min(0, targetTotal)        battery discharge component (≤0)
+	//   E  = state.EVChargingW          EV draw (≥0)
+	//   H  = rawGridW − currentTotal − E   "house" net (load + PV)
+	//   newGrid' = H + (Bn + B*scale) + E*scale
+	//   solve newGrid' ≤ fuseMaxW  ⇒  scale ≤ (fuseMaxW − H − Bn) / (B + E)
+	//
+	// Discharge alone never trips this — Bn is negative, so it lifts the
+	// numerator (more headroom). Only positive battery demand competes
+	// with EV.
+	state.FuseEVMaxW = 0
+	state.FuseSaturated = false
+	if fuseMaxW > 0 && state.EVChargingW > 0 {
+		targetTotal := currentTotal + totalCorrection
+		B := math.Max(0, targetTotal)
+		Bn := math.Min(0, targetTotal)
+		E := state.EVChargingW
+		H := rawGridW - currentTotal - E
+		projectedGrid := H + targetTotal + E
+		if projectedGrid > fuseMaxW && (B+E) > 0 {
+			scale := (fuseMaxW - H - Bn) / (B + E)
+			if scale < 0 {
+				scale = 0
+			}
+			if scale > 1 {
+				scale = 1
+			}
+			newBattery := Bn + B*scale
+			totalCorrection = newBattery - currentTotal
+			state.FuseEVMaxW = E * scale
+			state.FuseSaturated = true
+		}
 	}
 
 	// ---- Per-group PV surplus for DC-local charge routing (#143) ----
