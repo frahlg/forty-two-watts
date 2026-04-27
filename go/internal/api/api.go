@@ -165,6 +165,7 @@ func (s *Server) routes() {
 	s.handle("GET  /api/system/info", s.handleSysInfo)
 	s.handle("GET  /api/config", s.handleGetConfig)
 	s.handle("POST /api/config", s.handlePostConfig)
+	s.handle("POST /api/drivers/verify_tesla", s.handleVerifyTesla)
 	s.handle("GET  /api/mode", s.handleGetMode)
 	s.handle("POST /api/mode", s.handleSetMode)
 	s.handle("POST /api/target", s.handleSetTarget)
@@ -369,6 +370,44 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			d["bat_w"] = r.SmoothedW
 			if r.SoC != nil {
 				d["bat_soc"] = *r.SoC
+			}
+		}
+		// Vehicle (DerVehicle) — read-only BMS readings emitted by
+		// drivers like tesla_vehicle.lua. Surfaced so the per-driver
+		// card can render SoC + charge_limit + charging_state. RawW
+		// is always 0 for vehicle readings (no power channel).
+		if r := s.deps.Tel.Get(name, telemetry.DerVehicle); r != nil {
+			var v struct {
+				SoC                  *float64 `json:"soc"`
+				ChargeLimitPct       *float64 `json:"charge_limit_pct"`
+				ChargingState        *string  `json:"charging_state"`
+				TimeToFullMin        *int     `json:"time_to_full_min"`
+				ChargeAmps           *float64 `json:"charge_amps"`
+				ChargerActualCurrent *float64 `json:"charger_actual_current"`
+				Stale                *bool    `json:"stale"`
+			}
+			if r.Data != nil && json.Unmarshal(r.Data, &v) == nil {
+				if v.SoC != nil {
+					d["vehicle_soc"] = *v.SoC
+				}
+				if v.ChargeLimitPct != nil {
+					d["vehicle_charge_limit_pct"] = *v.ChargeLimitPct
+				}
+				if v.ChargingState != nil {
+					d["vehicle_charging_state"] = *v.ChargingState
+				}
+				if v.TimeToFullMin != nil {
+					d["vehicle_time_to_full_min"] = *v.TimeToFullMin
+				}
+				if v.ChargeAmps != nil {
+					d["vehicle_charge_amps"] = *v.ChargeAmps
+				}
+				if v.ChargerActualCurrent != nil {
+					d["vehicle_charger_actual_current"] = *v.ChargerActualCurrent
+				}
+				if v.Stale != nil {
+					d["vehicle_stale"] = *v.Stale
+				}
 			}
 		}
 		if r := s.deps.Tel.Get(name, telemetry.DerEV); r != nil {

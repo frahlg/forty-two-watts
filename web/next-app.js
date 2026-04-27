@@ -1291,12 +1291,62 @@
       var ticks = d.tick_count != null ? d.tick_count : 0;
       var errors = d.consecutive_errors != null ? d.consecutive_errors : 0;
 
-      // Detect EV driver by presence of any ev_* field. Render a distinct
-      // card body — PV/battery/meter rows are always 0 for EV chargers.
-      var isEV = (d.ev_w != null || d.ev_connected != null || d.ev_charging != null);
+      // Detect driver kind from telemetry shape. Vehicle drivers
+      // (e.g. tesla_vehicle) emit DerVehicle which carries SoC +
+      // charge_limit + charging_state but no power; render a vehicle-
+      // specific body. EV chargers emit DerEV with power. Anything
+      // else falls through to the legacy meter/pv/battery layout.
+      var isVehicle = (d.vehicle_soc != null || d.vehicle_charge_limit_pct != null);
+      var isEV = !isVehicle && (d.ev_w != null || d.ev_connected != null || d.ev_charging != null);
 
       var body;
-      if (isEV) {
+      if (isVehicle) {
+        var vSoc = d.vehicle_soc != null ? Math.round(d.vehicle_soc) : null;
+        var vLimit = d.vehicle_charge_limit_pct != null ? Math.round(d.vehicle_charge_limit_pct) : null;
+        var vState = d.vehicle_charging_state || "—";
+        var vTtf = d.vehicle_time_to_full_min;
+        var vStale = !!d.vehicle_stale;
+        var vAmps = d.vehicle_charge_amps;             // car's in-app current limit
+        var vActual = d.vehicle_charger_actual_current; // current actually flowing
+        var socDisplay = (vSoc != null && vLimit != null)
+          ? vSoc + " / " + vLimit + " %"
+          : (vSoc != null ? vSoc + " %" : "—");
+        if (vStale) socDisplay += " ★";
+        var stateClassV = (vState === "Charging") ? "stat-ok" : (vState === "Disconnected" ? "stat-dim" : "stat-warn");
+        var ttfStr = (vTtf != null && vTtf > 0)
+          ? (vTtf >= 60 ? Math.floor(vTtf / 60) + "h " + (vTtf % 60) + "m" : vTtf + " min")
+          : "—";
+        // Amps row reads "5 / 16 A" (actual / in-app limit) when both
+        // present; flags as warn when actual lags the limit (vehicle
+        // throttled itself or wallbox limit is lower than what the
+        // car would accept). Skipped entirely when neither field is
+        // reported (older proxies).
+        var ampsRow = "";
+        if (vAmps != null || vActual != null) {
+          var ampsText = (vActual != null ? Math.round(vActual) : "?") +
+                         " / " +
+                         (vAmps != null ? Math.round(vAmps) : "?") +
+                         " A";
+          var ampsCls = (vActual != null && vAmps != null && vActual + 0.5 < vAmps)
+            ? "stat-warn" : "stat-value";
+          ampsRow =
+            '  <span class="stat-label">Amps (actual/limit)</span>' +
+            '<span class="stat-value ' + ampsCls + '">' + ampsText + '</span>';
+        }
+        body =
+          '<div class="driver-stats">' +
+          '  <span class="stat-label">SoC</span><span class="stat-value">' + socDisplay + '</span>' +
+          '  <span class="stat-label">State</span><span class="stat-value ' + stateClassV + '">' + escHtml(vState) + '</span>' +
+          ampsRow +
+          '  <span class="stat-label">Time to full</span><span class="stat-value">' + ttfStr + '</span>' +
+          (vStale ? '  <span class="stat-label">Note</span><span class="stat-value stat-warn">data stale</span>' : '') +
+          '  <span class="stat-label">Ticks</span><span class="stat-value">' + ticks + '</span>' +
+          '  <span class="stat-label">Errors</span><span class="stat-value">' + errors + '</span>' +
+          '</div>' +
+          (vSoc != null
+            ? '<div class="driver-soc-bar"><div class="driver-soc-fill" style="width:' + vSoc + '%"></div></div>'
+            : '');
+      } else if (isEV) {
         var evWVal = d.ev_w != null ? d.ev_w : 0;
         // state_label + reason_no_current_label come from the driver —
         // UI renders them verbatim. Protocol knowledge stays in Lua.
@@ -1386,7 +1436,7 @@
         // Inline battery model — rendered from models.js's cached payload.
         // Drawing it here in the same pass as the driver card avoids the
         // earlier race where two independent polls fought over the slot.
-        (!isEV && !(d.disabled === true || d.status === "disabled") && window.renderInlineBatteryModel ? window.renderInlineBatteryModel(name) : "");
+        (!isEV && !isVehicle && !(d.disabled === true || d.status === "disabled") && window.renderInlineBatteryModel ? window.renderInlineBatteryModel(name) : "");
 
       driversGrid.appendChild(card);
     });
