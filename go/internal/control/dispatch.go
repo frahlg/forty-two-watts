@@ -368,13 +368,22 @@ func ComputeDispatch(
 	// ---- Idle + Charge short-circuits ----
 	switch effectiveMode {
 	case ModeIdle:
-		state.LastTargets = nil
 		// Even in idle, the reactive fuse-saver runs: an unplanned
 		// load (manual_hold injecting EV power, oven turning on,
 		// neighbour's pool pump on the same fuse) can push grid
 		// import past the fuse with the battery sitting at 0 W. The
 		// fuse-saver overrides idle and forces discharge.
-		return fuseSaverFromZero(store, state, driverCapacities, fuseMaxW)
+		out := fuseSaverFromZero(store, state, driverCapacities, fuseMaxW)
+		// LastTargets reflects what we actually issued: nil when
+		// the fuse-saver no-op'd, the discharge targets when it
+		// fired. /api/status, the history snapshot, and the RLS
+		// model loop all depend on this being accurate.
+		state.LastTargets = out
+		if out != nil {
+			now := time.Now()
+			state.LastDispatch = &now
+		}
+		return out
 	case ModeCharge:
 		targets := chargeAll(store, driverCapacities, state.DriverLimits)
 		state.LastTargets = targets
@@ -388,7 +397,16 @@ func ComputeDispatch(
 			// Holdoff suppresses normal re-dispatch, but the
 			// fuse-saver overrides — an overflow can't wait 5 s for
 			// the next eligible tick.
-			return fuseSaverFromZero(store, state, driverCapacities, fuseMaxW)
+			out := fuseSaverFromZero(store, state, driverCapacities, fuseMaxW)
+			if out != nil {
+				// Same bookkeeping as the idle path so downstream
+				// consumers (status/history/learner) see the
+				// commanded discharge.
+				state.LastTargets = out
+				now := time.Now()
+				state.LastDispatch = &now
+			}
+			return out
 		}
 	}
 
@@ -653,6 +671,13 @@ func ComputeDispatch(
 
 	// ---- Fuse guard (bidirectional, #145) ----
 	raw = applyFuseGuard(raw, store, state.SiteMeterDriver, fuseMaxW)
+	// forceFuseDischarge runs LAST, deliberately AFTER the slew loop
+	// at line 625. A fuse overflow can demand a battery target that's
+	// far beyond what slew would normally allow in a single 5 s tick
+	// (e.g. 0 W → −3 kW), and slew-limiting that would leave the
+	// fuse violated for multiple ticks. The fuse is the
+	// non-negotiable ceiling — it bypasses slew. Regression-guarded
+	// by TestFuseSaverBypassesSlew.
 	raw = forceFuseDischarge(raw, store, state, driverCapacities, fuseMaxW)
 
 	// Update state
@@ -967,21 +992,34 @@ func applyFuseGuard(targets []DispatchTarget, store *telemetry.Store, siteMeter 
 // Called from ComputeDispatch branches that would otherwise return nil
 // (idle mode, holdoff window) so the safety primary still gets a chance
 // to fire before we walk away from the cycle. Builds zero-W targets for
-// every online battery and runs them through forceFuseDischarge; if no
+// every battery that is BOTH online (per DriverHealth) AND has a current
+// DerBattery reading, then runs them through forceFuseDischarge; if no
 // overflow is predicted, the result is nil (caller sees the same
-// empty-dispatch behaviour as before).
+// empty-dispatch behaviour as before). Filtering to online+telemetry
+// matches ComputeDispatch's main path and avoids commanding offline
+// batteries via the fuse-saver back door.
 func fuseSaverFromZero(
 	store *telemetry.Store,
 	state *State,
 	driverCapacities map[string]float64,
 	fuseMaxW float64,
 ) []DispatchTarget {
-	if fuseMaxW <= 0 || len(driverCapacities) == 0 {
+	if fuseMaxW <= 0 || len(driverCapacities) == 0 || store == nil {
 		return nil
 	}
 	zeros := make([]DispatchTarget, 0, len(driverCapacities))
 	for name := range driverCapacities {
+		h := store.DriverHealth(name)
+		if h == nil || !h.IsOnline() {
+			continue
+		}
+		if r := store.Get(name, telemetry.DerBattery); r == nil {
+			continue
+		}
 		zeros = append(zeros, DispatchTarget{Driver: name, TargetW: 0})
+	}
+	if len(zeros) == 0 {
+		return nil
 	}
 	out := forceFuseDischarge(zeros, store, state, driverCapacities, fuseMaxW)
 	for _, t := range out {
@@ -1043,9 +1081,20 @@ func forceFuseDischarge(
 	if fuseMaxW <= 0 || len(targets) == 0 || state == nil {
 		return targets
 	}
+	// Sum currentBat only across the batteries we're about to control
+	// — uncontrolled or offline batteries' current draw is captured in
+	// the live grid reading already; counting them again would
+	// double-subtract their contribution and mispredict.
+	seenBat := make(map[string]struct{}, len(targets))
 	var currentBat float64
-	for _, r := range store.ReadingsByType(telemetry.DerBattery) {
-		currentBat += r.SmoothedW
+	for _, t := range targets {
+		if _, seen := seenBat[t.Driver]; seen {
+			continue
+		}
+		seenBat[t.Driver] = struct{}{}
+		if r := store.Get(t.Driver, telemetry.DerBattery); r != nil {
+			currentBat += r.SmoothedW
+		}
 	}
 	var currentGrid float64
 	if state.SiteMeterDriver != "" {
@@ -1115,11 +1164,18 @@ func forceFuseDischarge(
 	copy(out, targets)
 	for _, s := range slots {
 		share := allocate * (s.headroom / totalHeadroom)
-		if out[s.idx].TargetW > 0 {
-			out[s.idx].TargetW = -share
-		} else {
-			out[s.idx].TargetW -= share
-		}
+		// Subtract `share` from the existing target — that gives the
+		// algorithm one consistent rule across all signs:
+		//   +3000 - 2960 = +40   (still charging, but reduced)
+		//    0    - 2960 = -2960 (idle → discharge)
+		//   -1000 - 960  = -1960 (already discharging → more)
+		// The net change to sumTarget is exactly `share`, so the
+		// post-dispatch predicted gridW lands at fuseMaxW. Setting
+		// TargetW = -share when positive (the prior implementation)
+		// over-corrected by the original charge magnitude — letting
+		// out`predicted` undershoot the fuse and discharging more
+		// than necessary.
+		out[s.idx].TargetW -= share
 		out[s.idx].Clamped = true
 	}
 	return out

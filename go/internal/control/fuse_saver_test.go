@@ -52,24 +52,43 @@ func TestFuseSaverForcesDischargeFromIdle(t *testing.T) {
 	}
 }
 
-// Planner commanded the battery to CHARGE (off-peak hours, planner
-// arbitrage). Grid is already at the fuse from external loads. The
-// fuse-saver flips the charge command to discharge regardless of plan.
-func TestFuseSaverFlipsChargeToDischargeWhenOverFuse(t *testing.T) {
-	// Live grid at fuse limit; planner asked to charge 3 kW; current
-	// battery doing nothing (target hasn't propagated yet).
+// In production the call chain is applyFuseGuard THEN
+// forceFuseDischarge. When the planner asks for charge while the grid
+// is already at the fuse, applyFuseGuard scales the charge down toward
+// 0; forceFuseDischarge then sees a small (or zero) target and either
+// no-ops or adds a tiny extra discharge to close the residual gap.
+// The standalone-flip-to-discharge behaviour the previous version of
+// this test asserted doesn't happen on the real path — applyFuseGuard
+// would never let a +3 kW charge reach forceFuseDischarge with grid
+// already at the fuse.
+func TestFuseSaverAfterFuseGuardKeepsScaledCharge(t *testing.T) {
+	// Live grid near the fuse limit; planner asked to charge 3 kW;
+	// battery currently idle.
 	store, state, caps := setupFuseSaver(11000, 0, 0.6, 10000)
 	targets := []DispatchTarget{{Driver: "bat", TargetW: 3000}}
-	// Predicted = 11000 - 0 + 3000 = 14000. Over fuse by 2960.
-	out := forceFuseDischarge(targets, store, state, caps, 11040)
-	if out[0].TargetW >= 0 {
-		t.Errorf("expected discharge override, got TargetW=%.0f", out[0].TargetW)
+
+	// Step 1: applyFuseGuard scales charging down because predicted
+	// import (11000 + 3000 = 14000) exceeds the fuse.
+	guarded := applyFuseGuard(targets, store, "meter", 11040)
+	if guarded[0].TargetW < 0 {
+		t.Fatalf("applyFuseGuard should NOT flip charge to discharge — "+
+			"got %.0f W", guarded[0].TargetW)
 	}
-	// 14000 - 11040 = 2960 overage → full discharge of 2960 W
-	// (charge zeroed first, then negative magnitude added).
-	expected := -2960.0
-	if math.Abs(out[0].TargetW-expected) > 1 {
-		t.Errorf("target = %.0f, want ≈ %.0f", out[0].TargetW, expected)
+	if guarded[0].TargetW > 100 {
+		t.Fatalf("applyFuseGuard should have scaled charge down toward 0, "+
+			"got %.0f W (charge surviving the fuse guard is a regression)",
+			guarded[0].TargetW)
+	}
+
+	// Step 2: forceFuseDischarge runs on the post-guard targets. With
+	// charge already at ~0 the predicted gridW after the guard is at
+	// the fuse limit; forceFuseDischarge no-ops or adds a small
+	// residual discharge. Either way it must NOT take the target
+	// further negative than -2960 W (the original overage).
+	out := forceFuseDischarge(guarded, store, state, caps, 11040)
+	if out[0].TargetW < -2960.001 {
+		t.Errorf("post-guard discharge over-correction: target = %.0f W, "+
+			"original overage was 2960 W", out[0].TargetW)
 	}
 }
 
@@ -172,6 +191,31 @@ func TestFuseSaverDisabledWhenFuseMaxZero(t *testing.T) {
 	if out[0].TargetW != 1000 || out[0].Clamped {
 		t.Errorf("fuse_max=0 should disable: got %.0f clamped=%v",
 			out[0].TargetW, out[0].Clamped)
+	}
+}
+
+// Slew bypass — the fuse is the non-negotiable ceiling, slew rate
+// must NOT limit the fuse-saver. End-to-end test: battery at rest
+// (anchor SmoothedW = 0), aggressive 500 W/cycle slew, sudden grid
+// import 14 kW (over 11 kW fuse). Expected: target ≈ -3 kW
+// regardless of the slew rate, because forceFuseDischarge runs
+// AFTER the slew loop in ComputeDispatch.
+func TestFuseSaverBypassesSlew(t *testing.T) {
+	store, state, caps := setupFuseSaver(14000, 0, 0.6, 10000)
+	state.Mode = ModeIdle
+	state.SlewRateW = 500 // tight slew that would otherwise cap the response
+	out := ComputeDispatch(store, state, caps, 11040)
+	if len(out) == 0 {
+		t.Fatalf("idle + over-fuse: expected fuse-saver discharge, got empty")
+	}
+	// Predicted overage = 14000 − 11040 = 2960 W. With 10 kW headroom
+	// the fuse-saver should command the full overage as discharge —
+	// well beyond the 500 W/cycle slew. If we see −500 W instead of
+	// ≈ −2960 W, slew is incorrectly clamping the safety primary.
+	expected := -2960.0
+	if math.Abs(out[0].TargetW-expected) > 1 {
+		t.Errorf("target = %.0f W, want %.0f W (slew must NOT clamp the fuse-saver)",
+			out[0].TargetW, expected)
 	}
 }
 
