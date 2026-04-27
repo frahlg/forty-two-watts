@@ -1601,6 +1601,14 @@ func recordHistory(st *state.Store, tel *telemetry.Store, ctrl *control.State, n
 		if r := tel.Get(name, telemetry.DerMeter); r != nil {
 			row["meter_w"] = r.SmoothedW
 		}
+		// EV charge power: required for the live chart's EV series
+		// (web/next-app.js reads `d.ev_w` per driver from /api/history).
+		// Without it the chart's EV trace is always zero — the in-memory
+		// /api/status DOES carry ev_w, but history rows never did until
+		// this row was added.
+		if r := tel.Get(name, telemetry.DerEV); r != nil {
+			row["ev_w"] = r.SmoothedW
+		}
 		_ = h
 		perDriver[name] = row
 	}
