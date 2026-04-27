@@ -1,6 +1,7 @@
 package control
 
 import (
+	"encoding/json"
 	"log/slog"
 	"math"
 	"time"
@@ -106,6 +107,19 @@ type State struct {
 	GridTargetW    float64
 	GridToleranceW float64
 	SiteMeterDriver string
+
+	// SiteFuseAmps is the per-phase trip current of the site's main
+	// breaker (cfg.Fuse.MaxAmps). Used by the per-phase clamp inside
+	// applyFuseGuard / forceFuseDischarge: when the meter reports
+	// per-phase amps via DerReading.Data (l1_a / l2_a / l3_a, emitted
+	// by Pixii / Ferroamp / Sungrow), any single phase exceeding
+	// SiteFuseAmps is treated as additional aggregate overage so the
+	// existing scaling+discharge logic responds.
+	//
+	// Zero disables the per-phase clamp (back-compat for tests and
+	// sites without per-phase meter data).
+	SiteFuseAmps    float64
+	SiteFuseVoltage float64
 
 	// For Priority mode
 	PriorityOrder []string
@@ -670,7 +684,7 @@ func ComputeDispatch(
 	}
 
 	// ---- Fuse guard (bidirectional, #145) ----
-	raw = applyFuseGuard(raw, store, state.SiteMeterDriver, fuseMaxW)
+	raw = applyFuseGuard(raw, store, state, fuseMaxW)
 	// forceFuseDischarge runs LAST, deliberately AFTER the slew loop
 	// at line 625. A fuse overflow can demand a battery target that's
 	// far beyond what slew would normally allow in a single 5 s tick
@@ -904,10 +918,11 @@ func clampWithSoC(target float64, b batteryInfo) (float64, bool) {
 // can't push aggregate imports past the fuse. The new path also uses
 // live load inference so the discharge side no longer over-scales
 // during high-load hours.
-func applyFuseGuard(targets []DispatchTarget, store *telemetry.Store, siteMeter string, fuseMaxW float64) []DispatchTarget {
-	if fuseMaxW <= 0 {
+func applyFuseGuard(targets []DispatchTarget, store *telemetry.Store, state *State, fuseMaxW float64) []DispatchTarget {
+	if fuseMaxW <= 0 || state == nil {
 		return targets
 	}
+	siteMeter := state.SiteMeterDriver
 	// Aggregate live battery power so we can hold load+pv constant.
 	var currentBat float64
 	for _, r := range store.ReadingsByType(telemetry.DerBattery) {
@@ -925,7 +940,22 @@ func applyFuseGuard(targets []DispatchTarget, store *telemetry.Store, siteMeter 
 	}
 	predicted := currentGrid - currentBat + sumTarget
 
-	if math.Abs(predicted) <= fuseMaxW {
+	// Per-phase import overage: the worst single-phase amperage above
+	// the fuse, expressed as the AGGREGATE battery reduction needed
+	// to bring it back. Assumes a 3Φ balanced battery — each unit of
+	// total battery action contributes 1/3 to each phase, so a worst-
+	// phase overage of N watts requires 3 × N watts of total battery
+	// action to bring it under. Conservative for 1Φ batteries (e.g.
+	// Pixii Home) — they over-correct on the other phases, which
+	// means LESS import on those, still safe. See PR #208 follow-up
+	// in `docs/safety.md` §3a.
+	perPhaseImport := perPhaseImportOverageW(store, state) * 3.0
+	importOverage := predicted - fuseMaxW
+	if perPhaseImport > importOverage {
+		importOverage = perPhaseImport
+	}
+
+	if importOverage <= 0 && math.Abs(predicted) <= fuseMaxW {
 		return targets
 	}
 
@@ -933,9 +963,8 @@ func applyFuseGuard(targets []DispatchTarget, store *telemetry.Store, siteMeter 
 	copy(out, targets)
 
 	switch {
-	case predicted > fuseMaxW:
-		// Too much import → shrink charging.
-		overage := predicted - fuseMaxW
+	case importOverage > 0:
+		// Too much import (aggregate or per-phase) → shrink charging.
 		var totalCharge float64
 		for _, t := range out {
 			if t.TargetW > 0 {
@@ -945,10 +974,11 @@ func applyFuseGuard(targets []DispatchTarget, store *telemetry.Store, siteMeter 
 		if totalCharge <= 0 {
 			// No charge commands to pull back — the overage is load-driven
 			// and nothing this layer can do. Leave targets untouched;
-			// operator/BMS/load shedding is the next lever.
+			// the reactive fuse-saver below (forceFuseDischarge) can
+			// still flip idle batteries to discharge.
 			return out
 		}
-		newTotal := totalCharge - overage
+		newTotal := totalCharge - importOverage
 		if newTotal < 0 {
 			newTotal = 0
 		}
@@ -959,7 +989,7 @@ func applyFuseGuard(targets []DispatchTarget, store *telemetry.Store, siteMeter 
 				out[i].Clamped = true
 			}
 		}
-	default: // predicted < -fuseMaxW
+	case predicted < -fuseMaxW:
 		overage := -fuseMaxW - predicted // positive magnitude over export fuse
 		var totalDischarge float64
 		for _, t := range out {
@@ -986,6 +1016,44 @@ func applyFuseGuard(targets []DispatchTarget, store *telemetry.Store, siteMeter 
 		}
 	}
 	return out
+}
+
+// perPhaseImportOverageW returns the wattage by which the worst single
+// phase exceeds the per-phase fuse amperage. 0 when within limits, when
+// per-phase data isn't available, or when the per-phase clamp is
+// disabled (state.SiteFuseAmps == 0). The meter driver must emit
+// l1_a / l2_a / l3_a in DerReading.Data — Pixii, Ferroamp, and Sungrow
+// all do this today.
+func perPhaseImportOverageW(store *telemetry.Store, state *State) float64 {
+	if state == nil || state.SiteFuseAmps <= 0 || state.SiteMeterDriver == "" {
+		return 0
+	}
+	r := store.Get(state.SiteMeterDriver, telemetry.DerMeter)
+	if r == nil || len(r.Data) == 0 {
+		return 0
+	}
+	var d struct {
+		L1A *float64 `json:"l1_a"`
+		L2A *float64 `json:"l2_a"`
+		L3A *float64 `json:"l3_a"`
+	}
+	if err := json.Unmarshal(r.Data, &d); err != nil {
+		return 0
+	}
+	maxA := 0.0
+	for _, p := range []*float64{d.L1A, d.L2A, d.L3A} {
+		if p != nil && *p > maxA {
+			maxA = *p
+		}
+	}
+	if maxA <= state.SiteFuseAmps {
+		return 0
+	}
+	v := state.SiteFuseVoltage
+	if v <= 0 {
+		v = 230 // sensible default; main wires the actual config voltage
+	}
+	return (maxA - state.SiteFuseAmps) * v
 }
 
 // fuseSaverFromZero is the early-return entry point for the fuse-saver.
@@ -1108,10 +1176,17 @@ func forceFuseDischarge(
 	}
 	predicted := currentGrid - currentBat + sumTarget
 
-	if predicted <= fuseMaxW {
+	// Per-phase overage trumps aggregate when bigger. Same balanced-3Φ
+	// assumption as applyFuseGuard (× 3 multiplier on the worst-phase
+	// W to get the equivalent total-battery W needed).
+	perPhaseOverage := perPhaseImportOverageW(store, state) * 3.0
+	overage := predicted - fuseMaxW
+	if perPhaseOverage > overage {
+		overage = perPhaseOverage
+	}
+	if overage <= 0 {
 		return targets
 	}
-	overage := predicted - fuseMaxW
 
 	type slot struct {
 		idx      int

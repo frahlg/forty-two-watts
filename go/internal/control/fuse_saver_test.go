@@ -1,6 +1,7 @@
 package control
 
 import (
+	"encoding/json"
 	"math"
 	"testing"
 
@@ -69,7 +70,7 @@ func TestFuseSaverAfterFuseGuardKeepsScaledCharge(t *testing.T) {
 
 	// Step 1: applyFuseGuard scales charging down because predicted
 	// import (11000 + 3000 = 14000) exceeds the fuse.
-	guarded := applyFuseGuard(targets, store, "meter", 11040)
+	guarded := applyFuseGuard(targets, store, state, 11040)
 	if guarded[0].TargetW < 0 {
 		t.Fatalf("applyFuseGuard should NOT flip charge to discharge — "+
 			"got %.0f W", guarded[0].TargetW)
@@ -215,6 +216,117 @@ func TestFuseSaverBypassesSlew(t *testing.T) {
 	expected := -2960.0
 	if math.Abs(out[0].TargetW-expected) > 1 {
 		t.Errorf("target = %.0f W, want %.0f W (slew must NOT clamp the fuse-saver)",
+			out[0].TargetW, expected)
+	}
+}
+
+// ---- Per-phase clamp ----
+
+// setupPerPhase wires a meter that emits l1_a/l2_a/l3_a in
+// DerReading.Data and a single battery. Aggregate gridW stays
+// deliberately under the fuse to prove the per-phase clamp fires
+// independently of the aggregate guard.
+func setupPerPhase(aggGridW float64, l1A, l2A, l3A float64, batSoC float64, maxDischargeW float64) (*telemetry.Store, *State, map[string]float64) {
+	s := telemetry.NewStore()
+	data, _ := json.Marshal(map[string]any{
+		"l1_a": l1A,
+		"l2_a": l2A,
+		"l3_a": l3A,
+	})
+	s.Update("meter", telemetry.DerMeter, aggGridW, nil, data)
+	s.DriverHealthMut("meter").RecordSuccess()
+	soc := batSoC
+	s.Update("bat", telemetry.DerBattery, 0, &soc, nil)
+	s.DriverHealthMut("bat").RecordSuccess()
+	st := NewState(0, 50, "meter")
+	st.SiteFuseAmps = 16
+	st.SiteFuseVoltage = 230
+	st.DriverLimits = map[string]PowerLimits{
+		"bat": {MaxChargeW: 10000, MaxDischargeW: maxDischargeW},
+	}
+	return s, st, map[string]float64{"bat": 15200}
+}
+
+// Single-phase imbalance: aggregate is under fuse but L1 is over.
+// applyFuseGuard must scale charging down to bring the worst phase
+// back. (Pixii single-phase battery on L1 is the real-world case.)
+func TestPerPhaseClampScalesChargingOnImbalance(t *testing.T) {
+	// Isolate the per-phase case: aggregate predicted (7000 + 4000 =
+	// 11000 W) is under the 11040 W fuse, so the legacy aggregate
+	// branch wouldn't fire. But L1 alone is at 18 A × 230 V = 4140 W
+	// (over the 16 A fuse on that phase) — only the per-phase clamp
+	// can catch it.
+	store, state, _ := setupPerPhase(7000, 18, 12, 8, 0.6, 10000)
+	targets := []DispatchTarget{{Driver: "bat", TargetW: 4000}}
+	guarded := applyFuseGuard(targets, store, state, 11040)
+	if !guarded[0].Clamped {
+		t.Errorf("Clamped flag must mark per-phase response")
+	}
+	// Per-phase overage = (18 − 16) × 230 = 460 W on the worst phase.
+	// Balanced-3Φ assumption ⇒ 460 × 3 = 1380 W of total battery
+	// reduction needed. Charge 4000 → 4000 − 1380 = 2620 W.
+	expected := 2620.0
+	if math.Abs(guarded[0].TargetW-expected) > 1 {
+		t.Errorf("charge after per-phase clamp = %.0f W, want %.0f W",
+			guarded[0].TargetW, expected)
+	}
+}
+
+// Per-phase overage with no charge to scale → fuse-saver forces
+// discharge. Reproduces the test-day failure: battery idle, EV pinned
+// at 16 A 3Φ, one phase pushed over by house imbalance, aggregate
+// stays under fuse so applyFuseGuard wouldn't fire — but the per-phase
+// path now does.
+func TestPerPhaseClampFiresFuseSaverFromIdle(t *testing.T) {
+	store, state, caps := setupPerPhase(9000, 18, 12, 8, 0.6, 10000)
+	out := fuseSaverFromZero(store, state, caps, 11040)
+	if out == nil {
+		t.Fatalf("per-phase overload from idle must trigger fuse-saver")
+	}
+	if out[0].TargetW >= 0 {
+		t.Errorf("expected discharge target, got %.0f W", out[0].TargetW)
+	}
+	// Same math as the charging test: 460 W × 3 = 1380 W. From idle
+	// (target 0), full discharge of 1380 W.
+	expected := -1380.0
+	if math.Abs(out[0].TargetW-expected) > 1 {
+		t.Errorf("forced discharge = %.0f W, want %.0f W", out[0].TargetW, expected)
+	}
+}
+
+// All phases under the fuse → per-phase clamp doesn't fire.
+func TestPerPhaseClampNoOpWhenAllPhasesSafe(t *testing.T) {
+	store, state, caps := setupPerPhase(8000, 14, 12, 10, 0.6, 10000)
+	out := fuseSaverFromZero(store, state, caps, 11040)
+	if out != nil {
+		t.Errorf("all phases under fuse: expected nil, got %v", out)
+	}
+}
+
+// Per-phase clamp gated on SiteFuseAmps > 0. Sites without per-phase
+// configuration get the legacy aggregate-only behaviour.
+func TestPerPhaseClampDisabledWhenSiteFuseAmpsZero(t *testing.T) {
+	store, state, caps := setupPerPhase(9000, 18, 12, 8, 0.6, 10000)
+	state.SiteFuseAmps = 0 // disable per-phase clamp
+	out := fuseSaverFromZero(store, state, caps, 11040)
+	if out != nil {
+		t.Errorf("per-phase clamp disabled but still fired: %v", out)
+	}
+}
+
+// Aggregate AND per-phase both over: take the larger overage. With a
+// huge imbalance, per-phase × 3 dominates.
+func TestPerPhaseClampDominatesAggregateWhenLarger(t *testing.T) {
+	// Aggregate over by 500 W (predicted = 11540 vs 11040). But L1 is
+	// at 22 A → over by 6 A × 230 = 1380 W per-phase × 3 = 4140 W.
+	store, state, caps := setupPerPhase(11540, 22, 14, 8, 0.6, 10000)
+	out := fuseSaverFromZero(store, state, caps, 11040)
+	if out == nil {
+		t.Fatalf("expected discharge, got nil")
+	}
+	expected := -4140.0
+	if math.Abs(out[0].TargetW-expected) > 1 {
+		t.Errorf("forced discharge = %.0f W, want %.0f W (per-phase × 3)",
 			out[0].TargetW, expected)
 	}
 }
