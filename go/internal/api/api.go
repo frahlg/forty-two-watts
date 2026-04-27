@@ -1786,16 +1786,115 @@ func (s *Server) handleEVChargers(w http.ResponseWriter, r *http.Request) {
 }
 
 // GET /api/loadpoints returns the configured EV loadpoints with their
-// current observable state.
+// current observable state. When a DerVehicle driver is online (e.g.
+// tesla_vehicle.lua against TeslaBLEProxy), its real BMS SoC is
+// overlaid onto the response and SoCSource flips from "inferred" to
+// "vehicle" so the UI can render measured-vs-estimated honestly.
+// Multi-vehicle households (one wallbox, multiple Teslas) are picked
+// among by charging_state ranking — see decorateWithVehicle.
 func (s *Server) handleLoadpoints(w http.ResponseWriter, r *http.Request) {
 	if s.deps.Loadpoints == nil {
 		writeJSON(w, 200, map[string]any{"enabled": false, "loadpoints": []any{}})
 		return
 	}
+	states := s.deps.Loadpoints.States()
+	if s.deps.Tel != nil {
+		decorateLoadpointsWithVehicle(states, s.deps.Tel)
+	}
 	writeJSON(w, 200, map[string]any{
 		"enabled":    true,
-		"loadpoints": s.deps.Loadpoints.States(),
+		"loadpoints": states,
 	})
+}
+
+// decorateLoadpointsWithVehicle overlays the best-matching DerVehicle
+// reading onto each plugged-in loadpoint state. Mutates the input
+// slice in place. The "best" reading is the one most likely to be the
+// car physically connected: rank by charging_state, tiebreak by
+// freshness; an explicit "Disconnected" is skipped entirely.
+func decorateLoadpointsWithVehicle(states []loadpoint.State, tel *telemetry.Store) {
+	readings := tel.ReadingsByType(telemetry.DerVehicle)
+	if len(readings) == 0 {
+		// No vehicle drivers — mark every plugged-in lp as inferred.
+		for i := range states {
+			if states[i].PluggedIn {
+				states[i].SoCSource = "inferred"
+			}
+		}
+		return
+	}
+	// Pick the single best vehicle reading across all DerVehicle drivers.
+	// Multi-vehicle ranking lives close to where it matters: this is the
+	// only place that needs to interpret charging_state today.
+	type vehicleData struct {
+		ChargingState  string  `json:"charging_state"`
+		ChargeLimitPct float64 `json:"charge_limit_pct"`
+		Stale          bool    `json:"stale"`
+	}
+	rankFn := func(s string) int {
+		switch s {
+		case "Charging", "Starting":
+			return 3
+		case "NoPower":
+			return 2
+		case "Stopped", "Complete":
+			return 1
+		case "Disconnected":
+			return -1
+		default:
+			return 0
+		}
+	}
+	var bestRank = -1
+	var bestUpdated time.Time
+	var bestSoC, bestLimit float64
+	var bestState, bestDriver string
+	var bestStale bool
+	for _, vr := range readings {
+		if vr.SoC == nil {
+			continue
+		}
+		if h := tel.DriverHealth(vr.Driver); h == nil || !h.IsOnline() {
+			continue
+		}
+		var meta vehicleData
+		if len(vr.Data) > 0 {
+			_ = json.Unmarshal(vr.Data, &meta)
+		}
+		rank := rankFn(meta.ChargingState)
+		if rank < 0 {
+			continue
+		}
+		if rank < bestRank || (rank == bestRank && !vr.UpdatedAt.After(bestUpdated)) {
+			continue
+		}
+		bestRank = rank
+		bestUpdated = vr.UpdatedAt
+		bestSoC = *vr.SoC
+		bestLimit = meta.ChargeLimitPct
+		bestState = meta.ChargingState
+		bestStale = meta.Stale
+		bestDriver = vr.Driver
+	}
+	for i := range states {
+		if !states[i].PluggedIn {
+			continue
+		}
+		if bestDriver == "" {
+			states[i].SoCSource = "inferred"
+			continue
+		}
+		states[i].VehicleDriver = bestDriver
+		states[i].VehicleSoCPct = bestSoC
+		states[i].VehicleChargeLimitPct = bestLimit
+		states[i].VehicleChargingState = bestState
+		states[i].VehicleStale = bestStale
+		// Override CurrentSoCPct with measured value. The loadpoint
+		// manager's inferred value is preserved internally — this is
+		// purely a presentation overlay so the dashboard shows truth.
+		states[i].CurrentSoCPct = bestSoC
+		states[i].SoCSource = "vehicle"
+	}
 }
 
 // POST /api/loadpoints/{id}/target sets user intent for an EV

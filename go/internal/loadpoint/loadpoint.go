@@ -115,6 +115,20 @@ type State struct {
 	TargetSoCPct       float64   `json:"target_soc_pct"`        // user intent
 	TargetTime         time.Time `json:"target_time,omitempty"` // user intent
 	UpdatedAtMs        int64     `json:"updated_at_ms"`
+
+	// Vehicle-side telemetry, populated by the API layer from the most
+	// recent DerVehicle reading whose charging_state indicates a likely
+	// physical connection. Zero values when no online vehicle driver is
+	// reporting. SoCSource is "vehicle" when CurrentSoCPct was overridden
+	// from the car's BMS, "inferred" when it's the loadpoint manager's
+	// pluginSoC + deliveredWh estimate, "" when not plugged in.
+	VehicleSoCPct         float64 `json:"vehicle_soc_pct,omitempty"`
+	VehicleChargeLimitPct float64 `json:"vehicle_charge_limit_pct,omitempty"`
+	VehicleChargingState  string  `json:"vehicle_charging_state,omitempty"`
+	VehicleDriver         string  `json:"vehicle_driver,omitempty"`
+	VehicleStale          bool    `json:"vehicle_stale,omitempty"`
+	SoCSource             string  `json:"soc_source,omitempty"`
+
 	// MinChargeW / MaxChargeW / AllowedStepsW are repeated here so the
 	// UI has everything for rendering in one fetch.
 	MinChargeW    float64   `json:"min_charge_w"`
