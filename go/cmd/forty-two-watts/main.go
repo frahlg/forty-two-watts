@@ -553,6 +553,18 @@ func main() {
 				if !st.PluggedIn {
 					continue
 				}
+				// Schedule gate: only extend the DP with an EV-SoC
+				// dimension when the operator has set BOTH a target SoC
+				// and a future deadline. Without a schedule the DP
+				// previously planned EV charging speculatively across
+				// the full 48 h horizon — drawing battery + grid budget
+				// against a target the operator never asked for. With
+				// no schedule, EV is left to the loadpoint controller's
+				// reactive surplus-only behaviour.
+				if st.TargetSoCPct <= 0 || st.TargetTime.IsZero() ||
+					!st.TargetTime.After(time.Now()) {
+					continue
+				}
 				// Pull capacity off the configured loadpoint.
 				var capWh float64 = 60000 // 60 kWh fallback
 				for _, c := range cfg.Loadpoints {
@@ -576,6 +588,7 @@ func main() {
 				// back to inferred SoC when nothing online matches.
 				initSoC := st.CurrentSoCPct
 				socSource := "inferred"
+				var vehicleChargeLimit float64 // 0 = unknown
 				var bestRank = -1
 				var bestUpdated time.Time
 				for _, vr := range tel.ReadingsByType(telemetry.DerVehicle) {
@@ -586,7 +599,8 @@ func main() {
 						continue
 					}
 					var meta struct {
-						ChargingState string `json:"charging_state"`
+						ChargingState  string  `json:"charging_state"`
+						ChargeLimitPct float64 `json:"charge_limit_pct"`
 					}
 					if len(vr.Data) > 0 {
 						_ = json.Unmarshal(vr.Data, &meta)
@@ -605,6 +619,7 @@ func main() {
 					bestUpdated = vr.UpdatedAt
 					initSoC = *vr.SoC
 					socSource = "vehicle:" + vr.Driver
+					vehicleChargeLimit = meta.ChargeLimitPct
 				}
 				// Map target time → slot index using the DP's
 				// actual slot length (hour-of-prices vs. 15-min
@@ -621,15 +636,33 @@ func main() {
 						targetSlot = int(delta / (time.Duration(slotLenMin) * time.Minute))
 					}
 				}
+				// Operational ceiling: the lower of the user's target
+				// and the vehicle-configured charge limit. The car
+				// won't accept current beyond charge_limit_pct anyway,
+				// so planning past it is wasted DP grid space. When
+				// the limit is unknown, fall back to the deadline
+				// target itself; never plan beyond what was requested.
+				maxPct := st.TargetSoCPct
+				if vehicleChargeLimit > 0 && vehicleChargeLimit < maxPct {
+					maxPct = vehicleChargeLimit
+				}
+				// Guard against degenerate grids: if current SoC > maxPct
+				// (already over target), grow the ceiling to current so
+				// the DP can at least represent it (no charging will be
+				// scheduled). The deadline penalty handles the rest.
+				if initSoC > maxPct {
+					maxPct = initSoC
+				}
 				slog.Debug("mpc: loadpoint spec",
 					"id", st.ID, "soc_pct", initSoC, "soc_source", socSource,
-					"target_pct", st.TargetSoCPct, "target_slot", targetSlot)
+					"target_pct", st.TargetSoCPct, "target_slot", targetSlot,
+					"max_pct", maxPct, "vehicle_limit_pct", vehicleChargeLimit)
 				return &mpc.LoadpointSpec{
 					ID:              st.ID,
 					CapacityWh:      capWh,
 					Levels:          11,
 					MinPct:          0,
-					MaxPct:          100,
+					MaxPct:          maxPct,
 					InitialSoCPct:   initSoC,
 					PluggedIn:       true,
 					TargetSoCPct:    st.TargetSoCPct,
