@@ -176,3 +176,86 @@ func TestManualHoldUnknownLoadpointIsNoOp(t *testing.T) {
 		t.Errorf("orphan hold lost")
 	}
 }
+
+// Minimal hold (only power_w + expiry) MUST still propagate the
+// loadpoint's PhaseMode and the controller's wired SiteFuse params
+// (voltage, max_amps_per_phase, site_phases) into the cmd. Without
+// the fall-through, the driver loses the per-phase fuse clamp inputs
+// and falls back to its 230 V × 16 A defaults — wrong on
+// non-standard sites. (Copilot review on PR #206.)
+func TestManualHoldFallsThroughToLoadpointAndSiteDefaults(t *testing.T) {
+	now := time.Date(2026, 4, 27, 10, 0, 0, 0, time.UTC)
+	cfg := holdLoadpoint() // PhaseMode=auto, PhaseSplitW=3680
+	cmd := runHoldTick(t, cfg, ManualHold{
+		PowerW:    1380,
+		ExpiresAt: now.Add(60 * time.Second),
+	}, now)
+	if cmd.power != 1380 {
+		t.Errorf("power = %.0f, want 1380", cmd.power)
+	}
+	// Should fall through to lpCfg.PhaseMode + c.site.*
+	if cmd.phaseMode != "auto" {
+		t.Errorf("phase_mode = %q, want \"auto\" (fallthrough from lpCfg)", cmd.phaseMode)
+	}
+	if cmd.voltage != 230 {
+		t.Errorf("voltage = %.0f, want 230 (fallthrough from site fuse)", cmd.voltage)
+	}
+	if cmd.maxAmpsPerPhase != 16 {
+		t.Errorf("max_amps_per_phase = %.0f, want 16 (fallthrough from site fuse)",
+			cmd.maxAmpsPerPhase)
+	}
+	if cmd.sitePhases != 3 {
+		t.Errorf("site_phases = %d, want 3 (fallthrough from site fuse)", cmd.sitePhases)
+	}
+}
+
+// Non-standard site (240 V × 20 A): even with a minimal hold, the
+// driver receives THE SITE'S real fuse params, not the 230 V × 16 A
+// driver default. This was the safety motivation for the
+// fall-through.
+func TestManualHoldFallsThroughToNonStandardSiteFuse(t *testing.T) {
+	now := time.Date(2026, 4, 27, 10, 0, 0, 0, time.UTC)
+	cfg := holdLoadpoint()
+	dir := &Directive{
+		SlotStart:         now.Add(-1 * time.Second),
+		SlotEnd:           now.Add(60 * time.Minute),
+		LoadpointEnergyWh: map[string]float64{cfg.ID: 6000},
+	}
+	sender := &fakeSender{}
+	samples := map[string]EVSample{cfg.DriverName: {Connected: true, PowerW: 0}}
+	c := newTestController(t, []Config{cfg}, dir, samples, sender)
+	c.SetSiteFuse(SiteFuse{MaxAmps: 20, Voltage: 240, PhaseCnt: 3})
+	c.SetManualHold(cfg.ID, ManualHold{
+		PowerW:    1500,
+		ExpiresAt: now.Add(60 * time.Second),
+	})
+	c.Tick(context.Background(), now)
+	cmd := sender.calls[0]
+	if cmd.voltage != 240 {
+		t.Errorf("voltage = %.0f, want 240 (real site mains)", cmd.voltage)
+	}
+	if cmd.maxAmpsPerPhase != 20 {
+		t.Errorf("max_amps_per_phase = %.0f, want 20 (real site fuse)",
+			cmd.maxAmpsPerPhase)
+	}
+}
+
+// Explicit hold values still WIN over the loadpoint/site defaults —
+// fall-through is for missing fields only. Operator-supplied
+// overrides take precedence.
+func TestManualHoldExplicitFieldsOverrideDefaults(t *testing.T) {
+	now := time.Date(2026, 4, 27, 10, 0, 0, 0, time.UTC)
+	cfg := holdLoadpoint() // PhaseMode=auto
+	cmd := runHoldTick(t, cfg, ManualHold{
+		PowerW:    1380,
+		PhaseMode: "1p", // explicitly override the loadpoint's "auto"
+		Voltage:   220,  // explicitly override the site's 230
+		ExpiresAt: now.Add(60 * time.Second),
+	}, now)
+	if cmd.phaseMode != "1p" {
+		t.Errorf("phase_mode = %q, want \"1p\" (operator override)", cmd.phaseMode)
+	}
+	if cmd.voltage != 220 {
+		t.Errorf("voltage = %.0f, want 220 (operator override)", cmd.voltage)
+	}
+}

@@ -117,6 +117,55 @@ func TestManualHoldInstallsAndReadsBack(t *testing.T) {
 	}
 }
 
+// Per Copilot review: POST/DELETE/GET must all 404 when Loadpoints is
+// nil or when the id isn't configured. Earlier behaviour allowed a
+// hold to be installed on an arbitrary id when Loadpoints was nil.
+func TestManualHold404WhenLoadpointsNil(t *testing.T) {
+	mgr := loadpoint.NewManager()
+	ctrl := loadpoint.NewController(mgr, nil, nil, nil)
+	srv := New(&Deps{LoadpointCtrl: ctrl}) // intentionally Loadpoints=nil
+
+	cases := []struct {
+		name, method, path, body string
+	}{
+		{"POST", http.MethodPost, "/api/loadpoints/garage/manual_hold", `{"power_w":1380,"hold_s":30}`},
+		{"DELETE", http.MethodDelete, "/api/loadpoints/garage/manual_hold", ""},
+		{"GET", http.MethodGet, "/api/loadpoints/garage/manual_hold", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var body *strings.Reader
+			if tc.body != "" {
+				body = strings.NewReader(tc.body)
+			}
+			var req *http.Request
+			if body != nil {
+				req = httptest.NewRequest(tc.method, tc.path, body)
+				req.Header.Set("Content-Type", "application/json")
+			} else {
+				req = httptest.NewRequest(tc.method, tc.path, nil)
+			}
+			rr := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rr, req)
+			if rr.Code != http.StatusNotFound {
+				t.Errorf("%s: status = %d, want 404", tc.name, rr.Code)
+			}
+		})
+	}
+}
+
+func TestManualHoldDeleteAndGet404OnUnknownLoadpoint(t *testing.T) {
+	srv, _ := newManualHoldServer(t)
+	for _, m := range []string{http.MethodDelete, http.MethodGet} {
+		req := httptest.NewRequest(m, "/api/loadpoints/ghost/manual_hold", nil)
+		rr := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rr, req)
+		if rr.Code != http.StatusNotFound {
+			t.Errorf("%s ghost: status = %d, want 404", m, rr.Code)
+		}
+	}
+}
+
 func TestManualHoldDeleteClears(t *testing.T) {
 	srv, ctrl := newManualHoldServer(t)
 	ctrl.SetManualHold("garage", loadpoint.ManualHold{

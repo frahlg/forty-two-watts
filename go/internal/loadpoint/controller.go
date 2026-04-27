@@ -47,8 +47,9 @@ type Controller struct {
 	// `POST /api/loadpoints/{id}/manual_hold` so an operator can pin
 	// a specific amperage / phase configuration on the charger for
 	// long enough to observe driver behaviour, without fighting the
-	// 5-second control loop. nil entries (or expired ones) fall
-	// through to the normal compute-from-plan path.
+	// 5-second control loop. Missing entries (or expired holds, which
+	// `GetManualHold` lazily evicts) fall through to the normal
+	// compute-from-plan path.
 	holdMu sync.Mutex
 	holds  map[string]ManualHold
 }
@@ -56,8 +57,14 @@ type Controller struct {
 // ManualHold pins a loadpoint to a specific dispatch payload until
 // ExpiresAt. PowerW is sent verbatim; PhaseMode / PhaseSplitW /
 // MinPhaseHoldS / Voltage / MaxAmpsPerPhase override the loadpoint's
-// configured defaults so the driver receives exactly the inputs the
-// operator wants tested.
+// configured defaults — but ONLY when explicitly set on the hold.
+// Zero values mean "no override" and the controller falls back to
+// the loadpoint's PhaseMode/PhaseSplitW/MinPhaseHoldS and the wired
+// SiteFuse for voltage / max_amps_per_phase / site_phases. This
+// preserves the per-phase fuse clamp on minimal holds (e.g. just
+// `{power_w, hold_s}`) — without the fall-through, the driver would
+// silently fall back to its 230 V × 16 A defaults, which on a
+// non-standard site could exceed the actual fuse.
 type ManualHold struct {
 	PowerW          float64
 	PhaseMode       string
@@ -219,27 +226,47 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config) {
 
 	cmd := map[string]any{"action": "ev_set_current"}
 	if hold, ok := c.GetManualHold(lpCfg.ID, now); ok {
-		// Manual override active — use the hold's payload verbatim.
-		// Skips MPC translation AND the loadpoint's own phase
-		// preferences; everything comes from the operator's hold.
+		// Manual override active — skip MPC translation. The hold's
+		// non-zero fields override the loadpoint config + site fuse;
+		// zero/empty fields fall through to the normal defaults so a
+		// minimal hold (just `power_w`) still carries the per-phase
+		// fuse clamp inputs the driver needs to stay safe.
 		cmd["power_w"] = hold.PowerW
-		if hold.PhaseMode != "" {
+		switch {
+		case hold.PhaseMode != "":
 			cmd["phase_mode"] = hold.PhaseMode
+		case lpCfg.PhaseMode != "":
+			cmd["phase_mode"] = lpCfg.PhaseMode
 		}
-		if hold.PhaseSplitW > 0 {
+		switch {
+		case hold.PhaseSplitW > 0:
 			cmd["phase_split_w"] = hold.PhaseSplitW
+		case lpCfg.PhaseSplitW > 0:
+			cmd["phase_split_w"] = lpCfg.PhaseSplitW
 		}
-		if hold.MinPhaseHoldS > 0 {
+		switch {
+		case hold.MinPhaseHoldS > 0:
 			cmd["min_phase_hold_s"] = hold.MinPhaseHoldS
+		case lpCfg.MinPhaseHoldS > 0:
+			cmd["min_phase_hold_s"] = lpCfg.MinPhaseHoldS
 		}
-		if hold.Voltage > 0 {
+		switch {
+		case hold.Voltage > 0:
 			cmd["voltage"] = hold.Voltage
+		case c.site.Voltage > 0:
+			cmd["voltage"] = c.site.Voltage
 		}
-		if hold.MaxAmpsPerPhase > 0 {
+		switch {
+		case hold.MaxAmpsPerPhase > 0:
 			cmd["max_amps_per_phase"] = hold.MaxAmpsPerPhase
+		case c.site.MaxAmps > 0:
+			cmd["max_amps_per_phase"] = c.site.MaxAmps
 		}
-		if hold.SitePhases > 0 {
+		switch {
+		case hold.SitePhases > 0:
 			cmd["site_phases"] = hold.SitePhases
+		case c.site.MaxAmps > 0:
+			cmd["site_phases"] = c.site.Phases()
 		}
 	} else {
 		cmdW, planReady := c.computeCommand(now, lpCfg, sample.PowerW)

@@ -19,9 +19,12 @@ import (
 // and is registered via routes() in api.go.
 
 // manualHoldRequest is the body shape for POST. All fields are
-// optional except hold_s; defaults match the loadpoint's configured
-// values + the wired site fuse, so a minimal {hold_s: 30, power_w: X}
-// works for the common case.
+// optional except hold_s. Omitted fields fall through to the
+// loadpoint's configured PhaseMode/PhaseSplitW/MinPhaseHoldS and the
+// wired site fuse for voltage / max_amps_per_phase / site_phases —
+// see Controller.tickOne's hold branch. A minimal `{hold_s: 30,
+// power_w: X}` therefore still carries the per-phase fuse clamp
+// inputs the driver needs.
 type manualHoldRequest struct {
 	PowerW          float64 `json:"power_w"`
 	PhaseMode       string  `json:"phase_mode,omitempty"`
@@ -64,11 +67,13 @@ func (s *Server) handleLoadpointManualHold(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, 400, map[string]string{"error": "id required"})
 		return
 	}
-	if s.deps.Loadpoints != nil {
-		if _, ok := s.deps.Loadpoints.State(id); !ok {
-			writeJSON(w, 404, map[string]string{"error": "loadpoint not found"})
-			return
-		}
+	if s.deps.Loadpoints == nil {
+		writeJSON(w, 404, map[string]string{"error": "loadpoints not configured"})
+		return
+	}
+	if _, ok := s.deps.Loadpoints.State(id); !ok {
+		writeJSON(w, 404, map[string]string{"error": "loadpoint not found"})
+		return
 	}
 	var req manualHoldRequest
 	if err := readJSON(r, &req); err != nil {
@@ -93,7 +98,7 @@ func (s *Server) handleLoadpointManualHold(w http.ResponseWriter, r *http.Reques
 	case "", "auto", "1p", "3p":
 	default:
 		writeJSON(w, 400, map[string]string{
-			"error": "phase_mode must be one of: auto, 1p, 3p",
+			"error": "phase_mode must be omitted/empty or one of: auto, 1p, 3p",
 		})
 		return
 	}
@@ -125,6 +130,14 @@ func (s *Server) handleLoadpointManualHoldClear(w http.ResponseWriter, r *http.R
 		writeJSON(w, 400, map[string]string{"error": "id required"})
 		return
 	}
+	if s.deps.Loadpoints == nil {
+		writeJSON(w, 404, map[string]string{"error": "loadpoints not configured"})
+		return
+	}
+	if _, ok := s.deps.Loadpoints.State(id); !ok {
+		writeJSON(w, 404, map[string]string{"error": "loadpoint not found"})
+		return
+	}
 	s.deps.LoadpointCtrl.ClearManualHold(id)
 	writeJSON(w, 200, manualHoldResponse{Active: false})
 }
@@ -140,6 +153,14 @@ func (s *Server) handleLoadpointManualHoldGet(w http.ResponseWriter, r *http.Req
 	id := r.PathValue("id")
 	if id == "" {
 		writeJSON(w, 400, map[string]string{"error": "id required"})
+		return
+	}
+	if s.deps.Loadpoints == nil {
+		writeJSON(w, 404, map[string]string{"error": "loadpoints not configured"})
+		return
+	}
+	if _, ok := s.deps.Loadpoints.State(id); !ok {
+		writeJSON(w, 404, map[string]string{"error": "loadpoint not found"})
 		return
 	}
 	h, active := s.deps.LoadpointCtrl.GetManualHold(id, time.Now())
