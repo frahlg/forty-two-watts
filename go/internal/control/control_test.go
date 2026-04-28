@@ -1817,3 +1817,181 @@ func TestJointFuseAllocatorWithBatteryCoversEV(t *testing.T) {
 			delta, st1.FuseEVMaxW, st2.FuseEVMaxW)
 	}
 }
+
+// Plan/exec sign-mismatch floor — operator-report 2026-04-28 (08:00–08:15
+// CEST): planner_arbitrage peak slot wanted -2400 W (discharge to export
+// at 334 öre), dispatch produced +1640 W (charged surplus). The floor's
+// job is to make that whole class of bug a no-op: when sign(plan_intent)
+// disagrees with sign(executed total), every battery target becomes 0.
+//
+// Direct exercise of applyPlanSignFloor — keeps the test focused on the
+// floor's contract and independent of which upstream path produced the
+// wrong-sign target.
+func TestPlanSignFloorClampsChargeWhenPlanSaysDischarge(t *testing.T) {
+	st := NewState(0, 0, "ferroamp")
+	st.Mode = ModePlannerArbitrage
+	// Plan intent: discharge — BatteryEnergyWh < -idleWh (-50).
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) {
+		return SlotDirective{
+			SlotStart:       time.Now(),
+			SlotEnd:         time.Now().Add(15 * time.Minute),
+			BatteryEnergyWh: -600,
+		}, true
+	}
+	in := []DispatchTarget{{Driver: "pixii", TargetW: 1700}} // would-be charge
+	out := applyPlanSignFloor(in, st)
+	if len(out) != 1 {
+		t.Fatalf("len = %d, want 1", len(out))
+	}
+	if out[0].TargetW != 0 {
+		t.Errorf("TargetW = %f, want 0 (plan says discharge, exec said charge)", out[0].TargetW)
+	}
+	if !out[0].Clamped {
+		t.Error("expected Clamped=true so the dispatch trace shows the floor fired")
+	}
+}
+
+func TestPlanSignFloorClampsDischargeWhenPlanSaysCharge(t *testing.T) {
+	st := NewState(0, 0, "ferroamp")
+	st.Mode = ModePlannerArbitrage
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) {
+		return SlotDirective{
+			SlotStart:       time.Now(),
+			SlotEnd:         time.Now().Add(15 * time.Minute),
+			BatteryEnergyWh: 1500, // charge intent
+		}, true
+	}
+	in := []DispatchTarget{{Driver: "pixii", TargetW: -2000}}
+	out := applyPlanSignFloor(in, st)
+	if out[0].TargetW != 0 || !out[0].Clamped {
+		t.Errorf("symmetric case: got TargetW=%f Clamped=%v, want 0/true",
+			out[0].TargetW, out[0].Clamped)
+	}
+}
+
+func TestPlanSignFloorPassesThroughWhenSignsAgree(t *testing.T) {
+	st := NewState(0, 0, "ferroamp")
+	st.Mode = ModePlannerArbitrage
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) {
+		return SlotDirective{
+			SlotStart:       time.Now(),
+			SlotEnd:         time.Now().Add(15 * time.Minute),
+			BatteryEnergyWh: -600,
+		}, true
+	}
+	in := []DispatchTarget{{Driver: "pixii", TargetW: -1800}}
+	out := applyPlanSignFloor(in, st)
+	if out[0].TargetW != -1800 {
+		t.Errorf("matching signs: TargetW = %f, want unchanged -1800", out[0].TargetW)
+	}
+	if out[0].Clamped {
+		t.Error("Clamped should not be set when the floor was a no-op")
+	}
+}
+
+func TestPlanSignFloorIgnoresManualModes(t *testing.T) {
+	// Manual modes (self_consumption, peak_shaving, charge, etc.) have
+	// no plan to disagree with. The floor must be a no-op so the
+	// operator's manual selection executes as written.
+	st := NewState(0, 0, "ferroamp")
+	st.Mode = ModeSelfConsumption
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) {
+		return SlotDirective{BatteryEnergyWh: -600}, true
+	}
+	in := []DispatchTarget{{Driver: "pixii", TargetW: 1700}}
+	out := applyPlanSignFloor(in, st)
+	if out[0].TargetW != 1700 {
+		t.Errorf("manual mode: TargetW = %f, want unchanged 1700", out[0].TargetW)
+	}
+}
+
+func TestPlanSignFloorIdleBandIsNoOp(t *testing.T) {
+	// An executed total inside ±100 W is "idle, no opinion on sign" —
+	// don't trigger the floor on it.
+	st := NewState(0, 0, "ferroamp")
+	st.Mode = ModePlannerArbitrage
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) {
+		return SlotDirective{BatteryEnergyWh: -600}, true
+	}
+	in := []DispatchTarget{{Driver: "pixii", TargetW: 50}} // tiny positive — within band
+	out := applyPlanSignFloor(in, st)
+	if out[0].TargetW != 50 {
+		t.Errorf("inside idle band: TargetW = %f, want unchanged 50", out[0].TargetW)
+	}
+}
+
+func TestPlanSignFloorReadsLegacyPlanTarget(t *testing.T) {
+	// When SlotDirective isn't wired (legacy path), intent comes from
+	// PlanTarget. mpc.actionToSlot encodes a planned discharge as
+	// ("self_consumption", negative_grid_w) — verify we follow that
+	// mapping.
+	st := NewState(0, 0, "ferroamp")
+	st.Mode = ModePlannerArbitrage
+	st.PlanTarget = func(time.Time) (string, float64, bool) {
+		return "self_consumption", -4000, true
+	}
+	in := []DispatchTarget{{Driver: "pixii", TargetW: 1700}} // charge against discharge plan
+	out := applyPlanSignFloor(in, st)
+	if out[0].TargetW != 0 {
+		t.Errorf("legacy-path discharge intent: TargetW = %f, want 0", out[0].TargetW)
+	}
+}
+
+func TestPlanSignFloorNoOpWhenNoIntent(t *testing.T) {
+	// Neither callback wired, OR both return !ok → no plan to compare
+	// against; let the dispatch result through unchanged.
+	st := NewState(0, 0, "ferroamp")
+	st.Mode = ModePlannerArbitrage
+	in := []DispatchTarget{{Driver: "pixii", TargetW: 1700}}
+	out := applyPlanSignFloor(in, st)
+	if out[0].TargetW != 1700 {
+		t.Errorf("no plan intent: TargetW = %f, want unchanged", out[0].TargetW)
+	}
+}
+
+// End-to-end through ComputeDispatch: simulate the 06:00-06:15 UTC bug
+// (planner_arbitrage discharge slot, but the dispatch math somehow
+// produces charge — e.g. because the energy-allocation path didn't
+// engage and the legacy path absorbed surplus). The floor must clamp.
+//
+// Constructed without UseEnergyDispatch so we land in the legacy PI
+// path — same path that was active during the live incident.
+func TestComputeDispatchAppliesSignFloorOnDischargeSlot(t *testing.T) {
+	now := time.Now()
+	store := seedStore(-1700, []struct {
+		name    string
+		currentW, soc float64
+	}{
+		{"pixii", 0, 0.15},
+	})
+	st := NewState(0, 0, "pixii")
+	st.Mode = ModePlannerArbitrage
+	st.SlewRateW = 100000
+	st.MinDispatchIntervalS = 0
+	// Legacy path: PlanTarget returns ("self_consumption", -4000, true).
+	// dispatch will set GridTargetW=-4000; but we OVERRIDE PlanTarget
+	// here to return grid_target=0 to model the bug behaviour where the
+	// negative grid target failed to plumb through (whatever the cause).
+	// The plan INTENT (discharge) still comes from SlotDirective.
+	st.PlanTarget = func(time.Time) (string, float64, bool) {
+		return "self_consumption", 0, true // bug: should have been negative
+	}
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) {
+		return SlotDirective{
+			SlotStart:       now,
+			SlotEnd:         now.Add(15 * time.Minute),
+			BatteryEnergyWh: -600, // peak-slot discharge intent
+		}, true
+	}
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"pixii": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	// Without the floor, PI on grid_target=0 with grid=-1700 would
+	// command +1700 W charge to absorb the export. With the floor,
+	// that charge command must be clamped to 0.
+	if targets[0].TargetW > 100 {
+		t.Errorf("TargetW = %f W — sign floor should have clamped charge to 0 on a discharge slot",
+			targets[0].TargetW)
+	}
+}
