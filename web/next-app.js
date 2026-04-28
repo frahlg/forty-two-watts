@@ -1339,7 +1339,7 @@
         var socDisplay = (vSoc != null && vLimit != null)
           ? vSoc + " / " + vLimit + " %"
           : (vSoc != null ? vSoc + " %" : "—");
-        if (vStale) socDisplay += " ★";
+        if (vStale) socDisplay = "⚠ " + socDisplay;
         var stateClassV = (vState === "Charging") ? "stat-ok" : (vState === "Disconnected" ? "stat-dim" : "stat-warn");
         var ttfStr = (vTtf != null && vTtf > 0)
           ? (vTtf >= 60 ? Math.floor(vTtf / 60) + "h " + (vTtf % 60) + "m" : vTtf + " min")
