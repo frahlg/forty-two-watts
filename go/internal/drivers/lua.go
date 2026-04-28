@@ -39,6 +39,7 @@ import (
 	"fmt"
 	"io"
 	net_http "net/http"
+	net_url "net/url"
 	"os"
 	"strings"
 	"sync"
@@ -183,7 +184,7 @@ func registerHost(L *lua.LState, env *HostEnv) {
 		return 0
 	}))
 
-	// host.emit("meter"|"pv"|"battery"|"ev", { w=…, soc=…, connected=…, charging=… })
+	// host.emit("meter"|"pv"|"battery"|"ev"|"vehicle", { w=…, soc=…, … })
 	// The type string is prepended to the table as a `type` field and
 	// the whole thing is serialized as JSON before hitting the telemetry store.
 	// Allowed fields per type:
@@ -196,6 +197,14 @@ func registerHost(L *lua.LState, env *HostEnv) {
 	//              session_wh (optional, kWh for current session * 1000),
 	//              max_a (optional, charger current limit),
 	//              phases (optional, 1 or 3)
+	//   vehicle -> soc (required, vehicle battery level % 0-100),
+	//              charge_limit_pct (optional, vehicle-configured limit),
+	//              charging_state (optional, e.g. "Charging"|"Stopped"|"Complete"),
+	//              time_to_full_min (optional),
+	//              stale (optional bool, true when data hasn't refreshed
+	//              since stale_after_s — UI should de-emphasize).
+	//              w is unused for vehicle readings (charger's DerEV owns
+	//              the power number).
 	host.RawSetString("emit", L.NewFunction(func(L *lua.LState) int {
 		typ := L.CheckString(1)
 		tbl := L.CheckTable(2)
@@ -430,6 +439,27 @@ func registerHost(L *lua.LState, env *HostEnv) {
 	// headers is an optional Lua table {["Content-Type"]="application/json", ...}
 	httpClient := &net_http.Client{Timeout: 15 * time.Second}
 
+	// hostAllowed checks the URL's host component against the
+	// per-driver allowlist. Empty allowlist = any host (legacy
+	// behaviour). Matched case-insensitively, port-agnostic. See
+	// HostEnv.HTTPAllowedHosts docs.
+	hostAllowed := func(rawURL string) (bool, string) {
+		if len(env.HTTPAllowedHosts) == 0 {
+			return true, ""
+		}
+		u, err := net_url.Parse(rawURL)
+		if err != nil || u.Host == "" {
+			return false, "invalid URL"
+		}
+		host := strings.ToLower(u.Hostname())
+		for _, allowed := range env.HTTPAllowedHosts {
+			if strings.EqualFold(strings.TrimSpace(allowed), host) {
+				return true, ""
+			}
+		}
+		return false, fmt.Sprintf("host %q not in allowed_hosts", host)
+	}
+
 	applyHeaders := func(req *net_http.Request, L *lua.LState, argIdx int) {
 		tbl := L.OptTable(argIdx, nil)
 		if tbl == nil {
@@ -449,6 +479,11 @@ func registerHost(L *lua.LState, env *HostEnv) {
 			return 2
 		}
 		url := L.CheckString(1)
+		if ok, reason := hostAllowed(url); !ok {
+			L.Push(lua.LNil)
+			L.Push(lua.LString("http: " + reason))
+			return 2
+		}
 		req, err := net_http.NewRequest("GET", url, nil)
 		if err != nil {
 			L.Push(lua.LNil)
@@ -485,6 +520,11 @@ func registerHost(L *lua.LState, env *HostEnv) {
 			return 2
 		}
 		url := L.CheckString(1)
+		if ok, reason := hostAllowed(url); !ok {
+			L.Push(lua.LNil)
+			L.Push(lua.LString("http: " + reason))
+			return 2
+		}
 		payload := L.CheckString(2)
 		req, err := net_http.NewRequest("POST", url, strings.NewReader(payload))
 		if err != nil {
