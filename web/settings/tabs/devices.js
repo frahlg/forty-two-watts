@@ -71,13 +71,43 @@
             '<input type="number" data-path="drivers.' + idx + '.capabilities.modbus.unit_id" value="' + (modbus.unit_id || 1) + '">' +
             '</fieldset>';
         }
-        // Local-HTTP vs cloud-HTTP driver detection by declared config shape.
+        // Local-HTTP vs cloud-HTTP vs vehicle-over-proxy detection by
+        // declared config shape + catalog capabilities. Vehicle drivers
+        // (e.g. tesla_vehicle against a TeslaBLEProxy) expose only
+        // {ip, vin} and read no power channel.
         var dcfg = d.config || {};
         var hasHostField = Object.prototype.hasOwnProperty.call(dcfg, 'host');
         var hasAuthField = Object.prototype.hasOwnProperty.call(dcfg, 'email') ||
                            Object.prototype.hasOwnProperty.call(dcfg, 'password');
-        var isLocalHTTP = cap.http != null && hasHostField;
-        var isCloudDriver = cap.http != null && !hasHostField && (hasAuthField || Object.keys(dcfg).length === 0);
+        var catalogEntry = (S.catalogByLua || {})[d.lua];
+        var caps = (catalogEntry && catalogEntry.capabilities) || [];
+        var isVehicleDriver = cap.http != null &&
+          (caps.indexOf("vehicle") >= 0 ||
+           Object.prototype.hasOwnProperty.call(dcfg, 'vin') ||
+           Object.prototype.hasOwnProperty.call(dcfg, 'ip'));
+        var isLocalHTTP = !isVehicleDriver && cap.http != null && hasHostField;
+        var isCloudDriver = !isVehicleDriver && cap.http != null && !hasHostField &&
+          (hasAuthField || Object.keys(dcfg).length === 0);
+        if (isVehicleDriver) {
+          // TeslaBLEProxy-style drivers only need the LAN IP of the
+          // proxy and the VIN it's paired to. "Verify connection"
+          // makes the backend issue a one-shot vehicle_data poll so
+          // the operator can confirm pairing before saving.
+          var vcfg = d.config || {};
+          html += '<fieldset><legend>Vehicle</legend>' +
+            '<div class="field-row"><div>' +
+            '<label>Proxy IP ' + help('LAN address of the TeslaBLEProxy. Bare IP uses port 8080; append ":port" to override (e.g. 192.168.1.50:1234).') + '</label>' +
+            '<input type="text" class="tesla-ip-input" data-driver-idx="' + idx + '" data-path="drivers.' + idx + '.config.ip" value="' + escHtml(vcfg.ip || '') + '" placeholder="192.168.1.50 (or 192.168.1.50:1234)">' +
+            '</div><div>' +
+            '<label>VIN ' + help('Vehicle Identification Number the proxy is paired to.') + '</label>' +
+            '<input type="text" data-path="drivers.' + idx + '.config.vin" value="' + escHtml(vcfg.vin || '') + '" placeholder="5YJ3E1EA1KF000000">' +
+            '</div></div>' +
+            '<div style="margin-top:8px;display:flex;gap:10px;align-items:center">' +
+            '<button class="btn-add tesla-verify-btn" type="button" data-driver-idx="' + idx + '">Verify connection</button>' +
+            '<span class="tesla-verify-status" data-driver-idx="' + idx + '" style="font-size:0.82rem;color:var(--text-dim)"></span>' +
+            '</div>' +
+            '</fieldset>';
+        }
         if (isLocalHTTP) {
           var lcfg = d.config || {};
           // Render the Disable-PV checkbox for every HTTP driver; the
@@ -147,6 +177,10 @@
         // what the driver itself declares, not a hard-coded list.
         var byLua = {};
         entries.forEach(function (e) { if (e && e.path) byLua[e.path] = e; });
+        // Cache by-lua so the synchronous render pass can detect
+        // catalog-driven driver kinds (e.g. "vehicle") on re-renders
+        // without waiting for the fetch to resolve again.
+        S.catalogByLua = byLua;
         bodyEl.querySelectorAll(".drv-disable-pv").forEach(function (lbl) {
           var lua = lbl.getAttribute("data-drv-lua");
           var entry = lua && byLua[lua];
@@ -196,9 +230,20 @@
         if (protocols.indexOf("http") >= 0) {
           var hosts = (chosen.dataset.httpHosts || "").split(",").filter(Boolean);
           driver.capabilities.http = { allowed_hosts: hosts };
+          // Vehicle drivers (e.g. tesla_vehicle) take {ip, vin}, not
+          // {host} or {email,password,serial}. Detect via catalog
+          // capability so existing local-HTTP and cloud branches stay
+          // untouched.
+          var entry = (S.catalogByLua || {})[sel.value];
+          var entryCaps = (entry && entry.capabilities) || [];
           var connHost = chosen.dataset.connectionHost || "";
-          if (connHost) driver.config = { host: connHost };
-          else driver.config = { email: "", password: "", serial: "" };
+          if (entryCaps.indexOf("vehicle") >= 0) {
+            driver.config = { ip: "", vin: "" };
+          } else if (connHost) {
+            driver.config = { host: connHost };
+          } else {
+            driver.config = { email: "", password: "", serial: "" };
+          }
         }
         config.drivers.push(driver);
         ctx.renderTab("devices");
@@ -262,6 +307,73 @@
             connectBtn.disabled = false;
           });
         });
+      });
+
+      // Tesla "Verify connection" buttons. Issues a backend probe
+      // against the configured proxy IP + VIN and renders the result
+      // inline. Backend handles SSRF hardening — the UI just collects
+      // the two fields and displays the response.
+      bodyEl.querySelectorAll(".tesla-verify-btn").forEach(function (vbtn) {
+        vbtn.addEventListener("click", function () {
+          var dIdx = vbtn.dataset.driverIdx;
+          var statusEl = bodyEl.querySelector('.tesla-verify-status[data-driver-idx="' + dIdx + '"]');
+          var ipInput = bodyEl.querySelector('[data-path="drivers.' + dIdx + '.config.ip"]');
+          var vinInput = bodyEl.querySelector('[data-path="drivers.' + dIdx + '.config.vin"]');
+          var ip = ipInput ? ipInput.value.trim() : "";
+          var vin = vinInput ? vinInput.value.trim() : "";
+          if (!ip || !vin) {
+            if (statusEl) statusEl.textContent = "Enter Proxy IP + VIN first";
+            return;
+          }
+          if (statusEl) { statusEl.textContent = "Verifying…"; statusEl.style.color = "var(--text-dim)"; }
+          vbtn.disabled = true;
+          fetch("/api/drivers/verify_tesla", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ip: ip, vin: vin }),
+          }).then(function (r) {
+            return r.json().then(function (j) { return { ok: r.ok, body: j }; });
+          }).then(function (res) {
+            if (!statusEl) return;
+            if (res.ok && res.body && res.body.ok) {
+              var soc = res.body.soc_pct != null ? Math.round(res.body.soc_pct) + "%" : "?";
+              var lim = res.body.charge_limit_pct != null ? Math.round(res.body.charge_limit_pct) + "%" : "?";
+              var st = res.body.charging_state || "";
+              statusEl.style.color = "#2a7";
+              statusEl.textContent = "✓ SoC " + soc + " · limit " + lim + (st ? " · " + st : "");
+            } else {
+              statusEl.style.color = "#c44";
+              statusEl.textContent = "✗ " + ((res.body && res.body.error) || "verification failed");
+            }
+          }).catch(function (e) {
+            if (statusEl) {
+              statusEl.style.color = "#c44";
+              statusEl.textContent = "✗ " + e.message;
+            }
+          }).finally(function () {
+            vbtn.disabled = false;
+          });
+        });
+      });
+
+      // Auto-sync capabilities.http.allowed_hosts from the configured
+      // Proxy IP. Without this, a fresh tesla driver gets allowed_hosts=[]
+      // (set by catalog-add) and every host.http_get call returns
+      // "host not in allowed_hosts" — driver never reaches the proxy
+      // and watchdog flips it stale. Strip any ":port" suffix; the
+      // allowlist is matched on hostname only.
+      bodyEl.querySelectorAll(".tesla-ip-input").forEach(function (inp) {
+        function syncAllowedHosts() {
+          var dIdx = inp.dataset.driverIdx;
+          var d = config.drivers[dIdx];
+          if (!d || !d.capabilities) return;
+          if (!d.capabilities.http) d.capabilities.http = { allowed_hosts: [] };
+          var ip = (inp.value || "").trim();
+          var bare = ip.split(":")[0];
+          d.capabilities.http.allowed_hosts = bare ? [bare] : [];
+        }
+        inp.addEventListener("input", syncAllowedHosts);
+        inp.addEventListener("blur", syncAllowedHosts);
       });
 
       // Add/remove-device buttons.
