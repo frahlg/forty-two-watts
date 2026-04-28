@@ -55,7 +55,14 @@ curl -fsSL https://raw.githubusercontent.com/frahlg/forty-two-watts/master/scrip
 
 Then open `http://<your-pi>:8080/setup` to run the first-time wizard.
 
-### Option C — build from source
+### Option C — Home Assistant OS add-on
+
+If you already run Home Assistant OS or HA Supervised, install
+forty-two-watts as an add-on directly from the supervisor — no
+separate Pi or Docker host needed. Maintained at
+[erikarenhill/ha-addon-forty-two-watts](https://github.com/erikarenhill/ha-addon-forty-two-watts).
+
+### Option D — build from source
 
 **Prerequisites:** Go 1.25+, a Raspberry Pi (or any `linux/arm64` machine), and at least one supported inverter/battery on your LAN.
 
