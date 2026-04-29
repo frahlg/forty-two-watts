@@ -140,6 +140,33 @@ also short-circuits the dispatch cycle when the configured site-meter
 driver is stale, because a stale grid reading causes one battery to
 charge another.
 
+## UI / web work
+
+**Always follow `DESIGN.md`** for any work under `web/` — colour
+tokens, typography, component vocabulary, and "what NOT to do" rules.
+The short version:
+
+- Read tokens from `web/components/theme.css`. Never hard-code hex
+  colours (e.g. `#6cf`, `#ffb020`); reach for `var(--accent-e)`,
+  `var(--fg)`, `var(--ink-raised)`, `var(--line)`, etc.
+- One amber accent only. On-accent text is near-black `#0a0a0a`,
+  never white.
+- Mono (`var(--mono)`) for eyebrow labels (UPPERCASE, `0.18em`
+  letter-spacing) and tabular numerics; sans (`var(--sans)`) for
+  prose.
+- 1 px hairline borders (`var(--line)`); no drop-shadows on cards or
+  modals (the only sanctioned shadow is the accent glow on 6 px status
+  dots).
+- Light theme support is automatic when you use the tokens — do not
+  branch on `data-theme`.
+- Do not reintroduce Google Fonts; fresh-Pi deploys must boot without
+  WAN.
+
+When extending an existing component, match its existing token usage
+rather than adding new local colour rules. If a new component needs a
+component-specific hue, follow the `--*-e` naming convention so the
+light theme can flip it cleanly.
+
 ## Code conventions
 
 - `slog` for all logging
