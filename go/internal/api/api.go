@@ -213,6 +213,9 @@ func (s *Server) routes() {
 	s.handle("POST /api/loadpoints/{id}/manual_hold", s.handleLoadpointManualHold)
 	s.handle("DELETE /api/loadpoints/{id}/manual_hold", s.handleLoadpointManualHoldClear)
 	s.handle("GET  /api/loadpoints/{id}/manual_hold", s.handleLoadpointManualHoldGet)
+	s.handle("POST /api/battery/manual_hold", s.handleBatteryManualHold)
+	s.handle("DELETE /api/battery/manual_hold", s.handleBatteryManualHoldClear)
+	s.handle("GET  /api/battery/manual_hold", s.handleBatteryManualHoldGet)
 	s.handle("GET  /api/version/check", s.handleVersionCheck)
 	s.handle("POST /api/version/skip", s.handleVersionSkip)
 	s.handle("POST /api/version/unskip", s.handleVersionUnskip)
@@ -703,6 +706,10 @@ func (s *Server) handleSetMode(w http.ResponseWriter, r *http.Request) {
 		control.ModePlannerSelf, control.ModePlannerCheap, control.ModePlannerArbitrage:
 		s.deps.CtrlMu.Lock()
 		s.deps.Ctrl.Mode = m
+		// An explicit mode change is a reset signal: drop any active
+		// battery manual hold so the new mode takes effect on the very
+		// next dispatch tick. Mirrors the loadpoint manual_hold UX.
+		s.deps.Ctrl.ClearBatteryManualHold()
 		s.deps.CtrlMu.Unlock()
 		if err := s.deps.State.SaveConfig("mode", req.Mode); err != nil {
 			slog.Warn("failed to persist mode", "err", err)
