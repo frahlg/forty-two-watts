@@ -831,10 +831,15 @@ func TestJointFuseAllocatorScalesBothBatteryAndEV(t *testing.T) {
 	if !st.FuseSaturated {
 		t.Errorf("FuseSaturated = false; want true after joint scaling")
 	}
-	// EV cap is the allocator's verdict (independent of fuse guard's
-	// in-tick safety net): scale × current EV ≈ 0.831 × 8000 ≈ 6650.
-	if st.FuseEVMaxW < 6000 || st.FuseEVMaxW > 7200 {
-		t.Errorf("FuseEVMaxW = %.0f — want ~6650 (scaled EV cap)", st.FuseEVMaxW)
+	// EV cap is the post-republish verdict: after applyFuseGuard +
+	// forceFuseDischarge constrain battery further (and may swing it
+	// into discharge), the cap accounts for the now-greater fuse
+	// headroom. Bound below by ~6000 (the original allocator's
+	// pessimistic cap) and above by the current EV draw — a cap
+	// greater than the EV is currently drawing would be loose.
+	if st.FuseEVMaxW < 6000 || st.FuseEVMaxW > st.EVChargingW {
+		t.Errorf("FuseEVMaxW = %.0f — want in [6000, %.0f] (post-republish cap)",
+			st.FuseEVMaxW, st.EVChargingW)
 	}
 	// Sanity: post-dispatch projected grid stays at or below fuse.
 	projected := 8200.0 + got

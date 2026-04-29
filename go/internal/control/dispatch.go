@@ -660,6 +660,12 @@ func ComputeDispatch(
 	// Discharge alone never trips this — Bn is negative, so it lifts the
 	// numerator (more headroom). Only positive battery demand competes
 	// with EV.
+	//
+	// BatteryCoversEV mode: H is computed from rawGridW (the raw meter,
+	// unchanged regardless of BatteryCoversEV) so H stays correct in
+	// both modes. The PI's gridW is the only place that branches on
+	// BatteryCoversEV; the joint allocator's geometry is independent
+	// of that. Regression: TestJointFuseAllocatorWithBatteryCoversEV.
 	state.FuseEVMaxW = 0
 	state.FuseSaturated = false
 	if fuseMaxW > 0 && state.EVChargingW > 0 {
@@ -809,6 +815,44 @@ func ComputeDispatch(
 	// non-negotiable ceiling — it bypasses slew. Regression-guarded
 	// by TestFuseSaverBypassesSlew.
 	raw = forceFuseDischarge(raw, store, state, driverCapacities, fuseMaxW)
+
+	// ---- Republish FuseEVMaxW after forceFuseDischarge ----
+	// The joint allocator (line 625) computes FuseEVMaxW assuming the
+	// battery target it just produced is what gets dispatched. But
+	// forceFuseDischarge may have flipped that target from charge to
+	// discharge — freeing additional fuse headroom for the EV.
+	// Without this re-publish the loadpoint controller throttles the
+	// EV against a stale (too-conservative) cap for one tick. Run only
+	// when the joint allocator already engaged this tick — otherwise
+	// FuseEVMaxW is "no advice" and should stay 0.
+	if state.FuseSaturated && state.EVChargingW > 0 && fuseMaxW > 0 {
+		var postBat float64
+		seen := make(map[string]struct{}, len(raw))
+		for _, t := range raw {
+			if _, ok := seen[t.Driver]; ok {
+				continue
+			}
+			seen[t.Driver] = struct{}{}
+			postBat += t.TargetW
+		}
+		// H = rawGridW − currentTotal − E (unchanged from joint allocator)
+		// newGrid = H + postBat + E*scale ≤ fuseMaxW
+		// → scale ≤ (fuseMaxW − H − postBat) / E, capped to ≤1
+		var rawGridW2 float64
+		if r := store.Get(state.SiteMeterDriver, telemetry.DerMeter); r != nil {
+			rawGridW2 = r.SmoothedW
+		}
+		H := rawGridW2 - currentTotal - state.EVChargingW
+		headroom := fuseMaxW - H - postBat
+		if headroom < 0 {
+			headroom = 0
+		}
+		newCap := headroom
+		if newCap > state.EVChargingW {
+			newCap = state.EVChargingW
+		}
+		state.FuseEVMaxW = newCap
+	}
 
 	// Update state
 	now := time.Now()

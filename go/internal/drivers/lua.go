@@ -441,23 +441,61 @@ func registerHost(L *lua.LState, env *HostEnv) {
 
 	// hostAllowed checks the URL's host component against the
 	// per-driver allowlist. Empty allowlist = any host (legacy
-	// behaviour). Matched case-insensitively, port-agnostic. See
-	// HostEnv.HTTPAllowedHosts docs.
+	// behaviour). Matched case-insensitively.
+	//
+	// Allowlist entry semantics:
+	//   "192.168.1.50"        → host-only match (any port allowed —
+	//                           backward-compatible default)
+	//   "192.168.1.50:8080"   → host AND port must match
+	//
+	// The port-aware form lets operators tighten an allowlist so a
+	// driver granted access to a single proxy can't probe other ports
+	// on the same host (e.g. SSH/22, Redis/6379, internal admin UIs).
+	// Existing configs that don't specify a port keep working.
+	//
+	// Schemes other than http/https are rejected outright — file://,
+	// data://, ftp:// etc. have no business here and would otherwise
+	// produce opaque "unsupported protocol scheme" errors from the
+	// stdlib client.
 	hostAllowed := func(rawURL string) (bool, string) {
-		if len(env.HTTPAllowedHosts) == 0 {
-			return true, ""
-		}
 		u, err := net_url.Parse(rawURL)
 		if err != nil || u.Host == "" {
 			return false, "invalid URL"
 		}
+		switch strings.ToLower(u.Scheme) {
+		case "http", "https":
+		default:
+			return false, fmt.Sprintf("scheme %q not supported (http/https only)", u.Scheme)
+		}
+		if len(env.HTTPAllowedHosts) == 0 {
+			return true, ""
+		}
 		host := strings.ToLower(u.Hostname())
-		for _, allowed := range env.HTTPAllowedHosts {
-			if strings.EqualFold(strings.TrimSpace(allowed), host) {
+		port := u.Port()
+		if port == "" {
+			if u.Scheme == "https" {
+				port = "443"
+			} else {
+				port = "80"
+			}
+		}
+		for _, raw := range env.HTTPAllowedHosts {
+			entry := strings.ToLower(strings.TrimSpace(raw))
+			if entry == "" {
+				continue
+			}
+			eHost, ePort, hasPort := splitHostPortLower(entry)
+			if !hasPort {
+				if entry == host {
+					return true, ""
+				}
+				continue
+			}
+			if eHost == host && ePort == port {
 				return true, ""
 			}
 		}
-		return false, fmt.Sprintf("host %q not in allowed_hosts", host)
+		return false, fmt.Sprintf("host %q (port %s) not in allowed_hosts", host, port)
 	}
 
 	applyHeaders := func(req *net_http.Request, L *lua.LState, argIdx int) {
@@ -557,6 +595,46 @@ func registerHost(L *lua.LState, env *HostEnv) {
 	}))
 
 	L.SetGlobal("host", host)
+}
+
+// splitHostPortLower parses an allowlist entry as "host" or "host:port".
+// Returns lowercased host, port string, and a flag indicating whether a
+// port was present. Bracketed IPv6 ([::1]:8080) is supported via the
+// explicit "]" boundary; unbracketed IPv6 ("fe80::1") is treated as
+// host-only because the trailing ":1" would otherwise be misread as
+// port 1.
+func splitHostPortLower(s string) (host, port string, hasPort bool) {
+	s = strings.ToLower(s)
+	if strings.HasPrefix(s, "[") {
+		end := strings.Index(s, "]")
+		if end < 0 {
+			return s, "", false
+		}
+		h := s[1:end]
+		rest := s[end+1:]
+		if strings.HasPrefix(rest, ":") && len(rest) > 1 {
+			return h, rest[1:], true
+		}
+		return h, "", false
+	}
+	// Two or more colons → unbracketed IPv6, treat as host-only.
+	if strings.Count(s, ":") >= 2 {
+		return s, "", false
+	}
+	i := strings.LastIndex(s, ":")
+	if i < 0 {
+		return s, "", false
+	}
+	maybePort := s[i+1:]
+	if maybePort == "" {
+		return s, "", false
+	}
+	for _, r := range maybePort {
+		if r < '0' || r > '9' {
+			return s, "", false
+		}
+	}
+	return s[:i], maybePort, true
 }
 
 func modbusKindFromString(s string) int32 {

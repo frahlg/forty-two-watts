@@ -579,47 +579,18 @@ func main() {
 				// car); when a vehicle driver such as TeslaBLEProxy is
 				// online, its SoC reading is ground truth.
 				//
-				// Multi-vehicle case: one charger may be paired with N
-				// vehicle drivers (a household with 2 Teslas sharing one
-				// wallbox). Pick the one most likely to be the car
-				// physically connected right now: rank by charging_state
-				// (Charging > NoPower/Starting > Stopped/Complete >
-				// Disconnected/unknown), tiebreak by freshness. Falls
-				// back to inferred SoC when nothing online matches.
+				// Picker (rank + freshness + bounds) lives in
+				// telemetry.PickBestVehicle so api.go's loadpoint
+				// decoration agrees with us on which vehicle is "the
+				// one". Falls back to inferred SoC when nothing usable
+				// online matches.
 				initSoC := st.CurrentSoCPct
 				socSource := "inferred"
 				var vehicleChargeLimit float64 // 0 = unknown
-				var bestRank = -1
-				var bestUpdated time.Time
-				for _, vr := range tel.ReadingsByType(telemetry.DerVehicle) {
-					if vr.SoC == nil {
-						continue
-					}
-					if h := tel.DriverHealth(vr.Driver); h == nil || !h.IsOnline() {
-						continue
-					}
-					var meta struct {
-						ChargingState  string  `json:"charging_state"`
-						ChargeLimitPct float64 `json:"charge_limit_pct"`
-					}
-					if len(vr.Data) > 0 {
-						_ = json.Unmarshal(vr.Data, &meta)
-					}
-					rank := vehicleConnectedRank(meta.ChargingState)
-					if rank < 0 {
-						continue // explicitly disconnected — not this car
-					}
-					if rank < bestRank {
-						continue
-					}
-					if rank == bestRank && !vr.UpdatedAt.After(bestUpdated) {
-						continue
-					}
-					bestRank = rank
-					bestUpdated = vr.UpdatedAt
-					initSoC = *vr.SoC
-					socSource = "vehicle:" + vr.Driver
-					vehicleChargeLimit = meta.ChargeLimitPct
+				if pick := telemetry.PickBestVehicle(tel, time.Now()); pick.Driver != "" {
+					initSoC = pick.SoCPct
+					socSource = "vehicle:" + pick.Driver
+					vehicleChargeLimit = pick.ChargeLimitPct
 				}
 				// Map target time → slot index using the DP's
 				// actual slot length (hour-of-prices vs. 15-min
@@ -755,9 +726,18 @@ func main() {
 		// Startup replan: the scheduled tick is up to mpcSvc.Interval
 		// (15 min) away. Don't make the operator wait — fire one
 		// immediately so /api/mpc/plan is populated as soon as
-		// telemetry, prices, and forecasts have settled.
+		// telemetry, prices, and forecasts have settled. Observe ctx
+		// during the warm-up sleep so SIGTERM during startup doesn't
+		// keep this goroutine alive past shutdown.
 		go func() {
-			time.Sleep(2 * time.Second) // give drivers a moment to seed SoC
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(2 * time.Second): // give drivers a moment to seed SoC
+			}
+			if ctx.Err() != nil {
+				return
+			}
 			_ = mpcSvc.Replan(ctx)
 			slog.Info("mpc: startup replan completed")
 		}()
@@ -1729,26 +1709,6 @@ func isConfigMissing(err error) bool {
 		return true
 	}
 	return strings.Contains(err.Error(), "no such file")
-}
-
-// vehicleConnectedRank scores how likely a DerVehicle driver is to be the
-// one physically plugged into the loadpoint right now, based on Tesla
-// Owner-API charging_state semantics (other vendors use the same
-// vocabulary). Higher rank = more likely connected. Negative = explicitly
-// not connected; caller should skip.
-func vehicleConnectedRank(chargingState string) int {
-	switch chargingState {
-	case "Charging", "Starting":
-		return 3 // actively pulling power — definitely this car
-	case "NoPower":
-		return 2 // plugged but wallbox not delivering yet
-	case "Stopped", "Complete":
-		return 1 // plugged + idle (charge limit reached, paused, etc.)
-	case "Disconnected":
-		return -1 // explicitly unplugged — never pick this one
-	default:
-		return 0 // unknown/missing — usable but de-prioritised
-	}
 }
 
 func recordHistory(st *state.Store, tel *telemetry.Store, ctrl *control.State, nowMs int64) {
