@@ -97,6 +97,7 @@ func (r *Registry) Add(ctx context.Context, cfg config.Driver) error {
 	}
 
 	env := NewHostEnv(cfg.Name, r.tel)
+	env.BatteryCapacityWh = cfg.BatteryCapacityWh
 	if mq := cfg.EffectiveMQTT(); mq != nil && r.MQTTFactory != nil {
 		cap, err := r.MQTTFactory(cfg.Name, mq)
 		if err != nil {

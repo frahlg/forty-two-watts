@@ -63,6 +63,16 @@ type HostEnv struct {
 	HTTPAllowedHosts []string
 	Start      time.Time  // monotonic start; host.millis() computed from here
 
+	// BatteryCapacityWh mirrors the operator's `battery_capacity_wh`
+	// declaration for this driver. Zero means "no physical battery
+	// wired here" — typical for a hybrid inverter used PV-only. When
+	// zero, emitTelemetry drops `host.emit("battery", …)` calls so
+	// phantom SoC readings never reach the telemetry store, the
+	// /api/status drivers map, or the frontend's Combined view (which
+	// would otherwise mean-average a real battery's 24 % SoC with the
+	// phantom 0 % from a no-battery hybrid, halving the displayed SoC).
+	BatteryCapacityWh float64
+
 	mu sync.Mutex
 	// Desired poll interval — driver can set via host.set_poll_interval OR
 	// return it from driver_poll. We persist the last hint here.
@@ -164,6 +174,20 @@ func (h *HostEnv) emitTelemetry(rawJSON []byte) error {
 	t, err := telemetry.ParseDerType(env.Type)
 	if err != nil {
 		return err
+	}
+	// Drop battery emits from drivers the operator declared as no-battery
+	// (battery_capacity_wh ≤ 0). Hybrid inverters used PV-only still expose
+	// battery registers in firmware, and the driver dutifully emits whatever
+	// it reads — but without a physical pack those readings are phantom
+	// (typically w=0, soc=0). Letting them through pollutes the telemetry
+	// store, /api/status drivers map, and the frontend's Combined view.
+	// Health success is still recorded — the driver IS alive, just emitting
+	// data the operator told us to ignore.
+	if t == telemetry.DerBattery && h.BatteryCapacityWh <= 0 {
+		if h.Telemetry != nil {
+			h.Telemetry.DriverHealthMut(h.DriverName).RecordSuccess()
+		}
+		return nil
 	}
 	if h.Telemetry != nil {
 		h.Telemetry.Update(h.DriverName, t, env.W, env.SoC, rawJSON)
