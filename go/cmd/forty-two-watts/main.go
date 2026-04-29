@@ -165,7 +165,7 @@ func main() {
 	ctrl.SlewRateW = cfg.Site.SlewRateW
 	ctrl.MinDispatchIntervalS = cfg.Site.MinDispatchIntervalS
 	ctrl.InverterGroups = inverterGroupsFrom(cfg.Drivers)
-	ctrl.DriverLimits = driverLimitsFrom(cfg.Drivers)
+	ctrl.DriverLimits = driverLimitsFrom(cfg.Drivers, cfg.Batteries)
 	// Per-phase fuse params for the per-phase clamp inside applyFuseGuard
 	// + forceFuseDischarge. Reads l1_a/l2_a/l3_a from the meter driver
 	// when SiteFuseAmps > 0; otherwise the per-phase clamp is disabled.
@@ -328,7 +328,7 @@ func main() {
 			// a bare replace would race with the control loop's 5 s tick.
 			ctrlMu.Lock()
 			ctrl.InverterGroups = inverterGroupsFrom(newCfg.Drivers)
-			ctrl.DriverLimits = driverLimitsFrom(newCfg.Drivers)
+			ctrl.DriverLimits = driverLimitsFrom(newCfg.Drivers, newCfg.Batteries)
 			ctrlMu.Unlock()
 
 			// Push the new pool totals into the planner so its next
@@ -1443,20 +1443,30 @@ func driverCapacitiesFrom(drivers []config.Driver, loadpoints []config.Loadpoint
 
 // driverLimitsFrom builds the driver-name → per-battery PowerLimits map
 // used by control.State for per-battery charge/discharge caps (#145).
-// Drivers without an explicit `max_charge_w` / `max_discharge_w` are
-// omitted from the map, so the dispatcher falls through to the global
-// MaxCommandW default for those drivers — same behaviour as before the
-// per-driver feature shipped. Config-reload calls this again and swaps
-// the map atomically in the control state.
-func driverLimitsFrom(drivers []config.Driver) map[string]control.PowerLimits {
+// Reads the drivers section first, then falls back to the batteries
+// section for the same key — operators commonly set per-battery limits
+// only under `batteries:` (the MPC reads them from there), and without
+// this fallback the dispatcher silently uses the 5 kW MaxCommandW
+// default while the planner schedules against the configured 9 kW.
+// Drivers without limits in either place are omitted from the map.
+func driverLimitsFrom(drivers []config.Driver, batteries map[string]config.Battery) map[string]control.PowerLimits {
 	out := map[string]control.PowerLimits{}
 	for _, d := range drivers {
-		if d.MaxChargeW == 0 && d.MaxDischargeW == 0 {
+		chg, dis := d.MaxChargeW, d.MaxDischargeW
+		if b, ok := batteries[d.Name]; ok {
+			if chg == 0 && b.MaxChargeW != nil && *b.MaxChargeW > 0 {
+				chg = *b.MaxChargeW
+			}
+			if dis == 0 && b.MaxDischargeW != nil && *b.MaxDischargeW > 0 {
+				dis = *b.MaxDischargeW
+			}
+		}
+		if chg == 0 && dis == 0 {
 			continue
 		}
 		out[d.Name] = control.PowerLimits{
-			MaxChargeW:    d.MaxChargeW,
-			MaxDischargeW: d.MaxDischargeW,
+			MaxChargeW:    chg,
+			MaxDischargeW: dis,
 		}
 	}
 	return out

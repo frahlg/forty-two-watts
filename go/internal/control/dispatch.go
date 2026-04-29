@@ -545,6 +545,23 @@ func ComputeDispatch(
 				state.slotDelivered += currentTotal * dt / 3600.0
 			}
 			state.lastTickTs = now
+			// A reactive replan can shrink the slot's energy budget while
+			// the accumulator already overshot the new (smaller) target —
+			// e.g. live PV/load drift triggers replan that decides the
+			// remaining slot should stop discharging, but slotDelivered
+			// already exceeds the new BatteryEnergyWh. Without capping,
+			// remainingWh flips sign and the dispatch tries to "buy back"
+			// the discharge — exactly the trade the planner avoided.
+			// Cap so remainingWh = 0 (idle for the rest of the slot)
+			// instead of going positive (charge during a discharge slot).
+			state.currentDirective.BatteryEnergyWh = currentDirective.BatteryEnergyWh
+			state.currentDirective.SlotEnd = currentDirective.SlotEnd
+			if currentDirective.BatteryEnergyWh < 0 && state.slotDelivered < currentDirective.BatteryEnergyWh {
+				state.slotDelivered = currentDirective.BatteryEnergyWh
+			}
+			if currentDirective.BatteryEnergyWh > 0 && state.slotDelivered > currentDirective.BatteryEnergyWh {
+				state.slotDelivered = currentDirective.BatteryEnergyWh
+			}
 		}
 		remainingWh := currentDirective.BatteryEnergyWh - state.slotDelivered
 		remainingS := currentDirective.SlotEnd.Sub(now).Seconds()
@@ -759,6 +776,31 @@ func ComputeDispatch(
 
 	// ---- Fuse guard (bidirectional, #145) ----
 	raw = applyFuseGuard(raw, store, state, fuseMaxW)
+
+	// ---- Plan/exec sign-mismatch floor (planner modes only) ----
+	// Operator-report 2026-04-28 (08:00–08:15 CEST): planner_arbitrage
+	// peak slot wanted battery_w = -2400 W (discharge to export at peak),
+	// dispatch produced +1640..+1860 W (charged from PV surplus). PV
+	// got swallowed by the battery instead of sold at 334 öre/kWh.
+	//
+	// Root cause was a code-path divergence elsewhere; this is the
+	// rail that makes that whole class of bug a no-op:
+	//
+	//   plan says discharge, exec produces charge → idle this tick
+	//   plan says charge,    exec produces discharge → idle this tick
+	//
+	// "Idle for this tick" is the right floor because:
+	//   - Discharging a charge slot would burn cycles against operator
+	//     intent. Idling and waiting for the next replan is harmless.
+	//   - Charging a discharge slot would buy energy at the exact slot
+	//     the planner intended to SELL it. Idling and letting PV export
+	//     naturally captures most of the lost revenue without any risk.
+	//
+	// Only applied in planner modes — manual modes have no plan to
+	// disagree with. forceFuseDischarge runs AFTER this so a fuse
+	// overflow can still drive discharge regardless of plan intent.
+	raw = applyPlanSignFloor(raw, state)
+
 	// forceFuseDischarge runs LAST, deliberately AFTER the slew loop
 	// at line 625. A fuse overflow can demand a battery target that's
 	// far beyond what slew would normally allow in a single 5 s tick
@@ -1128,6 +1170,93 @@ func perPhaseImportOverageW(store *telemetry.Store, state *State) float64 {
 		v = 230 // sensible default; main wires the actual config voltage
 	}
 	return (maxA - state.SiteFuseAmps) * v
+}
+
+// applyPlanSignFloor enforces "executed battery total must agree in sign
+// with the plan's intent for this slot" — the safety rail described at
+// the call-site comment. Only active in planner modes. When the sum of
+// post-distribute, post-clamp targets has the opposite sign to the
+// active slot's plan intent, every target is forced to zero (idle).
+//
+// Sources of plan intent (first-non-empty wins):
+//   - state.SlotDirective(now).BatteryEnergyWh — energy-allocation path
+//   - state.PlanTarget(now) "charge" mode → charge intent
+//   - state.PlanTarget(now) "self_consumption" with negative gridW →
+//     discharge-to-export intent (matches mpc.actionToSlot's mapping)
+//
+// If no source is available (no planner callbacks wired, or both
+// returned !ok) the floor is a no-op — there's no intent to compare
+// against. Threshold of 100 W matches mpc.IdleGateThresholdW so a
+// near-zero plan target counts as "idle, no opinion on sign".
+func applyPlanSignFloor(targets []DispatchTarget, state *State) []DispatchTarget {
+	if len(targets) == 0 || state == nil || !state.Mode.IsPlannerMode() {
+		return targets
+	}
+	intent := planSignIntent(state)
+	if intent == 0 {
+		return targets
+	}
+	var sumTarget float64
+	for _, t := range targets {
+		sumTarget += t.TargetW
+	}
+	const idleBand = 100.0
+	if math.Abs(sumTarget) < idleBand {
+		return targets
+	}
+	execSign := 0
+	if sumTarget > idleBand {
+		execSign = 1
+	} else if sumTarget < -idleBand {
+		execSign = -1
+	}
+	if execSign == 0 || execSign == intent {
+		return targets
+	}
+	slog.Warn("plan/exec sign mismatch — clamping to idle for this tick",
+		"plan_intent", intent, "exec_sum_w", sumTarget, "mode", string(state.Mode))
+	out := make([]DispatchTarget, len(targets))
+	for i, t := range targets {
+		out[i] = DispatchTarget{Driver: t.Driver, TargetW: 0, Clamped: true}
+	}
+	return out
+}
+
+// planSignIntent returns +1 for charge, -1 for discharge, 0 for idle /
+// unknown. Reads SlotDirective first (energy path), falls back to
+// PlanTarget (legacy path). Centralises the multi-source lookup so the
+// floor and any future intent-aware code stay aligned.
+func planSignIntent(state *State) int {
+	const idleWh = 50.0     // a near-zero per-slot energy is idle, not signed
+	const idleGridW = 100.0 // matches mpc.IdleGateThresholdW for sign decisions
+	if state.SlotDirective != nil {
+		if dir, ok := state.SlotDirective(time.Now()); ok {
+			if dir.BatteryEnergyWh > idleWh {
+				return +1
+			}
+			if dir.BatteryEnergyWh < -idleWh {
+				return -1
+			}
+			return 0
+		}
+	}
+	if state.PlanTarget != nil {
+		if modeStr, gridW, ok := state.PlanTarget(time.Now()); ok {
+			switch Mode(modeStr) {
+			case ModeCharge:
+				return +1
+			case ModeSelfConsumption:
+				// mpc.actionToSlot encodes a planned discharge-to-export
+				// as ("self_consumption", negative_grid_w). Mirror that
+				// mapping here: negative grid target = discharge intent.
+				if gridW < -idleGridW {
+					return -1
+				}
+				return 0
+			}
+		}
+	}
+	return 0
 }
 
 // fuseSaverFromZero is the early-return entry point for the fuse-saver.
