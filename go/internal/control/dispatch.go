@@ -545,6 +545,23 @@ func ComputeDispatch(
 				state.slotDelivered += currentTotal * dt / 3600.0
 			}
 			state.lastTickTs = now
+			// A reactive replan can shrink the slot's energy budget while
+			// the accumulator already overshot the new (smaller) target —
+			// e.g. live PV/load drift triggers replan that decides the
+			// remaining slot should stop discharging, but slotDelivered
+			// already exceeds the new BatteryEnergyWh. Without capping,
+			// remainingWh flips sign and the dispatch tries to "buy back"
+			// the discharge — exactly the trade the planner avoided.
+			// Cap so remainingWh = 0 (idle for the rest of the slot)
+			// instead of going positive (charge during a discharge slot).
+			state.currentDirective.BatteryEnergyWh = currentDirective.BatteryEnergyWh
+			state.currentDirective.SlotEnd = currentDirective.SlotEnd
+			if currentDirective.BatteryEnergyWh < 0 && state.slotDelivered < currentDirective.BatteryEnergyWh {
+				state.slotDelivered = currentDirective.BatteryEnergyWh
+			}
+			if currentDirective.BatteryEnergyWh > 0 && state.slotDelivered > currentDirective.BatteryEnergyWh {
+				state.slotDelivered = currentDirective.BatteryEnergyWh
+			}
 		}
 		remainingWh := currentDirective.BatteryEnergyWh - state.slotDelivered
 		remainingS := currentDirective.SlotEnd.Sub(now).Seconds()
