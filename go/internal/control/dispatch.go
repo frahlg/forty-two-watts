@@ -888,7 +888,13 @@ func ComputeDispatch(
 	// Only applied in planner modes — manual modes have no plan to
 	// disagree with. forceFuseDischarge runs AFTER this so a fuse
 	// overflow can still drive discharge regardless of plan intent.
-	raw = applyPlanSignFloor(raw, state)
+	//
+	// Skipped when a manual hold is active: the operator is
+	// deliberately overriding the planner, so a sign mismatch with the
+	// plan is the intended behaviour, not a bug to clamp out.
+	if !manualHoldActive {
+		raw = applyPlanSignFloor(raw, state)
+	}
 
 	// forceFuseDischarge runs LAST, deliberately AFTER the slew loop
 	// at line 625. A fuse overflow can demand a battery target that's

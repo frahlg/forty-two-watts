@@ -2190,6 +2190,42 @@ func TestBatteryManualHoldExpiryRevertsToMode(t *testing.T) {
 	}
 }
 
+func TestBatteryManualHoldBypassesPlanSignFloor(t *testing.T) {
+	// Pi report 2026-04-29: manual hold installed `charge 666 W` while
+	// MPC plan intent was `discharge` — applyPlanSignFloor clamped
+	// every tick to idle, defeating the override entirely. The sign
+	// floor exists to catch *unintended* plan/exec divergence in
+	// planner modes, but a manual hold is *intentional* divergence.
+	store := seedStore(0, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	st := NewState(0, 50, "ferroamp")
+	st.Mode = ModePlannerArbitrage
+	st.SlewRateW = 100000
+	now := time.Now()
+	// Plan says discharge this slot.
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) {
+		return SlotDirective{
+			SlotStart:       now,
+			SlotEnd:         now.Add(15 * time.Minute),
+			BatteryEnergyWh: -1500,
+		}, true
+	}
+	// Hold says charge — opposite sign.
+	st.SetBatteryManualHold(BatteryManualHold{PowerW: 666, ExpiresAt: now.Add(60 * time.Second)})
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 100000)
+	if len(targets) != 1 {
+		t.Fatalf("expected 1 target, got %d", len(targets))
+	}
+	if math.Abs(targets[0].TargetW-666) > 1 {
+		t.Errorf("hold should win over plan-sign floor, got %f (want 666)",
+			targets[0].TargetW)
+	}
+}
+
 func TestBatteryManualHoldBypassesHoldoff(t *testing.T) {
 	// LastDispatch in the very recent past would normally trigger the
 	// holdoff branch. Manual holds must bypass it for immediate effect.
