@@ -7,10 +7,11 @@ import (
 
 // VehicleMaxAge is the freshness window past which a DerVehicle reading
 // is considered stale enough to ignore for control decisions. Picked
-// conservatively at 5 min — TeslaBLEProxy polls cached every ~60 s, and
-// the driver itself force-wakes every 30 min. Anything older than 5 min
-// is either a sleeping car the proxy hasn't woken or a proxy outage,
-// either way not safe to act on as ground truth.
+// conservatively at 5 min so a vehicle driver that has lost contact
+// (asleep car, paired-proxy outage, cloud-API throttle) cannot keep an
+// old SoC live as ground truth. Tighter than this would churn against
+// vendors whose backends only refresh on a 60–120 s cadence; looser
+// would mean acting on a value that no longer reflects reality.
 const VehicleMaxAge = 5 * time.Minute
 
 // VehiclePick is the "best matching" DerVehicle reading for a loadpoint:
@@ -22,15 +23,16 @@ type VehiclePick struct {
 	SoCPct         float64 // bounded [0,100]
 	ChargeLimitPct float64 // bounded [0,100]
 	ChargingState  string
-	Stale          bool      // proxy says "this is last-known, vehicle asleep"
+	Stale          bool      // driver says "this is last-known, vehicle unreachable"
 	UpdatedAt      time.Time // wall-clock of the underlying reading
 }
 
-// VehicleConnectedRank scores how likely a DerVehicle driver is to be the
-// one physically plugged into the loadpoint right now, based on Tesla
-// Owner-API charging_state semantics (other vendors use the same
-// vocabulary). Higher rank = more likely connected. Negative = explicitly
-// not connected; caller should skip.
+// VehicleConnectedRank scores how likely a DerVehicle driver is to be
+// the one physically plugged into the loadpoint right now, using the
+// charging_state vocabulary every vehicle driver normalizes to (the
+// strings below are the canonical values; vendor specifics are
+// translated inside each Lua driver). Higher rank = more likely
+// connected. Negative = explicitly not connected; caller should skip.
 //
 // Single source of truth for the rank table — both main.go (MPC plan
 // inputs) and api.go (loadpoint decoration) call this so multi-vehicle
@@ -55,14 +57,15 @@ func VehicleConnectedRank(chargingState string) int {
 // VehicleConnectedRank, tiebreak by freshness. Returns a zero-value
 // VehiclePick if no usable reading exists.
 //
-// Defenses applied here (do NOT skip — the BLE proxy is a network
-// trust boundary):
-//   - SoC bounded to [0,100] — a misbehaving proxy reporting 200 % or
+// Defenses applied here (do NOT skip — every vehicle driver pulls
+// from a network trust boundary, whether a local BLE proxy, an
+// in-LAN OEM gateway, or a cloud API):
+//   - SoC bounded to [0,100] — a misbehaving driver reporting 200 % or
 //     -50 % must not be able to overcharge or freeze EV charging.
 //   - ChargeLimitPct bounded to [0,100] — same risk.
 //   - Stale by `now − UpdatedAt > VehicleMaxAge` — wallclock check on
-//     the reading's own timestamp, even when the proxy didn't set the
-//     `stale` flag. A proxy that stops responding mustn't keep the
+//     the reading's own timestamp, even when the driver didn't set the
+//     `stale` flag. A driver that stops publishing mustn't keep the
 //     last-known SoC live forever.
 //   - Driver health-online check — offline drivers contribute nothing.
 //
@@ -83,7 +86,7 @@ func PickBestVehicle(s *Store, now time.Time) VehiclePick {
 		}
 		if !vr.UpdatedAt.IsZero() && now.Sub(vr.UpdatedAt) > VehicleMaxAge {
 			// Reading is older than we're willing to trust as ground
-			// truth — proxy probably stopped publishing. Skip rather
+			// truth — driver probably stopped publishing. Skip rather
 			// than risk acting on a stale SoC.
 			continue
 		}
