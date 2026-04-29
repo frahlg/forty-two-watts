@@ -173,21 +173,28 @@ function driver_poll()
   --
   -- BUT once every WAKEUP_INTERVAL_MS (30 min) we DO request a
   -- wakeup so cached data can't drift forever while the car sleeps.
-  -- last_wakeup_ms == 0 is the "never woken since process start" sentinel
-  -- so the FIRST poll after startup always forces a wakeup. The car may
-  -- have been asleep for hours while forty-two-watts was down — we want
-  -- ground-truth SoC on the dashboard immediately, not the proxy's stale
-  -- cache from the previous run. After this initial wake, the 30-min
-  -- cadence takes over.
+  -- The cadence is anchored to driver-process uptime, so the FIRST
+  -- poll after startup intentionally does NOT force a wakeup. Reason:
+  -- a crash-loop (the host wedges, restarts every few seconds) would
+  -- otherwise hammer Tesla's BLE radio at multiple wakeups per minute,
+  -- draining the 12 V battery and likely hitting Tesla's "Command
+  -- Disallowed" rate limit. The tradeoff is that immediately after a
+  -- restart the dashboard may show up to 30 min of stale SoC; the
+  -- operator can press "Verify connection" in settings to force a
+  -- one-shot wake, or wait for the next scheduled 30-min wake.
   local now = host.millis()
-  local do_wakeup = (last_wakeup_ms == 0) or ((now - last_wakeup_ms) >= WAKEUP_INTERVAL_MS)
+  local do_wakeup = (last_wakeup_ms > 0) and ((now - last_wakeup_ms) >= WAKEUP_INTERVAL_MS)
+  if last_wakeup_ms == 0 then
+    -- Anchor the cadence at "now" so the first FORCED wake fires
+    -- exactly WAKEUP_INTERVAL_MS after startup, not on first poll.
+    last_wakeup_ms = now
+  end
   local url = base_url .. "/api/1/vehicles/" .. vin ..
               "/vehicle_data?endpoints=charge_state"
   if do_wakeup then
     url = url .. "&wakeup=true"
-    local reason = (last_wakeup_ms == 0) and "startup" or "30-min cadence"
     last_wakeup_ms = now
-    host.log("info", "tesla: forcing BLE wakeup on this poll (" .. reason .. ")")
+    host.log("info", "tesla: forcing BLE wakeup on this poll (30-min cadence)")
   end
   -- host.http_get returns (body_string, nil) or (nil, error_string) —
   -- first return is the body directly, NOT a table with .body. The
@@ -314,5 +321,16 @@ function driver_default_mode()
 end
 
 function driver_cleanup()
-  last.soc = nil
+  -- Reset every persistent piece of state so a hot-reload looks
+  -- identical to a fresh process start (the `last_wakeup_ms` reset
+  -- in particular re-anchors the 30-min cadence so we don't fire a
+  -- wakeup the moment the reloaded driver runs its first poll).
+  last.soc                    = nil
+  last.charge_limit           = nil
+  last.charging_state         = nil
+  last.time_to_full           = nil
+  last.charge_amps            = nil
+  last.charger_actual_current = nil
+  last.ts_ms                  = 0
+  last_wakeup_ms              = 0
 end

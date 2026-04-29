@@ -1809,12 +1809,19 @@ func (s *Server) handleLoadpoints(w http.ResponseWriter, r *http.Request) {
 
 // decorateLoadpointsWithVehicle overlays the best-matching DerVehicle
 // reading onto each plugged-in loadpoint state. Mutates the input
-// slice in place. The "best" reading is the one most likely to be the
-// car physically connected: rank by charging_state, tiebreak by
-// freshness; an explicit "Disconnected" is skipped entirely.
+// slice in place. Picker (rank + freshness + bounds) lives in
+// telemetry.PickBestVehicle so main.go's MPC plumbing and this
+// presentation path agree on which vehicle is "the one".
+//
+// CurrentSoCPct is intentionally NOT overwritten with the BMS reading.
+// The loadpoint controller uses CurrentSoCPct as its inference state;
+// overlaying it from the BMS would mean the UI shows BMS truth while
+// the controller's plan was computed from the inferred value the
+// previous tick — a presentation lie. VehicleSoCPct exposes the BMS
+// value separately; the frontend renders both and labels which one
+// the controller used.
 func decorateLoadpointsWithVehicle(states []loadpoint.State, tel *telemetry.Store) {
-	readings := tel.ReadingsByType(telemetry.DerVehicle)
-	if len(readings) == 0 {
+	if len(tel.ReadingsByType(telemetry.DerVehicle)) == 0 {
 		// No vehicle drivers — mark every plugged-in lp as inferred.
 		for i := range states {
 			if states[i].PluggedIn {
@@ -1823,76 +1830,20 @@ func decorateLoadpointsWithVehicle(states []loadpoint.State, tel *telemetry.Stor
 		}
 		return
 	}
-	// Pick the single best vehicle reading across all DerVehicle drivers.
-	// Multi-vehicle ranking lives close to where it matters: this is the
-	// only place that needs to interpret charging_state today.
-	type vehicleData struct {
-		ChargingState  string  `json:"charging_state"`
-		ChargeLimitPct float64 `json:"charge_limit_pct"`
-		Stale          bool    `json:"stale"`
-	}
-	rankFn := func(s string) int {
-		switch s {
-		case "Charging", "Starting":
-			return 3
-		case "NoPower":
-			return 2
-		case "Stopped", "Complete":
-			return 1
-		case "Disconnected":
-			return -1
-		default:
-			return 0
-		}
-	}
-	var bestRank = -1
-	var bestUpdated time.Time
-	var bestSoC, bestLimit float64
-	var bestState, bestDriver string
-	var bestStale bool
-	for _, vr := range readings {
-		if vr.SoC == nil {
-			continue
-		}
-		if h := tel.DriverHealth(vr.Driver); h == nil || !h.IsOnline() {
-			continue
-		}
-		var meta vehicleData
-		if len(vr.Data) > 0 {
-			_ = json.Unmarshal(vr.Data, &meta)
-		}
-		rank := rankFn(meta.ChargingState)
-		if rank < 0 {
-			continue
-		}
-		if rank < bestRank || (rank == bestRank && !vr.UpdatedAt.After(bestUpdated)) {
-			continue
-		}
-		bestRank = rank
-		bestUpdated = vr.UpdatedAt
-		bestSoC = *vr.SoC
-		bestLimit = meta.ChargeLimitPct
-		bestState = meta.ChargingState
-		bestStale = meta.Stale
-		bestDriver = vr.Driver
-	}
+	pick := telemetry.PickBestVehicle(tel, time.Now())
 	for i := range states {
 		if !states[i].PluggedIn {
 			continue
 		}
-		if bestDriver == "" {
+		if pick.Driver == "" {
 			states[i].SoCSource = "inferred"
 			continue
 		}
-		states[i].VehicleDriver = bestDriver
-		states[i].VehicleSoCPct = bestSoC
-		states[i].VehicleChargeLimitPct = bestLimit
-		states[i].VehicleChargingState = bestState
-		states[i].VehicleStale = bestStale
-		// Override CurrentSoCPct with measured value. The loadpoint
-		// manager's inferred value is preserved internally — this is
-		// purely a presentation overlay so the dashboard shows truth.
-		states[i].CurrentSoCPct = bestSoC
+		states[i].VehicleDriver = pick.Driver
+		states[i].VehicleSoCPct = pick.SoCPct
+		states[i].VehicleChargeLimitPct = pick.ChargeLimitPct
+		states[i].VehicleChargingState = pick.ChargingState
+		states[i].VehicleStale = pick.Stale
 		states[i].SoCSource = "vehicle"
 	}
 }

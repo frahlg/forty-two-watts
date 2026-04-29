@@ -165,7 +165,7 @@ func main() {
 	ctrl.SlewRateW = cfg.Site.SlewRateW
 	ctrl.MinDispatchIntervalS = cfg.Site.MinDispatchIntervalS
 	ctrl.InverterGroups = inverterGroupsFrom(cfg.Drivers)
-	ctrl.DriverLimits = driverLimitsFrom(cfg.Drivers)
+	ctrl.DriverLimits = driverLimitsFrom(cfg.Drivers, cfg.Batteries)
 	// Per-phase fuse params for the per-phase clamp inside applyFuseGuard
 	// + forceFuseDischarge. Reads l1_a/l2_a/l3_a from the meter driver
 	// when SiteFuseAmps > 0; otherwise the per-phase clamp is disabled.
@@ -328,7 +328,7 @@ func main() {
 			// a bare replace would race with the control loop's 5 s tick.
 			ctrlMu.Lock()
 			ctrl.InverterGroups = inverterGroupsFrom(newCfg.Drivers)
-			ctrl.DriverLimits = driverLimitsFrom(newCfg.Drivers)
+			ctrl.DriverLimits = driverLimitsFrom(newCfg.Drivers, newCfg.Batteries)
 			ctrlMu.Unlock()
 
 			// Push the new pool totals into the planner so its next
@@ -579,47 +579,18 @@ func main() {
 				// car); when a vehicle driver such as TeslaBLEProxy is
 				// online, its SoC reading is ground truth.
 				//
-				// Multi-vehicle case: one charger may be paired with N
-				// vehicle drivers (a household with 2 Teslas sharing one
-				// wallbox). Pick the one most likely to be the car
-				// physically connected right now: rank by charging_state
-				// (Charging > NoPower/Starting > Stopped/Complete >
-				// Disconnected/unknown), tiebreak by freshness. Falls
-				// back to inferred SoC when nothing online matches.
+				// Picker (rank + freshness + bounds) lives in
+				// telemetry.PickBestVehicle so api.go's loadpoint
+				// decoration agrees with us on which vehicle is "the
+				// one". Falls back to inferred SoC when nothing usable
+				// online matches.
 				initSoC := st.CurrentSoCPct
 				socSource := "inferred"
 				var vehicleChargeLimit float64 // 0 = unknown
-				var bestRank = -1
-				var bestUpdated time.Time
-				for _, vr := range tel.ReadingsByType(telemetry.DerVehicle) {
-					if vr.SoC == nil {
-						continue
-					}
-					if h := tel.DriverHealth(vr.Driver); h == nil || !h.IsOnline() {
-						continue
-					}
-					var meta struct {
-						ChargingState  string  `json:"charging_state"`
-						ChargeLimitPct float64 `json:"charge_limit_pct"`
-					}
-					if len(vr.Data) > 0 {
-						_ = json.Unmarshal(vr.Data, &meta)
-					}
-					rank := vehicleConnectedRank(meta.ChargingState)
-					if rank < 0 {
-						continue // explicitly disconnected — not this car
-					}
-					if rank < bestRank {
-						continue
-					}
-					if rank == bestRank && !vr.UpdatedAt.After(bestUpdated) {
-						continue
-					}
-					bestRank = rank
-					bestUpdated = vr.UpdatedAt
-					initSoC = *vr.SoC
-					socSource = "vehicle:" + vr.Driver
-					vehicleChargeLimit = meta.ChargeLimitPct
+				if pick := telemetry.PickBestVehicle(tel, time.Now()); pick.Driver != "" {
+					initSoC = pick.SoCPct
+					socSource = "vehicle:" + pick.Driver
+					vehicleChargeLimit = pick.ChargeLimitPct
 				}
 				// Map target time → slot index using the DP's
 				// actual slot length (hour-of-prices vs. 15-min
@@ -755,9 +726,18 @@ func main() {
 		// Startup replan: the scheduled tick is up to mpcSvc.Interval
 		// (15 min) away. Don't make the operator wait — fire one
 		// immediately so /api/mpc/plan is populated as soon as
-		// telemetry, prices, and forecasts have settled.
+		// telemetry, prices, and forecasts have settled. Observe ctx
+		// during the warm-up sleep so SIGTERM during startup doesn't
+		// keep this goroutine alive past shutdown.
 		go func() {
-			time.Sleep(2 * time.Second) // give drivers a moment to seed SoC
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(2 * time.Second): // give drivers a moment to seed SoC
+			}
+			if ctx.Err() != nil {
+				return
+			}
 			_ = mpcSvc.Replan(ctx)
 			slog.Info("mpc: startup replan completed")
 		}()
@@ -1443,20 +1423,30 @@ func driverCapacitiesFrom(drivers []config.Driver, loadpoints []config.Loadpoint
 
 // driverLimitsFrom builds the driver-name → per-battery PowerLimits map
 // used by control.State for per-battery charge/discharge caps (#145).
-// Drivers without an explicit `max_charge_w` / `max_discharge_w` are
-// omitted from the map, so the dispatcher falls through to the global
-// MaxCommandW default for those drivers — same behaviour as before the
-// per-driver feature shipped. Config-reload calls this again and swaps
-// the map atomically in the control state.
-func driverLimitsFrom(drivers []config.Driver) map[string]control.PowerLimits {
+// Reads the drivers section first, then falls back to the batteries
+// section for the same key — operators commonly set per-battery limits
+// only under `batteries:` (the MPC reads them from there), and without
+// this fallback the dispatcher silently uses the 5 kW MaxCommandW
+// default while the planner schedules against the configured 9 kW.
+// Drivers without limits in either place are omitted from the map.
+func driverLimitsFrom(drivers []config.Driver, batteries map[string]config.Battery) map[string]control.PowerLimits {
 	out := map[string]control.PowerLimits{}
 	for _, d := range drivers {
-		if d.MaxChargeW == 0 && d.MaxDischargeW == 0 {
+		chg, dis := d.MaxChargeW, d.MaxDischargeW
+		if b, ok := batteries[d.Name]; ok {
+			if chg == 0 && b.MaxChargeW != nil && *b.MaxChargeW > 0 {
+				chg = *b.MaxChargeW
+			}
+			if dis == 0 && b.MaxDischargeW != nil && *b.MaxDischargeW > 0 {
+				dis = *b.MaxDischargeW
+			}
+		}
+		if chg == 0 && dis == 0 {
 			continue
 		}
 		out[d.Name] = control.PowerLimits{
-			MaxChargeW:    d.MaxChargeW,
-			MaxDischargeW: d.MaxDischargeW,
+			MaxChargeW:    chg,
+			MaxDischargeW: dis,
 		}
 	}
 	return out
@@ -1719,26 +1709,6 @@ func isConfigMissing(err error) bool {
 		return true
 	}
 	return strings.Contains(err.Error(), "no such file")
-}
-
-// vehicleConnectedRank scores how likely a DerVehicle driver is to be the
-// one physically plugged into the loadpoint right now, based on Tesla
-// Owner-API charging_state semantics (other vendors use the same
-// vocabulary). Higher rank = more likely connected. Negative = explicitly
-// not connected; caller should skip.
-func vehicleConnectedRank(chargingState string) int {
-	switch chargingState {
-	case "Charging", "Starting":
-		return 3 // actively pulling power — definitely this car
-	case "NoPower":
-		return 2 // plugged but wallbox not delivering yet
-	case "Stopped", "Complete":
-		return 1 // plugged + idle (charge limit reached, paused, etc.)
-	case "Disconnected":
-		return -1 // explicitly unplugged — never pick this one
-	default:
-		return 0 // unknown/missing — usable but de-prioritised
-	}
 }
 
 func recordHistory(st *state.Store, tel *telemetry.Store, ctrl *control.State, nowMs int64) {
