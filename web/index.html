@@ -428,6 +428,45 @@
     <span class="footer-tagline">Don't Panic 🐬</span>
   </footer>
 
+  <!-- Battery manual-hold popup -->
+  <ftw-modal id="battery-modal" style="--ftw-modal-max-width:420px">
+    <span slot="title">Battery control</span>
+    <div id="battery-modal-body">
+      <div id="battery-modal-active" class="battery-active hidden">
+        <div class="battery-active-headline"></div>
+        <div class="battery-active-detail"></div>
+      </div>
+      <div class="battery-row">
+        <label class="battery-label">Direction</label>
+        <div class="battery-segmented" role="radiogroup" aria-label="Direction">
+          <button type="button" class="battery-seg-btn active" data-direction="charge" role="radio" aria-checked="true">Charge</button>
+          <button type="button" class="battery-seg-btn" data-direction="discharge" role="radio" aria-checked="false">Discharge</button>
+          <button type="button" class="battery-seg-btn" data-direction="idle" role="radio" aria-checked="false">Idle</button>
+        </div>
+      </div>
+      <div class="battery-row" id="battery-power-row">
+        <label class="battery-label" for="battery-power-input">Power</label>
+        <div class="battery-power-wrap">
+          <input id="battery-power-input" type="number" min="0" step="100" value="3000" inputmode="numeric"/>
+          <span class="battery-unit">W</span>
+        </div>
+      </div>
+      <div class="battery-row">
+        <label class="battery-label">Duration</label>
+        <div class="battery-chips">
+          <button type="button" class="battery-chip" data-hold="300">5 min</button>
+          <button type="button" class="battery-chip active" data-hold="900">15 min</button>
+          <button type="button" class="battery-chip" data-hold="1800">30 min</button>
+        </div>
+      </div>
+      <div id="battery-modal-error" class="battery-error hidden"></div>
+    </div>
+    <div slot="footer" style="display:flex;gap:0.5rem;width:100%">
+      <button class="btn-add" id="battery-btn-stop" style="flex:1" disabled>Stop</button>
+      <button class="btn-add" id="battery-btn-install" style="flex:2">Install hold</button>
+    </div>
+  </ftw-modal>
+
   <!-- EV detail popup -->
   <ftw-modal id="ev-modal" style="--ftw-modal-max-width:380px">
     <span slot="title">EV Charger</span>

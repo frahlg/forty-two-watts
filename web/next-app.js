@@ -1782,6 +1782,7 @@
       energyFlowEl.addEventListener("ftw-planet-click", function (e) {
         var d = (e && e.detail) || {};
         if (d.role === "ev") openEvModal(d.name || null);
+        if (d.role === "battery") openBatteryModal();
       });
     }
 
@@ -1799,6 +1800,184 @@
     evBtnStart.addEventListener("click", function () { evCommand("ev_start"); });
     evBtnPause.addEventListener("click", function () { evCommand("ev_pause"); });
     evBtnResume.addEventListener("click", function () { evCommand("ev_resume"); });
+  }
+
+  // Battery manual-hold modal — pin the aggregate battery setpoint
+  // (charge / discharge / idle) for a bounded duration, bypassing
+  // the active mode and the MPC. Safety clamps (SoC, per-driver caps,
+  // slew, fuse guard) still apply on the resulting target. Opened by
+  // clicking the battery planet in the energy-flow hero.
+  var batteryModal = document.getElementById("battery-modal");
+  if (batteryModal) {
+    var batterySegBtns = batteryModal.querySelectorAll(".battery-seg-btn");
+    var batteryChips = batteryModal.querySelectorAll(".battery-chip");
+    var batteryPowerInput = document.getElementById("battery-power-input");
+    var batteryPowerRow = document.getElementById("battery-power-row");
+    var batteryActiveBox = document.getElementById("battery-modal-active");
+    var batteryErrorBox = document.getElementById("battery-modal-error");
+    var batteryBtnInstall = document.getElementById("battery-btn-install");
+    var batteryBtnStop = document.getElementById("battery-btn-stop");
+    var batteryRefreshTimer = null;
+
+    var batteryFormState = { direction: "charge", holdS: 900 };
+
+    function batteryShowError(msg) {
+      if (!msg) {
+        batteryErrorBox.classList.add("hidden");
+        batteryErrorBox.textContent = "";
+        return;
+      }
+      batteryErrorBox.textContent = msg;
+      batteryErrorBox.classList.remove("hidden");
+    }
+
+    function batterySelectDirection(dir) {
+      batteryFormState.direction = dir;
+      batterySegBtns.forEach(function (b) {
+        var on = b.dataset.direction === dir;
+        b.classList.toggle("active", on);
+        b.setAttribute("aria-checked", on ? "true" : "false");
+      });
+      // Idle has no power magnitude — hide the row to keep the form
+      // honest. Reappears the moment the user picks charge or discharge.
+      if (batteryPowerRow) {
+        batteryPowerRow.classList.toggle("hidden", dir === "idle");
+      }
+    }
+
+    function batterySelectDuration(holdS) {
+      batteryFormState.holdS = holdS;
+      batteryChips.forEach(function (c) {
+        c.classList.toggle("active", Number(c.dataset.hold) === holdS);
+      });
+    }
+
+    batterySegBtns.forEach(function (b) {
+      b.addEventListener("click", function () {
+        batterySelectDirection(b.dataset.direction);
+      });
+    });
+    batteryChips.forEach(function (c) {
+      c.addEventListener("click", function () {
+        batterySelectDuration(Number(c.dataset.hold));
+      });
+    });
+
+    function batteryRenderActive(d) {
+      // Active-hold banner + Stop-button enable. Source of truth is
+      // the GET response; we update both pieces of UI from one place
+      // so they can never drift.
+      if (!d || !d.active) {
+        batteryActiveBox.classList.add("hidden");
+        batteryBtnStop.disabled = true;
+        return;
+      }
+      var dir = d.direction || "idle";
+      var headline =
+        dir === "charge"    ? "Charging at " + (d.power_w || 0) + " W" :
+        dir === "discharge" ? "Discharging at " + (d.power_w || 0) + " W" :
+                              "Holding idle";
+      var remaining = "";
+      if (d.expires_at_ms) {
+        var ms = d.expires_at_ms - Date.now();
+        if (ms > 0) {
+          var totalSec = Math.round(ms / 1000);
+          var min = Math.floor(totalSec / 60);
+          var sec = totalSec % 60;
+          remaining = "Expires in " + (min > 0 ? min + " min " : "") + sec + " s";
+        } else {
+          remaining = "Expired";
+        }
+      }
+      batteryActiveBox.querySelector(".battery-active-headline").textContent = headline;
+      batteryActiveBox.querySelector(".battery-active-detail").textContent = remaining;
+      batteryActiveBox.classList.remove("hidden");
+      batteryBtnStop.disabled = false;
+    }
+
+    function batteryRefresh() {
+      fetch("/api/battery/manual_hold")
+        .then(function (r) { return r.json(); })
+        .then(batteryRenderActive)
+        .catch(function () { /* network blip — leave previous state */ });
+    }
+
+    // Expose to the planet-click handler. Stored on window because the
+    // handler's enclosing scope captured `openBatteryModal` by name
+    // before this `if (batteryModal)` block runs.
+    window.__openBatteryModal = function () {
+      batteryShowError("");
+      batterySelectDirection(batteryFormState.direction);
+      batterySelectDuration(batteryFormState.holdS);
+      batteryModal.open();
+      batteryRefresh();
+      if (batteryRefreshTimer) clearInterval(batteryRefreshTimer);
+      batteryRefreshTimer = setInterval(batteryRefresh, 3000);
+    };
+
+    batteryModal.addEventListener("ftw-modal-close", function () {
+      if (batteryRefreshTimer) {
+        clearInterval(batteryRefreshTimer);
+        batteryRefreshTimer = null;
+      }
+    });
+
+    batteryBtnInstall.addEventListener("click", function () {
+      batteryShowError("");
+      var dir = batteryFormState.direction;
+      var holdS = batteryFormState.holdS;
+      var powerW = 0;
+      if (dir !== "idle") {
+        powerW = Number(batteryPowerInput.value);
+        if (!isFinite(powerW) || powerW < 0) {
+          batteryShowError("Power must be a non-negative number");
+          return;
+        }
+      }
+      batteryBtnInstall.disabled = true;
+      fetch("/api/battery/manual_hold", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ direction: dir, power_w: powerW, hold_s: holdS }),
+      }).then(function (r) {
+        if (!r.ok) {
+          return r.json().then(function (j) {
+            throw new Error((j && j.error) || ("HTTP " + r.status));
+          });
+        }
+        return r.json();
+      }).then(function (d) {
+        batteryRenderActive(d);
+      }).catch(function (err) {
+        batteryShowError(err.message || "Failed to install hold");
+      }).finally(function () {
+        batteryBtnInstall.disabled = false;
+      });
+    });
+
+    batteryBtnStop.addEventListener("click", function () {
+      batteryShowError("");
+      batteryBtnStop.disabled = true;
+      fetch("/api/battery/manual_hold", { method: "DELETE" })
+        .then(function (r) {
+          if (!r.ok) throw new Error("HTTP " + r.status);
+          return r.json();
+        })
+        .then(batteryRenderActive)
+        .catch(function (err) {
+          batteryShowError(err.message || "Failed to clear hold");
+          batteryBtnStop.disabled = false;
+        });
+    });
+  }
+  // Bridge for the planet-click handler — referenced before the IIFE
+  // assigning to window.__openBatteryModal above runs in source order,
+  // but the click only fires after user interaction so the assignment
+  // has happened by then.
+  function openBatteryModal() {
+    if (typeof window.__openBatteryModal === "function") {
+      window.__openBatteryModal();
+    }
   }
 
   // Click-to-toggle legend items. Each item has data-toggle with a
