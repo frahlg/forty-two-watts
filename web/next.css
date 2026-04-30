@@ -477,6 +477,23 @@ body.ftw-next .history-head {
   align-items: center;
   justify-content: space-between;
   margin-bottom: 10px;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+/* Two stacked toggle pills (Numbers/Cakes + Week/Month) ride to the
+   right of the panel label. Wrap onto a new line on narrow viewports
+   instead of squashing the label. */
+body.ftw-next .history-toggles {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+/* History view-mode swap: tiles vs cake. Both children of the panel
+   stay in the DOM so swapping is a CSS class flip, no fetch round-trip. */
+body.ftw-next .history-tiles.hidden,
+body.ftw-next .history-cake.hidden { display: none; }
+body.ftw-next .history-cake {
+  padding: 4px 0 6px;
 }
 /* Shared Week/Month segmented pill — same visual as the per-card
    toggle that used to live inside the shadow DOM so the brand
@@ -506,7 +523,13 @@ body.ftw-next .history-toggle::before {
   transition: transform 260ms cubic-bezier(0.4, 0, 0.2, 1);
   z-index: 0;
 }
-body.ftw-next .history-toggle[data-active="month"]::before {
+/* Slide the amber pill to the right side of the toggle when the
+   second option is active. Generalised so both Week/Month
+   (data-active="month") and Bars/Cakes (data-active="cakes") share
+   the same pill animation — the toggle markup is otherwise
+   identical and shouldn't need a special CSS branch per option set. */
+body.ftw-next .history-toggle[data-active="month"]::before,
+body.ftw-next .history-toggle[data-active="cakes"]::before {
   transform: translateX(100%);
 }
 body.ftw-next .history-toggle button {
@@ -541,6 +564,20 @@ body.ftw-next .history-tiles {
 }
 @media (max-width: 900px) {
   body.ftw-next .history-tiles { grid-template-columns: 1fr; }
+}
+
+/* ---- Electricity prices — full-width chart between fuse and energy
+   sections. Section height ≈ 2× fuse-card height per spec; the
+   <ftw-price-chart> component owns its own SVG geometry inside. */
+body.ftw-next .prices-row {
+  display: block;
+  margin: 12px 0;
+}
+body.ftw-next .prices-group {
+  background: var(--ink-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  padding: var(--card-pad, 14px 16px);
 }
 
 /* ---- Energy today — one outer card with sub-tiles, mirrors fuse-card ---- */

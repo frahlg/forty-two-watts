@@ -177,7 +177,7 @@ class FtwEnergyCake extends FtwElement {
       return this._layout({
         slices: this._renderEmpty(),
         centerTop: "—",
-        centerSub: "self use",
+        centerSub: "kWh consumed",
         legend: [
           { color: "var(--accent-e)", label: "Self-consumption", value: "—" },
           { color: "var(--red-e)", label: "Imported", value: "—" },
@@ -191,8 +191,12 @@ class FtwEnergyCake extends FtwElement {
 
     return this._layout({
       slices: this._renderSlices(selfPct),
-      centerTop: `${Math.round(selfPct)}%`,
-      centerSub: "self use",
+      // Centre of the donut now shows TOTAL CONSUMED — the headline
+      // "how much energy did the household actually use over this
+      // window" number. Self-consumption % still reads off the legend
+      // so we don't lose the per-slice context.
+      centerTop: formatKwhNum(loadWh / 1000),
+      centerSub: "kWh consumed",
       legend: [
         {
           color: "var(--accent-e)",
