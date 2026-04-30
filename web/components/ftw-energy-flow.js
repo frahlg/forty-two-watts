@@ -1044,12 +1044,12 @@ class FtwEnergyFlow extends FtwElement {
     const P = {
       vbX, vbW, H: Hdyn, cy,
       orbitR, baseR: tier.baseR, hubR: tier.hubR,
-      // Compact viewports: lift the icon ~40 px above the desktop
-      // baseline (cy − 50 was original, then −70, now −90). Desktop
-      // gets the same ~20 px lift (cy − 54 → cy − 74) so the icon
-      // doesn't crowd the power value when the hub disc shrinks
-      // proportionally.
-      hubIconY:      cy - (compact ? 90 : 74),
+      // Hub icon Y — backed off ~14 px from the previous lift after a
+      // visual check showed the icon sitting on top of the dashed
+      // ring (which lives at hubR − 8). Now icon at cy − 60 desktop
+      // / cy − 76 compact stays comfortably inside the ring while
+      // still clearing the power value below.
+      hubIconY:      cy - (compact ? 76 : 60),
       hubValueY:     cy - (compact ? 8  : 10),
       hubSelfNowY:   cy + (compact ? 14 : 16),
       hubSelfTodayY: cy + (compact ? 32 : 34),
@@ -1448,7 +1448,7 @@ function renderCircleNode({ pos, title, nameLabel, value, sub, color, soc,
       ? (compact ? 0.46 : 0.60)
       : (showDaily ? (compact ? 0.55 : 0.66) : 0.42);
     const socR = noSubButSoc
-      ? (compact ? 0.55 : 0.62)
+      ? (compact ? 0.46 : 0.52)
       : (showDaily ? (compact ? 0.74 : 0.80) : 0.70);
     valueY = Math.round((showDaily ? 0.04 : 0.09) * r);
     dailyY = Math.round(dailyR * r);
