@@ -1401,27 +1401,32 @@ function renderCircleNode({ pos, title, nameLabel, value, sub, color, soc,
   // stacked lines ("SOLAR" / "SUNGROW"). That preserves more horizontal
   // room inside the disk than a single "SOLAR · SUNGROW" line.
   const twoLine = !!nameLabel;
-  // Simple-mode planets (e.g. solar — no status sub-label, no SoC)
-  // use a 3-row stack centred around the disc midline:
-  //   title · value · daily
-  // with the power value at y=0 and equal title-to-power /
-  // power-to-daily gaps. The dropping of two trailing rows means
-  // the visual mass would otherwise sit in the upper half — this
-  // branch re-balances around y=0 so power reads as the focal point.
-  const simple = !sub && soc == null && showDaily;
+  // Layout branches by visible-row count:
+  //
+  //   3 rows — title · value · daily               (e.g. solar)
+  //   4 rows — title · value · daily · soc         (e.g. battery, no sub)
+  //   5 rows — title · value · daily · sub · soc   (full)
+  //   4 rows — title · value · sub · soc           (legacy, no daily)
+  //
+  // Three-row layout centres the power value on the disc midline.
+  // Four/five-row layouts keep the original generous title→value gap
+  // mirrored on value→daily; sub/soc trail on a tighter step.
+  const showSub = !!sub;
+  const showSoc = soc != null;
+  const simple3 = showDaily && !showSub && !showSoc;
   let titleY, valueY, dailyY, subY, socY;
-  if (simple) {
-    const gap = compact ? 0.28 : 0.32;
+  if (simple3) {
+    // Symmetric three-row stack centred on y=0. Gap matches the
+    // legacy title-Y so SOLAR sits at the same height as planets in
+    // other corners — the eye reads all four corner titles at one
+    // horizontal level instead of solar's hovering lower.
+    const gap = (twoLine ? 0.50 : 0.42);
     titleY = Math.round(-gap * r);
     valueY = 0;
     dailyY = Math.round(gap * r);
-    subY = 0;   // unused
-    socY = 0;   // unused
+    subY = 0;
+    socY = 0;
   } else {
-    // 5-row layout (title · value · daily · sub · soc) with the
-    // generous title→value gap mirrored on value→daily, then sub /
-    // soc trailing on a tighter step. Compact viewports tighten the
-    // primary gap so the planet stays inside the disc edge.
     titleY = Math.round((twoLine ? -0.50 : -0.42) * r);
     const dailyR = compact ? 0.32 : 0.50;
     const subR   = showDaily ? (compact ? 0.55 : 0.66) : 0.42;
@@ -1429,7 +1434,11 @@ function renderCircleNode({ pos, title, nameLabel, value, sub, color, soc,
     valueY = Math.round((showDaily ? 0.04 : 0.09) * r);
     dailyY = Math.round(dailyR * r);
     subY   = Math.round(subR * r);
-    socY   = Math.round(socRow * r);
+    // When the planet has no status sub-label but still has SoC
+    // (e.g. battery now that 'charging/discharging' moved to the
+    // power-value colour), pull SoC up into the empty sub slot so
+    // the bottom of the bubble doesn't feel hollow.
+    socY   = Math.round((!showSub && showSoc ? subR : socRow) * r);
   }
   const titleSvg = twoLine
     ? `<text x="${x}" y="${y + titleY}" text-anchor="middle"

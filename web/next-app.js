@@ -456,12 +456,17 @@
         if (d.bat_w != null) {
           var bKw = d.bat_w / 1000;
           var bIdle = isFlowIdle(bKw);
+          // Direction conveyed by colour of the power value: charge
+          // green (filling), discharge red (draining), idle stays
+          // neutral cyan (the battery's identity hue). Drops the
+          // wordy charging/discharging sub-label.
+          var bColor = bIdle ? "var(--cyan)" :
+                       (bKw >= 0 ? "var(--green-e)" : "var(--red-e)");
           planets.push({
             id: "bat-" + name, corner: "top-right", title: "BATTERY", name: name, role: "battery",
             kw: bKw, toHub: bKw < 0,
-            color: "var(--cyan)",
-            sub: bIdle ? "idle" :
-                 (bKw >= 0 ? "charging" : "discharging"),
+            color: bColor,
+            sub: "",
             soc: d.bat_soc != null ? Math.round(d.bat_soc * 100) : null,
             dailyKwhParts: batDailyParts,
           });
