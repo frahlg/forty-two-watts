@@ -208,12 +208,18 @@ header h1 {
 }
 .diag-ev { background: rgba(6,182,212,0.18); color: #67e8f9; }
 
-/* Detail pane */
+/* Detail pane — single scroll container so the chart can roll out
+   of view on short viewports (small laptops); the sticky thead still
+   pins to the top of the pane once the table starts scrolling under
+   it. The inner .diagnose-table-wrap previously owned the scrollbar
+   with `flex: 1; overflow: auto`, which forced the chart to keep its
+   full 320 px regardless of remaining height — leaving < 100 px for
+   the table on a 720p laptop. */
 .diagnose-detail {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 8px;
-  overflow: hidden;
+  overflow: auto;
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -247,9 +253,10 @@ header h1 {
 .diag-chart-highlight.hidden { display: none; }
 
 .diagnose-table-wrap {
-  flex: 1;
-  overflow: auto;
   padding: 0 0.5rem 1rem 0.5rem;
+  /* No own overflow / flex grow — the parent .diagnose-detail is the
+     single scroll container; the sticky `thead th { top: 0 }` pins
+     against it when the chart scrolls out of view. */
 }
 .diag-table {
   width: 100%;
