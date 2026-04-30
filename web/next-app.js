@@ -402,7 +402,13 @@
       // be redundant. Use the kWh unit instead so the line reads as
       // a standalone total.
       var pvDailyStr   = fmtKwhShort(pvKwhTotal) + " kWh";
-      var gridDailyStr = "↓ " + fmtKwhShort(importKwh) + "  ↑ " + fmtKwhShort(exportKwh);
+      // Grid daily totals are colour-coded: import red, export green,
+      // both bold so the polarity reads at a glance against the dark
+      // bubble. Other planets stay on the plain dimmed text style.
+      var gridDailyParts = [
+        { text: "↓ " + fmtKwhShort(importKwh), color: "var(--red-e)",   bold: true },
+        { text: "↑ " + fmtKwhShort(exportKwh), color: "var(--green-e)", bold: true },
+      ];
       var batDailyStr  = "↑ " + fmtKwhShort(batChargedKwh) + "  ↓ " + fmtKwhShort(batDischargedKwh);
 
       // Grid — single utility, bottom-left corner. Import = toward house.
@@ -415,7 +421,7 @@
                (gkw >= 0 ? "var(--red-e)" : "var(--green-e)"),
         sub: gIdle ? "balanced" :
              (gkw >= 0 ? "importing" : "exporting"),
-        dailyKwh: gridDailyStr,
+        dailyKwhParts: gridDailyParts,
       });
 
       var drvs = data.drivers || {};

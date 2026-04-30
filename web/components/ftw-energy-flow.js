@@ -627,6 +627,7 @@ class FtwEnergyFlow extends FtwElement {
         id: p.id,
         aggregated: !!p.aggregated,
         dailyKwh: p.placeholder ? null : (p.dailyKwh || null),
+        dailyKwhParts: p.placeholder ? null : (p.dailyKwhParts || null),
       })
     ).join("");
     return `<g class="ef-layer ef-layer-${layerClass}">` +
@@ -1376,14 +1377,15 @@ function renderCircleNode({ pos, title, nameLabel, value, sub, color, soc,
                             radius = 86,
                             clickable = false, role = "", name = "", id = "",
                             aggregated = false,
-                            dailyKwh = null }) {
+                            dailyKwh = null, dailyKwhParts = null }) {
   const r = radius;
   const { x, y } = pos;
   // Daily totals line — empty string when no payload was passed (back-
   // compat with callers that haven't been wired up yet). Drops out
   // entirely on small planets (r < 50, e.g. 4+ planets clustered at
   // one corner) so the disc text doesn't overflow.
-  const showDaily = dailyKwh && r >= 50;
+  const hasParts = Array.isArray(dailyKwhParts) && dailyKwhParts.length > 0;
+  const showDaily = (dailyKwh || hasParts) && r >= 50;
   // Clickable planets must advertise themselves to assistive tech:
   // role=button so screen readers announce "button", and aria-label
   // derived from the visible title/name so the announcement names
@@ -1473,7 +1475,7 @@ function renderCircleNode({ pos, title, nameLabel, value, sub, color, soc,
       </text>
       ${showDaily ? `<text x="${x}" y="${y + dailyY}" text-anchor="middle"
             fill="var(--hero-sub-text)" class="sv-node-sub">
-        ${escapeXml(dailyKwh)}
+        ${hasParts ? renderDailyParts(dailyKwhParts) : escapeXml(dailyKwh)}
       </text>` : ""}
       <text x="${x}" y="${y + subY}" text-anchor="middle"
             fill="var(--hero-sub-text)" class="sv-node-sub">
@@ -1484,6 +1486,21 @@ function renderCircleNode({ pos, title, nameLabel, value, sub, color, soc,
 }
 
 // ---------- primitives ----------
+
+// renderDailyParts — emit a sequence of styled <tspan>s inside the
+// daily-totals <text>. Each part has { text, color?, bold?, gap? }.
+// `gap` inserts a small space-tspan before the part for separation.
+// Used today by the grid bubble to colour-code import (red) vs
+// export (green) and bold the magnitudes; other roles still pass a
+// plain string via dailyKwh.
+function renderDailyParts(parts) {
+  return parts.map((p, i) => {
+    const fill = p.color ? `fill="${p.color}"` : "";
+    const weight = p.bold ? `font-weight="600"` : "";
+    const lead = i > 0 ? ` ` : "";
+    return `<tspan ${fill} ${weight}>${escapeXml(lead + (p.text || ""))}</tspan>`;
+  }).join("");
+}
 
 function fmtKw(kw) {
   // Input is kilowatts. Sub-kW values render as plain integer watts
@@ -1561,6 +1578,7 @@ function aggregateGroups(groups) {
     // e.g. household import_wh, fleet bat_charged_wh — onto every
     // member of the group, so first wins). Falls back to nil silently.
     const dailyKwh = first.dailyKwh || null;
+    const dailyKwhParts = first.dailyKwhParts || null;
     out[corner] = [{
       id: `agg-${corner}`,
       corner,
@@ -1577,6 +1595,7 @@ function aggregateGroups(groups) {
       name: `${group.length}×`,
       aggregated: true,
       dailyKwh,
+      dailyKwhParts,
     }];
   }
   return out;
