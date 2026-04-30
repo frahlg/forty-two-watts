@@ -199,16 +199,44 @@ type Site struct {
 	MinDispatchIntervalS int     `yaml:"min_dispatch_interval_s" json:"min_dispatch_interval_s"`
 }
 
+// DefaultFuseSafetyMarginA is the fall-back per-phase amp headroom
+// applied when fuse.safety_margin_a is unset (nil) in the YAML.
+// Single source of truth — main.go routes through Fuse.Effective-
+// SafetyMarginA() rather than re-declaring it.
+const DefaultFuseSafetyMarginA = 0.5
+
 // Fuse describes the shared breaker limit used by the fuse guard.
 type Fuse struct {
 	MaxAmps float64 `yaml:"max_amps" json:"max_amps"`
 	Phases  int     `yaml:"phases" json:"phases"`
 	Voltage float64 `yaml:"voltage" json:"voltage"`
+
+	// SafetyMarginA reserves headroom (per-phase amps) below MaxAmps
+	// inside the dispatch fuse guard. Pointer so we can distinguish
+	// "unset" (nil → DefaultFuseSafetyMarginA) from "explicitly
+	// disabled" (non-nil 0.0). Inverters often have their own per-
+	// phase current protection that trips before the breaker; without
+	// a margin the dispatch can ride right up to MaxAmps and the
+	// inverter cuts to 0 W in one tick, then dispatch ramps back up —
+	// visible as a flap. 0.5 A × 230 V × 3 phases ≈ 345 W of aggregate
+	// headroom.
+	SafetyMarginA *float64 `yaml:"safety_margin_a,omitempty" json:"safety_margin_a,omitempty"`
 }
 
 // MaxPowerW returns the total power budget for the fuse guard.
 func (f Fuse) MaxPowerW() float64 {
 	return f.MaxAmps * f.Voltage * float64(f.Phases)
+}
+
+// EffectiveSafetyMarginA returns the per-phase amp headroom to apply,
+// resolving nil ("unset → use default") vs an explicit value (including
+// 0.0 to disable the margin entirely). Single read site so the default
+// can never drift across consumers.
+func (f Fuse) EffectiveSafetyMarginA() float64 {
+	if f.SafetyMarginA == nil {
+		return DefaultFuseSafetyMarginA
+	}
+	return *f.SafetyMarginA
 }
 
 // Driver is one driver entry. Each driver is a Lua script loaded by
@@ -805,6 +833,21 @@ func (c *Config) Validate() error {
 	}
 	if c.Fuse.MaxAmps <= 0 {
 		return errors.New("fuse.max_amps must be > 0")
+	}
+	// safety_margin_a must be in [0, max_amps) when explicitly set.
+	// Negative would *raise* the per-phase threshold above the breaker
+	// rating (defeating the guard); >= max_amps zeroes the headroom
+	// and silently disables the per-phase clamp — both are real safety
+	// holes if reached through a typo'd config. nil (unset) is OK and
+	// resolves to DefaultFuseSafetyMarginA at the consumer.
+	if c.Fuse.SafetyMarginA != nil {
+		v := *c.Fuse.SafetyMarginA
+		if v < 0 {
+			return errors.New("fuse.safety_margin_a must be >= 0")
+		}
+		if v >= c.Fuse.MaxAmps {
+			return errors.New("fuse.safety_margin_a must be < fuse.max_amps")
+		}
 	}
 	if n := c.Notifications; n != nil {
 		if n.DefaultPriority < 0 || n.DefaultPriority > 5 {

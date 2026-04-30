@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -477,6 +478,89 @@ func TestNotificationsMaskSecrets(t *testing.T) {
 	}
 	if c.Notifications.Ntfy.AccessToken != "tk_secret" {
 		t.Errorf("original mutated")
+	}
+}
+
+func TestFuseSafetyMarginNilUsesDefault(t *testing.T) {
+	// Field omitted in YAML → nil pointer → default 0.5 A.
+	f := Fuse{MaxAmps: 16, Voltage: 230, Phases: 3}
+	if got := f.EffectiveSafetyMarginA(); got != DefaultFuseSafetyMarginA {
+		t.Errorf("nil margin: got %v, want %v (DefaultFuseSafetyMarginA)",
+			got, DefaultFuseSafetyMarginA)
+	}
+}
+
+func TestFuseSafetyMarginExplicitZeroDisables(t *testing.T) {
+	// The whole point of switching to *float64: explicit 0 is a real
+	// operator choice ("no margin") and must NOT be silently upgraded
+	// to the default. Regression for PR #219 review #1/#2/#3.
+	zero := 0.0
+	f := Fuse{MaxAmps: 16, Voltage: 230, Phases: 3, SafetyMarginA: &zero}
+	if got := f.EffectiveSafetyMarginA(); got != 0 {
+		t.Errorf("explicit 0 must disable margin, got %v", got)
+	}
+}
+
+func TestFuseSafetyMarginExplicitValuePassesThrough(t *testing.T) {
+	v := 1.5
+	f := Fuse{MaxAmps: 16, Voltage: 230, Phases: 3, SafetyMarginA: &v}
+	if got := f.EffectiveSafetyMarginA(); got != 1.5 {
+		t.Errorf("got %v, want 1.5", got)
+	}
+}
+
+func TestValidateRejectsNegativeSafetyMargin(t *testing.T) {
+	yaml := `
+site: { name: x, smoothing_alpha: 0.3 }
+fuse: { max_amps: 16, phases: 3, voltage: 230, safety_margin_a: -0.1 }
+drivers:
+  - name: m
+    lua: m.lua
+    is_site_meter: true
+    capabilities: { mqtt: { host: 1.1.1.1 } }
+api: { port: 8080 }
+`
+	_, err := Parse([]byte(yaml), ".")
+	if err == nil || !strings.Contains(err.Error(), "safety_margin_a") {
+		t.Errorf("expected safety_margin_a >= 0 rejection, got %v", err)
+	}
+}
+
+func TestValidateRejectsSafetyMarginAtOrAboveMaxAmps(t *testing.T) {
+	yaml := `
+site: { name: x, smoothing_alpha: 0.3 }
+fuse: { max_amps: 16, phases: 3, voltage: 230, safety_margin_a: 16.0 }
+drivers:
+  - name: m
+    lua: m.lua
+    is_site_meter: true
+    capabilities: { mqtt: { host: 1.1.1.1 } }
+api: { port: 8080 }
+`
+	_, err := Parse([]byte(yaml), ".")
+	if err == nil || !strings.Contains(err.Error(), "< fuse.max_amps") {
+		t.Errorf("expected safety_margin_a < max_amps rejection, got %v", err)
+	}
+}
+
+func TestValidateAcceptsExplicitZeroSafetyMargin(t *testing.T) {
+	yaml := `
+site: { name: x, smoothing_alpha: 0.3 }
+fuse: { max_amps: 16, phases: 3, voltage: 230, safety_margin_a: 0.0 }
+drivers:
+  - name: m
+    lua: m.lua
+    is_site_meter: true
+    capabilities: { mqtt: { host: 1.1.1.1 } }
+api: { port: 8080 }
+`
+	c, err := Parse([]byte(yaml), ".")
+	if err != nil {
+		t.Fatalf("explicit 0 must validate (operator-disabled margin), got %v", err)
+	}
+	// And the resolved value must be 0, not the default.
+	if got := c.Fuse.EffectiveSafetyMarginA(); got != 0 {
+		t.Errorf("EffectiveSafetyMarginA after explicit 0: got %v, want 0", got)
 	}
 }
 

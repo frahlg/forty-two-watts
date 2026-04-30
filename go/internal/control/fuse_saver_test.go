@@ -331,6 +331,98 @@ func TestPerPhaseClampDominatesAggregateWhenLarger(t *testing.T) {
 	}
 }
 
+// Per-phase EXPORT overage: PV is exporting hard on a single phase
+// (e.g. 1Φ inverter on L2), aggregate gridW negative. The per-phase
+// guard must fire on the EXPORT side and shrink discharging — NOT
+// trigger forceFuseDischarge, which would push more power out and
+// worsen the over-current phase. Regression for PR #219 review S1.
+func TestPerPhaseClampFiresOnExportImbalance(t *testing.T) {
+	// Aggregate gridW = -7000 W (heavy export). Phases (magnitude):
+	// L2 = 18 A (over the 16 A fuse), L1 = 12, L3 = 8. Per-phase
+	// overage = (18 − 16) × 230 × 3 = 1380 W of discharge to shrink.
+	// Battery is currently discharging −5000 W; the target reduces
+	// magnitude to bring L2 back under fuse.
+	store, state, _ := setupPerPhase(-7000, 12, 18, 8, 0.6, 10000)
+	// Set the live battery reading so applyFuseGuard's "predicted"
+	// reflects the current discharge state.
+	soc := 0.6
+	store.Update("bat", telemetry.DerBattery, -5000, &soc, nil)
+	store.DriverHealthMut("bat").RecordSuccess()
+
+	targets := []DispatchTarget{{Driver: "bat", TargetW: -5000}}
+	guarded := applyFuseGuard(targets, store, state, 11040)
+	if !guarded[0].Clamped {
+		t.Errorf("export-side per-phase overage must clamp the discharge target")
+	}
+	// New discharge magnitude: 5000 − 1380 = 3620 W → target = −3620 W.
+	expected := -3620.0
+	if math.Abs(guarded[0].TargetW-expected) > 1 {
+		t.Errorf("discharge after export-side per-phase clamp = %.0f W, want %.0f W",
+			guarded[0].TargetW, expected)
+	}
+}
+
+// forceFuseDischarge must NOT fire on export-side per-phase overage.
+// Its job is to relieve IMPORT — commanding more discharge during
+// export-side per-phase trip would push the over-current phase
+// further over the breaker. Regression for PR #219 review S1.
+func TestForceFuseDischargeIgnoresExportSidePerPhase(t *testing.T) {
+	// Heavy export with one phase over fuse. fuseSaverFromZero (which
+	// calls forceFuseDischarge) MUST return nil — the export-side
+	// overage is not its problem.
+	store, state, caps := setupPerPhase(-9000, 12, 18, 8, 0.6, 10000)
+	out := fuseSaverFromZero(store, state, caps, 11040)
+	if out != nil {
+		t.Errorf("forceFuseDischarge fired on export-side per-phase overage; "+
+			"would worsen the over-current phase. got %v", out)
+	}
+}
+
+// SiteFuseSafetyA shrinks the per-phase threshold below MaxAmps so the
+// dispatch stops trying to ride right up to the breaker (where the
+// inverter's own per-phase limiter trips first and causes a flap).
+// Regression for PR #219 — the bug class motivating the safety margin.
+func TestPerPhaseClampHonorsSafetyMargin(t *testing.T) {
+	// Phases (15.5, 12, 8). MaxAmps = 16, SafetyA = 1.0 → effective
+	// threshold = 15 A. L1 at 15.5 A is OVER the effective threshold
+	// (under the raw 16 A). Per-phase overage = (15.5 − 15) × 230 × 3
+	// = 345 W of charge to shrink.
+	store, state, _ := setupPerPhase(7000, 15.5, 12, 8, 0.6, 10000)
+	state.SiteFuseSafetyA = 1.0
+	state.SiteFusePhases = 3
+	targets := []DispatchTarget{{Driver: "bat", TargetW: 4000}}
+	guarded := applyFuseGuard(targets, store, state, 11040)
+	if !guarded[0].Clamped {
+		t.Errorf("safety margin should pull the threshold under L1 = 15.5 A")
+	}
+	// Aggregate effFuseW = 11040 − 1.0×230×3 = 10350. Predicted =
+	// 7000 + 4000 − 0 = 11000 → aggregate overage = 11000 − 10350 = 650.
+	// Per-phase overage × 3 = 345. Aggregate wins (650 > 345).
+	// Charge 4000 − 650 = 3350.
+	expected := 3350.0
+	if math.Abs(guarded[0].TargetW-expected) > 1 {
+		t.Errorf("charge after safety-margin clamp = %.0f W, want %.0f W",
+			guarded[0].TargetW, expected)
+	}
+}
+
+// SafetyMarginA = 0 must produce identical output to the pre-PR
+// behaviour (locks the back-compat contract every existing per-phase
+// test relies on by leaving the field unset).
+func TestPerPhaseClampSafetyMarginZeroIsBackCompat(t *testing.T) {
+	store, state, _ := setupPerPhase(7000, 18, 12, 8, 0.6, 10000)
+	state.SiteFuseSafetyA = 0
+	state.SiteFusePhases = 3
+	targets := []DispatchTarget{{Driver: "bat", TargetW: 4000}}
+	guarded := applyFuseGuard(targets, store, state, 11040)
+	// Same math as TestPerPhaseClampScalesChargingOnImbalance.
+	expected := 2620.0
+	if math.Abs(guarded[0].TargetW-expected) > 1 {
+		t.Errorf("safety_margin_a=0 must match pre-PR behaviour: got %.0f W, want %.0f W",
+			guarded[0].TargetW, expected)
+	}
+}
+
 // End-to-end via ComputeDispatch: idle mode + grid surge → returns
 // non-empty discharge targets. Idle mode would normally return [].
 func TestFuseSaverFiresInIdleMode(t *testing.T) {

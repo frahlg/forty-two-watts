@@ -221,13 +221,21 @@ function driver_poll()
 
     -- ---- Meter Values ----
 
-    -- Per-phase current: 40237-40239, I16 each
+    -- Per-phase current: 40237-40239, I16 each. Emit MAGNITUDE only —
+    -- consistent with ferroamp.lua / sungrow.lua and with the
+    -- l1_a/l2_a/l3_a meter contract that the dispatch's per-phase fuse
+    -- guard reads. Direction is already conveyed by meter_w (signed at
+    -- the aggregate level); per-phase signed values would only make
+    -- sense for unbalanced-load diagnostics, and we don't expose those
+    -- as separate metrics today. Without abs() the dispatch's per-phase
+    -- guard had a sign-blind spot on export — site exported at 17 A on
+    -- one phase before any clamp fired.
     local ok_la, la_regs = pcall(host.modbus_read, 40237, 3, "holding")
     local l1_a, l2_a, l3_a = 0, 0, 0
     if ok_la and la_regs then
-        l1_a = scale(host.decode_i16(la_regs[1]), meter_a_sf)
-        l2_a = scale(host.decode_i16(la_regs[2]), meter_a_sf)
-        l3_a = scale(host.decode_i16(la_regs[3]), meter_a_sf)
+        l1_a = math.abs(scale(host.decode_i16(la_regs[1]), meter_a_sf))
+        l2_a = math.abs(scale(host.decode_i16(la_regs[2]), meter_a_sf))
+        l3_a = math.abs(scale(host.decode_i16(la_regs[3]), meter_a_sf))
     end
 
     -- Per-phase voltage: 40242-40244, I16 each

@@ -5,7 +5,16 @@
 
   S.tabs.control = {
     render: function (ctx) {
-      var field = ctx.field;
+      var field = ctx.field, help = ctx.help, getByPath = ctx.getByPath, escHtml = ctx.escHtml, config = ctx.config;
+      // Local helper for fractional-amp fields — the central field()
+      // helper emits no step attribute, which most browsers treat as
+      // step=1 and refuse 0.5 entries on validation.
+      function decimalField(label, path, dflt, helpText, step) {
+        var val = getByPath(config, path, dflt);
+        return '<label>' + label + (helpText ? ' ' + help(helpText) : '') + '</label>' +
+          '<input type="number" step="' + step + '" data-path="' + path +
+          '" value="' + escHtml(val == null ? "" : String(val)) + '">';
+      }
       return '<fieldset><legend>Site</legend>' +
         field("Name", "site.name", "text", "Home") +
         '<div class="field-row"><div>' +
@@ -37,7 +46,13 @@
         '</div><div>' +
         field("Phases", "fuse.phases", "number", 3) +
         '</div></div>' +
+        '<div class="field-row"><div>' +
         field("Voltage (V)", "fuse.voltage", "number", 230) +
+        '</div><div>' +
+        decimalField("Safety margin (A)", "fuse.safety_margin_a", 0.5,
+          "Headroom below max amps so the inverter's own per-phase limiter doesn't trip first. Defaults to 0.5 A.",
+          "0.1") +
+        '</div></div>' +
         '</fieldset>';
     },
   };

@@ -171,6 +171,11 @@ func main() {
 	// when SiteFuseAmps > 0; otherwise the per-phase clamp is disabled.
 	ctrl.SiteFuseAmps = cfg.Fuse.MaxAmps
 	ctrl.SiteFuseVoltage = cfg.Fuse.Voltage
+	ctrl.SiteFusePhases = cfg.Fuse.Phases
+	// EffectiveSafetyMarginA distinguishes nil ("unset, use default")
+	// from explicit 0 ("operator chose to disable"). The earlier
+	// `<= 0 → default` shortcut clobbered the disable case.
+	ctrl.SiteFuseSafetyA = cfg.Fuse.EffectiveSafetyMarginA()
 	// Restore persisted mode + target if present. The planner variants
 	// have to be listed too — without them the strategy the user picked in
 	// the UI (planner_self / planner_cheap / planner_arbitrage) is silently
@@ -329,6 +334,17 @@ func main() {
 			ctrlMu.Lock()
 			ctrl.InverterGroups = inverterGroupsFrom(newCfg.Drivers)
 			ctrl.DriverLimits = driverLimitsFrom(newCfg.Drivers, newCfg.Batteries)
+			// Fuse params + safety margin: previously startup-only.
+			// Hot-reload them so operators can tune the per-phase margin
+			// from the UI without restarting (e.g. raising it after the
+			// inverter's own protection trips, lowering it to recover
+			// last few hundred W of arbitrage headroom).
+			ctrl.SiteFuseAmps = newCfg.Fuse.MaxAmps
+			ctrl.SiteFuseVoltage = newCfg.Fuse.Voltage
+			ctrl.SiteFusePhases = newCfg.Fuse.Phases
+			// Mirror the startup-path default semantics — nil → 0.5,
+			// explicit 0 → disabled. See EffectiveSafetyMarginA.
+			ctrl.SiteFuseSafetyA = newCfg.Fuse.EffectiveSafetyMarginA()
 			ctrlMu.Unlock()
 
 			// Push the new pool totals into the planner so its next
@@ -1104,7 +1120,9 @@ func main() {
 
 	// ---- Control loop ----
 	controlInterval := time.Duration(cfg.Site.ControlIntervalS) * time.Second
-	fuseMaxW := cfg.Fuse.MaxPowerW()
+	// fuseMaxW is recomputed per tick from ctrl.SiteFuse* under ctrlMu —
+	// the configreload watcher updates those fields directly, so a
+	// startup snapshot here would go stale on the first hot-reload.
 	dtS := float64(cfg.Site.ControlIntervalS)
 
 	// Graceful shutdown
@@ -1209,6 +1227,7 @@ func main() {
 			capMu.RUnlock()
 
 			ctrlMu.Lock()
+			fuseMaxW := ctrl.SiteFuseAmps * ctrl.SiteFuseVoltage * float64(ctrl.SiteFusePhases)
 			targets := control.ComputeDispatch(tel, ctrl, capsSnap, fuseMaxW)
 			ctrlMu.Unlock()
 
