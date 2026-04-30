@@ -398,7 +398,10 @@
       var loadKwhTotal = (todayE.load_wh || 0) / 1000;
       var batChargedKwh    = (todayE.bat_charged_wh || 0) / 1000;
       var batDischargedKwh = (todayE.bat_discharged_wh || 0) / 1000;
-      var pvDailyStr   = "↑ " + fmtKwhShort(pvKwhTotal);
+      // Solar only flows one direction (production); the arrow would
+      // be redundant. Use the kWh unit instead so the line reads as
+      // a standalone total.
+      var pvDailyStr   = fmtKwhShort(pvKwhTotal) + " kWh";
       var gridDailyStr = "↓ " + fmtKwhShort(importKwh) + "  ↑ " + fmtKwhShort(exportKwh);
       var batDailyStr  = "↑ " + fmtKwhShort(batChargedKwh) + "  ↓ " + fmtKwhShort(batDischargedKwh);
 
