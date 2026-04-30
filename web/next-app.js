@@ -4,6 +4,18 @@
   "use strict";
 
   const POLL_INTERVAL = 2000;        // status poll cadence — snappier cards
+
+  // FLOW_IDLE_KW — magnitude below which a planet is treated as
+  // "idle / balanced" for label + colour purposes. Mirror of
+  // ftw-energy-flow.js's FLOW_IDLE_W (which sets window.FTW_FLOW_IDLE_W
+  // when its module loads). Read at use-time so the module-set value
+  // wins; literal `42` is the no-modules fallback. Inclusive
+  // comparison everywhere: |kW| <= threshold ⇒ idle.
+  function flowIdleKw() {
+    const w = (typeof window !== "undefined" && window.FTW_FLOW_IDLE_W) || 42;
+    return w / 1000;
+  }
+  function isFlowIdle(kw) { return Math.abs(kw) <= flowIdleKw(); }
   const CHART_POINTS = 360;          // up to 30 min of points (server pushes every ~5s)
   const CHART_RANGE_MS = {           // visible time window per range option
     "5m": 5 * 60 * 1000,
@@ -368,13 +380,13 @@
 
       // Grid — single utility, bottom-left corner. Import = toward house.
       var gkw = (data.grid_w || 0) / 1000;
-      var gAbs = Math.abs(gkw);
+      var gIdle = isFlowIdle(gkw);
       planets.push({
         id: "grid", corner: "bottom-left", title: "GRID", role: "grid",
         kw: gkw, toHub: gkw >= 0,
-        color: gAbs < 0.05 ? "var(--fg-muted)" :
+        color: gIdle ? "var(--fg-muted)" :
                (gkw >= 0 ? "var(--red-e)" : "var(--green-e)"),
-        sub: gAbs < 0.05 ? "balanced" :
+        sub: gIdle ? "balanced" :
              (gkw >= 0 ? "importing" : "exporting"),
       });
 
@@ -387,7 +399,7 @@
         // sign flip is display-only and lives in this function.
         if (d.pv_w != null) {
           var pvKw = -d.pv_w / 1000;
-          var pvGen = pvKw > 0.05;
+          var pvGen = !isFlowIdle(pvKw);
           planets.push({
             id: "pv-" + name, corner: "top-left", title: "SOLAR", name: name, role: "pv",
             kw: pvKw, toHub: true,
@@ -399,12 +411,12 @@
         // the house; charge flows away from it.
         if (d.bat_w != null) {
           var bKw = d.bat_w / 1000;
-          var bAbs = Math.abs(bKw);
+          var bIdle = isFlowIdle(bKw);
           planets.push({
             id: "bat-" + name, corner: "top-right", title: "BATTERY", name: name, role: "battery",
             kw: bKw, toHub: bKw < 0,
             color: "var(--cyan)",
-            sub: bAbs < 0.05 ? "idle" :
+            sub: bIdle ? "idle" :
                  (bKw >= 0 ? "charging" : "discharging"),
             soc: d.bat_soc != null ? Math.round(d.bat_soc * 100) : null,
           });
@@ -416,7 +428,7 @@
         // truth instead of session-Wh estimate.
         if (d.ev_w != null) {
           var eKw = d.ev_w / 1000;
-          var eActive = eKw > 0.05;
+          var eActive = !isFlowIdle(eKw);
           var lpEv = loadpointsByDriver && loadpointsByDriver[name];
           var evSoc = null;
           var evLimit = null;

@@ -55,6 +55,24 @@ import { FtwElement, ftwDebugDelay } from "./ftw-element.js";
 // render — they grow with the largest cluster size so the arc never
 // pushes a planet outside the box. Keeping H dynamic is what lets the
 // hero card grow when the user adds a second/third PV/battery/etc.
+// FLOW_IDLE_W — single source of truth for the "small enough to call
+// idle/balanced" threshold (in watts, magnitude). Used by:
+//   - this component (beam activation, sub-label "idle / charging /
+//     generating", aggregated-bubble greyscale, self-powered %)
+//   - web/next-app.js per-planet object construction (mirrors via
+//     window.FTW_FLOW_IDLE_W set below — non-module script, can't
+//     import; falls back to the same literal if this module hasn't
+//     loaded yet)
+//
+// Inclusive comparison everywhere: |kW| <= threshold ⇒ idle, strictly
+// > threshold ⇒ active. So at exactly 42 W the planet is idle AND the
+// beam is inactive — no mixed state at the boundary.
+const FLOW_IDLE_W = 42;
+const FLOW_IDLE_KW = FLOW_IDLE_W / 1000;
+function isIdleKw(kw) { return Math.abs(kw) <= FLOW_IDLE_KW; }
+if (typeof window !== "undefined") window.FTW_FLOW_IDLE_W = FLOW_IDLE_W;
+export { FLOW_IDLE_W, FLOW_IDLE_KW, isIdleKw };
+
 const W = 1000;
 const CX = W / 2;
 // Baseline height used when no cluster has more than one planet — also
@@ -578,7 +596,7 @@ class FtwEnergyFlow extends FtwElement {
         ...radialEndpoints(p._pos, p._r, P.hubR, p.toHub, CX, P.cy),
         kw: kwAbs,
         color: p.color,
-        active: !p.placeholder && kwAbs > 0.05,
+        active: !p.placeholder && !isIdleKw(p.kw),
       };
     });
     const maxKw = Math.max(0.5, ...edges.map(e => e.kw));
@@ -788,7 +806,7 @@ class FtwEnergyFlow extends FtwElement {
         if (p.role === "grid" && p.toHub) gridImport += Math.max(0, p.kw || 0);
       }
       const loadKw = Math.abs(load) || 0;
-      if (loadKw > 0.05) {
+      if (!isIdleKw(loadKw)) {
         const fromGrid = Math.min(gridImport, loadKw);
         selfPoweredPct = Math.max(0, Math.min(100, (1 - fromGrid / loadKw) * 100));
       }
@@ -1424,9 +1442,16 @@ function renderCircleNode({ pos, title, nameLabel, value, sub, color, soc,
 // ---------- primitives ----------
 
 function fmtKw(kw) {
-  const abs = Math.abs(kw);
-  if (abs < 0.1) return "0 W";
-  if (abs < 1)   return `${Math.round(kw * 1000)} W`;
+  // Input is kilowatts. Sub-kW values render as plain integer watts
+  // (no decimals) so a "30 W" import or "−12 W" battery trickle stays
+  // visible as the real number. The visual "idle / balanced"
+  // affordances (beam dimming, sub-label text) live on a separate
+  // ±FLOW_IDLE_W threshold; this formatter only handles display.
+  //
+  // Sub-half-watt magnitudes round to 0 W — that's noise, not signal.
+  // `+ 0` normalises Math.round's −0 result to plain 0 so a tiny
+  // negative reading doesn't print as "-0 W".
+  if (Math.abs(kw) < 1) return `${Math.round(kw * 1000) + 0} W`;
   return `${kw.toFixed(2)} kW`;
 }
 
@@ -1452,12 +1477,13 @@ function aggregateGroups(groups) {
     const toHub = group.every(p => p.toHub) ||
                   (!group.some(p => p.toHub) ? false : (totalKw >= 0));
     let sub = first.sub || "";
+    const idle = isIdleKw(totalKw);
     if (first.role === "battery") {
-      sub = absKw < 0.05 ? "idle" : (totalKw >= 0 ? "charging" : "discharging");
+      sub = idle ? "idle" : (totalKw >= 0 ? "charging" : "discharging");
     } else if (first.role === "pv") {
-      sub = absKw < 0.05 ? "idle" : "generating";
+      sub = idle ? "idle" : "generating";
     } else if (first.role === "ev") {
-      sub = absKw < 0.05 ? "idle" : "charging";
+      sub = idle ? "idle" : "charging";
     }
     // SoC: simple mean across reporters. Real weighting needs per-
     // battery capacity, which the component doesn't have here — the
@@ -1493,7 +1519,7 @@ function aggregateGroups(groups) {
       role: first.role,
       kw: totalKw,
       toHub,
-      color: absKw < 0.05 ? "var(--fg-muted)" : first.color,
+      color: idle ? "var(--fg-muted)" : first.color,
       sub,
       soc,
       chargeLimit,
