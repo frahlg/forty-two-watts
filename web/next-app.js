@@ -2025,6 +2025,36 @@
   // `range=week|month` onto every child — the component observes that
   // attribute and re-fetches, so the three charts stay in lock-step.
   var historyToggle = $("history-toggle");
+  var historyViewToggle = $("history-view-toggle");
+  var historyTiles = $("history-tiles");
+  var historyCakeWrap = $("history-cake");
+  var historyCakeEl = $("history-cake-el");
+
+  // historyState mirrors both toggles so the Bars/Cakes view and
+  // the Week/Month range stay coordinated. Only the cake re-fetches
+  // /api/energy/daily on a range change; the bar tiles each
+  // re-fetch themselves when their range= attribute is updated.
+  var historyState = { range: "week", view: "bars" };
+
+  function fetchHistoryCake() {
+    if (!historyCakeEl || typeof historyCakeEl.setTotals !== "function") return;
+    var days = historyState.range === "month" ? 30 : 7;
+    fetch("/api/energy/daily?days=" + days)
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        var arr = (j && j.days) || [];
+        var totals = { import_wh: 0, load_wh: 0, export_wh: 0, pv_wh: 0 };
+        for (var i = 0; i < arr.length; i++) {
+          totals.import_wh += arr[i].import_wh || 0;
+          totals.load_wh   += arr[i].load_wh   || 0;
+          totals.export_wh += arr[i].export_wh || 0;
+          totals.pv_wh     += arr[i].pv_wh     || 0;
+        }
+        historyCakeEl.setTotals(totals);
+      })
+      .catch(function () { /* network blip — leave the previous render */ });
+  }
+
   if (historyToggle) {
     historyToggle.addEventListener("click", function (e) {
       var btn = e.target.closest("button[data-range]");
@@ -2032,6 +2062,7 @@
       var next = btn.getAttribute("data-range");
       if (!next || next === historyToggle.getAttribute("data-active")) return;
       historyToggle.setAttribute("data-active", next);
+      historyState.range = next;
       var buttons = historyToggle.querySelectorAll("button[data-range]");
       for (var i = 0; i < buttons.length; i++) {
         var on = buttons[i].getAttribute("data-range") === next;
@@ -2042,6 +2073,28 @@
       for (var j = 0; j < tiles.length; j++) {
         tiles[j].setAttribute("range", next);
       }
+      // Cake: refresh only when it's the active view.
+      if (historyState.view === "cakes") fetchHistoryCake();
+    });
+  }
+
+  if (historyViewToggle) {
+    historyViewToggle.addEventListener("click", function (e) {
+      var btn = e.target.closest("button[data-view]");
+      if (!btn) return;
+      var next = btn.getAttribute("data-view");
+      if (!next || next === historyViewToggle.getAttribute("data-active")) return;
+      historyViewToggle.setAttribute("data-active", next);
+      historyState.view = next;
+      var buttons = historyViewToggle.querySelectorAll("button[data-view]");
+      for (var i = 0; i < buttons.length; i++) {
+        var on = buttons[i].getAttribute("data-view") === next;
+        buttons[i].classList.toggle("active", on);
+        buttons[i].setAttribute("aria-selected", on ? "true" : "false");
+      }
+      if (historyTiles) historyTiles.classList.toggle("hidden", next !== "bars");
+      if (historyCakeWrap) historyCakeWrap.classList.toggle("hidden", next !== "cakes");
+      if (next === "cakes") fetchHistoryCake();
     });
   }
 

@@ -157,6 +157,15 @@
       </div>
     </section>
 
+    <!-- Electricity prices — full-width chart of upcoming spot prices
+         with a VAT-on/off toggle, peak/low markers, and a hover
+         tooltip. Self-fetching: hits /api/prices on connect. -->
+    <section class="prices-row">
+      <div class="card prices-group">
+        <ftw-price-chart></ftw-price-chart>
+      </div>
+    </section>
+
     <!-- Energy today — one wrapper card with six sub-tiles. Mirrors the
          fuse-card pattern: outer card owns the label; each inner tile
          has its own sub-label + kWh value. Sub-labels drop the "today"
@@ -203,16 +212,25 @@
       <div class="card history-group">
         <div class="history-head">
           <div class="card-label">History in numbers</div>
-          <div class="history-toggle" id="history-toggle" role="tablist" data-active="week">
-            <button type="button" role="tab" data-range="week"  class="active" aria-selected="true">Week</button>
-            <button type="button" role="tab" data-range="month" aria-selected="false">Month</button>
+          <div class="history-toggles">
+            <div class="history-toggle" id="history-view-toggle" role="tablist" data-active="bars">
+              <button type="button" role="tab" data-view="bars"  class="active" aria-selected="true">Bars</button>
+              <button type="button" role="tab" data-view="cakes" aria-selected="false">Pie</button>
+            </div>
+            <div class="history-toggle" id="history-toggle" role="tablist" data-active="week">
+              <button type="button" role="tab" data-range="week"  class="active" aria-selected="true">Week</button>
+              <button type="button" role="tab" data-range="month" aria-selected="false">Month</button>
+            </div>
           </div>
         </div>
-        <div class="history-tiles">
+        <div class="history-tiles" id="history-tiles">
           <ftw-history-card metric="import" label="Imported" hide-toggle range="week"></ftw-history-card>
           <ftw-history-card metric="pv"     label="Produced" hide-toggle range="week"></ftw-history-card>
           <ftw-history-card metric="load"   label="Consumed" hide-toggle range="week"></ftw-history-card>
           <ftw-history-card metric="export" label="Exported" hide-toggle range="week"></ftw-history-card>
+        </div>
+        <div class="history-cake hidden" id="history-cake">
+          <ftw-energy-cake id="history-cake-el"></ftw-energy-cake>
         </div>
       </div>
     </section>
