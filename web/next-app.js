@@ -1339,7 +1339,7 @@
         var socDisplay = (vSoc != null && vLimit != null)
           ? vSoc + " / " + vLimit + " %"
           : (vSoc != null ? vSoc + " %" : "—");
-        if (vStale) socDisplay += " ★";
+        if (vStale) socDisplay = "⚠ " + socDisplay;
         var stateClassV = (vState === "Charging") ? "stat-ok" : (vState === "Disconnected" ? "stat-dim" : "stat-warn");
         var ttfStr = (vTtf != null && vTtf > 0)
           ? (vTtf >= 60 ? Math.floor(vTtf / 60) + "h " + (vTtf % 60) + "m" : vTtf + " min")
@@ -1777,11 +1777,17 @@
       evModalDriver = null;
     });
 
-    // EV planet click → open modal scoped to that driver.
+    // Planet click routing. EV → EV modal scoped to driver. Battery →
+    // <ftw-battery-control> manual-hold modal (no driver scoping; the
+    // hold applies to the aggregate battery setpoint).
     if (energyFlowEl) {
       energyFlowEl.addEventListener("ftw-planet-click", function (e) {
         var d = (e && e.detail) || {};
         if (d.role === "ev") openEvModal(d.name || null);
+        if (d.role === "battery") {
+          var bc = document.getElementById("battery-control");
+          if (bc && typeof bc.open === "function") bc.open();
+        }
       });
     }
 
@@ -1800,6 +1806,7 @@
     evBtnPause.addEventListener("click", function () { evCommand("ev_pause"); });
     evBtnResume.addEventListener("click", function () { evCommand("ev_resume"); });
   }
+
 
   // Click-to-toggle legend items. Each item has data-toggle with a
   // key; clicking toggles visibility of the matching series and

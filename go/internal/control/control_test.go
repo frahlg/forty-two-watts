@@ -831,10 +831,15 @@ func TestJointFuseAllocatorScalesBothBatteryAndEV(t *testing.T) {
 	if !st.FuseSaturated {
 		t.Errorf("FuseSaturated = false; want true after joint scaling")
 	}
-	// EV cap is the allocator's verdict (independent of fuse guard's
-	// in-tick safety net): scale × current EV ≈ 0.831 × 8000 ≈ 6650.
-	if st.FuseEVMaxW < 6000 || st.FuseEVMaxW > 7200 {
-		t.Errorf("FuseEVMaxW = %.0f — want ~6650 (scaled EV cap)", st.FuseEVMaxW)
+	// EV cap is the post-republish verdict: after applyFuseGuard +
+	// forceFuseDischarge constrain battery further (and may swing it
+	// into discharge), the cap accounts for the now-greater fuse
+	// headroom. Bound below by ~6000 (the original allocator's
+	// pessimistic cap) and above by the current EV draw — a cap
+	// greater than the EV is currently drawing would be loose.
+	if st.FuseEVMaxW < 6000 || st.FuseEVMaxW > st.EVChargingW {
+		t.Errorf("FuseEVMaxW = %.0f — want in [6000, %.0f] (post-republish cap)",
+			st.FuseEVMaxW, st.EVChargingW)
 	}
 	// Sanity: post-dispatch projected grid stays at or below fuse.
 	projected := 8200.0 + got
@@ -1988,5 +1993,260 @@ func TestComputeDispatchAppliesSignFloorOnDischargeSlot(t *testing.T) {
 	if targets[0].TargetW > 100 {
 		t.Errorf("TargetW = %f W — sign floor should have clamped charge to 0 on a discharge slot",
 			targets[0].TargetW)
+	}
+}
+
+// ---- Battery manual hold ----
+
+func TestBatteryManualHoldNotActiveByDefault(t *testing.T) {
+	st := NewState(0, 50, "ferroamp")
+	if _, ok := st.GetBatteryManualHold(time.Now()); ok {
+		t.Errorf("expected no active hold on a fresh State")
+	}
+}
+
+func TestBatteryManualHoldExpiresWithTime(t *testing.T) {
+	st := NewState(0, 50, "ferroamp")
+	now := time.Now()
+	st.SetBatteryManualHold(BatteryManualHold{PowerW: 1000, ExpiresAt: now.Add(10 * time.Second)})
+	if _, ok := st.GetBatteryManualHold(now); !ok {
+		t.Fatalf("hold should be active immediately after install")
+	}
+	if _, ok := st.GetBatteryManualHold(now.Add(11 * time.Second)); ok {
+		t.Errorf("hold should expire after ExpiresAt")
+	}
+	// Expired holds should be evicted from state — Clear after lazy eviction is a no-op.
+	st.ClearBatteryManualHold()
+	if _, ok := st.GetBatteryManualHold(now); ok {
+		t.Errorf("ClearBatteryManualHold should remove the hold")
+	}
+}
+
+func TestBatteryManualHoldChargesAtSetpoint(t *testing.T) {
+	// grid = +500 (some import). Without hold, self-consumption would
+	// command discharge ≈ -500. Hold installs +3000 → expect charge.
+	store := seedStore(500, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	st := NewState(0, 50, "ferroamp")
+	st.Mode = ModeSelfConsumption
+	st.SlewRateW = 100000
+	st.SetBatteryManualHold(BatteryManualHold{PowerW: 3000, ExpiresAt: time.Now().Add(60 * time.Second)})
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 100000)
+	if len(targets) != 1 {
+		t.Fatalf("expected 1 target, got %d", len(targets))
+	}
+	if math.Abs(targets[0].TargetW-3000) > 1 {
+		t.Errorf("hold sets +3000 charge, got %f", targets[0].TargetW)
+	}
+}
+
+func TestBatteryManualHoldDischargesAtSetpoint(t *testing.T) {
+	// grid = -2000 (exporting). Without hold, self-consumption would
+	// command +2000 charge. Hold installs -2500 → expect discharge.
+	store := seedStore(-2000, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	st := NewState(0, 50, "ferroamp")
+	st.Mode = ModeSelfConsumption
+	st.SlewRateW = 100000
+	st.SetBatteryManualHold(BatteryManualHold{PowerW: -2500, ExpiresAt: time.Now().Add(60 * time.Second)})
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 100000)
+	if len(targets) != 1 {
+		t.Fatalf("expected 1 target, got %d", len(targets))
+	}
+	if math.Abs(targets[0].TargetW-(-2500)) > 1 {
+		t.Errorf("hold sets -2500 discharge, got %f", targets[0].TargetW)
+	}
+}
+
+func TestBatteryManualHoldOverridesIdleMode(t *testing.T) {
+	// In ModeIdle the dispatch normally returns nothing. The hold must
+	// override and produce a target.
+	store := seedStore(0, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	st := NewState(0, 50, "ferroamp")
+	st.Mode = ModeIdle
+	st.SlewRateW = 100000
+	st.SetBatteryManualHold(BatteryManualHold{PowerW: 2000, ExpiresAt: time.Now().Add(60 * time.Second)})
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 100000)
+	if len(targets) != 1 {
+		t.Fatalf("expected 1 target, got %d", len(targets))
+	}
+	if math.Abs(targets[0].TargetW-2000) > 1 {
+		t.Errorf("hold should override Idle, got %f", targets[0].TargetW)
+	}
+}
+
+func TestBatteryManualHoldOverridesPlannerMode(t *testing.T) {
+	// Planner mode with an idle-gate slot directive would normally hold
+	// at 0. The hold must take precedence and discharge.
+	store := seedStore(0, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.6},
+	})
+	st := NewState(0, 50, "ferroamp")
+	st.Mode = ModePlannerSelf
+	st.SlewRateW = 100000
+	now := time.Now()
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) {
+		return SlotDirective{
+			SlotStart:       now,
+			SlotEnd:         now.Add(15 * time.Minute),
+			BatteryEnergyWh: 0, // idle-gate
+		}, true
+	}
+	st.SetBatteryManualHold(BatteryManualHold{PowerW: -3000, ExpiresAt: now.Add(60 * time.Second)})
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 100000)
+	if len(targets) != 1 {
+		t.Fatalf("expected 1 target, got %d", len(targets))
+	}
+	if math.Abs(targets[0].TargetW-(-3000)) > 1 {
+		t.Errorf("hold should override planner_self idle gate, got %f", targets[0].TargetW)
+	}
+}
+
+func TestBatteryManualHoldRespectsSoCFloor(t *testing.T) {
+	// SoC < 5% blocks discharge — hold trying to discharge an empty
+	// battery must clamp to 0 (clampWithSoC inside distributeProportional).
+	store := seedStore(0, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.02}, // 2% — below the 5% discharge floor
+	})
+	st := NewState(0, 50, "ferroamp")
+	st.Mode = ModeSelfConsumption
+	st.SlewRateW = 100000
+	st.SetBatteryManualHold(BatteryManualHold{PowerW: -3000, ExpiresAt: time.Now().Add(60 * time.Second)})
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 100000)
+	if len(targets) != 1 {
+		t.Fatalf("expected 1 target, got %d", len(targets))
+	}
+	if targets[0].TargetW != 0 || !targets[0].Clamped {
+		t.Errorf("empty battery: discharge hold must clamp to 0 (clamped=true), got %+v", targets[0])
+	}
+}
+
+func TestBatteryManualHoldRespectsFuseGuard(t *testing.T) {
+	// fuseMaxW is tiny (2000 W). Hold asks for +5000 charge but the
+	// fuse guard scales same-direction targets down to fit.
+	store := seedStore(0, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	st := NewState(0, 50, "ferroamp")
+	st.Mode = ModeSelfConsumption
+	st.SlewRateW = 100000
+	st.SetBatteryManualHold(BatteryManualHold{PowerW: 5000, ExpiresAt: time.Now().Add(60 * time.Second)})
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 2000)
+	if len(targets) != 1 {
+		t.Fatalf("expected 1 target, got %d", len(targets))
+	}
+	if targets[0].TargetW > 2000+1 {
+		t.Errorf("fuse guard must clamp +5000 charge under fuseMaxW=2000, got %f", targets[0].TargetW)
+	}
+	if !targets[0].Clamped {
+		t.Errorf("clamped flag should be set when fuse guard intervenes")
+	}
+}
+
+func TestBatteryManualHoldExpiryRevertsToMode(t *testing.T) {
+	// After the hold expires, the dispatch should revert to the configured
+	// mode (here SelfConsumption) and use the live grid reading again.
+	store := seedStore(1500, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	st := NewState(0, 50, "ferroamp")
+	st.Mode = ModeSelfConsumption
+	st.SlewRateW = 100000
+	now := time.Now()
+	st.SetBatteryManualHold(BatteryManualHold{PowerW: 3000, ExpiresAt: now.Add(-1 * time.Second)}) // already expired
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 100000)
+	if len(targets) != 1 {
+		t.Fatalf("expected 1 target after expiry, got %d", len(targets))
+	}
+	// Self-consumption with grid=+1500 should command discharge (negative).
+	if targets[0].TargetW >= 0 {
+		t.Errorf("expired hold should revert to self_consumption (discharge expected), got %f",
+			targets[0].TargetW)
+	}
+}
+
+func TestBatteryManualHoldBypassesPlanSignFloor(t *testing.T) {
+	// Pi report 2026-04-29: manual hold installed `charge 666 W` while
+	// MPC plan intent was `discharge` — applyPlanSignFloor clamped
+	// every tick to idle, defeating the override entirely. The sign
+	// floor exists to catch *unintended* plan/exec divergence in
+	// planner modes, but a manual hold is *intentional* divergence.
+	store := seedStore(0, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	st := NewState(0, 50, "ferroamp")
+	st.Mode = ModePlannerArbitrage
+	st.SlewRateW = 100000
+	now := time.Now()
+	// Plan says discharge this slot.
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) {
+		return SlotDirective{
+			SlotStart:       now,
+			SlotEnd:         now.Add(15 * time.Minute),
+			BatteryEnergyWh: -1500,
+		}, true
+	}
+	// Hold says charge — opposite sign.
+	st.SetBatteryManualHold(BatteryManualHold{PowerW: 666, ExpiresAt: now.Add(60 * time.Second)})
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 100000)
+	if len(targets) != 1 {
+		t.Fatalf("expected 1 target, got %d", len(targets))
+	}
+	if math.Abs(targets[0].TargetW-666) > 1 {
+		t.Errorf("hold should win over plan-sign floor, got %f (want 666)",
+			targets[0].TargetW)
+	}
+}
+
+func TestBatteryManualHoldBypassesHoldoff(t *testing.T) {
+	// LastDispatch in the very recent past would normally trigger the
+	// holdoff branch. Manual holds must bypass it for immediate effect.
+	store := seedStore(0, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	st := NewState(0, 50, "ferroamp")
+	st.Mode = ModeSelfConsumption
+	st.SlewRateW = 100000
+	st.MinDispatchIntervalS = 5
+	veryRecent := time.Now().Add(-1 * time.Second)
+	st.LastDispatch = &veryRecent
+	st.SetBatteryManualHold(BatteryManualHold{PowerW: 1500, ExpiresAt: time.Now().Add(60 * time.Second)})
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 100000)
+	if len(targets) != 1 {
+		t.Fatalf("manual hold must bypass holdoff, got %d targets", len(targets))
+	}
+	if math.Abs(targets[0].TargetW-1500) > 1 {
+		t.Errorf("got %f, want 1500", targets[0].TargetW)
 	}
 }

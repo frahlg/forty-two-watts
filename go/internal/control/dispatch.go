@@ -214,6 +214,55 @@ type State struct {
 	// total headroom. Hot-swappable via the config-reload watcher.
 	// Issue #145.
 	DriverLimits map[string]PowerLimits
+
+	// ManualHold pins the aggregate battery setpoint to a fixed power
+	// for a bounded duration, bypassing both the active manual mode
+	// and the MPC. Hot-installed via POST /api/battery/manual_hold;
+	// auto-expires. Zero ExpiresAt means inactive.
+	//
+	// Site sign convention: PowerW > 0 = charge, < 0 = discharge,
+	// 0 = idle. SoC clamps, slew, and the fuse guard still apply on
+	// the resulting target — operators cannot bypass safety bounds.
+	// Mutated under the same outer ctrlMu that protects the rest of
+	// State; no internal mutex.
+	ManualHold BatteryManualHold
+}
+
+// BatteryManualHold is the full payload of a battery manual override.
+// See State.ManualHold for invariants.
+type BatteryManualHold struct {
+	PowerW    float64
+	ExpiresAt time.Time
+}
+
+// SetBatteryManualHold installs a manual override on the aggregate
+// battery setpoint. Caller must hold the outer ctrlMu. A zero
+// ExpiresAt clears any active hold (same as ClearBatteryManualHold).
+func (s *State) SetBatteryManualHold(h BatteryManualHold) {
+	if h.ExpiresAt.IsZero() {
+		s.ManualHold = BatteryManualHold{}
+		return
+	}
+	s.ManualHold = h
+}
+
+// ClearBatteryManualHold removes any active hold regardless of expiry.
+// Idempotent. Caller must hold the outer ctrlMu.
+func (s *State) ClearBatteryManualHold() {
+	s.ManualHold = BatteryManualHold{}
+}
+
+// GetBatteryManualHold returns the active hold for `now`, lazily
+// evicting an expired one. Caller must hold the outer ctrlMu.
+func (s *State) GetBatteryManualHold(now time.Time) (BatteryManualHold, bool) {
+	if s.ManualHold.ExpiresAt.IsZero() {
+		return BatteryManualHold{}, false
+	}
+	if !now.Before(s.ManualHold.ExpiresAt) {
+		s.ManualHold = BatteryManualHold{}
+		return BatteryManualHold{}, false
+	}
+	return s.ManualHold, true
 }
 
 // NewState creates default control state (port of Rust ControlState::new).
@@ -322,7 +371,32 @@ func ComputeDispatch(
 	// later slot is honoured.
 	plannerSelfIdleGate := false
 	var currentDirective SlotDirective
+
+	// ---- Manual hold: highest-priority override ----
+	// Operator pinned a fixed aggregate battery setpoint (charge /
+	// discharge / idle) for a bounded duration. Skips the planner-mode
+	// pre-processing, the idle/charge short-circuits, the holdoff timer,
+	// and the deadband. Falls through to distribute → slew → SoC clamp
+	// → fuse guard so safety bounds still apply.
+	manualHold, manualHoldActive := state.GetBatteryManualHold(time.Now())
+	if manualHoldActive {
+		// Reset PI + slot accumulators so reverting to a planner mode
+		// after the hold expires doesn't read stale state — same reset
+		// that the ModePlannerSelf branch performs below.
+		state.PI.Reset()
+		state.currentDirective = SlotDirective{}
+		state.slotDelivered = 0
+		state.lastTickTs = time.Time{}
+		state.PlanStale = false
+		state.SetGridTarget(0)
+		// Force the proportional distribution path. effectiveMode stays
+		// SelfConsumption so the idle/charge short-circuits below don't
+		// fire when state.Mode is one of those.
+		effectiveMode = ModeSelfConsumption
+	}
 	switch {
+	case manualHoldActive:
+		// Already handled — leave effectiveMode at ModeSelfConsumption.
 	case state.Mode == ModePlannerSelf:
 		effectiveMode = ModeSelfConsumption
 		state.SetGridTarget(0)
@@ -417,7 +491,10 @@ func ComputeDispatch(
 	}
 
 	// ---- Holdoff ----
-	if state.LastDispatch != nil {
+	// Manual holds bypass the holdoff: the operator just installed a
+	// setpoint and expects immediate effect, not a 5 s wait. The fuse
+	// guard at the end of the cycle still protects the site.
+	if !manualHoldActive && state.LastDispatch != nil {
 		elapsed := time.Since(*state.LastDispatch).Seconds()
 		if elapsed < float64(state.MinDispatchIntervalS) {
 			// Holdoff suppresses normal re-dispatch, but the
@@ -512,9 +589,15 @@ func ComputeDispatch(
 		currentTotal += b.currentW
 	}
 
-	// ---- Compute totalCorrection — three paths diverge here ----
+	// ---- Compute totalCorrection — paths diverge here ----
 	var totalCorrection float64
 	switch {
+	case manualHoldActive:
+		// Drive the aggregate battery toward the operator's setpoint.
+		// PI was already reset above; deadband is intentionally skipped
+		// so even small setpoints are honoured exactly. Slew, SoC clamps,
+		// and the fuse guard still apply downstream.
+		totalCorrection = manualHold.PowerW - currentTotal
 	case plannerSelfIdleGate:
 		// planner_self + plan says idle this slot: drive the battery
 		// total toward 0 regardless of live grid flow. Slew ramps it
@@ -660,6 +743,12 @@ func ComputeDispatch(
 	// Discharge alone never trips this — Bn is negative, so it lifts the
 	// numerator (more headroom). Only positive battery demand competes
 	// with EV.
+	//
+	// BatteryCoversEV mode: H is computed from rawGridW (the raw meter,
+	// unchanged regardless of BatteryCoversEV) so H stays correct in
+	// both modes. The PI's gridW is the only place that branches on
+	// BatteryCoversEV; the joint allocator's geometry is independent
+	// of that. Regression: TestJointFuseAllocatorWithBatteryCoversEV.
 	state.FuseEVMaxW = 0
 	state.FuseSaturated = false
 	if fuseMaxW > 0 && state.EVChargingW > 0 {
@@ -799,7 +888,13 @@ func ComputeDispatch(
 	// Only applied in planner modes — manual modes have no plan to
 	// disagree with. forceFuseDischarge runs AFTER this so a fuse
 	// overflow can still drive discharge regardless of plan intent.
-	raw = applyPlanSignFloor(raw, state)
+	//
+	// Skipped when a manual hold is active: the operator is
+	// deliberately overriding the planner, so a sign mismatch with the
+	// plan is the intended behaviour, not a bug to clamp out.
+	if !manualHoldActive {
+		raw = applyPlanSignFloor(raw, state)
+	}
 
 	// forceFuseDischarge runs LAST, deliberately AFTER the slew loop
 	// at line 625. A fuse overflow can demand a battery target that's
@@ -809,6 +904,44 @@ func ComputeDispatch(
 	// non-negotiable ceiling — it bypasses slew. Regression-guarded
 	// by TestFuseSaverBypassesSlew.
 	raw = forceFuseDischarge(raw, store, state, driverCapacities, fuseMaxW)
+
+	// ---- Republish FuseEVMaxW after forceFuseDischarge ----
+	// The joint allocator (line 625) computes FuseEVMaxW assuming the
+	// battery target it just produced is what gets dispatched. But
+	// forceFuseDischarge may have flipped that target from charge to
+	// discharge — freeing additional fuse headroom for the EV.
+	// Without this re-publish the loadpoint controller throttles the
+	// EV against a stale (too-conservative) cap for one tick. Run only
+	// when the joint allocator already engaged this tick — otherwise
+	// FuseEVMaxW is "no advice" and should stay 0.
+	if state.FuseSaturated && state.EVChargingW > 0 && fuseMaxW > 0 {
+		var postBat float64
+		seen := make(map[string]struct{}, len(raw))
+		for _, t := range raw {
+			if _, ok := seen[t.Driver]; ok {
+				continue
+			}
+			seen[t.Driver] = struct{}{}
+			postBat += t.TargetW
+		}
+		// H = rawGridW − currentTotal − E (unchanged from joint allocator)
+		// newGrid = H + postBat + E*scale ≤ fuseMaxW
+		// → scale ≤ (fuseMaxW − H − postBat) / E, capped to ≤1
+		var rawGridW2 float64
+		if r := store.Get(state.SiteMeterDriver, telemetry.DerMeter); r != nil {
+			rawGridW2 = r.SmoothedW
+		}
+		H := rawGridW2 - currentTotal - state.EVChargingW
+		headroom := fuseMaxW - H - postBat
+		if headroom < 0 {
+			headroom = 0
+		}
+		newCap := headroom
+		if newCap > state.EVChargingW {
+			newCap = state.EVChargingW
+		}
+		state.FuseEVMaxW = newCap
+	}
 
 	// Update state
 	now := time.Now()

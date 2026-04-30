@@ -1370,20 +1370,29 @@ function renderCircleNode({ pos, title, nameLabel, value, sub, color, soc,
   // value is a cross-battery mean. EV planets gain two honesty markers:
   //  - "~" prefix when the value came from the inferred path (pluginSoC
   //    + deliveredWh) instead of the vehicle's own BMS.
-  //  - "★" suffix when the vehicle reading is stale (driver lost
+  //  - "⚠ " prefix when the vehicle reading is stale (driver lost
   //    contact with the car for more than its stale_after_s window).
+  //    Used to be "★ " — but "★" universally reads as "favourite",
+  //    the opposite of "degraded". A warning glyph + amber color
+  //    matches the rest of the app's stale signalling.
   // When a charge-limit is also known, render as "24/50%" — no spaces
   // around the slash, the format reads as "current of limit".
+  // At small radii (r<50, e.g. 4+ planets clustered in one corner) the
+  // chargeLimit suffix overflows the disc — drop it and show only the
+  // current SoC so the text always fits.
   let socText = "";
   if (soc != null) {
     const socPrefix = socSource === "inferred" ? "~" : "";
     const aggPrefix = aggregated ? "Avg " : "";
-    const staleMark = socStale ? " ★" : "";
-    const socBody = chargeLimit != null && chargeLimit > 0
+    const stalePrefix = socStale ? "⚠ " : "";
+    const showLimit = chargeLimit != null && chargeLimit > 0 && r >= 50;
+    const socBody = showLimit
       ? `${socPrefix}${Math.round(soc)}/${Math.round(chargeLimit)}%`
       : `${socPrefix}${Math.round(soc)}%`;
+    const fillColor = socStale ? "var(--stat-warn, #f59e0b)" : "var(--cyan)";
+    const titleAttr = socStale ? ` data-tooltip="Reading is stale (no recent contact with vehicle)"` : "";
     socText = `<text x="${x}" y="${y + socY}" text-anchor="middle"
-             fill="var(--cyan)" class="sv-node-sub">${aggPrefix}${socBody}${staleMark}</text>`;
+             fill="${fillColor}" class="sv-node-sub"${titleAttr}>${aggPrefix}${stalePrefix}${socBody}</text>`;
   }
   // Icon swapped in during the loading + fade-in phases. Scale chosen
   // so a full-size planet (r ≈ 86) hosts a ~30 px icon — readable at
@@ -1456,6 +1465,27 @@ function aggregateGroups(groups) {
     // detailed per-battery SoC lives in the individual view.
     const socs = group.map(p => p.soc).filter(s => s != null);
     const soc = socs.length ? socs.reduce((a, b) => a + b, 0) / socs.length : null;
+    // EV-only metadata: chargeLimit / socStale / socSource come from
+    // the vehicle driver and only ever appear on EV planets. Aggregating
+    // these across multiple EVs would mix unrelated cars, so we only
+    // forward them when the group contains exactly one EV reporter
+    // (e.g. one wallbox + one paired Tesla). Otherwise drop them and
+    // the aggregated bubble renders just the averaged SoC, no badge.
+    let chargeLimit = null;
+    let socStale = false;
+    let socSource = null;
+    if (first.role === "ev") {
+      const limits = group.map(p => p.chargeLimit).filter(v => v != null && v > 0);
+      if (limits.length === 1) chargeLimit = limits[0];
+      // socStale is true if ANY underlying reading is stale — better
+      // to over-warn than under-warn here.
+      socStale = group.some(p => !!p.socStale);
+      // socSource: prefer "vehicle" when at least one reporter has BMS
+      // truth; otherwise inherit "inferred" from the first.
+      const sources = group.map(p => p.socSource).filter(Boolean);
+      socSource = sources.includes("vehicle") ? "vehicle"
+                : sources.find(s => s === "inferred") || first.socSource || null;
+    }
     out[corner] = [{
       id: `agg-${corner}`,
       corner,
@@ -1466,6 +1496,9 @@ function aggregateGroups(groups) {
       color: absKw < 0.05 ? "var(--fg-muted)" : first.color,
       sub,
       soc,
+      chargeLimit,
+      socStale,
+      socSource,
       name: `${group.length}×`,
       aggregated: true,
     }];
