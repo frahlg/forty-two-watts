@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"math"
 	"testing"
+	"time"
 
 	"github.com/frahlg/forty-two-watts/go/internal/telemetry"
 )
@@ -398,8 +399,9 @@ func TestPerPhaseClampHonorsSafetyMargin(t *testing.T) {
 	// Aggregate effFuseW = 11040 − 1.0×230×3 = 10350. Predicted =
 	// 7000 + 4000 − 0 = 11000 → aggregate overage = 11000 − 10350 = 650.
 	// Per-phase overage × 3 = 345. Aggregate wins (650 > 345).
-	// Charge 4000 − 650 = 3350.
-	expected := 3350.0
+	// Buffer = half-margin = 0.5×1×230×3 = 345 W (post-fix headroom).
+	// Charge 4000 − 650 − 345 = 3005.
+	expected := 3005.0
 	if math.Abs(guarded[0].TargetW-expected) > 1 {
 		t.Errorf("charge after safety-margin clamp = %.0f W, want %.0f W",
 			guarded[0].TargetW, expected)
@@ -437,5 +439,112 @@ func TestFuseSaverFiresInIdleMode(t *testing.T) {
 	}
 	if !out[0].Clamped {
 		t.Errorf("Clamped flag must mark fuse-saver activation")
+	}
+}
+
+// Operator-report 2026-04-30: with safety_margin_a=1 (threshold = 15 A)
+// the system stabilised with phase amps oscillating between 15.0 and
+// 15.8 A — fuse guard reactively scaled targets just enough to clear
+// the trip, then the planner re-ramped, then it re-tripped. Half-margin
+// buffer keeps post-clamp aggregate below the threshold by an explicit
+// margin so the next tick has room before re-tripping.
+func TestFuseGuardLeavesHeadroomBelowThreshold(t *testing.T) {
+	store, state, _ := setupPerPhase(-7000, 12, 18, 8, 0.6, 10000)
+	state.SiteFuseSafetyA = 1.0
+	state.SiteFusePhases = 3
+	soc := 0.6
+	store.Update("bat", telemetry.DerBattery, -5000, &soc, nil)
+	store.DriverHealthMut("bat").RecordSuccess()
+
+	out := applyFuseGuard(
+		[]DispatchTarget{{Driver: "bat", TargetW: -5000}},
+		store, state, 11040)
+	if !out[0].Clamped {
+		t.Fatalf("expected per-phase export clamp")
+	}
+	// perPhase = (18−15) × 230 × 3 = 2070 W
+	// half-margin buffer = 0.5 × 1A × 230V × 3p = 345 W
+	// totalDischarge = 5000 → newTotal = 5000 − 2070 − 345 = 2585
+	expected := -2585.0
+	if math.Abs(out[0].TargetW-expected) > 1 {
+		t.Errorf("post-clamp target = %.0f W, want %.0f W (overage + half-margin)",
+			out[0].TargetW, expected)
+	}
+}
+
+// Hold-mode hysteresis prevents the planner from immediately
+// re-ramping into the threshold on the next tick. The clamp's max
+// is latched for ~30 s and re-applied even when the live overage
+// is zero.
+func TestFuseGuardHoldsClampAcrossTicks(t *testing.T) {
+	// Tick 1: clamp fires, latches max.
+	store, state, _ := setupPerPhase(-7000, 12, 18, 8, 0.6, 10000)
+	state.SiteFuseSafetyA = 1.0
+	state.SiteFusePhases = 3
+	soc := 0.6
+	store.Update("bat", telemetry.DerBattery, -5000, &soc, nil)
+	store.DriverHealthMut("bat").RecordSuccess()
+
+	tick1 := applyFuseGuard(
+		[]DispatchTarget{{Driver: "bat", TargetW: -5000}},
+		store, state, 11040)
+	if !tick1[0].Clamped {
+		t.Fatalf("tick 1: expected initial clamp")
+	}
+	if state.FuseHoldMaxDischargeW <= 0 {
+		t.Fatalf("tick 1: hold-max should be latched, got %v", state.FuseHoldMaxDischargeW)
+	}
+	if state.FuseHoldUntil.IsZero() {
+		t.Fatalf("tick 1: hold-until should be set")
+	}
+	tick1Cap := state.FuseHoldMaxDischargeW
+
+	// Tick 2: phase amps look clean (battery responded), planner
+	// asks for the original full discharge again. Hold-mode must
+	// re-apply the latched cap.
+	store2, state2, _ := setupPerPhase(-3000, 8, 10, 6, 0.6, 10000)
+	state2.SiteFuseSafetyA = 1.0
+	state2.SiteFusePhases = 3
+	state2.FuseHoldMaxDischargeW = state.FuseHoldMaxDischargeW
+	state2.FuseHoldUntil = state.FuseHoldUntil
+	store2.Update("bat", telemetry.DerBattery, -2500, &soc, nil)
+	store2.DriverHealthMut("bat").RecordSuccess()
+
+	tick2 := applyFuseGuard(
+		[]DispatchTarget{{Driver: "bat", TargetW: -5000}},
+		store2, state2, 11040)
+	if !tick2[0].Clamped {
+		t.Errorf("tick 2: hold-mode should still clamp the re-ramp")
+	}
+	if -tick2[0].TargetW > tick1Cap+0.5 {
+		t.Errorf("tick 2: target magnitude %.0f exceeds latched cap %.0f — hold not enforced",
+			-tick2[0].TargetW, tick1Cap)
+	}
+}
+
+// Hold expires after the window so future planner re-ramps aren't
+// permanently capped by stale state.
+func TestFuseGuardHoldExpiresAfterWindow(t *testing.T) {
+	store, state, _ := setupPerPhase(-3000, 8, 10, 6, 0.6, 10000)
+	state.SiteFuseSafetyA = 1.0
+	state.SiteFusePhases = 3
+	soc := 0.6
+	store.Update("bat", telemetry.DerBattery, -2500, &soc, nil)
+	store.DriverHealthMut("bat").RecordSuccess()
+
+	state.FuseHoldMaxDischargeW = 1000
+	state.FuseHoldUntil = time.Now().Add(-1 * time.Second)
+
+	out := applyFuseGuard(
+		[]DispatchTarget{{Driver: "bat", TargetW: -4000}},
+		store, state, 11040)
+	if !state.FuseHoldUntil.IsZero() {
+		t.Errorf("expired hold-until should be cleared, got %v", state.FuseHoldUntil)
+	}
+	if state.FuseHoldMaxDischargeW != 0 {
+		t.Errorf("expired hold-max should be cleared, got %v", state.FuseHoldMaxDischargeW)
+	}
+	if out[0].Clamped {
+		t.Errorf("post-expiry, no live overage: target should pass through, got %v", out[0])
 	}
 }

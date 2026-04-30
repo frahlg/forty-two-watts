@@ -227,6 +227,21 @@ type State struct {
 	// Issue #145.
 	DriverLimits map[string]PowerLimits
 
+	// FuseHold* — hysteresis state from applyFuseGuard. After a clamp
+	// fires, the latched maximum aggregate-battery magnitude (for the
+	// direction that tripped) is held for ~30 s so the planner can't
+	// immediately re-ramp into the same threshold and oscillate at
+	// the boundary. Each new fire extends the window.
+	//
+	// Without this, the dispatch + slew + planner feedback loop
+	// stabilises with phase amps riding right at the trip threshold:
+	// every tick scales the discharge JUST enough to clear the trip,
+	// the next tick the planner re-asks for more, and the system
+	// hovers permanently at the boundary instead of leaving headroom.
+	FuseHoldMaxDischargeW float64
+	FuseHoldMaxChargeW    float64
+	FuseHoldUntil         time.Time
+
 	// ManualHold pins the aggregate battery setpoint to a fixed power
 	// for a bounded duration, bypassing both the active manual mode
 	// and the MPC. Hot-installed via POST /api/battery/manual_hold;
@@ -1242,12 +1257,75 @@ func applyFuseGuard(targets []DispatchTarget, store *telemetry.Store, state *Sta
 		}
 	}
 
-	if importOverage <= 0 && exportOverage <= 0 {
-		return targets
-	}
-
 	out := make([]DispatchTarget, len(targets))
 	copy(out, targets)
+
+	// Hold-mode hysteresis: a recent clamp latched a max-magnitude per
+	// direction. Re-apply it now even if the live overage is zero so
+	// the planner can't ramp back through the boundary on the next
+	// tick. Window is refreshed every time the clamp fires, so the
+	// hold persists as long as the planner keeps trying to push past.
+	now := time.Now()
+	if state.FuseHoldUntil.After(now) {
+		if state.FuseHoldMaxDischargeW > 0 {
+			var totalDischarge float64
+			for _, t := range out {
+				if t.TargetW < 0 {
+					totalDischarge += -t.TargetW
+				}
+			}
+			if totalDischarge > state.FuseHoldMaxDischargeW {
+				scale := state.FuseHoldMaxDischargeW / totalDischarge
+				for i := range out {
+					if out[i].TargetW < 0 {
+						out[i].TargetW *= scale
+						out[i].Clamped = true
+					}
+				}
+			}
+		}
+		if state.FuseHoldMaxChargeW > 0 {
+			var totalCharge float64
+			for _, t := range out {
+				if t.TargetW > 0 {
+					totalCharge += t.TargetW
+				}
+			}
+			if totalCharge > state.FuseHoldMaxChargeW {
+				scale := state.FuseHoldMaxChargeW / totalCharge
+				for i := range out {
+					if out[i].TargetW > 0 {
+						out[i].TargetW *= scale
+						out[i].Clamped = true
+					}
+				}
+			}
+		}
+	} else if !state.FuseHoldUntil.IsZero() {
+		// Hold window expired — reset the latch so a future planner
+		// re-ramp doesn't get permanently capped by stale state.
+		state.FuseHoldMaxDischargeW = 0
+		state.FuseHoldMaxChargeW = 0
+		state.FuseHoldUntil = time.Time{}
+	}
+
+	if importOverage <= 0 && exportOverage <= 0 {
+		return out
+	}
+
+	// Headroom buffer: shrink targets by `overage + half the configured
+	// safety margin` so post-clamp the grid sits *below* the threshold
+	// instead of riding right at it. Without this, the next dispatch
+	// tick lets the planner re-ramp into the threshold and the system
+	// oscillates at the boundary — the operator's "safety margin"
+	// becomes the active steady-state instead of a buffer below it.
+	//
+	// Half-margin chosen so the post-clamp phase amps still cluster
+	// near the threshold (operator wants the fuse used efficiently)
+	// but with enough buffer to absorb load fluctuations and per-phase
+	// imbalance on the next tick. Operators wanting tighter or looser
+	// buffer just adjust safety_margin_a.
+	buffer := state.fuseSafetyMarginW() * 0.5
 
 	switch {
 	case importOverage > 0:
@@ -1265,7 +1343,7 @@ func applyFuseGuard(targets []DispatchTarget, store *telemetry.Store, state *Sta
 			// still flip idle batteries to discharge.
 			return out
 		}
-		newTotal := totalCharge - importOverage
+		newTotal := totalCharge - importOverage - buffer
 		if newTotal < 0 {
 			newTotal = 0
 		}
@@ -1276,6 +1354,10 @@ func applyFuseGuard(targets []DispatchTarget, store *telemetry.Store, state *Sta
 				out[i].Clamped = true
 			}
 		}
+		// Latch the new charge cap for the hold window. Each fire
+		// extends the window so the planner can't ramp through.
+		state.FuseHoldMaxChargeW = newTotal
+		state.FuseHoldUntil = now.Add(30 * time.Second)
 	case exportOverage > 0:
 		var totalDischarge float64
 		for _, t := range out {
@@ -1289,7 +1371,7 @@ func applyFuseGuard(targets []DispatchTarget, store *telemetry.Store, state *Sta
 			// is the lever in that scenario (annotateCurtailment).
 			return out
 		}
-		newTotal := totalDischarge - exportOverage
+		newTotal := totalDischarge - exportOverage - buffer
 		if newTotal < 0 {
 			newTotal = 0
 		}
@@ -1300,6 +1382,8 @@ func applyFuseGuard(targets []DispatchTarget, store *telemetry.Store, state *Sta
 				out[i].Clamped = true
 			}
 		}
+		state.FuseHoldMaxDischargeW = newTotal
+		state.FuseHoldUntil = now.Add(30 * time.Second)
 	}
 	return out
 }
