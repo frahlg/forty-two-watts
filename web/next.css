@@ -523,7 +523,13 @@ body.ftw-next .history-toggle::before {
   transition: transform 260ms cubic-bezier(0.4, 0, 0.2, 1);
   z-index: 0;
 }
-body.ftw-next .history-toggle[data-active="month"]::before {
+/* Slide the amber pill to the right side of the toggle when the
+   second option is active. Generalised so both Week/Month
+   (data-active="month") and Bars/Cakes (data-active="cakes") share
+   the same pill animation — the toggle markup is otherwise
+   identical and shouldn't need a special CSS branch per option set. */
+body.ftw-next .history-toggle[data-active="month"]::before,
+body.ftw-next .history-toggle[data-active="cakes"]::before {
   transform: translateX(100%);
 }
 body.ftw-next .history-toggle button {

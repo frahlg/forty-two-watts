@@ -2030,11 +2030,11 @@
   var historyCakeWrap = $("history-cake");
   var historyCakeEl = $("history-cake-el");
 
-  // historyState mirrors both toggles so the Numbers/Cakes view and
+  // historyState mirrors both toggles so the Bars/Cakes view and
   // the Week/Month range stay coordinated. Only the cake re-fetches
-  // /api/energy/daily on a range change; the numbers tiles each
+  // /api/energy/daily on a range change; the bar tiles each
   // re-fetch themselves when their range= attribute is updated.
-  var historyState = { range: "week", view: "numbers" };
+  var historyState = { range: "week", view: "bars" };
 
   function fetchHistoryCake() {
     if (!historyCakeEl || typeof historyCakeEl.setTotals !== "function") return;
@@ -2092,7 +2092,7 @@
         buttons[i].classList.toggle("active", on);
         buttons[i].setAttribute("aria-selected", on ? "true" : "false");
       }
-      if (historyTiles) historyTiles.classList.toggle("hidden", next !== "numbers");
+      if (historyTiles) historyTiles.classList.toggle("hidden", next !== "bars");
       if (historyCakeWrap) historyCakeWrap.classList.toggle("hidden", next !== "cakes");
       if (next === "cakes") fetchHistoryCake();
     });
