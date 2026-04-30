@@ -1040,7 +1040,7 @@ class FtwEnergyFlow extends FtwElement {
     const P = {
       vbX, vbW, H: Hdyn, cy,
       orbitR, baseR: tier.baseR, hubR: tier.hubR,
-      hubIconY:      cy - (compact ? 60 : 62),
+      hubIconY:      cy - (compact ? 72 : 76),
       hubValueY:     cy - (compact ? 16 : 18),
       hubSelfNowY:   cy + (compact ? 4  : 6),
       hubSelfTodayY: cy + (compact ? 22 : 24),
@@ -1398,12 +1398,17 @@ function renderCircleNode({ pos, title, nameLabel, value, sub, color, soc,
   // room inside the disk than a single "SOLAR · SUNGROW" line.
   const twoLine = !!nameLabel;
   const titleY = Math.round((twoLine ? -0.50 : -0.42) * r);
-  const valueY = Math.round(0.09  * r);
-  const subY   = Math.round(0.42  * r);
-  // Squeeze the SoC line down a touch when the daily-totals line is
-  // present so all three sub-rows fit cleanly within the disc.
-  const dailyY = Math.round(0.55  * r);
-  const socY   = Math.round(showDaily ? 0.78 * r : 0.70 * r);
+  // Five-row stack when dailyKwh is present (matches the hub layout):
+  //   title · value · daily · sub · soc
+  // The daily-totals line sits BETWEEN the realtime power value and
+  // the status label so the eye reads top-to-bottom: "what is it
+  // doing now → how much today → label". Without dailyKwh the layout
+  // collapses back to the legacy 4-row stack so old planet payloads
+  // (e.g. EV) still render cleanly.
+  const valueY = Math.round((showDaily ? 0.04 : 0.09) * r);
+  const dailyY = Math.round(0.27  * r);
+  const subY   = Math.round((showDaily ? 0.50 : 0.42) * r);
+  const socY   = Math.round((showDaily ? 0.76 : 0.70) * r);
   const titleSvg = twoLine
     ? `<text x="${x}" y="${y + titleY}" text-anchor="middle"
              fill="var(--hero-label-text)" class="sv-node-title">
@@ -1466,14 +1471,14 @@ function renderCircleNode({ pos, title, nameLabel, value, sub, color, soc,
       <text x="${x}" y="${y + valueY}" text-anchor="middle" fill="${color}" class="sv-node-value">
         ${value}
       </text>
-      <text x="${x}" y="${y + subY}" text-anchor="middle"
-            fill="var(--hero-sub-text)" class="sv-node-sub">
-        ${escapeXml(sub)}
-      </text>
       ${showDaily ? `<text x="${x}" y="${y + dailyY}" text-anchor="middle"
             fill="var(--hero-sub-text)" class="sv-node-sub">
         ${escapeXml(dailyKwh)}
       </text>` : ""}
+      <text x="${x}" y="${y + subY}" text-anchor="middle"
+            fill="var(--hero-sub-text)" class="sv-node-sub">
+        ${escapeXml(sub)}
+      </text>
       ${socText}
     </g>`;
 }
