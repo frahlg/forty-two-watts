@@ -157,38 +157,34 @@ func TestReloadAfterStopRejected(t *testing.T) {
 	}
 }
 
-// TestStopAfterFailedConnectDoesNotDeadlock documents the invariant
-// connectAndStart guarantees on its error path: when paho's Connect()
-// fails, the fresh stop+done channels it installed must not leak
-// (publishLoop never starts, so nothing else closes `b.done`). The
-// rollback in connectAndStart closes b.done explicitly — this test
-// simulates that post-rollback state and verifies Stop completes
-// rather than blocking forever in `<-doneCh`. Codex P1 on PR #232.
-//
-// The error path is rare in practice because the bridge wires paho
-// with `SetConnectRetry(true)` — refused connections never surface as
-// a synchronous error. The fix is still defensive: paho versions /
-// future config tweaks can re-introduce the path, and the cost of
-// always closing the rollback channel is one extra channel close.
+// TestStopAfterFailedConnectDoesNotDeadlock drives connectAndStart's
+// error path against a guaranteed-refused broker (127.0.0.1:1, with a
+// short connectTimeout to keep the test fast) and asserts the next
+// Stop() returns instead of blocking forever in teardown's <-doneCh.
+// Reverting the deferred close(b.done) rollback in connectAndStart
+// makes this test deadlock — that's the regression it guards.
 func TestStopAfterFailedConnectDoesNotDeadlock(t *testing.T) {
-	b := &Bridge{}
-	// Simulate the post-rollback state connectAndStart leaves behind
-	// after a Connect failure: stop is fresh + open, done is fresh +
-	// closed by the rollback, no goroutine running, no live client.
-	b.stop = make(chan struct{})
-	b.done = make(chan struct{})
-	close(b.done)
-	b.cfg = &config.HomeAssistant{Broker: "unreachable", Port: 1883}
+	b := &Bridge{
+		topicPrefix:    "forty-two-watts",
+		discoPrefix:    "homeassistant",
+		deviceID:       "forty_two_watts",
+		connectTimeout: 100 * time.Millisecond,
+	}
+	cfg := &config.HomeAssistant{Broker: "127.0.0.1", Port: 1}
 
-	doneCh := make(chan struct{})
+	if err := b.connectAndStart(cfg, nil); err == nil {
+		t.Fatal("connectAndStart against a refused broker must return an error")
+	}
+
+	stopped := make(chan struct{})
 	go func() {
 		b.Stop()
-		close(doneCh)
+		close(stopped)
 	}()
 	select {
-	case <-doneCh:
-		// Stop returned — invariant holds.
+	case <-stopped:
+		// Stop returned — rollback closed b.done, teardown didn't block.
 	case <-time.After(2 * time.Second):
-		t.Fatal("Stop blocked after a simulated failed Connect — teardown is stuck on <-doneCh")
+		t.Fatal("Stop blocked after a failed Connect — teardown is stuck on <-doneCh; the connectAndStart rollback regressed")
 	}
 }

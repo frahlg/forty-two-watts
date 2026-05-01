@@ -65,7 +65,14 @@ type Bridge struct {
 	lastPublishMs    int64
 	sensorsAnnounced int
 	stopped          bool
+
+	// connectTimeout is the WaitTimeout passed to paho's Connect token.
+	// 0 means "use defaultConnectTimeout"; tests override to keep the
+	// refused-broker path fast.
+	connectTimeout time.Duration
 }
+
+const defaultConnectTimeout = 10 * time.Second
 
 // IsConnected returns true if the Paho MQTT client currently has an
 // active connection to the broker.
@@ -206,22 +213,31 @@ func (b *Bridge) connectAndStart(cfg *config.HomeAssistant, driverNames []string
 	b.client = cli
 	b.mu.Unlock()
 
-	if tok := cli.Connect(); tok.WaitTimeout(10*time.Second) && tok.Error() != nil {
-		// Connect failed (unreachable broker, bad credentials, …). The
-		// fresh `b.done` we installed at the top of this function would
-		// otherwise stay open forever — publishLoop never starts, so no
-		// goroutine is responsible for closing it. The next teardown()
-		// would deadlock on `<-doneCh`. Close it now so a subsequent
-		// Reload / Stop can proceed.
-		b.mu.Lock()
-		if b.done != nil {
+	// We own b.done until publishLoop takes over — close it on any
+	// early return so the next teardown() doesn't block on <-doneCh.
+	started := false
+	defer func() {
+		if !started {
+			b.mu.Lock()
 			close(b.done)
+			b.mu.Unlock()
 		}
-		b.mu.Unlock()
-		return tok.Error()
+	}()
+
+	timeout := b.connectTimeout
+	if timeout == 0 {
+		timeout = defaultConnectTimeout
+	}
+	tok := cli.Connect()
+	if !tok.WaitTimeout(timeout) {
+		return fmt.Errorf("ha: connect timeout after %s", timeout)
+	}
+	if err := tok.Error(); err != nil {
+		return err
 	}
 
 	go b.publishLoop()
+	started = true
 	return nil
 }
 
