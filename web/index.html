@@ -111,6 +111,35 @@
     </div>
   </div>
 
+  <!-- Restart-required Dialog -->
+  <!--
+    Shown after a Settings save when the server reports that one or more
+    config sections can't be hot-reloaded (state.path, api.port, …). The
+    full list of "still needs a restart" reasons is the diminishing tail
+    in go/internal/config/restart_required.go — the long-term goal is
+    that this modal essentially never fires.
+  -->
+  <div id="restart-modal" class="modal hidden">
+    <div class="modal-content" style="max-width:480px">
+      <div class="modal-header">
+        <h2>Restart required</h2>
+      </div>
+      <div class="modal-body">
+        <p style="margin-top:0">Saved. Some changes can't be applied while the service is running:</p>
+        <ul id="restart-reasons" style="margin:8px 0 16px 18px;color:var(--text);font-size:0.9rem"></ul>
+        <p style="color:var(--text-dim);font-size:0.85rem;margin:0">Restart now to pick them up — the service comes back automatically (typically &lt;10 s).</p>
+        <div id="restart-progress" class="hidden" style="margin-top:14px;color:var(--text-dim);font-size:0.85rem">
+          <span class="spinner" aria-hidden="true"></span>
+          <span id="restart-progress-text">Restarting…</span>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button id="restart-later" class="btn-ghost">Restart later</button>
+        <button id="restart-now" class="btn-send">Restart now</button>
+      </div>
+    </div>
+  </div>
+
   <main id="view-live">
     <!-- Energy-flow hero — central house, PV top, Grid left, Battery right,
          EV bottom. next-app.js calls el.setReadings(...) each status tick. -->

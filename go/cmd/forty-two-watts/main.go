@@ -225,6 +225,23 @@ func main() {
 	// ---- Self-tune coordinator ----
 	selfTune := selftune.NewCoordinator()
 
+	// ---- Restart signal ----
+	// Closing restartCh from /api/restart drops the main control loop out
+	// of its select, which returns from main() so every defer (HA Stop,
+	// state.Close, http.Shutdown, …) runs in normal LIFO order. The
+	// bottom-of-stack `os.Exit` defer below then translates exitCode 1
+	// into a non-zero process exit so docker (`unless-stopped`) and
+	// systemd (`Restart=on-failure`) bring the binary back up. SIGTERM /
+	// SIGINT take the same return path with exitCode 0.
+	restartCh := make(chan struct{})
+	var restartOnce sync.Once
+	exitCode := 0
+	defer func() {
+		if exitCode != 0 {
+			os.Exit(exitCode)
+		}
+	}()
+
 	// ---- Driver registry ----
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -304,6 +321,22 @@ func main() {
 	// wired up. nil until that point — the reload closure guards.
 	var mpcSvc *mpc.Service
 
+	// Pre-declared so the hot-reload Applier can call (*ha.Bridge).Reload
+	// when broker / credentials / publish interval change. Constructed
+	// further down once the registry + control callbacks exist; the
+	// Applier nil-guards against the bridge being disabled.
+	var haBridge *ha.Bridge
+
+	// deps is the API server's runtime dependency container. Forward-
+	// declared as a *Deps so the hot-reload Applier closure can capture
+	// it as a variable: the closure dereferences `deps` only after the
+	// HTTP server has been wired up (deps is populated below), so
+	// applier-time reads always observe the fully-constructed value.
+	// Updating deps.HA from the applier (e.g. when an operator toggles
+	// HA from disabled to enabled at runtime) keeps the API handler's
+	// pointer in sync without forcing a process restart.
+	var deps *api.Deps
+
 	// ---- Config hot-reload watcher ----
 	watcher, err := configreload.New(*configPath, cfgMu, cfg, ctrlMu, ctrl,
 		func(newCfg, oldCfg *config.Config) {
@@ -379,6 +412,42 @@ func main() {
 			}
 			notifSvc.SetPublisher(newPub)
 			notifSvc.Reload(newCfg.Notifications)
+
+			// Home Assistant: hot-reload broker / credentials / publish
+			// interval / driver list. Bridge.Reload tears down the paho
+			// client and re-publishes discovery so an operator changing
+			// the broker IP from Settings sees HA reconnect within a
+			// second — no process restart required.
+			//
+			// Three transitions to handle:
+			//   running → running:  Bridge.Reload swaps connection.
+			//   running → disabled: Stop the existing bridge.
+			//   disabled → enabled: Start a fresh bridge (handles both
+			//                       the "previously toggled off" case and
+			//                       the "Start failed at boot, operator
+			//                       fixed the broker" recovery path).
+			haEnabled := newCfg.HomeAssistant != nil && newCfg.HomeAssistant.Enabled
+			switch {
+			case haBridge != nil && haEnabled:
+				if err := haBridge.Reload(newCfg.HomeAssistant, reg.Names()); err != nil {
+					slog.Warn("HA bridge reload failed", "err", err)
+				} else {
+					slog.Info("HA bridge reloaded", "broker", newCfg.HomeAssistant.Broker)
+				}
+			case haBridge != nil && !haEnabled:
+				haBridge.Stop()
+				haBridge = nil
+				deps.HA = nil
+				slog.Info("HA bridge stopped (disabled in config)")
+			case haBridge == nil && haEnabled:
+				if bridge, err := ha.Start(newCfg.HomeAssistant, tel, ctrl, ctrlMu, reg.Names(), haCallbacks(ctrl, ctrlMu, st)); err != nil {
+					slog.Warn("HA bridge start failed", "err", err)
+				} else {
+					haBridge = bridge
+					deps.HA = bridge
+					slog.Info("HA bridge started", "broker", newCfg.HomeAssistant.Broker)
+				}
+			}
 
 			// Weather diff → push live into the PV twin + forecast
 			// fetcher without a process restart. Users adjust rated PV
@@ -866,10 +935,10 @@ func main() {
 	}
 
 	// ---- Start HTTP API ----
-	// Forward-declare haBridge so Deps can reference it; the bridge
-	// gets wired further down (HA is optional + depends on reg.Names()).
-	var haBridge *ha.Bridge
-	deps := &api.Deps{
+	// haBridge is forward-declared at the top of the file so the config
+	// hot-reload closure can call Reload on it; the bridge instance gets
+	// wired further down (HA is optional + depends on reg.Names()).
+	deps = &api.Deps{
 		Tel: tel, Ctrl: ctrl, CtrlMu: ctrlMu,
 		State: st,
 		CapMu: capMu, Capacities: capacities,
@@ -899,6 +968,30 @@ func main() {
 		Events:     bus,
 		Notifications: notifSvc,
 		SelfUpdate: selfUpdater,
+		Restart: func(reqCtx context.Context) error {
+			// Prefer the docker-compose sidecar path when wired up: the
+			// updater container does docker compose up -d --force-recreate,
+			// which is the same code path post-update restarts use, so
+			// there's only one battle-tested escape hatch in production.
+			if selfUpdater != nil {
+				if err := selfUpdater.Trigger(reqCtx, "restart", ""); err == nil {
+					slog.Info("restart: dispatched via updater sidecar")
+					return nil
+				} else {
+					slog.Info("restart: sidecar unavailable, falling back to in-process exit", "err", err)
+				}
+			}
+			// Fallback: drop the main control loop out of its select so
+			// every defer (HA Stop, st.Close, http.Shutdown, …) runs
+			// cleanly. The os.Exit(1) at the bottom of the defer stack
+			// then makes docker (`unless-stopped`) and systemd
+			// (`Restart=on-failure`) bring the binary back up.
+			restartOnce.Do(func() {
+				exitCode = 1
+				close(restartCh)
+			})
+			return nil
+		},
 		Version:    Version,
 	}
 	srv := api.New(deps)
@@ -1020,54 +1113,22 @@ func main() {
 
 	// ---- HA MQTT bridge (optional) ----
 	if cfg.HomeAssistant != nil && cfg.HomeAssistant.Enabled {
-		cb := ha.CommandCallbacks{
-			SetMode: func(m string) error {
-				ctrlMu.Lock()
-				defer ctrlMu.Unlock()
-				switch control.Mode(m) {
-				case control.ModeIdle, control.ModeSelfConsumption, control.ModePeakShaving,
-					control.ModeCharge, control.ModePriority, control.ModeWeighted:
-					ctrl.Mode = control.Mode(m)
-					return st.SaveConfig("mode", m)
-				}
-				return fmt.Errorf("unknown mode: %s", m)
-			},
-			SetGridTarget: func(w float64) error {
-				ctrlMu.Lock()
-				defer ctrlMu.Unlock()
-				ctrl.SetGridTarget(w)
-				return st.SaveConfig("grid_target_w", strconv.FormatFloat(w, 'f', 1, 64))
-			},
-			SetPeakLimit: func(w float64) error {
-				ctrlMu.Lock()
-				defer ctrlMu.Unlock()
-				ctrl.PeakLimitW = w
-				return nil
-			},
-			SetEVCharging: func(w float64, active bool) error {
-				ctrlMu.Lock()
-				defer ctrlMu.Unlock()
-				if active { ctrl.EVChargingW = w } else { ctrl.EVChargingW = 0 }
-				return nil
-			},
-			SetBatteryCoversEV: func(enabled bool) error {
-				ctrlMu.Lock()
-				ctrl.BatteryCoversEV = enabled
-				ctrlMu.Unlock()
-				val := "false"
-				if enabled { val = "true" }
-				return st.SaveConfig("battery_covers_ev", val)
-			},
-		}
-		bridge, err := ha.Start(cfg.HomeAssistant, tel, ctrl, ctrlMu, reg.Names(), cb)
+		bridge, err := ha.Start(cfg.HomeAssistant, tel, ctrl, ctrlMu, reg.Names(), haCallbacks(ctrl, ctrlMu, st))
 		if err != nil {
 			slog.Warn("HA MQTT bridge failed to start", "err", err)
 		} else {
 			haBridge = bridge
-			defer haBridge.Stop()
 			deps.HA = haBridge // late-binding for API
 		}
 	}
+	// Stop deferred for whichever bridge instance is current at exit
+	// time — Reload may have swapped haBridge mid-flight, so re-read here
+	// rather than capturing the boot-time pointer.
+	defer func() {
+		if haBridge != nil {
+			haBridge.Stop()
+		}
+	}()
 
 	// ---- Nova Core federation (optional) ----
 	// Publishes telemetry to Sourceful Nova Core's MQTT broker (NATS
@@ -1150,6 +1211,12 @@ func main() {
 			slog.Info("shutting down")
 			if err := st.RecordEvent("shutdown"); err != nil {
 				slog.Warn("failed to persist shutdown event", "err", err)
+			}
+			return
+		case <-restartCh:
+			slog.Info("restart requested via API — exiting cleanly so the supervisor brings us back")
+			if err := st.RecordEvent("restart"); err != nil {
+				slog.Warn("failed to persist restart event", "err", err)
 			}
 			return
 		case <-ticker.C:
@@ -1797,6 +1864,59 @@ func recordHistory(st *state.Store, tel *telemetry.Store, ctrl *control.State, n
 // operator can explicitly blank a path to disable a feature — see
 // docs/self-update.md on FTW_UPDATER_SOCKET=""). Returns def only when
 // the variable is unset.
+// haCallbacks builds the bridge's command-callback set. Extracted so
+// the boot-time ha.Start path and the configreload "disabled → enabled"
+// path can share the exact same wiring — drift between them would mean
+// HA commands behave one way after boot and a different way after a
+// hot-reload, which is the kind of silent skew that's hardest to debug.
+func haCallbacks(ctrl *control.State, ctrlMu *sync.Mutex, st *state.Store) ha.CommandCallbacks {
+	return ha.CommandCallbacks{
+		SetMode: func(m string) error {
+			ctrlMu.Lock()
+			defer ctrlMu.Unlock()
+			switch control.Mode(m) {
+			case control.ModeIdle, control.ModeSelfConsumption, control.ModePeakShaving,
+				control.ModeCharge, control.ModePriority, control.ModeWeighted:
+				ctrl.Mode = control.Mode(m)
+				return st.SaveConfig("mode", m)
+			}
+			return fmt.Errorf("unknown mode: %s", m)
+		},
+		SetGridTarget: func(w float64) error {
+			ctrlMu.Lock()
+			defer ctrlMu.Unlock()
+			ctrl.SetGridTarget(w)
+			return st.SaveConfig("grid_target_w", strconv.FormatFloat(w, 'f', 1, 64))
+		},
+		SetPeakLimit: func(w float64) error {
+			ctrlMu.Lock()
+			defer ctrlMu.Unlock()
+			ctrl.PeakLimitW = w
+			return nil
+		},
+		SetEVCharging: func(w float64, active bool) error {
+			ctrlMu.Lock()
+			defer ctrlMu.Unlock()
+			if active {
+				ctrl.EVChargingW = w
+			} else {
+				ctrl.EVChargingW = 0
+			}
+			return nil
+		},
+		SetBatteryCoversEV: func(enabled bool) error {
+			ctrlMu.Lock()
+			ctrl.BatteryCoversEV = enabled
+			ctrlMu.Unlock()
+			val := "false"
+			if enabled {
+				val = "true"
+			}
+			return st.SaveConfig("battery_covers_ev", val)
+		},
+	}
+}
+
 func envOr(key, def string) string {
 	if v, ok := os.LookupEnv(key); ok {
 		return v
