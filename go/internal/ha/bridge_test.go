@@ -2,6 +2,7 @@ package ha
 
 import (
 	"testing"
+	"time"
 
 	"github.com/frahlg/forty-two-watts/go/internal/config"
 )
@@ -153,5 +154,37 @@ func TestReloadAfterStopRejected(t *testing.T) {
 	err := b.Reload(&config.HomeAssistant{Broker: "x", Port: 1883}, nil)
 	if err == nil {
 		t.Fatal("Reload after Stop must error, got nil")
+	}
+}
+
+// TestStopAfterFailedConnectDoesNotDeadlock drives connectAndStart's
+// error path against a guaranteed-refused broker (127.0.0.1:1, with a
+// short connectTimeout to keep the test fast) and asserts the next
+// Stop() returns instead of blocking forever in teardown's <-doneCh.
+// Reverting the deferred close(b.done) rollback in connectAndStart
+// makes this test deadlock — that's the regression it guards.
+func TestStopAfterFailedConnectDoesNotDeadlock(t *testing.T) {
+	b := &Bridge{
+		topicPrefix:    "forty-two-watts",
+		discoPrefix:    "homeassistant",
+		deviceID:       "forty_two_watts",
+		connectTimeout: 100 * time.Millisecond,
+	}
+	cfg := &config.HomeAssistant{Broker: "127.0.0.1", Port: 1}
+
+	if err := b.connectAndStart(cfg, nil); err == nil {
+		t.Fatal("connectAndStart against a refused broker must return an error")
+	}
+
+	stopped := make(chan struct{})
+	go func() {
+		b.Stop()
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+		// Stop returned — rollback closed b.done, teardown didn't block.
+	case <-time.After(2 * time.Second):
+		t.Fatal("Stop blocked after a failed Connect — teardown is stuck on <-doneCh; the connectAndStart rollback regressed")
 	}
 }

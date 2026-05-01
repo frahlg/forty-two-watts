@@ -65,7 +65,14 @@ type Bridge struct {
 	lastPublishMs    int64
 	sensorsAnnounced int
 	stopped          bool
+
+	// connectTimeout is the WaitTimeout passed to paho's Connect token.
+	// 0 means "use defaultConnectTimeout"; tests override to keep the
+	// refused-broker path fast.
+	connectTimeout time.Duration
 }
+
+const defaultConnectTimeout = 10 * time.Second
 
 // IsConnected returns true if the Paho MQTT client currently has an
 // active connection to the broker.
@@ -206,11 +213,31 @@ func (b *Bridge) connectAndStart(cfg *config.HomeAssistant, driverNames []string
 	b.client = cli
 	b.mu.Unlock()
 
-	if tok := cli.Connect(); tok.WaitTimeout(10*time.Second) && tok.Error() != nil {
-		return tok.Error()
+	// We own b.done until publishLoop takes over — close it on any
+	// early return so the next teardown() doesn't block on <-doneCh.
+	started := false
+	defer func() {
+		if !started {
+			b.mu.Lock()
+			close(b.done)
+			b.mu.Unlock()
+		}
+	}()
+
+	timeout := b.connectTimeout
+	if timeout == 0 {
+		timeout = defaultConnectTimeout
+	}
+	tok := cli.Connect()
+	if !tok.WaitTimeout(timeout) {
+		return fmt.Errorf("ha: connect timeout after %s", timeout)
+	}
+	if err := tok.Error(); err != nil {
+		return err
 	}
 
 	go b.publishLoop()
+	started = true
 	return nil
 }
 
