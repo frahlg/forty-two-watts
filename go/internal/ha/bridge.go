@@ -207,6 +207,17 @@ func (b *Bridge) connectAndStart(cfg *config.HomeAssistant, driverNames []string
 	b.mu.Unlock()
 
 	if tok := cli.Connect(); tok.WaitTimeout(10*time.Second) && tok.Error() != nil {
+		// Connect failed (unreachable broker, bad credentials, …). The
+		// fresh `b.done` we installed at the top of this function would
+		// otherwise stay open forever — publishLoop never starts, so no
+		// goroutine is responsible for closing it. The next teardown()
+		// would deadlock on `<-doneCh`. Close it now so a subsequent
+		// Reload / Stop can proceed.
+		b.mu.Lock()
+		if b.done != nil {
+			close(b.done)
+		}
+		b.mu.Unlock()
 		return tok.Error()
 	}
 

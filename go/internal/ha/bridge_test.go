@@ -2,6 +2,7 @@ package ha
 
 import (
 	"testing"
+	"time"
 
 	"github.com/frahlg/forty-two-watts/go/internal/config"
 )
@@ -153,5 +154,41 @@ func TestReloadAfterStopRejected(t *testing.T) {
 	err := b.Reload(&config.HomeAssistant{Broker: "x", Port: 1883}, nil)
 	if err == nil {
 		t.Fatal("Reload after Stop must error, got nil")
+	}
+}
+
+// TestStopAfterFailedConnectDoesNotDeadlock documents the invariant
+// connectAndStart guarantees on its error path: when paho's Connect()
+// fails, the fresh stop+done channels it installed must not leak
+// (publishLoop never starts, so nothing else closes `b.done`). The
+// rollback in connectAndStart closes b.done explicitly — this test
+// simulates that post-rollback state and verifies Stop completes
+// rather than blocking forever in `<-doneCh`. Codex P1 on PR #232.
+//
+// The error path is rare in practice because the bridge wires paho
+// with `SetConnectRetry(true)` — refused connections never surface as
+// a synchronous error. The fix is still defensive: paho versions /
+// future config tweaks can re-introduce the path, and the cost of
+// always closing the rollback channel is one extra channel close.
+func TestStopAfterFailedConnectDoesNotDeadlock(t *testing.T) {
+	b := &Bridge{}
+	// Simulate the post-rollback state connectAndStart leaves behind
+	// after a Connect failure: stop is fresh + open, done is fresh +
+	// closed by the rollback, no goroutine running, no live client.
+	b.stop = make(chan struct{})
+	b.done = make(chan struct{})
+	close(b.done)
+	b.cfg = &config.HomeAssistant{Broker: "unreachable", Port: 1883}
+
+	doneCh := make(chan struct{})
+	go func() {
+		b.Stop()
+		close(doneCh)
+	}()
+	select {
+	case <-doneCh:
+		// Stop returned — invariant holds.
+	case <-time.After(2 * time.Second):
+		t.Fatal("Stop blocked after a simulated failed Connect — teardown is stuck on <-doneCh")
 	}
 }
