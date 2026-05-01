@@ -118,3 +118,40 @@ func TestLastPublishMsRoundTrip(t *testing.T) {
 		t.Errorf("LastPublishMs = %d, want 1713200000000", got)
 	}
 }
+
+// TestStopIdempotent verifies the lifecycle Stop is safe to call multiple
+// times. main.go's defer-stack and the configreload "running → disabled"
+// path can both wind up calling Stop on the same bridge; a second call
+// must be a no-op rather than a panic-inducing double-close-of-channel.
+func TestStopIdempotent(t *testing.T) {
+	b := &Bridge{}
+	// Pretend Start ran and gave us channels to close.
+	b.stop = make(chan struct{})
+	b.done = make(chan struct{})
+	close(b.done) // simulate publishLoop having already exited
+
+	b.Stop()
+	b.Stop() // second call must be a no-op
+
+	if !b.stopped {
+		t.Error("Stop should mark bridge stopped")
+	}
+}
+
+// TestReloadAfterStopRejected guards the invariant that a Stop'd bridge
+// is terminal — operators must construct a fresh bridge, not resurrect
+// the dead one. The configreload applier in main.go relies on this: it
+// nulls haBridge after Stop and calls ha.Start on a re-enable, so a
+// Reload-on-stopped path that silently succeeded would mask wiring bugs.
+func TestReloadAfterStopRejected(t *testing.T) {
+	b := &Bridge{}
+	b.stop = make(chan struct{})
+	b.done = make(chan struct{})
+	close(b.done)
+	b.Stop()
+
+	err := b.Reload(&config.HomeAssistant{Broker: "x", Port: 1883}, nil)
+	if err == nil {
+		t.Fatal("Reload after Stop must error, got nil")
+	}
+}

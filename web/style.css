@@ -571,6 +571,41 @@ body { padding-bottom: 28px; }
   opacity: 0.85;
 }
 
+.btn-ghost {
+  margin-top: 0.5rem;
+  padding: 0.4rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 0.8rem;
+  transition: color 0.2s, border-color 0.2s;
+}
+
+.btn-ghost:hover {
+  color: var(--text);
+  border-color: var(--text-dim);
+}
+
+/* Tiny inline spinner for "restart in progress" / similar transient
+ * states. Uses currentColor so it adopts the surrounding text colour. */
+.spinner {
+  display: inline-block;
+  width: 0.8em;
+  height: 0.8em;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  vertical-align: -0.1em;
+  margin-right: 0.4em;
+  animation: ftw-spin 0.8s linear infinite;
+}
+
+@keyframes ftw-spin {
+  to { transform: rotate(360deg); }
+}
+
 /* ---- Drivers ---- */
 #drivers-section h2,
 #dispatch-section h2 {
