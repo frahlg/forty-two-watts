@@ -420,6 +420,22 @@ function driver_init(config)
         host.log("warn", "Easee: could not read firmware settings: " .. serr)
     end
 
+    -- Force a 6 A resting setpoint so any session that starts before our
+    -- first ev_set_current tick lands begins at the hardware minimum, not
+    -- at maxChargerCurrent. Easee resets dynamicChargerCurrent → max on
+    -- phase changes and on some session-start paths; without this, a
+    -- freshly plugged-in EV pulls 16 A for 5–10 s before the controller's
+    -- first dispatch tick claws it back, which the operator sees as a
+    -- visible inrush at the meter.
+    local pre_err = write_setting(charger_serial, {dynamicChargerCurrent = EASEE_MIN_A})
+    if pre_err == nil then
+        last_amps_set = EASEE_MIN_A
+        host.log("info", "Easee: dynamicChargerCurrent primed to " .. tostring(EASEE_MIN_A) .. " A at init")
+    else
+        host.log("warn", "Easee: init prime to " .. tostring(EASEE_MIN_A) .. " A failed: " ..
+            redact_http_err(pre_err))
+    end
+
     host.log("info", "Easee: driver initialized for " .. charger_serial)
 end
 
@@ -540,6 +556,19 @@ function driver_command(action, power_w, cmd)
     if not charger_serial or not ensure_auth(email, password) then return false end
 
     if action == "ev_start" then
+        -- Floor the dynamic setpoint to 6 A *before* asking the charger to
+        -- start. Without this, Easee energises the cable at whatever
+        -- dynamicChargerCurrent is currently cached server-side — which
+        -- after a phaseMode reset is maxChargerCurrent (16 A). Starting at
+        -- the minimum lets the controller ramp up on its own schedule
+        -- instead of the EV briefly pulling fuse-rated current.
+        local floor_err = write_setting(charger_serial, {dynamicChargerCurrent = EASEE_MIN_A})
+        if floor_err == nil then
+            last_amps_set = EASEE_MIN_A
+        else
+            host.log("warn", "Easee: pre-start floor write failed (continuing): " ..
+                redact_http_err(floor_err))
+        end
         return post_command("/commands/start_charging")
     elseif action == "ev_pause" then
         return post_command("/commands/pause_charging")
