@@ -515,16 +515,26 @@
 
     _styles() {
       return `
-        :host { all: initial; font-family: inherit; }
+        /* Inherit the dashboard tokens (--accent-e, --ink-raised, --fg, …)
+           and font stacks (--sans, --mono) from theme.css instead of
+           defaulting to "all: initial", which used to wall this shadow
+           DOM off from the design system and force the legacy hex
+           fallbacks (--surface, --border, --accent) to render. */
+        :host {
+          font-family: var(--sans, system-ui, -apple-system, sans-serif);
+          color: var(--fg);
+        }
         .hidden { display: none !important; }
+
         .badge {
-          /* Blue blinking dot so it's unmistakably "this is the
-             update indicator" and not confused with the green
-             connection dot next door. Pulsing animation stays so
-             it reads as actionable, not a static state. */
+          /* Pulsing amber accent dot — same visual language as the rest
+             of the dashboard's actionable signals. The connection dot
+             next door is green (state) and hides when this is on (see
+             body.has-update rule in next.css), so we don't get two
+             accent dots stacked. */
           appearance: none;
           background: transparent;
-          color: #3b82f6;
+          color: var(--accent-e);
           border: none;
           cursor: pointer;
           font-size: 1.1rem;
@@ -536,9 +546,10 @@
           0%, 100% { opacity: 1; }
           50%      { opacity: 0.45; }
         }
+
         .backdrop {
           position: fixed; inset: 0;
-          background: rgba(0,0,0,0.65);
+          background: rgba(0, 0, 0, 0.65);
           z-index: 1000;
         }
         .modal {
@@ -547,234 +558,310 @@
           transform: translate(-50%, -50%);
           width: min(92vw, 460px);
           /* Cap height + scroll so shorter viewports can't push the
-             header (close ×) or the footer (Update / Restart / Skip)
-             off-screen. Without this the modal clipped above the
-             viewport and the operator saw only the middle "Release
-             notes" block with no actionable buttons — reported on a
-             laptop-height browser running the /next dashboard. */
-          max-height: 85vh;
+             header or footer off-screen on small laptops. */
+          max-height: 88vh;
           overflow-y: auto;
-          background: var(--surface, #1e293b);
-          color: var(--text, #e2e8f0);
-          border: 1px solid var(--border, #334155);
-          border-radius: 8px;
+          background: var(--ink-raised);
+          color: var(--fg);
+          border: 1px solid var(--line);
+          border-radius: var(--radius-md, 14px);
           z-index: 1001;
           display: flex; flex-direction: column;
-          font-family: system-ui, -apple-system, sans-serif;
+          font-family: var(--sans, system-ui, sans-serif);
           font-size: 0.9rem;
         }
         .modal header {
           display: flex; align-items: center; justify-content: space-between;
-          padding: 0.9rem 1rem;
-          border-bottom: 1px solid var(--border, #334155);
+          gap: 0.75rem;
+          padding: 14px 18px;
+          border-bottom: 1px solid var(--line);
         }
-        .modal h3 { margin: 0; font-size: 1rem; }
+        .modal h3 {
+          margin: 0;
+          font-size: 1rem;
+          font-weight: 600;
+        }
         .modal .x {
           appearance: none; background: transparent;
-          color: var(--text-dim, #94a3b8);
+          color: var(--fg-dim);
           border: none; cursor: pointer;
-          font-size: 1.25rem; line-height: 1;
+          font-size: 1.5rem; line-height: 1;
+          padding: 2px 6px;
+          border-radius: 6px;
+          transition: color 0.15s, background 0.15s;
         }
-        .modal .body { padding: 1rem; }
-        .modal .body.center { text-align: center; padding: 1.4rem 1rem; }
-        .subtitle { margin: 0 0 0.75rem; color: var(--text-dim, #94a3b8); }
-        dl { margin: 0; display: grid; gap: 0.35rem; grid-template-columns: auto 1fr; }
+        .modal .x:hover { color: var(--fg); background: rgba(255, 255, 255, 0.05); }
+
+        .modal .body { padding: 14px 18px; }
+        .modal .body.center { text-align: center; padding: 22px 18px; }
+        .subtitle { margin: 0 0 12px; color: var(--fg-dim); }
+
+        /* Definition list — eyebrow labels are mono UPPERCASE 0.18em
+           letter-spacing per DESIGN.md, values mono with tabular nums. */
+        dl {
+          margin: 0;
+          display: grid;
+          gap: 8px 14px;
+          grid-template-columns: max-content 1fr;
+          align-items: center;
+        }
         dl > div { display: contents; }
-        dt { color: var(--text-dim, #94a3b8); font-size: 0.8rem; }
-        dd { margin: 0; font-variant-numeric: tabular-nums; }
-        .changelog {
-          margin-top: 0.75rem;
-          border: 1px solid var(--border, #334155);
-          border-radius: 4px;
-          background: rgba(255,255,255,0.02);
+        dt {
+          color: var(--fg-muted);
+          font-family: var(--mono);
+          font-size: 0.68rem;
+          font-weight: 500;
+          letter-spacing: 0.18em;
+          text-transform: uppercase;
         }
-        .changelog > summary {
-          padding: 0.5rem 0.75rem;
+        dd {
+          margin: 0;
+          font-family: var(--mono);
+          font-variant-numeric: tabular-nums;
+          color: var(--fg);
+        }
+
+        .changelog,
+        .snapshots {
+          margin-top: 12px;
+          border: 1px solid var(--line);
+          border-radius: var(--radius-sm, 10px);
+          background: var(--ink-sunken);
+        }
+        .changelog > summary,
+        .snapshots > summary {
+          padding: 8px 12px;
           cursor: pointer;
           font-weight: 600;
           font-size: 0.85rem;
-          color: var(--text-dim, #94a3b8);
+          color: var(--fg-dim);
           list-style: none;
         }
-        .changelog > summary::-webkit-details-marker { display: none; }
-        .changelog > summary::before {
+        .changelog > summary::-webkit-details-marker,
+        .snapshots > summary::-webkit-details-marker { display: none; }
+        .changelog > summary::before,
+        .snapshots > summary::before {
           content: "▸";
           display: inline-block;
           margin-right: 0.4rem;
+          color: var(--fg-muted);
           transition: transform 0.15s;
         }
-        .changelog[open] > summary::before { transform: rotate(90deg); }
+        .changelog[open] > summary::before,
+        .snapshots[open] > summary::before { transform: rotate(90deg); }
         .changelog-body {
-          padding: 0.25rem 0.9rem 0.5rem;
+          padding: 4px 14px 8px;
           max-height: 40vh;
           overflow-y: auto;
           font-size: 0.85rem;
-          line-height: 1.45;
+          line-height: 1.5;
         }
         .changelog-body h4 {
-          margin: 0.75rem 0 0.3rem;
+          margin: 12px 0 5px;
           font-size: 0.9rem;
-          color: var(--text, #e2e8f0);
+          color: var(--fg);
         }
         .changelog-body h5 {
-          margin: 0.6rem 0 0.25rem;
-          font-size: 0.8rem;
-          color: var(--text-dim, #94a3b8);
+          margin: 10px 0 4px;
+          font-size: 0.7rem;
+          font-family: var(--mono);
+          color: var(--fg-muted);
           text-transform: uppercase;
-          letter-spacing: 0.03em;
+          letter-spacing: 0.18em;
+          font-weight: 500;
         }
-        .changelog-body ul {
-          margin: 0.25rem 0 0.25rem;
-          padding-left: 1.1rem;
-        }
-        .changelog-body li { margin-bottom: 0.2rem; }
-        .changelog-body p { margin: 0.35rem 0; }
+        .changelog-body ul { margin: 4px 0; padding-left: 1.1rem; }
+        .changelog-body li { margin-bottom: 3px; }
+        .changelog-body p  { margin: 6px 0; }
         .changelog-body code {
-          background: rgba(255,255,255,0.08);
-          padding: 0.05rem 0.25rem;
-          border-radius: 3px;
+          background: var(--ink-raised);
+          border: 1px solid var(--line);
+          padding: 0.05rem 0.3rem;
+          border-radius: 4px;
+          font-family: var(--mono);
           font-size: 0.82rem;
         }
-        .changelog-body a {
-          color: var(--accent, #f59e0b);
+        .changelog-body a,
+        .notes-link {
+          color: var(--accent-e);
           text-decoration: none;
         }
-        .changelog-body a:hover { text-decoration: underline; }
+        .changelog-body a:hover,
+        .notes-link:hover { text-decoration: underline; }
         .changelog-link {
-          margin: 0.4rem 0.9rem 0.6rem;
+          margin: 6px 14px 8px;
           font-size: 0.8rem;
         }
-        .notes-link {
-          color: var(--accent, #f59e0b);
-          text-decoration: none;
-        }
-        .notes-link:hover { text-decoration: underline; }
+
         .snapshot-hint {
-          margin-top: 0.75rem;
-          padding: 0.5rem 0.7rem;
-          border: 1px solid var(--border, #334155);
-          border-radius: 4px;
-          background: rgba(148, 163, 184, 0.06);
-          color: var(--text-dim, #94a3b8);
+          margin-top: 12px;
+          padding: 10px 12px;
+          border: 1px solid var(--line);
+          border-radius: var(--radius-sm, 10px);
+          background: var(--ink-sunken);
+          color: var(--fg-dim);
           font-size: 0.78rem;
-          line-height: 1.4;
+          line-height: 1.45;
         }
         .snapshot-hint p { margin: 0; }
         .snapshot-skip {
           display: flex;
           align-items: center;
           gap: 0.4rem;
-          margin-top: 0.4rem;
+          margin-top: 8px;
           font-size: 0.76rem;
-          color: var(--text-dim, #94a3b8);
+          color: var(--fg-dim);
           cursor: pointer;
           user-select: none;
         }
         .snapshot-skip input[type="checkbox"] {
           margin: 0;
           cursor: pointer;
+          accent-color: var(--accent-e);
         }
-        .snapshots {
-          margin-top: 0.75rem;
-          border: 1px solid var(--border, #334155);
-          border-radius: 4px;
-          background: rgba(255,255,255,0.02);
-        }
-        .snapshots > summary {
-          padding: 0.5rem 0.75rem;
-          cursor: pointer;
-          font-weight: 600;
-          font-size: 0.85rem;
-          color: var(--text-dim, #94a3b8);
-          list-style: none;
-        }
-        .snapshots > summary::-webkit-details-marker { display: none; }
-        .snapshots > summary::before {
-          content: "▸";
-          display: inline-block;
-          margin-right: 0.4rem;
-          transition: transform 0.15s;
-        }
-        .snapshots[open] > summary::before { transform: rotate(90deg); }
+
         .snapshots-empty {
-          margin: 0.25rem 0.9rem 0.6rem;
+          margin: 4px 14px 8px;
           font-size: 0.78rem;
+          color: var(--fg-dim);
         }
         .snapshots-table {
           width: 100%;
           border-collapse: collapse;
           font-size: 0.78rem;
-          color: var(--text-dim, #94a3b8);
+          color: var(--fg-dim);
         }
         .snapshots-table th,
         .snapshots-table td {
-          padding: 0.3rem 0.75rem;
+          padding: 6px 12px;
           text-align: left;
-          border-top: 1px solid var(--border, #334155);
+          border-top: 1px solid var(--line);
         }
         .snapshots-table th {
-          font-weight: 600;
+          font-family: var(--mono);
+          font-size: 0.65rem;
+          font-weight: 500;
+          letter-spacing: 0.18em;
+          text-transform: uppercase;
+          color: var(--fg-muted);
           border-top: none;
-          color: var(--text, #e2e8f0);
         }
         .snapshots-table .nowrap { white-space: nowrap; }
-        .snapshots-table .mono { font-family: ui-monospace, monospace; }
+        .snapshots-table .mono   { font-family: var(--mono); }
         .snapshot-actions {
           display: flex;
-          gap: 0.3rem;
+          gap: 4px;
           justify-content: flex-end;
           flex-wrap: wrap;
         }
         .btn-small {
-          padding: 0.2rem 0.55rem;
+          padding: 4px 10px;
           font-size: 0.75rem;
         }
+
         .err {
-          margin-top: 0.75rem;
-          color: #f87171; font-size: 0.85rem;
+          margin-top: 12px;
+          color: var(--red-e);
+          font-size: 0.85rem;
         }
-        .dim { color: var(--text-dim, #94a3b8); font-size: 0.8rem; }
+        .dim { color: var(--fg-dim); font-size: 0.8rem; }
+
         .modal footer {
-          display: flex; gap: 0.5rem; justify-content: flex-end;
-          padding: 0.75rem 1rem;
-          border-top: 1px solid var(--border, #334155);
+          display: flex;
+          gap: 8px;
+          justify-content: flex-end;
+          padding: 12px 18px;
+          border-top: 1px solid var(--line);
           flex-wrap: wrap;
-          /* Stick to the bottom of the modal while body scrolls so
-             the primary action (Update / Restart) remains visible
-             however long the release-notes body grows. */
+          /* Stick to the modal bottom while the body scrolls so the
+             primary action stays visible however long the release
+             notes get. */
           position: sticky;
           bottom: 0;
-          background: var(--surface, #1e293b);
+          background: var(--ink-raised);
         }
+
+        /* Buttons — DESIGN.md component vocabulary, exact values:
+           Primary CTA: amber on near-black (never white), 11x18 px,
+                        radius 8 px, 14 px / 500 weight, hover only
+                        translateY(-1px) — no colour shift.
+           Secondary / ghost: transparent + 1 px hairline, hover bumps
+                        border-color to --fg-dim. Never changes
+                        background — that's a hard rule. */
         .btn {
           appearance: none;
-          padding: 0.4rem 0.9rem;
-          border: 1px solid var(--border, #334155);
+          padding: 11px 18px;
+          border: 1px solid var(--line);
           background: transparent;
-          color: var(--text, #e2e8f0);
-          border-radius: 4px;
+          color: var(--fg);
+          border-radius: 8px;
           cursor: pointer;
-          font-size: 0.85rem;
-          font-family: inherit;
+          font-size: 14px;
+          font-weight: 500;
+          font-family: var(--sans);
+          transition: border-color 0.15s, color 0.15s, transform 0.1s;
         }
-        .btn:hover { background: rgba(255,255,255,0.04); }
+        .btn:hover  { border-color: var(--fg-dim); }
+        .btn:active { transform: translateY(1px); }
         .btn-primary {
-          background: var(--accent, #f59e0b);
-          border-color: var(--accent, #f59e0b);
-          color: #0f172a;
+          background: var(--accent-e);
+          border-color: var(--accent-e);
+          color: #0a0a0a;
         }
-        .btn-primary:hover { opacity: 0.9; background: var(--accent, #f59e0b); }
-        .btn-ghost { color: var(--text-dim, #94a3b8); border-color: transparent; }
+        .btn-primary:hover {
+          background: var(--accent-e);
+          border-color: var(--accent-e);
+          transform: translateY(-1px);
+        }
+        .btn-ghost {
+          color: var(--fg-dim);
+          border-color: transparent;
+        }
+        .btn-ghost:hover {
+          color: var(--fg);
+          border-color: transparent;
+        }
+
         .spinner {
           display: inline-block;
-          width: 20px; height: 20px;
-          border: 2px solid var(--border, #334155);
-          border-top-color: var(--accent, #f59e0b);
+          width: 22px; height: 22px;
+          border: 2px solid var(--line);
+          border-top-color: var(--accent-e);
           border-radius: 50%;
           animation: spin 0.9s linear infinite;
           margin-bottom: 0.6rem;
         }
         @keyframes spin { to { transform: rotate(360deg); } }
+
+        /* Phone — keep the modal centered and slim (sized to content,
+           capped under the viewport), just wider than the desktop pill
+           and with tighter paddings. Footer flips to a vertical stack
+           with the primary action on top — easier thumb target than a
+           wrapped row of pills crammed against the right edge. */
+        @media (max-width: 600px) {
+          .modal {
+            width: calc(100vw - 16px);
+            max-width: calc(100vw - 16px);
+            max-height: 88dvh;
+          }
+          .modal header { padding: 12px 14px; }
+          .modal .body  { padding: 14px; }
+          .modal .body.center { padding: 22px 14px; }
+          .modal footer {
+            padding: 12px 14px;
+            flex-direction: column-reverse;
+            align-items: stretch;
+          }
+          .modal footer .btn,
+          .modal footer .dim {
+            width: 100%;
+            text-align: center;
+          }
+          .changelog-body { max-height: 44vh; }
+          .snapshots-table th,
+          .snapshots-table td { padding: 6px 8px; }
+          .snapshot-actions { justify-content: flex-start; }
+        }
       `;
     }
   }
