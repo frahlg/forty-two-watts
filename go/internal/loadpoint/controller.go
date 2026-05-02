@@ -77,9 +77,10 @@ type Controller struct {
 	// state that smooths the surplus_only pause/resume decision over
 	// a small rolling window so brief PV dips don't cycle the EV
 	// contactor. See computeSurplusCmd for the full rationale.
-	surplusMu     sync.Mutex
-	surplusWin    map[string]*surplusWindow
-	surplusPaused map[string]bool
+	surplusMu       sync.Mutex
+	surplusWin      map[string]*surplusWindow
+	surplusPaused   map[string]bool
+	surplusPausedAt map[string]time.Time
 }
 
 // surplusWindowSize is the length of the rolling-average buffer used
@@ -92,6 +93,14 @@ const surplusWindowSize = 4
 // resume a paused surplus_only loadpoint. Prevents oscillation right
 // at the threshold (snap_to_min ↔ pause).
 const surplusResumeMarginW = 200.0
+
+// surplusMinPauseHold is the minimum dwell time once a surplus_only
+// loadpoint has been paused. Easee documents ~30 s minimum on/off
+// for the contactor; this floor keeps us comfortably above it even
+// if the rolling-avg crosses the resume threshold quickly. The
+// rolling-avg already smooths transients; this is a hard contactor-
+// protection backstop on top.
+const surplusMinPauseHold = 35 * time.Second
 
 // defaultPhaseSplitW mirrors loadpoint.Config.PhaseSplitW's default —
 // 3680 W is a 16 A 1Φ ceiling at 230 V. Kept in sync with the comment
@@ -335,7 +344,22 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config) {
 		// zero/empty fields fall through to the normal defaults so a
 		// minimal hold (just `power_w`) still carries the per-phase
 		// fuse clamp inputs the driver needs to stay safe.
-		cmd["power_w"] = hold.PowerW
+		holdW := hold.PowerW
+		// Surplus-only is a hard promise even against a diagnostic
+		// hold: if the operator left surplus_only on while pinning a
+		// manual amperage, we still refuse to import grid for the EV.
+		// The hold's other fields (phase mode, hold time) are still
+		// honoured — only the W setpoint is clamped, and we log it so
+		// the operator notices the conflict.
+		if lpCfg.SurplusOnly && holdW > 0 {
+			clamped := c.computeSurplusCmd(lpCfg, holdW, sample.PowerW)
+			if clamped < holdW {
+				slog.Warn("loadpoint manual hold clamped by surplus_only",
+					"lp", lpCfg.ID, "hold_w", holdW, "clamped_w", clamped)
+				holdW = clamped
+			}
+		}
+		cmd["power_w"] = holdW
 		switch {
 		case hold.PhaseMode != "":
 			cmd["phase_mode"] = hold.PhaseMode
@@ -494,17 +518,23 @@ func (c *Controller) computeSurplusCmd(lpCfg Config, wantW, currentEvW float64) 
 	steps3 := surplus3PhaseSteps(lpCfg)
 	minStep3 := smallestNonZero(steps3)
 
-	paused := c.getSurplusPaused(lpCfg.ID)
+	paused, pausedAt := c.getSurplusPause(lpCfg.ID)
+	now := time.Now()
 	if paused {
-		if avg >= minStep3+surplusResumeMarginW {
+		// Hold a paused contactor for at least surplusMinPauseHold
+		// (Easee min on/off is ~30 s) before considering resume,
+		// regardless of how fast the rolling avg recovers.
+		held := now.Sub(pausedAt) >= surplusMinPauseHold
+		if held && avg >= minStep3+surplusResumeMarginW {
 			paused = false
 		}
 	} else {
 		if minStep3 > 0 && avg < minStep3 {
 			paused = true
+			pausedAt = now
 		}
 	}
-	c.setSurplusPaused(lpCfg.ID, paused)
+	c.setSurplusPause(lpCfg.ID, paused, pausedAt)
 
 	if paused {
 		return 0
@@ -567,6 +597,7 @@ func (c *Controller) resetSurplusSession(id string) {
 	defer c.surplusMu.Unlock()
 	delete(c.surplusWin, id)
 	delete(c.surplusPaused, id)
+	delete(c.surplusPausedAt, id)
 }
 
 func (c *Controller) recordSurplus(id string, sample float64) float64 {
@@ -583,19 +614,25 @@ func (c *Controller) recordSurplus(id string, sample float64) float64 {
 	return w.push(sample)
 }
 
-func (c *Controller) getSurplusPaused(id string) bool {
+func (c *Controller) getSurplusPause(id string) (bool, time.Time) {
 	c.surplusMu.Lock()
 	defer c.surplusMu.Unlock()
-	return c.surplusPaused[id]
+	return c.surplusPaused[id], c.surplusPausedAt[id]
 }
 
-func (c *Controller) setSurplusPaused(id string, v bool) {
+func (c *Controller) setSurplusPause(id string, paused bool, at time.Time) {
 	c.surplusMu.Lock()
 	defer c.surplusMu.Unlock()
 	if c.surplusPaused == nil {
 		c.surplusPaused = map[string]bool{}
+		c.surplusPausedAt = map[string]time.Time{}
 	}
-	c.surplusPaused[id] = v
+	c.surplusPaused[id] = paused
+	if paused {
+		c.surplusPausedAt[id] = at
+	} else {
+		delete(c.surplusPausedAt, id)
+	}
 }
 
 // computeCommand resolves the W setpoint for a plugged loadpoint.

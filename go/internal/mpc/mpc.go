@@ -467,7 +467,11 @@ func Optimize(slots []Slot, p Params) Plan {
 						// degrades gracefully on low-PV days — the
 						// deadline shortfall penalty then makes the
 						// "miss target" outcome expensive but legal.
-						if evActive && lp.SurplusOnly && evW > 0 && gridW > 0 {
+						// 50 W epsilon absorbs floating-point dither
+						// from the discretized PV/load grid so the
+						// constraint isn't artificially tight against
+						// an action that's effectively zero net.
+						if evActive && lp.SurplusOnly && evW > 0 && gridW > 50 {
 							continue
 						}
 
