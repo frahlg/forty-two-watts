@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"math"
 	"sync"
 	"time"
 )
@@ -43,6 +44,16 @@ type Controller struct {
 	// EV cooperatively share the site fuse.
 	fuseEVMax func() (float64, bool)
 
+	// siteSurplusForEVW returns the live PV surplus that this loadpoint
+	// could legally claim under surplus_only — i.e. *what's left of PV
+	// after house load*, regardless of what the home battery is
+	// currently absorbing. The arithmetic lives in main.go because
+	// it depends on per-site telemetry layout (pv driver, load driver,
+	// battery drivers, site-meter driver). Returns (_, false) when any
+	// of the inputs are stale; the controller then pauses rather than
+	// guess, which is the conservative default for "never import".
+	siteSurplusForEVW func() (float64, bool)
+
 	// site is the grid-boundary fuse. Its values are passed through
 	// to the driver in every ev_set_current cmd so the driver knows
 	// the per-phase ceiling and the mains voltage. Zero MaxAmps
@@ -61,6 +72,52 @@ type Controller struct {
 	// compute-from-plan path.
 	holdMu sync.Mutex
 	holds  map[string]ManualHold
+
+	// surplusMu protects surplusWin + surplusPaused, the per-loadpoint
+	// state that smooths the surplus_only pause/resume decision over
+	// a small rolling window so brief PV dips don't cycle the EV
+	// contactor. See computeSurplusCmd for the full rationale.
+	surplusMu     sync.Mutex
+	surplusWin    map[string]*surplusWindow
+	surplusPaused map[string]bool
+}
+
+// surplusWindowSize is the length of the rolling-average buffer used
+// for surplus_only pause/resume decisions. At a 5 s tick this is ~20 s
+// of smoothing — long enough to ride out single-tick cloud transients
+// without committing to a stale view of the world.
+const surplusWindowSize = 4
+
+// surplusResumeMarginW is added to the 3Φ minimum step before we will
+// resume a paused surplus_only loadpoint. Prevents oscillation right
+// at the threshold (snap_to_min ↔ pause).
+const surplusResumeMarginW = 200.0
+
+// defaultPhaseSplitW mirrors loadpoint.Config.PhaseSplitW's default —
+// 3680 W is a 16 A 1Φ ceiling at 230 V. Kept in sync with the comment
+// on Config.PhaseSplitW.
+const defaultPhaseSplitW = 3680.0
+
+// surplusWindow is a fixed-size ring buffer of recent surplus samples
+// for one loadpoint. Average is computed over the live samples (n may
+// be < surplusWindowSize during the first few ticks of a session).
+type surplusWindow struct {
+	buf  [surplusWindowSize]float64
+	n    int
+	head int
+}
+
+func (w *surplusWindow) push(v float64) float64 {
+	w.buf[w.head] = v
+	w.head = (w.head + 1) % surplusWindowSize
+	if w.n < surplusWindowSize {
+		w.n++
+	}
+	var sum float64
+	for i := 0; i < w.n; i++ {
+		sum += w.buf[i]
+	}
+	return sum / float64(w.n)
 }
 
 // ManualHold pins a loadpoint to a specific dispatch payload until
@@ -133,6 +190,20 @@ func (c *Controller) SetFuseEVMax(f func() (float64, bool)) {
 		return
 	}
 	c.fuseEVMax = f
+}
+
+// SetSiteSurplusForEV wires a per-tick "PV surplus available to the
+// EV" reader for the surplus_only clamp. The function returns total
+// W the EV could safely claim without forcing site import — typically
+// `(-pvW - houseLoadW)` since that's PV-minus-load regardless of how
+// the home battery is currently splitting it. Called once at startup
+// from main.go. Pass nil to disable, in which case surplus_only is
+// enforced only by the MPC plan (no live clamp).
+func (c *Controller) SetSiteSurplusForEV(f func() (float64, bool)) {
+	if c == nil {
+		return
+	}
+	c.siteSurplusForEVW = f
 }
 
 // SetSiteFuse installs the grid-boundary fuse so the controller can
@@ -239,9 +310,22 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config) {
 	if c.tel != nil {
 		sample, _ = c.tel(lpCfg.DriverName)
 	}
+	// Detect the disconnected→connected edge (state.PluggedIn flips
+	// from false to true) so we can reset session-scoped state
+	// before the new session's first dispatch tick. Without this
+	// the rolling-avg buffer keeps stale samples from the previous
+	// session, biasing the first ~20 s of pause/resume decisions.
+	wasPlugged := false
+	if st, ok := c.manager.State(lpCfg.ID); ok {
+		wasPlugged = st.PluggedIn
+	}
 	c.manager.Observe(lpCfg.ID, sample.Connected, sample.PowerW, sample.SessionWh)
 	if !sample.Connected {
+		c.resetSurplusSession(lpCfg.ID)
 		return
+	}
+	if !wasPlugged {
+		c.resetSurplusSession(lpCfg.ID)
 	}
 
 	cmd := map[string]any{"action": "ev_set_current"}
@@ -295,6 +379,21 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config) {
 			// 0 W standdown so the charger pauses cleanly.
 			cmdW = 0
 		}
+		// Surplus-only live clamp: regardless of what the MPC slot
+		// budget said for this 15-minute window, the EV must not
+		// import grid right now. We smooth the pause/resume decision
+		// across the last `surplusWindowSize` ticks (≈ 20 s) so a
+		// single cloud transient doesn't cycle the contactor, and we
+		// snap the setpoint to 3Φ-eligible steps so a brief deficit
+		// doesn't drop the charger to 1Φ (a phase swap is far more
+		// wear-inducing than holding 3Φ at a slightly lower current).
+		// Any short-term gap between the smoothed setpoint and live
+		// PV is naturally absorbed by the home battery via the
+		// reactive self_consumption PI in dispatch.go — that's the
+		// "battery smooths PV transients for ~1-2 min" path.
+		if lpCfg.SurplusOnly && cmdW > 0 {
+			cmdW = c.computeSurplusCmd(lpCfg, cmdW, sample.PowerW)
+		}
 		cmd["power_w"] = cmdW
 		// Pass operator's phase preferences through verbatim. The driver
 		// reads these and decides 1Φ vs 3Φ based on its own knowledge of
@@ -332,6 +431,171 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config) {
 		slog.Warn("loadpoint dispatch", "lp", lpCfg.ID,
 			"driver", lpCfg.DriverName, "err", err)
 	}
+}
+
+// computeSurplusCmd applies the surplus_only live clamp to the
+// planner-derived wantW, with rolling-average pause/resume hysteresis
+// and a 3Φ-only step floor (when phase mode allows). Returns the
+// adjusted command in W; 0 means "pause this tick".
+//
+// Inputs:
+//   - lpCfg.SurplusOnly is assumed true by the caller
+//   - wantW is the planner's setpoint after the fuse + planner clamps
+//   - currentEvW is the EV's live draw (site sign, +)
+//
+// Behaviour:
+//
+//  1. Read the live site grid power. No reading → 0 (conservative —
+//     we promised surplus_only and can't verify).
+//  2. Compute instant surplus = currentEvW + max(0, -gridW). This is
+//     the W we could deliver to the EV without crossing into import.
+//  3. Push the instant surplus into the rolling window; the average
+//     drives pause/resume. Pause only when avg drops below the 3Φ
+//     minimum step; resume only when avg ≥ that minimum + a margin
+//     (so we don't oscillate at the boundary).
+//  4. When not paused, snap the lower of (planner wantW, avg surplus)
+//     to a 3Φ-eligible step. Snapping to *avg* rather than *instant*
+//     keeps the setpoint steady through brief dips — the home battery
+//     fills the gap reactively for ~1-2 min, which is the user-
+//     authorised smoothing budget.
+func (c *Controller) computeSurplusCmd(lpCfg Config, wantW, currentEvW float64) float64 {
+	if c == nil {
+		return wantW
+	}
+	if c.siteSurplusForEVW == nil {
+		// No live surplus reader wired (test paths). Fall back to
+		// instant clamp.
+		return wantW
+	}
+	surplusW, ok := c.siteSurplusForEVW()
+	if !ok {
+		// Live reading missing or stale — pause rather than risk grid import.
+		return 0
+	}
+	// NaN/Inf guards: bad telemetry must not poison the rolling buffer
+	// (the comparisons in the pause/resume hysteresis would all
+	// evaluate false against NaN, silently disabling the surplus
+	// clamp). Treat any non-finite reading as "no surplus".
+	if math.IsNaN(surplusW) || math.IsInf(surplusW, 0) {
+		return 0
+	}
+	// surplusW is the EV-available PV surplus, computed by main.go's
+	// closure as `−gridW + batW + evW`. By the site convention's
+	// identity (`loadW = gridW − batW − pvW − evW`) this equals
+	// `−pvW − loadW`, i.e. PV-magnitude minus house load — invariant
+	// under whatever the home battery is currently doing with the
+	// surplus. The EV's own draw is part of that closure already, so
+	// we don't add currentEvW here.
+	instant := surplusW
+	if instant < 0 {
+		instant = 0
+	}
+	avg := c.recordSurplus(lpCfg.ID, instant)
+	steps3 := surplus3PhaseSteps(lpCfg)
+	minStep3 := smallestNonZero(steps3)
+
+	paused := c.getSurplusPaused(lpCfg.ID)
+	if paused {
+		if avg >= minStep3+surplusResumeMarginW {
+			paused = false
+		}
+	} else {
+		if minStep3 > 0 && avg < minStep3 {
+			paused = true
+		}
+	}
+	c.setSurplusPaused(lpCfg.ID, paused)
+
+	if paused {
+		return 0
+	}
+	target := wantW
+	if avg < target {
+		target = avg
+	}
+	return SnapChargeW(target, lpCfg.MinChargeW, lpCfg.MaxChargeW, steps3)
+}
+
+// surplus3PhaseSteps returns AllowedStepsW filtered down to entries
+// at or above the loadpoint's PhaseSplitW (default 3680 W) — i.e. the
+// steps the driver will deliver on 3Φ. 0 is always included so
+// "pause" is still a representable command.
+//
+// When PhaseMode is "1p" we don't filter — the operator explicitly
+// locked the install to 1Φ, so a 3Φ-only set would just wedge the
+// loadpoint at 0.
+func surplus3PhaseSteps(lpCfg Config) []float64 {
+	if lpCfg.PhaseMode == "1p" {
+		return lpCfg.AllowedStepsW
+	}
+	split := lpCfg.PhaseSplitW
+	if split <= 0 {
+		split = defaultPhaseSplitW
+	}
+	out := []float64{0}
+	for _, s := range lpCfg.AllowedStepsW {
+		if s == 0 {
+			continue
+		}
+		if s >= split {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func smallestNonZero(steps []float64) float64 {
+	var min float64
+	for _, s := range steps {
+		if s <= 0 {
+			continue
+		}
+		if min == 0 || s < min {
+			min = s
+		}
+	}
+	return min
+}
+
+// resetSurplusSession drops the per-loadpoint rolling buffer + paused
+// flag. Called on a plug-in edge (or unplug) so a new charging session
+// starts with a clean view of surplus rather than inheriting the
+// previous session's last samples — important when the car was
+// unplugged for hours and the cached buffer is meaningless.
+func (c *Controller) resetSurplusSession(id string) {
+	c.surplusMu.Lock()
+	defer c.surplusMu.Unlock()
+	delete(c.surplusWin, id)
+	delete(c.surplusPaused, id)
+}
+
+func (c *Controller) recordSurplus(id string, sample float64) float64 {
+	c.surplusMu.Lock()
+	defer c.surplusMu.Unlock()
+	if c.surplusWin == nil {
+		c.surplusWin = map[string]*surplusWindow{}
+	}
+	w, ok := c.surplusWin[id]
+	if !ok {
+		w = &surplusWindow{}
+		c.surplusWin[id] = w
+	}
+	return w.push(sample)
+}
+
+func (c *Controller) getSurplusPaused(id string) bool {
+	c.surplusMu.Lock()
+	defer c.surplusMu.Unlock()
+	return c.surplusPaused[id]
+}
+
+func (c *Controller) setSurplusPaused(id string, v bool) {
+	c.surplusMu.Lock()
+	defer c.surplusMu.Unlock()
+	if c.surplusPaused == nil {
+		c.surplusPaused = map[string]bool{}
+	}
+	c.surplusPaused[id] = v
 }
 
 // computeCommand resolves the W setpoint for a plugged loadpoint.

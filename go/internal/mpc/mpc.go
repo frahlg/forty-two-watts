@@ -460,6 +460,17 @@ func Optimize(slots []Slot, p Params) Plan {
 						// GridW = load + PV + battery + EV.
 						gridW := slot.LoadW + slot.PVW + battW + evW
 
+						// Surplus-only EV: forbid any non-zero EV
+						// action that turns the site into a net
+						// importer. evW = 0 is always feasible (the
+						// constraint short-circuits), so the DP
+						// degrades gracefully on low-PV days — the
+						// deadline shortfall penalty then makes the
+						// "miss target" outcome expensive but legal.
+						if evActive && lp.SurplusOnly && evW > 0 && gridW > 0 {
+							continue
+						}
+
 						// Mode-based feasibility. Baseline includes
 						// EV so the mode check asks "is the extra
 						// battery action pulling the grid further

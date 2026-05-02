@@ -730,6 +730,7 @@ func main() {
 					MaxChargeW:      st.MaxChargeW,
 					AllowedStepsW:   st.AllowedStepsW,
 					ChargeEfficiency: 0.9,
+					SurplusOnly:     st.SurplusOnly,
 				}
 			}
 			return nil
@@ -895,6 +896,56 @@ func main() {
 				return 0, false
 			}
 			return ctrl.FuseEVMaxW, true
+		})
+		// Wire the EV-available surplus computation for the
+		// surplus_only clamp. We want the W of PV that exceeds house
+		// load, regardless of how the home battery is currently
+		// splitting it — otherwise on a sunny day with the home
+		// battery absorbing all surplus the EV controller would see
+		// gridW≈0 and conclude "no surplus", contradicting reality.
+		//
+		// Identity (using api.go's convention `loadW = gridW − batW
+		// − pvW − evW`): pvSurplus = −pvW − loadW = −gridW + batW
+		// + evW. We compute the right-hand form because the
+		// telemetry store already publishes those three signals
+		// directly. Returns (_, false) when the site meter is
+		// missing — without it we can't bound grid import.
+		lpController.SetSiteSurplusForEV(func() (float64, bool) {
+			meterDriver := cfg.SiteMeterDriver()
+			if meterDriver == "" {
+				return 0, false
+			}
+			// Refuse to publish a surplus when the meter is stale —
+			// last-known SmoothedW lingers indefinitely after a
+			// driver crash, and trusting it would silently violate
+			// the surplus_only "never import" promise. The watchdog
+			// timeout matches what the control loop uses elsewhere
+			// for site-meter staleness.
+			watchdog := time.Duration(cfg.Site.WatchdogTimeoutS) * time.Second
+			if watchdog <= 0 {
+				watchdog = 60 * time.Second
+			}
+			if tel.IsStale(meterDriver, telemetry.DerMeter, watchdog) {
+				return 0, false
+			}
+			meter := tel.Get(meterDriver, telemetry.DerMeter)
+			if meter == nil {
+				return 0, false
+			}
+			gridW := meter.SmoothedW
+			// Sum battery only over drivers that are currently online.
+			// A crashed battery driver leaves SmoothedW at last-known
+			// (e.g. +5 kW from a sunny moment) which would inflate
+			// surplus indefinitely.
+			var batW float64
+			for _, r := range tel.ReadingsByType(telemetry.DerBattery) {
+				if h := tel.DriverHealth(r.Driver); h == nil || h.Status == telemetry.StatusOffline {
+					continue
+				}
+				batW += r.SmoothedW
+			}
+			evW := tel.SumOnlineEVW()
+			return -gridW + batW + evW, true
 		})
 	}
 
