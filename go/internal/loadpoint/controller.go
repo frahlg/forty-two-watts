@@ -539,9 +539,19 @@ func (c *Controller) computeSurplusCmd(lpCfg Config, wantW, currentEvW float64) 
 	if paused {
 		return 0
 	}
+	// Setpoint tracks INSTANT surplus, not the rolling average. The
+	// avg smooths the pause/resume decision so we don't cycle the
+	// contactor on transients (that's the user-stated intent: "avg
+	// over 4 ticks to determine pause"), but using avg for the
+	// setpoint magnitude lags reality — on a slowly dropping cloud
+	// front the EV would hold its previous draw for ~20 s while
+	// live PV had already fallen below it, and the difference
+	// leaks straight into grid import. Tracking instant keeps the
+	// no-import promise tight; the home battery's reactive PI in
+	// self_consumption fills sub-tick gaps.
 	target := wantW
-	if avg < target {
-		target = avg
+	if instant < target {
+		target = instant
 	}
 	return SnapChargeW(target, lpCfg.MinChargeW, lpCfg.MaxChargeW, steps3)
 }
