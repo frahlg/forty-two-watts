@@ -95,6 +95,7 @@ type Controller struct {
 	wakeMu        sync.Mutex
 	wakeLast      map[string]time.Time
 	wakeKickUntil map[string]time.Time
+	wakeAttempts  map[string]int
 }
 
 // wakeKickDuration is how long a wake-kick forces the EV charger to
@@ -103,9 +104,24 @@ type Controller struct {
 // session — sending charge_start while Easee is at 0 A is futile.
 // This briefly violates surplus_only's no-import rule, which is the
 // price of recovering from a detached session without operator
-// intervention. 15 s is enough for Tesla's BLE handshake plus a few
+// intervention. 30 s is enough for Tesla's BLE handshake plus a few
 // seconds of pilot-signal stabilisation.
 const wakeKickDuration = 30 * time.Second
+
+// wakeBackoffAfter is the number of consecutive failed wake attempts
+// (vehicle stays detached across the cooldown window) before we
+// stretch the cooldown out. The car's BLE radio gets rate-limited
+// after several rapid sends; pressing every 90 s indefinitely just
+// hammers it without effect. Counter resets on the first
+// `Charging` / `Starting` reading.
+const wakeBackoffAfter = 5
+
+// wakeBackoffCooldown is the stretched cooldown applied once
+// wakeBackoffAfter is reached. Big enough that an operator who is
+// ignoring the notification doesn't get hammered every 90 s; short
+// enough that recovery is automatic if the car wakes on its own
+// (e.g. user presses "Start" on the Tesla app).
+const wakeBackoffCooldown = 10 * time.Minute
 
 // vehicleWakeCooldown caps how often we'll send a charge_start to the
 // same loadpoint's matched vehicle. Tesla's BLE radio rate-limits
@@ -561,8 +577,14 @@ func (c *Controller) maybeWakeVehicle(ctx context.Context, now time.Time, lpID s
 	}
 	// Only Stopped / Disconnected / Complete are "needs wake" states.
 	// Charging / Starting / NoPower mean the car is doing the right
-	// thing on its own.
+	// thing on its own — also reset the failure counter so future
+	// detaches start with a fresh budget.
 	switch state {
+	case "Charging", "Starting":
+		c.wakeMu.Lock()
+		delete(c.wakeAttempts, lpID)
+		c.wakeMu.Unlock()
+		return
 	case "Stopped", "Disconnected", "Complete":
 	default:
 		return
@@ -571,19 +593,34 @@ func (c *Controller) maybeWakeVehicle(ctx context.Context, now time.Time, lpID s
 	if c.wakeLast == nil {
 		c.wakeLast = map[string]time.Time{}
 		c.wakeKickUntil = map[string]time.Time{}
+		c.wakeAttempts = map[string]int{}
 	}
 	last := c.wakeLast[lpID]
-	if !last.IsZero() && now.Sub(last) < vehicleWakeCooldown {
+	cooldown := vehicleWakeCooldown
+	attempts := c.wakeAttempts[lpID]
+	if attempts >= wakeBackoffAfter {
+		cooldown = wakeBackoffCooldown
+	}
+	if !last.IsZero() && now.Sub(last) < cooldown {
 		c.wakeMu.Unlock()
 		return
 	}
 	c.wakeLast[lpID] = now
+	c.wakeAttempts[lpID] = attempts + 1
 	// Also arm the wake-kick window so the next few dispatch ticks
 	// force the wallbox to signal current — without it the BLE
 	// charge_start lands on a 0 A wallbox and the car has nothing
 	// to negotiate with.
 	c.wakeKickUntil[lpID] = now.Add(wakeKickDuration)
+	stretched := attempts+1 == wakeBackoffAfter
 	c.wakeMu.Unlock()
+	if stretched {
+		slog.Warn("loadpoint auto-wake giving up on fast retries",
+			"lp", lpID, "vehicle_driver", driver,
+			"attempts", attempts+1,
+			"next_attempt_in", wakeBackoffCooldown,
+			"hint", "vehicle won't accept charge_start — needs manual wake from the operator's car app or a plug-cycle")
+	}
 
 	payload, err := json.Marshal(map[string]any{"action": "charge_start"})
 	if err != nil {
