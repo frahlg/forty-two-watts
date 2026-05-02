@@ -101,13 +101,34 @@ type DriverHealth struct {
 	TickCount         uint64
 }
 
-// RecordSuccess resets error state and marks the driver healthy.
+// RecordSuccess resets error state and marks the driver healthy. Call
+// this when the driver actually delivered fresh telemetry (i.e. on
+// host.emit), not just when its poll loop returned without error.
+// LastSuccess is the timestamp the watchdog uses to decide stale-
+// ness, so it must only advance when real data flowed.
 func (h *DriverHealth) RecordSuccess() {
 	now := time.Now()
 	h.LastSuccess = &now
 	h.ConsecutiveErrors = 0
 	h.LastError = ""
 	h.Status = StatusOk
+	h.TickCount++
+}
+
+// RecordTick marks one poll cycle as completed without error, but
+// without claiming fresh data flowed. Bumps TickCount so the loop is
+// visibly alive in /api/status, but leaves LastSuccess untouched so
+// the watchdog correctly flips the driver offline when emits stop.
+//
+// Why split this from RecordSuccess: an MQTT-fed driver (ferroamp)
+// caches the last payload per topic and emits from cache on every
+// poll. If the upstream stops publishing — e.g. the EnergyHub loses
+// power on a fuse blow — the cache stays populated, the lua poll
+// returns nil, and without this split the registry's per-poll
+// RecordSuccess would re-stamp LastSuccess forever. Issue: real-world
+// outage on 2026-05-02 where ferroamp showed pv_w=-3996.7040 to four
+// decimals identical for 30+ minutes after the inverter died.
+func (h *DriverHealth) RecordTick() {
 	h.TickCount++
 }
 
