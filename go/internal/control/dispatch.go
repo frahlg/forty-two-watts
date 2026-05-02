@@ -60,7 +60,8 @@ type SlotDirective struct {
 	SlotEnd         time.Time
 	BatteryEnergyWh float64 // site-signed: + = charge, − = discharge
 	SoCTargetPct    float64
-	Strategy        string // echoed for logging / API; mirrors mpc.Mode
+	Strategy        string  // echoed for logging / API; mirrors mpc.Mode
+	PVLimitW        float64 // 0 = no curtail; > 0 = cap aggregate PV output
 }
 
 // SlotDirectiveFunc returns the plan's energy-allocation directive for
@@ -98,6 +99,20 @@ type DispatchTarget struct {
 	Driver  string  `json:"driver"`
 	TargetW float64 `json:"target_w"`
 	Clamped bool    `json:"clamped"`
+}
+
+// CurtailTarget is a per-driver PV curtailment command. Emitted by
+// ComputePVCurtail when the active plan slot's PVLimitW signals that
+// exporting more PV than the limit would lose money (negative-spot
+// hours with no positive feed-in tariff, plus zero export bonus).
+//
+// LimitW=0 means "release any previous curtail" — main.go translates
+// the zero-limit form into a `curtail_disable` action so the driver
+// returns to its default operating mode. LimitW>0 dispatches as
+// `curtail` with the magnitude as the absolute power cap.
+type CurtailTarget struct {
+	Driver string  `json:"driver"`
+	LimitW float64 `json:"limit_w"`
 }
 
 // State holds all persistent state for one instance of the control loop.
@@ -206,6 +221,21 @@ type State struct {
 	// the AC bus (DC→AC→AC→DC ≈ 3-4 pp loss vs DC-local). Nil or empty
 	// preserves the capacity-proportional default. Issue #143.
 	InverterGroups map[string]string
+
+	// SupportsPVCurtail flags drivers whose lua advertises a "curtail"
+	// action (sungrow, ferroamp, deye, huawei, …). ComputePVCurtail
+	// only dispatches to flagged drivers; an EV charger or a meter
+	// driver wouldn't know what to do with a `curtail` payload.
+	// Populated from config.Driver.SupportsPVCurtail in main.go;
+	// hot-swappable via the config-reload watcher.
+	SupportsPVCurtail map[string]bool
+
+	// LastCurtailedDrivers remembers which drivers got a non-zero
+	// curtail dispatch on the previous tick. ComputePVCurtail uses
+	// the diff to emit a `curtail_disable` exactly once when the
+	// plan no longer wants curtailment — without this we'd silently
+	// leave the inverter capped after a slot rolls over.
+	LastCurtailedDrivers map[string]bool
 
 	// FuseEVMaxW is the joint allocator's verdict for the EV's allowed
 	// wattage this tick. Only meaningful when FuseSaturated is true.
@@ -978,6 +1008,96 @@ func ComputeDispatch(
 	}
 	state.LastTargets = raw
 	return raw
+}
+
+// ComputePVCurtail returns one CurtailTarget per affected driver for
+// this dispatch tick.
+//
+// When the active plan slot's PVLimitW > 0 (the MPC's annotateCurtailment
+// flagged that exporting more PV than the limit would lose money — e.g.
+// negative spot, no positive feed-in tariff), the limit is allocated
+// proportionally across drivers in `state.SupportsPVCurtail` according
+// to each driver's live PV output. Drivers not in that set are silently
+// skipped — an EV charger or a meter driver wouldn't know what to do
+// with a `curtail` payload.
+//
+// Drivers that received curtail last tick but aren't in the new set
+// (slot rolled over, or PVLimitW dropped to 0) get LimitW=0, which
+// main.go translates to `curtail_disable`. That guarantees the cap
+// is released exactly once when the plan no longer wants it — no
+// silent capping after a mode change or a fresh plan.
+//
+// Returns nil when nothing is curtailed and nothing needs releasing.
+//
+// Idempotent: state mutation (LastCurtailedDrivers) reflects the
+// post-call set of actively-curtailed drivers.
+func ComputePVCurtail(state *State, store *telemetry.Store) []CurtailTarget {
+	if state == nil {
+		return nil
+	}
+	// Fetch the active slot directly — independent of dispatch mode,
+	// because curtailment is an economic decision that applies in
+	// any mode the operator picked. The plan's `annotateCurtailment`
+	// already gated PVLimitW on negative export revenue.
+	var limit float64
+	if state.SlotDirective != nil {
+		if dir, ok := state.SlotDirective(time.Now()); ok {
+			limit = dir.PVLimitW
+		}
+	}
+
+	// Decide which drivers should be curtailed this tick.
+	next := map[string]float64{}
+	if limit > 0 && store != nil && len(state.SupportsPVCurtail) > 0 {
+		// Allocate the site-wide limit proportionally to each PV-
+		// supporting driver's live |PV|. A driver currently producing
+		// nothing gets nothing (no point asking it to cap output it
+		// isn't producing).
+		type pvD struct {
+			name string
+			abs  float64
+		}
+		var drivers []pvD
+		var total float64
+		for _, r := range store.ReadingsByType(telemetry.DerPV) {
+			if !state.SupportsPVCurtail[r.Driver] {
+				continue
+			}
+			if r.RawW >= 0 {
+				continue // not generating right now
+			}
+			abs := -r.RawW
+			drivers = append(drivers, pvD{name: r.Driver, abs: abs})
+			total += abs
+		}
+		if total > 0 {
+			for _, d := range drivers {
+				next[d.name] = limit * (d.abs / total)
+			}
+		}
+	}
+
+	var out []CurtailTarget
+	// Release any driver we curtailed last tick but not this one.
+	for d := range state.LastCurtailedDrivers {
+		if _, ok := next[d]; !ok {
+			out = append(out, CurtailTarget{Driver: d, LimitW: 0})
+		}
+	}
+	for d, w := range next {
+		out = append(out, CurtailTarget{Driver: d, LimitW: w})
+	}
+
+	if len(next) == 0 {
+		state.LastCurtailedDrivers = nil
+	} else {
+		updated := make(map[string]bool, len(next))
+		for d := range next {
+			updated[d] = true
+		}
+		state.LastCurtailedDrivers = updated
+	}
+	return out
 }
 
 // distributeProportional splits the total desired battery power across the

@@ -202,6 +202,13 @@ type SlotDirective struct {
 	SoCTargetPct    float64 // plan's SoC at SlotEnd — used by divergence detector
 	Strategy        Mode    // echoed for logging + API
 
+	// PVLimitW is the recommended cap on aggregate PV inverter output
+	// for this slot (W, positive). 0 means "no curtailment". Set by
+	// annotateCurtailment when exporting at zero / negative revenue
+	// would lose money — the dispatch layer divides this across the
+	// site's PV-supporting drivers and sends `curtail` commands.
+	PVLimitW float64
+
 	// LoadpointEnergyWh carries per-loadpoint EV energy budgets for
 	// this slot. Keyed by Loadpoint.ID. Positive = charging energy
 	// the plan allocated. Empty map when no loadpoints are
@@ -251,6 +258,7 @@ func (s *Service) SlotDirectiveAt(now time.Time) (SlotDirective, bool) {
 			BatteryEnergyWh: energyWh,
 			SoCTargetPct:    a.SoCPct,
 			Strategy:        s.Defaults.Mode,
+			PVLimitW:        a.PVLimitW,
 		}
 		// EV energy budget for the slot (single-loadpoint for now —
 		// keyed under lpID snapshot so the dispatch layer routes

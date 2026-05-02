@@ -265,6 +265,15 @@ type Driver struct {
 	// cross-charging. Untagged drivers keep today's capacity-proportional
 	// behavior. See issue #143 and docs/configuration.md.
 	InverterGroup string `yaml:"inverter_group,omitempty" json:"inverter_group,omitempty"`
+	// SupportsPVCurtail flags this driver as one that handles the
+	// `curtail` / `curtail_disable` actions in its lua. Drivers with
+	// it set become eligible for ComputePVCurtail dispatch when the
+	// MPC's slot directive carries a PVLimitW > 0 (negative-export
+	// economic guard). Default false — operators must opt in per
+	// driver to avoid surprising older configs. The lua side has
+	// always been there for sungrow / ferroamp / deye / huawei /
+	// solis; this flag just turns on the Go-side dispatcher.
+	SupportsPVCurtail bool `yaml:"supports_pv_curtail,omitempty" json:"supports_pv_curtail,omitempty"`
 	// Disabled skips this driver at startup / reload. Set via the UI when
 	// you want to temporarily take a driver out without editing yaml.
 	Disabled bool `yaml:"disabled,omitempty" json:"disabled,omitempty"`
