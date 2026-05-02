@@ -448,21 +448,6 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config) {
 			// 0 W standdown so the charger pauses cleanly.
 			cmdW = 0
 		}
-		// Wake-kick: when an auto-wake recently fired, force the
-		// wallbox to signal at least min 3Φ current for a few
-		// seconds so the car-side negotiation has something to land
-		// on. This is the only thing that's empirically observed to
-		// rescue a detached Tesla without operator intervention. The
-		// kick window is bounded by wakeKickDuration; outside it the
-		// normal surplus clamp resumes.
-		if c.wakeKickActive(lpCfg.ID, now) {
-			minKick := smallestNonZero(surplus3PhaseSteps(lpCfg))
-			if minKick > 0 && cmdW < minKick {
-				slog.Info("loadpoint wake-kick", "lp", lpCfg.ID,
-					"prev_cmd_w", cmdW, "kick_w", minKick)
-				cmdW = minKick
-			}
-		}
 		// Surplus-only live clamp: regardless of what the MPC slot
 		// budget said for this 15-minute window, the EV must not
 		// import grid right now. We smooth the pause/resume decision
@@ -477,6 +462,23 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config) {
 		// "battery smooths PV transients for ~1-2 min" path.
 		if lpCfg.SurplusOnly && cmdW > 0 {
 			cmdW = c.computeSurplusCmd(lpCfg, cmdW, sample.PowerW)
+		}
+		// Wake-kick AFTER the surplus clamp: when an auto-wake just
+		// fired and the surplus clamp paused us to 0, force the
+		// wallbox to signal at least min 3Φ current for a few
+		// seconds so the car-side negotiation has something to land
+		// on. This is the only thing that's empirically observed to
+		// rescue a detached Tesla without operator intervention. The
+		// kick window is bounded by wakeKickDuration; outside it the
+		// normal surplus clamp resumes. Brief grid import here is the
+		// price of recovering from a detached session.
+		if c.wakeKickActive(lpCfg.ID, now) {
+			minKick := smallestNonZero(surplus3PhaseSteps(lpCfg))
+			if minKick > 0 && cmdW < minKick {
+				slog.Info("loadpoint wake-kick", "lp", lpCfg.ID,
+					"prev_cmd_w", cmdW, "kick_w", minKick)
+				cmdW = minKick
+			}
 		}
 		cmd["power_w"] = cmdW
 		// Pass operator's phase preferences through verbatim. The driver
