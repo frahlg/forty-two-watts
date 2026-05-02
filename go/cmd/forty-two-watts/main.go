@@ -931,6 +931,47 @@ func main() {
 		// telemetry store already publishes those three signals
 		// directly. Returns (_, false) when the site meter is
 		// missing — without it we can't bound grid import.
+		// Wire the peak-remaining-surplus reader for the surplus_only
+		// 1Φ-fallback decision. Iterates the MPC plan's remaining
+		// daylight slots and returns max(−pvW − loadW). When that
+		// peak can't sustain a 3Φ minimum (4140 W on a 6 A 3Φ
+		// charger), surplus_only locks the loadpoint to 1Φ for the
+		// day rather than pausing it forever — a slow-charging EV
+		// is still better than no charging at all.
+		lpController.SetPeakRemainingSurplusW(func() (float64, bool) {
+			if mpcSvc == nil {
+				return 0, false
+			}
+			plan := mpcSvc.Latest()
+			if plan == nil || len(plan.Actions) == 0 {
+				return 0, false
+			}
+			now := time.Now()
+			endOfDay := time.Date(now.Year(), now.Month(), now.Day(),
+				23, 59, 59, 0, now.Location())
+			var peak float64
+			any := false
+			for _, a := range plan.Actions {
+				slotEnd := time.UnixMilli(a.SlotStartMs).Add(
+					time.Duration(a.SlotLenMin) * time.Minute)
+				if slotEnd.Before(now) {
+					continue
+				}
+				if time.UnixMilli(a.SlotStartMs).After(endOfDay) {
+					break
+				}
+				surplus := -a.PVW - a.LoadW
+				if !any || surplus > peak {
+					peak = surplus
+					any = true
+				}
+			}
+			if !any {
+				return 0, false
+			}
+			return peak, true
+		})
+
 		lpController.SetSiteSurplusForEV(func() (float64, bool) {
 			meterDriver := cfg.SiteMeterDriver()
 			if meterDriver == "" {

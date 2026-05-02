@@ -89,6 +89,28 @@ type Controller struct {
 	// nil disables the wake feature.
 	vehicleStatus func(loadpointID string) (driver, chargingState string, ok bool)
 
+	// peakRemainingSurplusW returns the peak PV-minus-load surplus
+	// expected for the rest of the local day, used by surplus_only
+	// to decide whether to lock the loadpoint to 1Φ for the day.
+	// When the highest forecasted surplus from now to end-of-day
+	// can't sustain a 3Φ minimum, sticking to 3Φ would mean we
+	// pause the EV for the rest of the day. Falling back to 1Φ
+	// once is far better than flapping 1Φ ↔ 3Φ as cloud cover
+	// shifts. nil disables this — the loadpoint then stays on 3Φ-
+	// only forever (matching the conservative original behaviour).
+	peakRemainingSurplusW func() (float64, bool)
+
+	// phaseLockMu protects phaseLocked1P + phaseLockedAt. The 1Φ
+	// lock is sticky for the rest of the day so a slowly recovering
+	// PV doesn't flip 1Φ ↔ 3Φ as clouds shift. It's automatically
+	// cleared at the start of the next local day if the forecast
+	// shows we'll see enough surplus to sustain 3Φ again — that's
+	// the natural reset point that matches the operator's "look at
+	// today vs tomorrow" mental model.
+	phaseLockMu   sync.Mutex
+	phaseLocked1P map[string]bool
+	phaseLockedAt map[string]time.Time
+
 	// wakeMu protects the per-loadpoint last-wake timestamp used to
 	// throttle charge_start retries. Tesla rate-limits BLE commands;
 	// retrying every 5 s would just exhaust the radio.
@@ -274,6 +296,20 @@ func (c *Controller) SetVehicleStatus(f func(loadpointID string) (driver, chargi
 		return
 	}
 	c.vehicleStatus = f
+}
+
+// SetPeakRemainingSurplusW wires the forecast-based "best surplus
+// we'll see for the rest of the day" reader used by surplus_only's
+// 1Φ-lock decision. Typical implementation in main.go iterates the
+// MPC plan's remaining slots until local end-of-day and returns the
+// max(−pvW − loadW). Pass nil to disable the 1Φ fallback — the
+// loadpoint then stays 3Φ-only and pauses on low-PV days, which is
+// the conservative original behaviour.
+func (c *Controller) SetPeakRemainingSurplusW(f func() (float64, bool)) {
+	if c == nil {
+		return
+	}
+	c.peakRemainingSurplusW = f
 }
 
 // SetSiteFuse installs the grid-boundary fuse so the controller can
@@ -489,7 +525,12 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config) {
 		// normal surplus clamp resumes. Brief grid import here is the
 		// price of recovering from a detached session.
 		if c.wakeKickActive(lpCfg.ID, now) {
-			minKick := smallestNonZero(surplus3PhaseSteps(lpCfg))
+			// Honour the surplus_only phase lock: when we've fallen
+			// back to 1Φ for the day, the kick should use the 1Φ
+			// minimum (1380 W) rather than 3Φ (4140 W). pickSurplusSteps
+			// already returns the right step set for the current
+			// lock state.
+			minKick := smallestNonZero(c.pickSurplusSteps(lpCfg))
 			if minKick > 0 && cmdW < minKick {
 				slog.Info("loadpoint wake-kick", "lp", lpCfg.ID,
 					"prev_cmd_w", cmdW, "kick_w", minKick)
@@ -728,8 +769,21 @@ func (c *Controller) computeSurplusCmd(lpCfg Config, wantW, currentEvW float64) 
 		instant = 0
 	}
 	avg := c.recordSurplus(lpCfg.ID, instant)
-	steps3 := surplus3PhaseSteps(lpCfg)
-	minStep3 := smallestNonZero(steps3)
+
+	// Pick the step set: 3Φ-only by default, but fall back to all
+	// allowed steps (which lets the driver hand the wallbox a 1Φ-
+	// eligible amperage) when the forecast says we won't see enough
+	// surplus to sustain 3Φ for the rest of the day. The lock is
+	// sticky: once we've gone 1Φ for the session we stay 1Φ to
+	// avoid cycling the contactor across the phase-mode boundary
+	// each time clouds shift.
+	steps := c.pickSurplusSteps(lpCfg)
+	minStep := smallestNonZero(steps)
+
+	// Compatibility variables for the rest of the function — the
+	// pause/resume hysteresis and wake-kick reuse these names.
+	steps3 := steps
+	minStep3 := minStep
 
 	paused, pausedAt := c.getSurplusPause(lpCfg.ID)
 	now := time.Now()
@@ -767,6 +821,84 @@ func (c *Controller) computeSurplusCmd(lpCfg Config, wantW, currentEvW float64) 
 		target = instant
 	}
 	return SnapChargeW(target, lpCfg.MinChargeW, lpCfg.MaxChargeW, steps3)
+}
+
+// pickSurplusSteps returns the step set surplus_only should snap to
+// for this loadpoint. Default is 3Φ-eligible only (the no-flap rule);
+// when the day's peak forecast surplus can't sustain a 3Φ minimum,
+// we fall back to all allowed steps and STICK there for the session
+// — re-upgrading would just cycle the contactor when clouds shift.
+func (c *Controller) pickSurplusSteps(lpCfg Config) []float64 {
+	if c == nil {
+		return surplus3PhaseSteps(lpCfg)
+	}
+	steps3 := surplus3PhaseSteps(lpCfg)
+	minStep3 := smallestNonZero(steps3)
+	now := time.Now()
+
+	c.phaseLockMu.Lock()
+	locked := c.phaseLocked1P[lpCfg.ID]
+	lockedAt := c.phaseLockedAt[lpCfg.ID]
+	// Day rollover: if a 1Φ lock was set on a previous local day
+	// AND the new day's forecast shows enough surplus to sustain
+	// 3Φ, clear the lock. This is the operator's "fresh start each
+	// morning" expectation — we re-evaluate on day boundaries
+	// rather than punishing today's bad weather forever.
+	if locked && minStep3 > 0 && c.peakRemainingSurplusW != nil &&
+		!sameLocalDay(lockedAt, now) {
+		if peak, ok := c.peakRemainingSurplusW(); ok && peak >= minStep3 {
+			delete(c.phaseLocked1P, lpCfg.ID)
+			delete(c.phaseLockedAt, lpCfg.ID)
+			locked = false
+			c.phaseLockMu.Unlock()
+			slog.Info("loadpoint surplus_only unlocked: new day with sufficient PV forecast",
+				"lp", lpCfg.ID, "peak_remaining_surplus_w", peak, "min_3p_step_w", minStep3)
+			return steps3
+		}
+	}
+	c.phaseLockMu.Unlock()
+
+	if locked {
+		// All allowed steps — driver picks the phase.
+		return lpCfg.AllowedStepsW
+	}
+	if c.peakRemainingSurplusW == nil {
+		return steps3
+	}
+	peak, ok := c.peakRemainingSurplusW()
+	if !ok {
+		return steps3
+	}
+	if minStep3 <= 0 {
+		return steps3
+	}
+	if peak >= minStep3 {
+		return steps3
+	}
+	// Lock to 1Φ for the rest of the day.
+	c.phaseLockMu.Lock()
+	if c.phaseLocked1P == nil {
+		c.phaseLocked1P = map[string]bool{}
+		c.phaseLockedAt = map[string]time.Time{}
+	}
+	c.phaseLocked1P[lpCfg.ID] = true
+	c.phaseLockedAt[lpCfg.ID] = now
+	c.phaseLockMu.Unlock()
+	slog.Info("loadpoint surplus_only locked to 1Φ for the day",
+		"lp", lpCfg.ID, "peak_remaining_surplus_w", peak, "min_3p_step_w", minStep3)
+	return lpCfg.AllowedStepsW
+}
+
+// sameLocalDay reports whether two time.Time values fall on the
+// same calendar day in the local timezone. Used by the 1Φ phase
+// lock to decide when to re-evaluate against the new day's forecast.
+func sameLocalDay(a, b time.Time) bool {
+	if a.IsZero() || b.IsZero() {
+		return false
+	}
+	la := a.Local()
+	lb := b.Local()
+	return la.Year() == lb.Year() && la.Month() == lb.Month() && la.Day() == lb.Day()
 }
 
 // surplus3PhaseSteps returns AllowedStepsW filtered down to entries
@@ -829,10 +961,13 @@ func (c *Controller) wakeKickActive(id string, now time.Time) bool {
 // unplugged for hours and the cached buffer is meaningless.
 func (c *Controller) resetSurplusSession(id string) {
 	c.surplusMu.Lock()
-	defer c.surplusMu.Unlock()
 	delete(c.surplusWin, id)
 	delete(c.surplusPaused, id)
 	delete(c.surplusPausedAt, id)
+	c.surplusMu.Unlock()
+	// Phase lock survives plug cycles — it's a per-day decision,
+	// not per-session. The day-rollover check in pickSurplusSteps
+	// is the only natural reset point.
 }
 
 func (c *Controller) recordSurplus(id string, sample float64) float64 {
