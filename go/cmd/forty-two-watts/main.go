@@ -165,6 +165,7 @@ func main() {
 	ctrl.SlewRateW = cfg.Site.SlewRateW
 	ctrl.MinDispatchIntervalS = cfg.Site.MinDispatchIntervalS
 	ctrl.InverterGroups = inverterGroupsFrom(cfg.Drivers)
+	ctrl.SupportsPVCurtail = supportsPVCurtailFrom(cfg.Drivers)
 	ctrl.DriverLimits = driverLimitsFrom(cfg.Drivers, cfg.Batteries)
 	// Per-phase fuse params for the per-phase clamp inside applyFuseGuard
 	// + forceFuseDischarge. Reads l1_a/l2_a/l3_a from the meter driver
@@ -366,6 +367,7 @@ func main() {
 			// a bare replace would race with the control loop's 5 s tick.
 			ctrlMu.Lock()
 			ctrl.InverterGroups = inverterGroupsFrom(newCfg.Drivers)
+			ctrl.SupportsPVCurtail = supportsPVCurtailFrom(newCfg.Drivers)
 			ctrl.DriverLimits = driverLimitsFrom(newCfg.Drivers, newCfg.Batteries)
 			// Fuse params + safety margin: previously startup-only.
 			// Hot-reload them so operators can tune the per-phase margin
@@ -767,6 +769,7 @@ func main() {
 				BatteryEnergyWh: d.BatteryEnergyWh,
 				SoCTargetPct:    d.SoCTargetPct,
 				Strategy:        string(d.Strategy),
+				PVLimitW:        d.PVLimitW,
 			}, true
 		}
 		// Default to the energy-allocation path. The plan is a
@@ -1320,6 +1323,34 @@ func main() {
 				}
 			}
 
+			// ---- PV curtailment dispatch ----
+			// MPC's annotateCurtailment sets pv_limit_w on slots where
+			// exporting more PV would lose money (negative spot, no
+			// positive feed-in tariff). ComputePVCurtail picks the
+			// drivers that opted in via supports_pv_curtail and emits
+			// either a `curtail` command (limit > 0) or a one-shot
+			// `curtail_disable` when a previously-curtailed driver
+			// drops out of the active set.
+			ctrlMu.Lock()
+			curtailTargets := control.ComputePVCurtail(ctrl, tel)
+			ctrlMu.Unlock()
+			for _, c := range curtailTargets {
+				var payload []byte
+				if c.LimitW > 0 {
+					payload, _ = json.Marshal(map[string]any{
+						"action":  "curtail",
+						"power_w": c.LimitW,
+					})
+				} else {
+					payload, _ = json.Marshal(map[string]any{
+						"action": "curtail_disable",
+					})
+				}
+				if err := reg.Send(ctx, c.Driver, payload); err != nil {
+					slog.Warn("pv curtail send", "name", c.Driver, "err", err)
+				}
+			}
+
 			// ---- EV dispatch: per-loadpoint observe + command ----
 			// The per-loadpoint state machine (observe → plan lookup
 			// → snap → send) is owned by loadpoint.Controller so the
@@ -1556,6 +1587,22 @@ func inverterGroupsFrom(drivers []config.Driver) map[string]string {
 			continue
 		}
 		out[d.Name] = d.InverterGroup
+	}
+	return out
+}
+
+// supportsPVCurtailFrom builds the per-driver opt-in map used by
+// ComputePVCurtail. Operators set `supports_pv_curtail: true` on
+// each driver whose lua handles the `curtail` / `curtail_disable`
+// actions (sungrow, ferroamp, deye, huawei, solis ship with it).
+// Drivers not in the map are silently skipped by the curtail
+// dispatcher — no risk of an EV charger receiving a curtail payload.
+func supportsPVCurtailFrom(drivers []config.Driver) map[string]bool {
+	out := map[string]bool{}
+	for _, d := range drivers {
+		if d.SupportsPVCurtail {
+			out[d.Name] = true
+		}
 	}
 	return out
 }
