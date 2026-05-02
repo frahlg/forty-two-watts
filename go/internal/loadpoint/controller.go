@@ -632,6 +632,42 @@ func (c *Controller) maybeWakeVehicle(ctx context.Context, now time.Time, lpID s
 		slog.Warn("loadpoint auto-wake failed", "lp", lpID,
 			"vehicle_driver", driver, "err", err)
 	}
+
+	// Wallbox session-cycle: when Tesla is in a "Stopped" state that
+	// rejects software charge_start ("requested" rejection from the
+	// car's own state machine), the only way to break out is to make
+	// the wallbox open and re-close its contactor — which Tesla
+	// interprets as a plug-cycle and accepts as a fresh session
+	// boundary. ev_pause + brief delay + ev_resume on the EV charger
+	// driver does exactly this. Driver-agnostic: any EV charger
+	// driver implementing the standard ev_pause / ev_resume actions
+	// gets this for free.
+	//
+	// Runs in a goroutine so the dispatch tick doesn't block on the
+	// pause→sleep→resume sequence (~3 s).
+	if lpCfg.DriverName != "" && c.send != nil {
+		go func(driverName string) {
+			pauseCmd, _ := json.Marshal(map[string]any{"action": "ev_pause"})
+			resumeCmd, _ := json.Marshal(map[string]any{"action": "ev_resume"})
+			if err := c.send(context.Background(), driverName, pauseCmd); err != nil {
+				slog.Warn("loadpoint wallbox-cycle pause failed",
+					"lp", lpID, "driver", driverName, "err", err)
+				return
+			}
+			slog.Info("loadpoint wallbox-cycle: paused", "lp", lpID, "driver", driverName)
+			// 3 s is enough for Tesla to register the contactor
+			// open as a plug-cycle. Shorter risks the car missing
+			// the transition; longer eats into the wake-kick
+			// window and prolongs the grid-import.
+			time.Sleep(3 * time.Second)
+			if err := c.send(context.Background(), driverName, resumeCmd); err != nil {
+				slog.Warn("loadpoint wallbox-cycle resume failed",
+					"lp", lpID, "driver", driverName, "err", err)
+				return
+			}
+			slog.Info("loadpoint wallbox-cycle: resumed", "lp", lpID, "driver", driverName)
+		}(lpCfg.DriverName)
+	}
 }
 
 // computeSurplusCmd applies the surplus_only live clamp to the
