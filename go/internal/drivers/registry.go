@@ -212,13 +212,15 @@ func (r *Registry) runLoop(rd *runningDriver) {
 				slog.Warn("driver poll failed", "name", rd.cfg.Name, "err", err)
 				r.tel.DriverHealthMut(rd.cfg.Name).RecordError(err.Error())
 			} else if r.tel != nil {
-				// Record the successful tick so driver_poll bumps the
-				// health record's TickCount even when the driver itself
-				// has nothing to emit yet (e.g. ferroamp between MQTT
-				// subscribe and the first inbound message). Without
-				// this, drivers that wait on slow telemetry topics
-				// are indistinguishable from ones that crashed.
-				r.tel.DriverHealthMut(rd.cfg.Name).RecordSuccess()
+				// Bump TickCount so the loop is visibly alive in
+				// /api/status, but DON'T touch LastSuccess — that
+				// happens inside host.emit when the driver actually
+				// delivers telemetry. A driver that polls without
+				// emitting (waiting for first MQTT message, or feeding
+				// stale cache after upstream death) needs to surface
+				// as stale to the watchdog; otherwise a dead ferroamp
+				// re-stamps LastSuccess every tick from cached values.
+				r.tel.DriverHealthMut(rd.cfg.Name).RecordTick()
 			}
 			// Re-arm timer at driver's requested interval
 			interval = rd.env.PollInterval()

@@ -44,6 +44,25 @@ local ehub_data = nil
 local eso_data = nil
 local sso_data = nil
 
+-- Last-arrival timestamp per topic (host.millis()). The EnergyHub
+-- normally publishes ehub at ~1 Hz; if it goes silent (power off,
+-- fuse blow, broker partition) the cached tables above stay
+-- populated. Without per-topic age checks the driver would re-emit
+-- last-known values on every poll, host.emit would re-stamp
+-- LastSuccess, and the watchdog could not flip the driver offline.
+-- Real incident: 2026-05-02 fuse blow left ferroamp emitting
+-- pv_w=-3996.7040 / meter_w=-7294.0490 identical to four decimals
+-- for 30+ minutes while the EnergyHub itself was unpowered.
+local ehub_ts = 0
+local eso_ts  = 0
+local sso_ts  = 0
+
+-- Treat cached topic data as stale beyond this age. EnergyHub
+-- publishes ehub at ~1 Hz and eso/sso slightly slower; 30 s gives
+-- generous slack for a WiFi blip or broker reconnect without
+-- flipping the driver offline.
+local STALE_AFTER_MS = 30000
+
 -- Optional config knob: when `skip_battery` is true the driver will
 -- NOT emit battery telemetry even when the ESO/pbat fields are
 -- present on the wire. Useful for dev setups that want a PV-only
@@ -140,22 +159,45 @@ function driver_init(config)
 end
 
 function driver_poll()
+    local now = host.millis()
     local messages = host.mqtt_messages()
-    if not messages then return 1000 end
+    if not messages then messages = {} end
 
-    -- Process incoming messages and cache data
+    -- Process incoming messages and stamp arrival time per topic
     for _, msg in ipairs(messages) do
         local ok, data = pcall(host.json_decode, msg.payload)
         if ok and data then
             if msg.topic == "extapi/data/ehub" then
-                ehub_data = data
+                ehub_data = data; ehub_ts = now
             elseif msg.topic == "extapi/data/eso" then
-                eso_data = data
+                eso_data = data; eso_ts = now
             elseif msg.topic == "extapi/data/sso" then
-                sso_data = data
+                sso_data = data; sso_ts = now
             end
         end
     end
+
+    -- Drop stale caches so the rest of the poll falls through and
+    -- the watchdog catches us when the EnergyHub stops publishing.
+    -- Per-topic so a partial outage (e.g. eso lags but ehub flows)
+    -- still lets the live channels through.
+    if ehub_data and (now - ehub_ts) > STALE_AFTER_MS then
+        host.log("warn", "Ferroamp: ehub stale (" .. (now - ehub_ts) .. " ms) — dropping cache")
+        ehub_data = nil
+    end
+    if eso_data and (now - eso_ts) > STALE_AFTER_MS then
+        eso_data = nil
+    end
+    if sso_data and (now - sso_ts) > STALE_AFTER_MS then
+        sso_data = nil
+    end
+
+    -- Diagnostics: per-topic age into the long-format TS DB so
+    -- operators can see partial outages directly in the metric
+    -- browser. Reported as "0" when never seen yet (ts = 0).
+    host.emit_metric("ehub_age_ms", ehub_ts == 0 and 0 or (now - ehub_ts))
+    host.emit_metric("eso_age_ms",  eso_ts  == 0 and 0 or (now - eso_ts))
+    host.emit_metric("sso_age_ms",  sso_ts  == 0 and 0 or (now - sso_ts))
 
     --------------------------------------------------------------------------
     -- Meter (grid connection point)
