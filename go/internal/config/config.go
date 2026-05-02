@@ -67,6 +67,11 @@ type NotificationRule struct {
 	Type          string `yaml:"type" json:"type"`
 	Enabled       bool   `yaml:"enabled" json:"enabled"`
 	ThresholdS    int    `yaml:"threshold_s,omitempty" json:"threshold_s,omitempty"`
+	// ThresholdN is a count-based threshold used by event types that
+	// aggregate across drivers (concurrent_drivers_offline). Ignored
+	// by per-driver events. Default behaviour per event documented
+	// alongside the const in notifications/service.go.
+	ThresholdN    int    `yaml:"threshold_n,omitempty" json:"threshold_n,omitempty"`
 	Priority      int    `yaml:"priority,omitempty" json:"priority,omitempty"`
 	Tags          string `yaml:"tags,omitempty" json:"tags,omitempty"`
 	TitleTemplate string `yaml:"title_template,omitempty" json:"title_template,omitempty"`
