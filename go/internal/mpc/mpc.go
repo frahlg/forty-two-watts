@@ -121,11 +121,20 @@ type Params struct {
 	//     export. Useful for operators with a fixed feed-in tariff.
 	//   - If ExportOrePerKWh == 0, each slot earns
 	//         slot.SpotOre + ExportBonusOreKwh − ExportFeeOreKwh
-	//     (clamped to zero) — per-slot pricing, which the DP needs to
-	//     see morning-vs-midday arbitrage opportunities.
+	//     i.e. raw spot pricing. The value can go negative when spot
+	//     is negative (Sweden + Nordic markets, increasingly common
+	//     during midday solar peaks). The DP treats a negative export
+	//     ore as a positive cost — exactly right when most retailers
+	//     pass the negative spot through to the customer.
+	//
+	//     ExportFloorOreKwh, if non-nil, clamps the per-slot export
+	//     ore at the given floor. Set to a pointer-to-zero for
+	//     retailers that cap export at 0 öre (no negative-spot
+	//     billing). nil = no clamp (default; matches the physics).
 	ExportOrePerKWh    float64
 	ExportBonusOreKwh  float64
 	ExportFeeOreKwh    float64
+	ExportFloorOreKwh  *float64
 
 	// Loadpoint extends the DP state space with one EV charge point.
 	// Nil (default) keeps the battery-only optimization path. See
@@ -286,11 +295,25 @@ func Optimize(slots []Slot, p Params) Plan {
 	effPrice := func(s Slot) float64 {
 		return s.Confidence*s.PriceOre + (1-s.Confidence)*meanPrice
 	}
-	// slotExportOre: per-slot export revenue. When Params.ExportOrePerKWh
-	// is set, it wins (fixed feed-in tariff). Otherwise each slot earns
-	// spot + bonus − fee, clamped at zero. Without this, the DP saw
-	// flat export revenue across the day and couldn't prefer "export
-	// at high-price morning, charge at cheap midday".
+	// slotExportOre: per-slot export revenue (öre/kWh). When
+	// Params.ExportOrePerKWh is set, it wins (fixed feed-in tariff).
+	// Otherwise each slot earns spot + bonus − fee.
+	//
+	// The DP's cost formula for an exporting slot is
+	//   cost = -slotExportOre(slot) * |gridKWh|
+	// so a NEGATIVE return value here is a positive cost — exactly
+	// what we want when spot is below zero (you pay to export under
+	// most Swedish retail agreements). Earlier code clamped this at
+	// zero, which made the DP indifferent between "stand still" and
+	// "blast export from battery" during minus-price hours and
+	// occasionally tripped the discharge in the latter direction by
+	// tie-break. Real incident: 2026-05-02 user switched to arbitrage
+	// at spot ≈ −5 öre and watched the battery discharge full power
+	// into the grid.
+	//
+	// If a retailer caps you at zero (no negative-spot billing) set
+	// Params.ExportFloorOreKwh to 0 — that re-introduces the clamp at
+	// the operator's choice rather than as silent default.
 	slotExportOre := func(s Slot) float64 {
 		if p.ExportOrePerKWh > 0 {
 			return p.ExportOrePerKWh
@@ -299,8 +322,8 @@ func Optimize(slots []Slot, p Params) Plan {
 		// Confidence blend on the same principle as import price.
 		mean := meanPrice * 0.7 // rough: spot ≈ 70% of consumer total
 		v = s.Confidence*v + (1-s.Confidence)*mean
-		if v < 0 {
-			v = 0
+		if p.ExportFloorOreKwh != nil && v < *p.ExportFloorOreKwh {
+			v = *p.ExportFloorOreKwh
 		}
 		return v
 	}

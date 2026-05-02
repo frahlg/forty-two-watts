@@ -377,6 +377,15 @@ type Price struct {
 	// ExportFeeOreKwh is a per-kWh deduction on export (e.g. transmission
 	// fees some DSOs charge for feed-in). Reduces effective export price.
 	ExportFeeOreKwh float64 `yaml:"export_fee_ore_kwh,omitempty" json:"export_fee_ore_kwh,omitempty"`
+
+	// ExportFloorOreKwh, if set, clamps per-slot export revenue at the
+	// given floor (öre/kWh). Use this only when your retailer caps
+	// negative-spot export at zero — i.e. they don't bill you when
+	// spot goes negative. Default (unset / nil) lets export revenue
+	// follow real spot, which can go negative; that's the physics
+	// most Swedish customer agreements pass through. Set to a pointer
+	// to 0.0 if you have a guaranteed-zero-floor agreement.
+	ExportFloorOreKwh *float64 `yaml:"export_floor_ore_kwh,omitempty" json:"export_floor_ore_kwh,omitempty"`
 }
 
 // Weather is the weather-forecast source config.

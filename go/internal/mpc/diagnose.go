@@ -55,8 +55,9 @@ type DiagnosticParams struct {
 	DischargeEfficiency float64 `json:"discharge_efficiency"`
 	CapacityWh          float64 `json:"capacity_wh"`
 	TerminalSoCPrice    float64 `json:"terminal_soc_price_ore_kwh"`
-	ExportBonusOreKwh   float64 `json:"export_bonus_ore_kwh"`
-	ExportFeeOreKwh     float64 `json:"export_fee_ore_kwh"`
+	ExportBonusOreKwh   float64  `json:"export_bonus_ore_kwh"`
+	ExportFeeOreKwh     float64  `json:"export_fee_ore_kwh"`
+	ExportFloorOreKwh   *float64 `json:"export_floor_ore_kwh,omitempty"`
 }
 
 // Diagnostic is the full post-mortem of the most recent Optimize call.
@@ -154,6 +155,7 @@ func buildDiagnostic(plan *Plan, slots []Slot, p Params, zone string,
 			TerminalSoCPrice:    p.TerminalSoCPrice,
 			ExportBonusOreKwh:   p.ExportBonusOreKwh,
 			ExportFeeOreKwh:     p.ExportFeeOreKwh,
+			ExportFloorOreKwh:   p.ExportFloorOreKwh,
 		},
 		Slots:          out,
 		LastReplanAtMs: replanAtMs,

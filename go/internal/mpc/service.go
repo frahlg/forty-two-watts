@@ -106,6 +106,11 @@ type Service struct {
 	ExportBonusOreKwh float64
 	ExportFeeOreKwh   float64
 
+	// ExportFloorOreKwh, when non-nil, clamps the per-slot export ore
+	// at the floor. Wired from config.Price.ExportFloorOreKwh; nil =
+	// no clamp, real spot pass-through (default).
+	ExportFloorOreKwh *float64
+
 	// GridTariffOreKwh and VATPercent let the MPC turn forecast spot
 	// prices into consumer-total prices when back-filling future slots
 	// using s.Price. Mirrors prices.Applier semantics.
@@ -552,6 +557,7 @@ func (s *Service) replan(_ context.Context) *Plan {
 	// to force a flat feed-in tariff).
 	p.ExportBonusOreKwh = s.ExportBonusOreKwh
 	p.ExportFeeOreKwh = s.ExportFeeOreKwh
+	p.ExportFloorOreKwh = s.ExportFloorOreKwh
 
 	// Default terminal valuation. Mode-dependent because self-consumption
 	// is a constrained game: the battery can only offset local load, not
