@@ -161,7 +161,7 @@ func TestReadingPreservesData(t *testing.T) {
 // ---- DerType ----
 
 func TestDerTypeRoundtrip(t *testing.T) {
-	for _, name := range []string{"meter", "pv", "battery", "ev"} {
+	for _, name := range []string{"meter", "pv", "battery", "ev", "vehicle", "thermal_battery"} {
 		d, err := ParseDerType(name)
 		if err != nil {
 			t.Fatal(err)
@@ -172,6 +172,41 @@ func TestDerTypeRoundtrip(t *testing.T) {
 	}
 	if _, err := ParseDerType("nonsense"); err == nil {
 		t.Error("expected parse error")
+	}
+}
+
+// TestThermalBatteryExcludedFromBatteryAggregation pins the central
+// promise of the DerThermalBattery split: every site-equation
+// aggregator iterates ReadingsByType(DerBattery) and must NOT see
+// thermal entries. If this test breaks, an aggregator started using
+// a different filter path that bypasses the type system — fix the
+// caller, not the test.
+func TestThermalBatteryExcludedFromBatteryAggregation(t *testing.T) {
+	s := NewStore()
+	soc := 0.50
+	s.Update("real-bat", DerBattery, 1500, &soc, []byte(`{"type":"battery","w":1500,"soc":0.5}`))
+	thermalSoC := 1.0
+	s.Update("heat-pump", DerThermalBattery, 2000, &thermalSoC, []byte(`{"type":"thermal_battery","w":2000,"soc":1.0}`))
+
+	bats := s.ReadingsByType(DerBattery)
+	if len(bats) != 1 {
+		t.Fatalf("expected 1 DerBattery reading, got %d", len(bats))
+	}
+	if bats[0].Driver != "real-bat" {
+		t.Errorf("DerBattery filter leaked thermal driver: %q", bats[0].Driver)
+	}
+
+	thermals := s.ReadingsByType(DerThermalBattery)
+	if len(thermals) != 1 || thermals[0].Driver != "heat-pump" {
+		t.Errorf("DerThermalBattery filter wrong: %+v", thermals)
+	}
+
+	// Sanity: the two types must NOT collide at Get(name, type) lookup.
+	if r := s.Get("heat-pump", DerBattery); r != nil {
+		t.Errorf("Get(heat-pump, DerBattery) returned a reading: %+v", r)
+	}
+	if r := s.Get("real-bat", DerThermalBattery); r != nil {
+		t.Errorf("Get(real-bat, DerThermalBattery) returned a reading: %+v", r)
 	}
 }
 

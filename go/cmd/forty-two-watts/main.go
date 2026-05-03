@@ -49,6 +49,7 @@ import (
 	"github.com/frahlg/forty-two-watts/go/internal/selfupdate"
 	"github.com/frahlg/forty-two-watts/go/internal/state"
 	"github.com/frahlg/forty-two-watts/go/internal/telemetry"
+	"github.com/frahlg/forty-two-watts/go/internal/thermal"
 )
 
 // Version gets injected at build time via -ldflags. Defaults to "dev" for
@@ -896,6 +897,63 @@ func main() {
 		})
 	}
 
+	// ---- Thermal block controller ----
+	// One controller for every configured thermal driver (heat pumps,
+	// hot-water cylinders, etc.). Schedules block commands by price
+	// AFTER each MPC replan; the dispatch tick below calls Tick() to
+	// emit any state-change command. See go/internal/thermal for
+	// the rationale for keeping this out of the MPC DP.
+	thermalCtl := thermal.NewController(reg.Send)
+	thermalDrivers := make([]thermal.DriverConfig, 0)
+	for _, d := range cfg.Drivers {
+		if !isLikelyThermalDriver(d.Lua) || d.Name == "" {
+			continue
+		}
+		thermalDrivers = append(thermalDrivers, thermal.DriverConfig{
+			Name:      d.Name,
+			MaxBlockW: d.MaxDischargeW,
+			// Operator-tunable budget + price floor land here once
+			// the YAML schema gains them; defaults inside ScheduleBlocks
+			// (6 kWh/day @ 50 öre/kWh floor) work for a sane first cut.
+		})
+	}
+	updateThermalSchedule := func() {
+		if len(thermalDrivers) == 0 || mpcSvc == nil {
+			return
+		}
+		plan := mpcSvc.Latest()
+		if plan == nil || len(plan.Actions) == 0 {
+			return
+		}
+		// Build PriceSlot list from the plan's actions. Skip past
+		// slots so the scheduler only ever decides about the
+		// future.
+		now := time.Now()
+		priceSlots := make([]thermal.PriceSlot, 0, len(plan.Actions))
+		for _, a := range plan.Actions {
+			slotEnd := time.UnixMilli(a.SlotStartMs).Add(
+				time.Duration(a.SlotLenMin) * time.Minute)
+			if slotEnd.Before(now) {
+				continue
+			}
+			priceSlots = append(priceSlots, thermal.PriceSlot{
+				StartMs:  a.SlotStartMs,
+				LenMin:   a.SlotLenMin,
+				PriceOre: a.PriceOre,
+			})
+		}
+		for _, td := range thermalDrivers {
+			thermalCtl.SetSchedule(td.Name, thermal.ScheduleBlocks(priceSlots, td))
+		}
+	}
+	// updateThermalSchedule is cheap (O(N log N) over ~193 slots
+	// once a day's price forecast lands). Called once at startup
+	// and again from the dispatch tick rate-limited to once per
+	// minute — the price forecast doesn't change faster than
+	// that, and the Controller's per-driver de-bounce ensures
+	// re-issuing the same schedule produces zero commands.
+	updateThermalSchedule()
+
 	// ---- Self-update checker ----
 	// Probes the GitHub Releases API in the background; the UI reads the
 	// cached result via /api/version/check. Gated behind FTW_SELFUPDATE_ENABLED
@@ -1204,6 +1262,11 @@ func main() {
 	var prevFuseSaturated bool
 	var lastFuseReplan time.Time
 	const fuseReplanCooldown = 60 * time.Second
+	// Re-run the thermal scheduler once per minute from the
+	// dispatch tick so price-forecast updates land in the next
+	// block decision without needing a callback into mpc.Service.
+	var lastThermalUpdate time.Time
+	const thermalScheduleInterval = 60 * time.Second
 	// One-shot replan when the FIRST DerVehicle reading arrives. The
 	// startup replan ran with whatever fallback SoC was available; once
 	// the Tesla / vehicle driver gets ground truth from the car, the
@@ -1356,6 +1419,21 @@ func main() {
 			// → snap → send) is owned by loadpoint.Controller so the
 			// main tick stays a thin orchestrator. See issue #172.
 			lpController.Tick(ctx, time.Now())
+
+			// ---- Thermal dispatch: heat-pump block / release ----
+			// The thermal controller has its own per-tick state
+			// machine, idempotent across ticks (only sends when the
+			// scheduled block-W changes). DerThermalBattery drivers
+			// are intentionally NOT in the dispatch.go battery
+			// distribution path — this is the only place block
+			// commands originate. Refresh the schedule periodically
+			// so a freshly-replanned price forecast lands in the
+			// next block decision.
+			if time.Since(lastThermalUpdate) > thermalScheduleInterval {
+				updateThermalSchedule()
+				lastThermalUpdate = time.Now()
+			}
+			thermalCtl.Tick(ctx, time.Now())
 
 			// ---- Trigger MPC replan on fuse-saturation rising edge ----
 			// The joint allocator (control.dispatch) just throttled
