@@ -182,8 +182,9 @@ func (h *HostEnv) emitTelemetry(rawJSON []byte) error {
 	// (typically w=0, soc=0). Letting them through pollutes the telemetry
 	// store, /api/status drivers map, and the frontend's Combined view.
 	// Health success is still recorded — the driver IS alive, just emitting
-	// data the operator told us to ignore.
-	if t == telemetry.DerBattery && h.BatteryCapacityWh <= 0 {
+	// data the operator told us to ignore. Same guard for DerThermalBattery:
+	// a thermal driver without battery_capacity_wh is misconfigured.
+	if (t == telemetry.DerBattery || t == telemetry.DerThermalBattery) && h.BatteryCapacityWh <= 0 {
 		if h.Telemetry != nil {
 			h.Telemetry.DriverHealthMut(h.DriverName).RecordSuccess()
 		}

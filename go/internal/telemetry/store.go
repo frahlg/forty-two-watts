@@ -22,10 +22,28 @@ const (
 	// readings don't conflict with dispatch math, they only inform
 	// the loadpoint manager's SoC-source selection and the UI.
 	DerVehicle
+	// DerThermalBattery is a load-shifting actuator modelled to the
+	// MPC as a battery, but NOT grid-coupled — it can shed load on
+	// command (heat pump compressor block, EV charger pause, etc.)
+	// but cannot inject power into the grid. Reported `w` is the
+	// device's current consumption (positive); a "discharge" command
+	// translates to "stop consuming", not "supply power".
+	//
+	// The distinction matters because every site-equation aggregator
+	// (api.go's batW / loadW / weightedSoC, mpc.service.LoadW
+	// reconstruction, dispatch.go's currentTotal + applyFuseGuard
+	// predictor + distributeProportional split) MUST exclude
+	// DerThermalBattery — including its consumption in those sums
+	// double-counts: once via the meter (where it shows up as
+	// load), again via the battery aggregate (where it would look
+	// like grid-supporting injection). The MPC dispatch routing path
+	// still targets these drivers directly via the Registry — only
+	// the *aggregate* views filter them out.
+	DerThermalBattery
 )
 
 // String returns the canonical string form ("meter", "pv", "battery",
-// "ev", "vehicle").
+// "ev", "vehicle", "thermal_battery").
 func (d DerType) String() string {
 	switch d {
 	case DerMeter:
@@ -38,6 +56,8 @@ func (d DerType) String() string {
 		return "ev"
 	case DerVehicle:
 		return "vehicle"
+	case DerThermalBattery:
+		return "thermal_battery"
 	}
 	return "unknown"
 }
@@ -55,6 +75,8 @@ func ParseDerType(s string) (DerType, error) {
 		return DerEV, nil
 	case "vehicle":
 		return DerVehicle, nil
+	case "thermal_battery":
+		return DerThermalBattery, nil
 	}
 	return 0, fmt.Errorf("unknown der type %q", s)
 }

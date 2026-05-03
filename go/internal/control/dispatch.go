@@ -89,6 +89,11 @@ const MaxCommandW = 5000
 type PowerLimits struct {
 	MaxChargeW    float64
 	MaxDischargeW float64
+	// BlockCharge is true when the operator has explicitly set max_charge_w = 0,
+	// meaning the MPC must never issue a charge command to this driver.
+	// Distinct from MaxChargeW == 0 with BlockCharge == false, which means
+	// "no explicit limit set — fall back to MaxCommandW default".
+	BlockCharge bool
 }
 
 // DispatchTarget is one command to issue to a single battery driver.
@@ -359,12 +364,17 @@ type batteryInfo struct {
 	group         string  // inverter-affinity tag; empty = untagged (#143)
 	maxChargeW    float64 // per-driver cap; 0 = use MaxCommandW default (#145)
 	maxDischargeW float64 // per-driver cap; 0 = use MaxCommandW default (#145)
+	blockCharge   bool    // true when max_charge_w=0 is set explicitly — never charge
 }
 
 // chargeCap returns the effective per-battery charge ceiling, falling
 // back to MaxCommandW when the driver didn't set an explicit limit.
+// When blockCharge is true the cap is zero — the MPC must not charge.
 // Kept a method so every clamp point queries the same fallback rule.
 func (b batteryInfo) chargeCap() float64 {
+	if b.blockCharge {
+		return 0
+	}
 	if b.maxChargeW > 0 {
 		return b.maxChargeW
 	}
@@ -625,6 +635,7 @@ func ComputeDispatch(
 			group:         state.InverterGroups[name],
 			maxChargeW:    lim.MaxChargeW,
 			maxDischargeW: lim.MaxDischargeW,
+			blockCharge:   lim.BlockCharge,
 		})
 	}
 	onlineBats := make([]batteryInfo, 0, len(batteries))

@@ -49,6 +49,7 @@ import (
 	"github.com/frahlg/forty-two-watts/go/internal/selfupdate"
 	"github.com/frahlg/forty-two-watts/go/internal/state"
 	"github.com/frahlg/forty-two-watts/go/internal/telemetry"
+	"github.com/frahlg/forty-two-watts/go/internal/thermal"
 )
 
 // Version gets injected at build time via -ldflags. Defaults to "dev" for
@@ -896,6 +897,63 @@ func main() {
 		})
 	}
 
+	// ---- Thermal block controller ----
+	// One controller for every configured thermal driver (heat pumps,
+	// hot-water cylinders, etc.). Schedules block commands by price
+	// AFTER each MPC replan; the dispatch tick below calls Tick() to
+	// emit any state-change command. See go/internal/thermal for
+	// the rationale for keeping this out of the MPC DP.
+	thermalCtl := thermal.NewController(reg.Send)
+	thermalDrivers := make([]thermal.DriverConfig, 0)
+	for _, d := range cfg.Drivers {
+		if !isLikelyThermalDriver(d.Lua) || d.Name == "" {
+			continue
+		}
+		thermalDrivers = append(thermalDrivers, thermal.DriverConfig{
+			Name:      d.Name,
+			MaxBlockW: d.MaxDischargeW,
+			// Operator-tunable budget + price floor land here once
+			// the YAML schema gains them; defaults inside ScheduleBlocks
+			// (6 kWh/day @ 50 öre/kWh floor) work for a sane first cut.
+		})
+	}
+	updateThermalSchedule := func() {
+		if len(thermalDrivers) == 0 || mpcSvc == nil {
+			return
+		}
+		plan := mpcSvc.Latest()
+		if plan == nil || len(plan.Actions) == 0 {
+			return
+		}
+		// Build PriceSlot list from the plan's actions. Skip past
+		// slots so the scheduler only ever decides about the
+		// future.
+		now := time.Now()
+		priceSlots := make([]thermal.PriceSlot, 0, len(plan.Actions))
+		for _, a := range plan.Actions {
+			slotEnd := time.UnixMilli(a.SlotStartMs).Add(
+				time.Duration(a.SlotLenMin) * time.Minute)
+			if slotEnd.Before(now) {
+				continue
+			}
+			priceSlots = append(priceSlots, thermal.PriceSlot{
+				StartMs:  a.SlotStartMs,
+				LenMin:   a.SlotLenMin,
+				PriceOre: a.PriceOre,
+			})
+		}
+		for _, td := range thermalDrivers {
+			thermalCtl.SetSchedule(td.Name, thermal.ScheduleBlocks(priceSlots, td))
+		}
+	}
+	// updateThermalSchedule is cheap (O(N log N) over ~193 slots
+	// once a day's price forecast lands). Called once at startup
+	// and again from the dispatch tick rate-limited to once per
+	// minute — the price forecast doesn't change faster than
+	// that, and the Controller's per-driver de-bounce ensures
+	// re-issuing the same schedule produces zero commands.
+	updateThermalSchedule()
+
 	// ---- Self-update checker ----
 	// Probes the GitHub Releases API in the background; the UI reads the
 	// cached result via /api/version/check. Gated behind FTW_SELFUPDATE_ENABLED
@@ -1204,6 +1262,11 @@ func main() {
 	var prevFuseSaturated bool
 	var lastFuseReplan time.Time
 	const fuseReplanCooldown = 60 * time.Second
+	// Re-run the thermal scheduler once per minute from the
+	// dispatch tick so price-forecast updates land in the next
+	// block decision without needing a callback into mpc.Service.
+	var lastThermalUpdate time.Time
+	const thermalScheduleInterval = 60 * time.Second
 	// One-shot replan when the FIRST DerVehicle reading arrives. The
 	// startup replan ran with whatever fallback SoC was available; once
 	// the Tesla / vehicle driver gets ground truth from the car, the
@@ -1356,6 +1419,21 @@ func main() {
 			// → snap → send) is owned by loadpoint.Controller so the
 			// main tick stays a thin orchestrator. See issue #172.
 			lpController.Tick(ctx, time.Now())
+
+			// ---- Thermal dispatch: heat-pump block / release ----
+			// The thermal controller has its own per-tick state
+			// machine, idempotent across ticks (only sends when the
+			// scheduled block-W changes). DerThermalBattery drivers
+			// are intentionally NOT in the dispatch.go battery
+			// distribution path — this is the only place block
+			// commands originate. Refresh the schedule periodically
+			// so a freshly-replanned price forecast lands in the
+			// next block decision.
+			if time.Since(lastThermalUpdate) > thermalScheduleInterval {
+				updateThermalSchedule()
+				lastThermalUpdate = time.Now()
+			}
+			thermalCtl.Tick(ctx, time.Now())
 
 			// ---- Trigger MPC replan on fuse-saturation rising edge ----
 			// The joint allocator (control.dispatch) just throttled
@@ -1534,9 +1612,46 @@ func driverCapacitiesFrom(drivers []config.Driver, loadpoints []config.Loadpoint
 		if isLikelyEVDriver(d.Lua) {
 			continue
 		}
+		// Thermal-battery drivers (e.g. myuplink heat pumps) emit as
+		// DerThermalBattery, NOT DerBattery — they aren't grid-coupled
+		// and the dispatcher's `Get(name, DerBattery)` will skip them
+		// regardless. Excluding them here keeps their thermal-store
+		// "capacity" out of the MPC pool's totalCap so the DP's
+		// SoC / terminal-credit math doesn't mistake a 5 kWh tank for
+		// 5 kWh of grid-supporting kWh. A future PR can add a
+		// thermal-store decision variable to the DP for proper
+		// MPC-driven blocking; until then thermal drivers are
+		// telemetry-only.
+		if isLikelyThermalDriver(d.Lua) {
+			continue
+		}
 		out[d.Name] = d.BatteryCapacityWh
 	}
 	return out
+}
+
+// isLikelyThermalDriver reports whether the Lua path looks like a
+// thermal-battery / load-shifter driver — read like
+// isLikelyEVDriver: a narrow allowlist of drivers that emit as
+// DerThermalBattery so cfg-time aggregators can exclude them
+// without round-tripping through the loaded Lua VM.
+func isLikelyThermalDriver(luaPath string) bool {
+	if luaPath == "" {
+		return false
+	}
+	base := strings.ToLower(luaPath)
+	if i := strings.LastIndex(base, "/"); i >= 0 {
+		base = base[i+1:]
+	}
+	base = strings.TrimSuffix(base, ".lua")
+	for _, p := range []string{
+		"myuplink", // myuplink.lua — NIBE / Bosch / Atlantic / Daikin via MyUplink Cloud
+	} {
+		if strings.HasPrefix(base, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // driverLimitsFrom builds the driver-name → per-battery PowerLimits map
@@ -1551,20 +1666,32 @@ func driverLimitsFrom(drivers []config.Driver, batteries map[string]config.Batte
 	out := map[string]control.PowerLimits{}
 	for _, d := range drivers {
 		chg, dis := d.MaxChargeW, d.MaxDischargeW
+		// blockCharge is true when the operator explicitly wrote max_charge_w: 0
+		// on a driver that is also registered as a battery (battery_capacity_wh > 0).
+		// Because MaxChargeW is a float64 with omitempty, an absent field and an
+		// explicit 0 are indistinguishable at the struct level. We use
+		// BatteryCapacityWh > 0 as the signal that this driver is intentionally
+		// participating in dispatch — making MaxChargeW == 0 a deliberate cap.
+		blockCharge := d.MaxChargeW == 0 && d.BatteryCapacityWh > 0
 		if b, ok := batteries[d.Name]; ok {
 			if chg == 0 && b.MaxChargeW != nil && *b.MaxChargeW > 0 {
 				chg = *b.MaxChargeW
+				blockCharge = false // batteries section overrides the zero
 			}
 			if dis == 0 && b.MaxDischargeW != nil && *b.MaxDischargeW > 0 {
 				dis = *b.MaxDischargeW
 			}
 		}
-		if chg == 0 && dis == 0 {
+		// Include driver in the map if any limit is set, or if blockCharge is
+		// active — previously a (0, 0) pair was silently skipped, which meant
+		// max_charge_w: 0 had no effect when max_discharge_w was also absent.
+		if chg == 0 && dis == 0 && !blockCharge {
 			continue
 		}
 		out[d.Name] = control.PowerLimits{
 			MaxChargeW:    chg,
 			MaxDischargeW: dis,
+			BlockCharge:   blockCharge,
 		}
 	}
 	return out
