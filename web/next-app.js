@@ -595,6 +595,7 @@
       var voltage = fuseCfg.voltage  || 230;
 
       var phaseI = Array.isArray(data.phase_amps) ? data.phase_amps : [];
+      var phaseW = Array.isArray(data.phase_powers) ? data.phase_powers : [];
       var hasPhaseData = phaseI.length > 0;
 
       // Hide the per-phase box row entirely when no phase data, otherwise
@@ -621,6 +622,14 @@
         if (fusePhases.childElementCount !== phases) {
           fusePhases.innerHTML = "";
           for (var p = 0; p < phases; p++) {
+            // Each grid column is a wrapper: the boxed fuse tile on
+            // top, the signed-W readout BELOW the box (outside it),
+            // smaller font, dimmed. Keeps the box clean and lets the
+            // W label sit right under the bar without padding/border
+            // around it.
+            var col = document.createElement("div");
+            col.className = "fuse-phase-col";
+
             var box = document.createElement("div");
             box.className = "fuse-phase-box";
             var lab = document.createElement("div");
@@ -637,30 +646,41 @@
             box.appendChild(lab);
             box.appendChild(v);
             box.appendChild(bar);
-            fusePhases.appendChild(box);
+
+            var vw = document.createElement("div");
+            vw.className = "fuse-phase-w";
+            vw.textContent = "-- W";
+
+            col.appendChild(box);
+            col.appendChild(vw);
+            fusePhases.appendChild(col);
           }
         }
-        var boxes = fusePhases.querySelectorAll(".fuse-phase-box");
-        for (var rb = 0; rb < boxes.length; rb++) {
+        var cols = fusePhases.querySelectorAll(".fuse-phase-col");
+        for (var rb = 0; rb < cols.length; rb++) {
           var rawA = rb < phaseI.length ? phaseI[rb] : 0;
+          var rawW = rb < phaseW.length ? phaseW[rb] : 0;
           var magA = Math.abs(rawA);
           var pct = Math.min(100, (magA / maxAmps) * 100);
-          var bf = boxes[rb].querySelector(".fuse-phase-fill");
-          var bv = boxes[rb].querySelector(".fuse-phase-val");
-          // CSS custom property so the same value drives both the
-          // horizontal bar (desktop) and the vertical bar (mobile)
-          // without the inline width overriding the mobile media
-          // query. The two orientations are pure CSS flips below.
+          var bf = cols[rb].querySelector(".fuse-phase-fill");
+          var bv = cols[rb].querySelector(".fuse-phase-val");
+          var bvw = cols[rb].querySelector(".fuse-phase-w");
           bf.style.setProperty("--fill-pct", pct + "%");
-          // Smooth gradient instead of the old .warn/.crit buckets:
-          // fuseFillColor() interpolates green→yellow→orange→red
-          // across 50%/75%/90% knees so a bar at 45 % already leans
-          // yellow, 55 % is clearly yellow, 82 % is firmly orange, etc.
-          // Export (negative current, PV backfeed) keeps its own cool
-          // cyan via the .export class.
           bf.style.backgroundColor = (rawA < -0.1) ? "" : fuseFillColor(pct);
           bf.className = "fuse-phase-fill" + (rawA < -0.1 ? " export" : "");
-          bv.textContent = magA.toFixed(1) + " A";
+          // Display SIGNED current (operator-requested): the bar still
+          // sizes by magnitude so the fuse-fraction is visually honest,
+          // but the number shows direction so an exporting phase reads
+          // "-7.3 A" rather than the same "7.3 A" as an importing one.
+          var signedA = rawA;
+          if (Math.abs(signedA) < 0.05) signedA = 0;
+          bv.textContent = signedA.toFixed(1) + " A";
+          if (bvw) {
+            var sw = rawW;
+            if (Math.abs(sw) < 1) sw = 0;
+            bvw.textContent = Math.round(sw) + " W";
+            bvw.classList.toggle("export", rawW < -1);
+          }
         }
       }
     }

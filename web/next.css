@@ -375,8 +375,21 @@ body.ftw-next .fuse-card .card-label {
 }
 body.ftw-next .fuse-phase-boxes {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  /* Always 3 equal columns so the per-phase tiles line up vertically
+     with the phase-power row below, regardless of viewport. The
+     previous auto-fit minmax(140px, 1fr) collapsed to fewer columns
+     on narrow screens and the two rows stopped aligning. */
+  grid-template-columns: repeat(3, 1fr);
   gap: 10px;
+}
+body.ftw-next .fuse-phase-col {
+  /* Wrapper for one phase column: the boxed tile sits on top, the
+     signed-W readout sits OUTSIDE the box just below it. Keeps the
+     box visually clean (label + A val + bar) while still carrying
+     the W diagnostic in the same column position. */
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 body.ftw-next .fuse-phase-box {
   /* Sub-card sits INSIDE the fuse card, so pick --ink-sunken (the
@@ -392,6 +405,23 @@ body.ftw-next .fuse-phase-box {
   display: grid;
   grid-template-rows: auto auto auto;
   gap: 6px;
+}
+body.ftw-next .fuse-phase-col .fuse-phase-w {
+  /* Smaller, dimmer than the A reading — diagnostic, not primary.
+     Lives outside the box so it doesn't take padding/border real
+     estate. Sign convention matches the bar's export class. */
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+  color: var(--fg-label);
+  text-align: left;
+  line-height: 1.1;
+  padding: 0 4px;
+}
+body.ftw-next .fuse-phase-col .fuse-phase-w.export {
+  color: var(--cyan);
 }
 body.ftw-next .fuse-phase-box .fuse-phase-label {
   font-family: var(--mono);
