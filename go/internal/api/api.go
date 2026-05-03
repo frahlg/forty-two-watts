@@ -7,6 +7,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -121,6 +122,17 @@ type Deps struct {
 	// /api/notifications/* endpoints.
 	Notifications *notifications.Service
 
+	// Restart triggers a graceful process restart from POST /api/restart.
+	// Implementations:
+	//   - production (docker compose): dispatch to the ftw-updater sidecar
+	//     so the running container is force-recreated against the same
+	//     image — exact same code path as the post-update restart.
+	//   - dev / systemd: signal main() to return with a non-zero exit
+	//     code; docker (unless-stopped) and systemd (on-failure) bring
+	//     the binary back up.
+	// nil disables /api/restart (returns 503).
+	Restart func(ctx context.Context) error
+
 	Version string
 }
 
@@ -225,6 +237,7 @@ func (s *Server) routes() {
 	s.handle("GET  /api/version/snapshots", s.handleVersionSnapshots)
 	s.handle("DELETE /api/version/snapshots/{id}", s.handleVersionSnapshotDelete)
 	s.handle("POST /api/version/rollback", s.handleVersionRollback)
+	s.handle("POST /api/restart", s.handleRestart)
 
 	// ---- Static web UI ----
 	// Everything not matched above falls through to the static server.
@@ -573,6 +586,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		}(),
 		"fuse":             fuseCfg,
 		"phase_amps":       phaseAmps,
+		"phase_powers":     siteMeterPhasePowers(s.deps.Tel, ctrl.SiteMeterDriver),
 		"drivers":          drivers,
 		"dispatch":         dispatch,
 	}
@@ -600,6 +614,29 @@ func siteMeterPhaseAmps(tel *telemetry.Store, siteMeter string) []float64 {
 	if payload.L1A != nil { out = append(out, *payload.L1A) }
 	if payload.L2A != nil { out = append(out, *payload.L2A) }
 	if payload.L3A != nil { out = append(out, *payload.L3A) }
+	return out
+}
+
+// siteMeterPhasePowers pulls per-phase L1/L2/L3 active power (W) from
+// the site meter driver's emit payload. Mirrors siteMeterPhaseAmps —
+// signed values, negative = export on that phase. UI uses these to
+// display a per-phase W reading next to the per-phase A bar so the
+// operator can see one phase importing while another exports
+// (typical when a 1Φ EV is on L1 and PV is balanced across L2/L3).
+func siteMeterPhasePowers(tel *telemetry.Store, siteMeter string) []float64 {
+	if siteMeter == "" { return nil }
+	r := tel.Get(siteMeter, telemetry.DerMeter)
+	if r == nil || len(r.Data) == 0 { return nil }
+	var payload struct {
+		L1W *float64 `json:"l1_w"`
+		L2W *float64 `json:"l2_w"`
+		L3W *float64 `json:"l3_w"`
+	}
+	if err := json.Unmarshal(r.Data, &payload); err != nil { return nil }
+	out := make([]float64, 0, 3)
+	if payload.L1W != nil { out = append(out, *payload.L1W) }
+	if payload.L2W != nil { out = append(out, *payload.L2W) }
+	if payload.L3W != nil { out = append(out, *payload.L3W) }
 	return out
 }
 
@@ -658,6 +695,13 @@ func (s *Server) handlePostConfig(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]string{"error": "validation: " + err.Error()})
 		return
 	}
+	// Diff against the live config BEFORE we mutate the shared pointer —
+	// otherwise the comparison would always come back empty.
+	s.deps.CfgMu.RLock()
+	oldCfg := *s.deps.Cfg
+	s.deps.CfgMu.RUnlock()
+	restartReasons := config.RestartRequiredFor(&oldCfg, &newCfg)
+
 	// Persist atomically (Password has yaml:"-" so it won't appear in YAML)
 	if err := s.deps.SaveConfig(s.deps.ConfigPath, &newCfg); err != nil {
 		writeJSON(w, 500, map[string]string{"error": "save failed: " + err.Error()})
@@ -675,8 +719,12 @@ func (s *Server) handlePostConfig(w http.ResponseWriter, r *http.Request) {
 	s.deps.CfgMu.Lock()
 	*s.deps.Cfg = newCfg
 	s.deps.CfgMu.Unlock()
-	slog.Info("config updated via API")
-	writeJSON(w, 200, map[string]string{"status": "ok"})
+	slog.Info("config updated via API", "restart_required", len(restartReasons) > 0)
+	writeJSON(w, 200, map[string]any{
+		"status":           "ok",
+		"restart_required": len(restartReasons) > 0,
+		"restart_reasons":  restartReasons,
+	})
 }
 
 // ---- /api/mode ----

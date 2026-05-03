@@ -67,6 +67,11 @@ type NotificationRule struct {
 	Type          string `yaml:"type" json:"type"`
 	Enabled       bool   `yaml:"enabled" json:"enabled"`
 	ThresholdS    int    `yaml:"threshold_s,omitempty" json:"threshold_s,omitempty"`
+	// ThresholdN is a count-based threshold used by event types that
+	// aggregate across drivers (concurrent_drivers_offline). Ignored
+	// by per-driver events. Default behaviour per event documented
+	// alongside the const in notifications/service.go.
+	ThresholdN    int    `yaml:"threshold_n,omitempty" json:"threshold_n,omitempty"`
 	Priority      int    `yaml:"priority,omitempty" json:"priority,omitempty"`
 	Tags          string `yaml:"tags,omitempty" json:"tags,omitempty"`
 	TitleTemplate string `yaml:"title_template,omitempty" json:"title_template,omitempty"`
@@ -265,6 +270,15 @@ type Driver struct {
 	// cross-charging. Untagged drivers keep today's capacity-proportional
 	// behavior. See issue #143 and docs/configuration.md.
 	InverterGroup string `yaml:"inverter_group,omitempty" json:"inverter_group,omitempty"`
+	// SupportsPVCurtail flags this driver as one that handles the
+	// `curtail` / `curtail_disable` actions in its lua. Drivers with
+	// it set become eligible for ComputePVCurtail dispatch when the
+	// MPC's slot directive carries a PVLimitW > 0 (negative-export
+	// economic guard). Default false — operators must opt in per
+	// driver to avoid surprising older configs. The lua side has
+	// always been there for sungrow / ferroamp / deye / huawei /
+	// solis; this flag just turns on the Go-side dispatcher.
+	SupportsPVCurtail bool `yaml:"supports_pv_curtail,omitempty" json:"supports_pv_curtail,omitempty"`
 	// Disabled skips this driver at startup / reload. Set via the UI when
 	// you want to temporarily take a driver out without editing yaml.
 	Disabled bool `yaml:"disabled,omitempty" json:"disabled,omitempty"`
@@ -377,6 +391,15 @@ type Price struct {
 	// ExportFeeOreKwh is a per-kWh deduction on export (e.g. transmission
 	// fees some DSOs charge for feed-in). Reduces effective export price.
 	ExportFeeOreKwh float64 `yaml:"export_fee_ore_kwh,omitempty" json:"export_fee_ore_kwh,omitempty"`
+
+	// ExportFloorOreKwh, if set, clamps per-slot export revenue at the
+	// given floor (öre/kWh). Use this only when your retailer caps
+	// negative-spot export at zero — i.e. they don't bill you when
+	// spot goes negative. Default (unset / nil) lets export revenue
+	// follow real spot, which can go negative; that's the physics
+	// most Swedish customer agreements pass through. Set to a pointer
+	// to 0.0 if you have a guaranteed-zero-floor agreement.
+	ExportFloorOreKwh *float64 `yaml:"export_floor_ore_kwh,omitempty" json:"export_floor_ore_kwh,omitempty"`
 }
 
 // Weather is the weather-forecast source config.

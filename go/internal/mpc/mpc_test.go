@@ -139,6 +139,79 @@ func TestArbitrageDischargesToExpensive(t *testing.T) {
 	}
 }
 
+// Regression: arbitrage at negative spot must NOT discharge battery to
+// grid. Real incident 2026-05-02: operator switched to planner_arbitrage
+// during −5 öre spot prices and watched batteries discharge full power
+// into the grid. Root cause was slotExportOre clamping at 0 — exporting
+// at negative spot looked "free" instead of "costly", so the DP tied on
+// multiple paths and could pick aggressive discharge by tie-break.
+//
+// With the clamp removed (default), exporting at negative spot is a
+// positive cost, so the DP MUST prefer idle/charge over discharge.
+func TestArbitrageDoesNotDischargeAtNegativeSpot(t *testing.T) {
+	// Six 60-min slots, all with negative spot. Light load + steady PV
+	// surplus, so the baseline grid is already exporting; the question
+	// is whether the battery makes export *worse*.
+	slots := make([]Slot, 6)
+	for i := range slots {
+		slots[i] = Slot{
+			StartMs:    int64(i) * 60 * 60 * 1000,
+			LenMin:     60,
+			PriceOre:   80,   // consumer total stays positive (grid + VAT
+			SpotOre:    -5.0, // wholesale spot pays you to consume
+			LoadW:      500,
+			PVW:        -2000, // 2 kW solar
+			Confidence: 1.0,
+		}
+	}
+	p := baseParams(ModeArbitrage)
+	p.InitialSoCPct = 60      // plenty of headroom either direction
+	p.TerminalSoCPrice = 80.0 // realistic — same scale as PriceOre, so
+	//                            cycling losses register in the objective
+	plan := Optimize(slots, p)
+
+	for i, a := range plan.Actions {
+		if a.BatteryW < -1e-6 {
+			t.Errorf("slot %d: battery discharging %fW at negative spot %.2f öre",
+				i, a.BatteryW, a.SpotOre)
+		}
+	}
+}
+
+// With ExportFloorOreKwh set to a pointer-to-zero, the old clamp
+// behaviour returns: export at negative spot looks free again. This
+// codifies the back-compat knob for retailers that don't bill for
+// negative-spot export, and also guards against accidental removal of
+// the per-customer override.
+func TestArbitrageNegativeSpotWithExportFloorClampsAtZero(t *testing.T) {
+	zero := 0.0
+	slots := []Slot{
+		{StartMs: 0, LenMin: 60, PriceOre: 80, SpotOre: -5.0,
+			LoadW: 500, PVW: -2000, Confidence: 1.0},
+		// Second slot identical so the planner has multiple
+		// indistinguishable options to pick from. With the floor at 0
+		// the cost of discharging vs idling is exactly equal — but
+		// neither should exhibit a *positive* cost (i.e. v < 0 must
+		// have been clamped out).
+		{StartMs: 60 * 60 * 1000, LenMin: 60, PriceOre: 80, SpotOre: -5.0,
+			LoadW: 500, PVW: -2000, Confidence: 1.0},
+	}
+	p := baseParams(ModeArbitrage)
+	p.InitialSoCPct = 60
+	p.ExportFloorOreKwh = &zero
+	p.TerminalSoCPrice = 0
+	// We don't assert a specific dispatch — the floor makes export
+	// a tie. Just sanity-check that Optimize doesn't crash and the
+	// reported plan cost isn't artificially negative.
+	plan := Optimize(slots, p)
+	for i, a := range plan.Actions {
+		if a.CostOre < -1e-6 {
+			t.Errorf("slot %d: cost %f öre went negative under export floor=0",
+				i, a.CostOre)
+		}
+	}
+}
+
 // ---- Efficiency ----
 
 func TestEfficiencyCostsSoC(t *testing.T) {

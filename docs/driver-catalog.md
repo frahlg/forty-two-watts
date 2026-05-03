@@ -35,6 +35,7 @@ back to the device; read-only drivers only emit telemetry.
 | Sofar HYD-ES / HYD-EP | Sofar | Modbus | battery, meter, pv | no | HYD 6000-ES, HYD 20KTL-3PH | `drivers/sofar.lua` |
 | SolarEdge HD-Wave / StorEdge | SolarEdge | Modbus | meter, pv | no | SE10K, StorEdge SE7600A-US | `drivers/solaredge.lua` |
 | SolarEdge inverter (PV only) | SolarEdge | Modbus | pv | no | HD-Wave, StorEdge | `drivers/solaredge_pv.lua` |
+| SolarEdge legacy K-series (display) | SolarEdge | Modbus | pv | no | SE7K, SE10K, SE17K, SE25K | `drivers/solaredge_legacy.lua` |
 | Solis hybrid inverter | Solis | Modbus | battery, meter, pv | yes | RHI-6K-48ES-5G, S6-EH3P10K-H | `drivers/solis.lua` |
 | Sungrow SH Hybrid Inverter | Sungrow | Modbus | battery, meter, pv | yes | SH5.0RT, SH6.0RT, SH8.0RT, SH10RT | `drivers/sungrow.lua` |
 | Victron Cerbo GX / Venus GX | Victron | Modbus | battery, meter, pv | no | Cerbo GX, Venus GX | `drivers/victron.lua` |
