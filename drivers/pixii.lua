@@ -221,21 +221,25 @@ function driver_poll()
 
     -- ---- Meter Values ----
 
-    -- Per-phase current: 40237-40239, I16 each. Emit MAGNITUDE only —
-    -- consistent with ferroamp.lua / sungrow.lua and with the
-    -- l1_a/l2_a/l3_a meter contract that the dispatch's per-phase fuse
-    -- guard reads. Direction is already conveyed by meter_w (signed at
-    -- the aggregate level); per-phase signed values would only make
-    -- sense for unbalanced-load diagnostics, and we don't expose those
-    -- as separate metrics today. Without abs() the dispatch's per-phase
-    -- guard had a sign-blind spot on export — site exported at 17 A on
-    -- one phase before any clamp fired.
+    -- Per-phase current: 40237-40239, I16 each. Pixii's amperage
+    -- registers are magnitude-only (the firmware reports the absolute
+    -- value regardless of direction), so we derive the SIGN from the
+    -- signed per-phase power read in the same atomic poll below
+    -- (l1_w / l2_w / l3_w decode immediately after this block from
+    -- contiguous registers — same Modbus snapshot, same instant).
+    -- Final emit is `sign(l*_w) * |l*_a|`, giving the UI the
+    -- direction it needs without the Pixii's own missing sign bit.
+    --
+    -- Fuse safety: dispatch.go:1561 takes math.Abs() before clamping,
+    -- so signed amps here do NOT weaken the per-phase fuse guard —
+    -- the guard fires on magnitude regardless of direction, exactly
+    -- as before.
     local ok_la, la_regs = pcall(host.modbus_read, 40237, 3, "holding")
-    local l1_a, l2_a, l3_a = 0, 0, 0
+    local l1_a_mag, l2_a_mag, l3_a_mag = 0, 0, 0
     if ok_la and la_regs then
-        l1_a = math.abs(scale(host.decode_i16(la_regs[1]), meter_a_sf))
-        l2_a = math.abs(scale(host.decode_i16(la_regs[2]), meter_a_sf))
-        l3_a = math.abs(scale(host.decode_i16(la_regs[3]), meter_a_sf))
+        l1_a_mag = math.abs(scale(host.decode_i16(la_regs[1]), meter_a_sf))
+        l2_a_mag = math.abs(scale(host.decode_i16(la_regs[2]), meter_a_sf))
+        l3_a_mag = math.abs(scale(host.decode_i16(la_regs[3]), meter_a_sf))
     end
 
     -- Per-phase voltage: 40242-40244, I16 each
@@ -269,6 +273,21 @@ function driver_poll()
         l2_w = scale(host.decode_i16(lpw_regs[2]), meter_w_sf)
         l3_w = scale(host.decode_i16(lpw_regs[3]), meter_w_sf)
     end
+
+    -- Compose signed per-phase current = sign(power) × |amperage|.
+    -- A small dead-band around 0 W avoids flipping the sign when a
+    -- near-zero phase reads as +0.4 W vs -0.4 W between polls. With
+    -- |W| < 1, treat the phase as zero-amp regardless of magnitude
+    -- (consumer current at <1 W on 230 V is 4 mA — below register
+    -- resolution anyway).
+    local function signed_a(mag, w)
+        if math.abs(w) < 1 then return 0 end
+        if w < 0 then return -mag end
+        return mag
+    end
+    local l1_a = signed_a(l1_a_mag, l1_w)
+    local l2_a = signed_a(l2_a_mag, l2_w)
+    local l3_a = signed_a(l3_a_mag, l3_w)
 
     -- Export energy: 40272-40275, U32 BE (two regs consumed for the value)
     local ok_exp, exp_regs = pcall(host.modbus_read, 40272, 4, "holding")

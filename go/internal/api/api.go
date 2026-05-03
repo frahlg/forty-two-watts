@@ -586,6 +586,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		}(),
 		"fuse":             fuseCfg,
 		"phase_amps":       phaseAmps,
+		"phase_powers":     siteMeterPhasePowers(s.deps.Tel, ctrl.SiteMeterDriver),
 		"drivers":          drivers,
 		"dispatch":         dispatch,
 	}
@@ -613,6 +614,29 @@ func siteMeterPhaseAmps(tel *telemetry.Store, siteMeter string) []float64 {
 	if payload.L1A != nil { out = append(out, *payload.L1A) }
 	if payload.L2A != nil { out = append(out, *payload.L2A) }
 	if payload.L3A != nil { out = append(out, *payload.L3A) }
+	return out
+}
+
+// siteMeterPhasePowers pulls per-phase L1/L2/L3 active power (W) from
+// the site meter driver's emit payload. Mirrors siteMeterPhaseAmps —
+// signed values, negative = export on that phase. UI uses these to
+// display a per-phase W reading next to the per-phase A bar so the
+// operator can see one phase importing while another exports
+// (typical when a 1Φ EV is on L1 and PV is balanced across L2/L3).
+func siteMeterPhasePowers(tel *telemetry.Store, siteMeter string) []float64 {
+	if siteMeter == "" { return nil }
+	r := tel.Get(siteMeter, telemetry.DerMeter)
+	if r == nil || len(r.Data) == 0 { return nil }
+	var payload struct {
+		L1W *float64 `json:"l1_w"`
+		L2W *float64 `json:"l2_w"`
+		L3W *float64 `json:"l3_w"`
+	}
+	if err := json.Unmarshal(r.Data, &payload); err != nil { return nil }
+	out := make([]float64, 0, 3)
+	if payload.L1W != nil { out = append(out, *payload.L1W) }
+	if payload.L2W != nil { out = append(out, *payload.L2W) }
+	if payload.L3W != nil { out = append(out, *payload.L3W) }
 	return out
 }
 
