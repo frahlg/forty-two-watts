@@ -1435,9 +1435,46 @@ func driverCapacitiesFrom(drivers []config.Driver, loadpoints []config.Loadpoint
 		if isLikelyEVDriver(d.Lua) {
 			continue
 		}
+		// Thermal-battery drivers (e.g. myuplink heat pumps) emit as
+		// DerThermalBattery, NOT DerBattery — they aren't grid-coupled
+		// and the dispatcher's `Get(name, DerBattery)` will skip them
+		// regardless. Excluding them here keeps their thermal-store
+		// "capacity" out of the MPC pool's totalCap so the DP's
+		// SoC / terminal-credit math doesn't mistake a 5 kWh tank for
+		// 5 kWh of grid-supporting kWh. A future PR can add a
+		// thermal-store decision variable to the DP for proper
+		// MPC-driven blocking; until then thermal drivers are
+		// telemetry-only.
+		if isLikelyThermalDriver(d.Lua) {
+			continue
+		}
 		out[d.Name] = d.BatteryCapacityWh
 	}
 	return out
+}
+
+// isLikelyThermalDriver reports whether the Lua path looks like a
+// thermal-battery / load-shifter driver — read like
+// isLikelyEVDriver: a narrow allowlist of drivers that emit as
+// DerThermalBattery so cfg-time aggregators can exclude them
+// without round-tripping through the loaded Lua VM.
+func isLikelyThermalDriver(luaPath string) bool {
+	if luaPath == "" {
+		return false
+	}
+	base := strings.ToLower(luaPath)
+	if i := strings.LastIndex(base, "/"); i >= 0 {
+		base = base[i+1:]
+	}
+	base = strings.TrimSuffix(base, ".lua")
+	for _, p := range []string{
+		"myuplink", // myuplink.lua — NIBE / Bosch / Atlantic / Daikin via MyUplink Cloud
+	} {
+		if strings.HasPrefix(base, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // driverLimitsFrom builds the driver-name → per-battery PowerLimits map

@@ -67,7 +67,18 @@ DRIVER = {
   manufacturer = "MyUplink (NIBE, Bosch, Atlantic, Daikin, ...)",
   version      = "2.0.0",
   protocols    = { "http" },
-  capabilities = { "battery", "apicreds" },
+  -- "thermal_battery" tells the host to emit DerThermalBattery
+  -- readings (instead of DerBattery). Site-equation aggregators
+  -- (api batW/loadW/weightedSoC, mpc loadW reconstruction,
+  -- dispatch currentTotal + applyFuseGuard predictor +
+  -- distributeProportional) intentionally EXCLUDE this DerType:
+  -- heat-pump consumption is already in the meter as load, and a
+  -- "discharge" command sheds load instead of injecting power, so
+  -- including it in the battery aggregate would double-count. The
+  -- MPC dispatch routing path still targets these drivers
+  -- directly via the Registry — only the *aggregate* views
+  -- filter them out.
+  capabilities = { "thermal_battery", "apicreds" },
   description  = "Heat pump via MyUplink Cloud REST API v2. Fakes thermal stores as batteries so the MPC can block consumption during expensive price hours. Never charges — only blocks.",
   homepage     = "https://dev.myuplink.com",
   http_hosts   = { "api.myuplink.com" },
@@ -317,13 +328,20 @@ function driver_poll()
         power_w = (pts[PARAM_POWER].unit == "kW") and raw * 1000 or raw
     end
 
-    -- Emit as battery:
-    --   w   = compressor power right now (positive = consuming = "charging")
-    --   soc = always 1.0 so MPC always considers discharge (blocking) available
+    -- Emit as thermal_battery:
+    --   w   = compressor power right now (positive = consuming).
+    --         Stays as a positive load reading; the site equation
+    --         is self-consistent because the meter already sees
+    --         this as load and the aggregators filter
+    --         DerThermalBattery out of the battery sum so it isn't
+    --         ALSO counted as battery charging.
+    --   soc = always 1.0 so the MPC always considers "discharge"
+    --         (blocking) available — real thermal state is opaque.
     --
-    -- The MPC will never send charge commands because max_charge_w = 0
-    -- in config.yaml. It will only send discharge (block) or idle (release).
-    host.emit("battery", {
+    -- The MPC will never send charge commands because max_charge_w
+    -- = 0 in config.yaml. It will only send discharge (block) or
+    -- idle (release).
+    host.emit("thermal_battery", {
         w   = power_w,
         soc = 1.0,
     })
