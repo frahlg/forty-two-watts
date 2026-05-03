@@ -26,8 +26,9 @@
 //	host.modbus_write_multi(addr, values)
 //	host.json_decode(s)             -- convenience JSON → Lua table
 //	host.json_encode(t)             -- Lua table → JSON string
-//	host.http_get(url, headers)     -- HTTP GET, returns (body, nil) or (nil, err)
-//	host.http_post(url, body, headers) -- HTTP POST, returns (body, nil) or (nil, err)
+//	host.http_get(url, headers)          -- HTTP GET, returns (body, nil) or (nil, err)
+//	host.http_post(url, body, headers)   -- HTTP POST, returns (body, nil) or (nil, err)
+//	host.http_patch(url, body, headers)  -- HTTP PATCH, returns (body, nil) or (nil, err)
 //
 // Lua 5.1 via yuin/gopher-lua — pure Go, zero CGo, one allocation-aware
 // interpreter per driver.
@@ -436,6 +437,7 @@ func registerHost(L *lua.LState, env *HostEnv) {
 	// ---- HTTP capability ----
 	// host.http_get(url, headers?) → (body, nil) or (nil, error_string)
 	// host.http_post(url, body, headers?) → (body, nil) or (nil, error_string)
+	// host.http_patch(url, body, headers?) → (body, nil) or (nil, error_string)
 	// headers is an optional Lua table {["Content-Type"]="application/json", ...}
 	httpClient := &net_http.Client{Timeout: 15 * time.Second}
 
@@ -565,6 +567,49 @@ func registerHost(L *lua.LState, env *HostEnv) {
 		}
 		payload := L.CheckString(2)
 		req, err := net_http.NewRequest("POST", url, strings.NewReader(payload))
+		if err != nil {
+			L.Push(lua.LNil)
+			L.Push(lua.LString(err.Error()))
+			return 2
+		}
+		req.Header.Set("Content-Type", "application/json")
+		applyHeaders(req, L, 3)
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			L.Push(lua.LNil)
+			L.Push(lua.LString(err.Error()))
+			return 2
+		}
+		defer resp.Body.Close()
+		body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		if err != nil {
+			L.Push(lua.LNil)
+			L.Push(lua.LString(err.Error()))
+			return 2
+		}
+		if resp.StatusCode >= 400 {
+			L.Push(lua.LNil)
+			L.Push(lua.LString(fmt.Sprintf("HTTP %d: %s", resp.StatusCode, string(body))))
+			return 2
+		}
+		L.Push(lua.LString(string(body)))
+		return 1
+	}))
+
+	host.RawSetString("http_patch", L.NewFunction(func(L *lua.LState) int {
+		if !env.HTTP {
+			L.Push(lua.LNil)
+			L.Push(lua.LString("http: capability not granted"))
+			return 2
+		}
+		url := L.CheckString(1)
+		if ok, reason := hostAllowed(url); !ok {
+			L.Push(lua.LNil)
+			L.Push(lua.LString("http: " + reason))
+			return 2
+		}
+		payload := L.CheckString(2)
+		req, err := net_http.NewRequest("PATCH", url, strings.NewReader(payload))
 		if err != nil {
 			L.Push(lua.LNil)
 			L.Push(lua.LString(err.Error()))
