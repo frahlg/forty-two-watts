@@ -545,6 +545,18 @@ func main() {
 		}
 	}
 	defer reg.ShutdownAll()
+	batteryIdentity := func(name string) (string, bool) {
+		return runningDeviceID(reg, name)
+	}
+	ctrl.BatteryHoldTargetValid = func(name, deviceID string) bool {
+		currentID, ok := batteryIdentity(name)
+		if !ok || currentID != deviceID {
+			return false
+		}
+		health := tel.DriverHealth(name)
+		reading := tel.Get(name, telemetry.DerBattery)
+		return health != nil && health.IsOnline() && reading != nil && reading.SoC != nil
+	}
 
 	// ---- Identity bootstrap ----
 	// Drivers report make/serial inside driver_init via host.set_make / set_sn,
@@ -2076,7 +2088,8 @@ func main() {
 		Tel: tel, LogRing: logRing, Ctrl: ctrl, CtrlMu: ctrlMu,
 		State: st,
 		CapMu: capMu, Capacities: capacities, TelemetryCapacities: telemetryCapacities,
-		CfgMu: cfgMu, Cfg: cfg, ConfigPath: *configPath,
+		BatteryIdentity: batteryIdentity,
+		CfgMu:           cfgMu, Cfg: cfg, ConfigPath: *configPath,
 		ConfigApplier:       applyConfigChange,
 		DriverDir:           resolveDriverDir(),
 		UserDriverDir:       *userDriversDirFlag,
@@ -2527,6 +2540,10 @@ func main() {
 			}
 
 			if !freshness.Allowed() {
+				// Clear before persisting: persistTelemetryTick snapshots
+				// ctrl, so the stored tick has to show the hold already
+				// released rather than one the blocked tick never executed.
+				clearBatteryManualHoldForDispatchBlock(ctrl, ctrlMu)
 				sampleCount, err := persistTelemetryTick(st, tel, ctrl, nowMs, watchdogTimeout)
 				if err != nil {
 					slog.Warn("tick persistence failed", "samples", sampleCount, "err", err)
@@ -2962,6 +2979,28 @@ func registerAllDevices(st *state.Store, reg *drivers.Registry) {
 			slog.Debug("device registered", "name", name, "device_id", id, "make", make, "sn", sn, "mac", mac)
 		}
 	}
+}
+
+func runningDeviceID(reg *drivers.Registry, name string) (string, bool) {
+	if reg == nil || name == "" {
+		return "", false
+	}
+	env := reg.Env(name)
+	if env == nil {
+		return "", false
+	}
+	makeName, serial, mac, endpoint := env.FullIdentity()
+	id := state.ResolveDeviceID(makeName, serial, mac, endpoint)
+	return id, id != ""
+}
+
+func clearBatteryManualHoldForDispatchBlock(ctrl *control.State, ctrlMu *sync.Mutex) {
+	if ctrl == nil || ctrlMu == nil {
+		return
+	}
+	ctrlMu.Lock()
+	ctrl.ClearBatteryManualHold()
+	ctrlMu.Unlock()
 }
 
 const driverDefaultTimeout = 2 * time.Second

@@ -79,16 +79,20 @@ type Deps struct {
 	CapMu               *sync.RWMutex
 	Capacities          map[string]float64 // driver → battery_capacity_wh (controllable pool)
 	TelemetryCapacities map[string]float64 // all site batteries incl. observe_only (SoC weighting)
-	CfgMu               *sync.RWMutex
-	Cfg                 *config.Config
-	ConfigPath          string
-	DriverDir           string // where to scan for Lua drivers (default: <config-dir>/drivers)
-	UserDriverDir       string // persistent user-drivers overlay; searched before DriverDir
-	Models              map[string]*battery.Model
-	ModelsMu            *sync.Mutex
-	SelfTune            *selftune.Coordinator
-	DtS                 float64                                   // control interval seconds (for model τ / age displays)
-	SaveConfig          func(path string, c *config.Config) error // injection for testability
+
+	// BatteryIdentity resolves the live driver to its current hardware.
+	BatteryIdentity func(driver string) (deviceID string, ok bool)
+
+	CfgMu         *sync.RWMutex
+	Cfg           *config.Config
+	ConfigPath    string
+	DriverDir     string // where to scan for Lua drivers (default: <config-dir>/drivers)
+	UserDriverDir string // persistent user-drivers overlay; searched before DriverDir
+	Models        map[string]*battery.Model
+	ModelsMu      *sync.Mutex
+	SelfTune      *selftune.Coordinator
+	DtS           float64                                   // control interval seconds (for model τ / age displays)
+	SaveConfig    func(path string, c *config.Config) error // injection for testability
 	// ConfigApplier is main.go's config-applied callback — the same
 	// closure the configreload watcher runs (registry reload with SoC
 	// bounds, capacities, inverter groups, fuse and mpc/loadmodel
