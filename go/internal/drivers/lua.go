@@ -942,6 +942,14 @@ func registerHost(L *lua.LState, env *HostEnv) {
 		return 0
 	}))
 
+	// Canonical names from the Blixt L1 host API, which srcfl/device-drivers
+	// uses as its naming reference. Registered as aliases so a converted
+	// driver runs here unchanged; the older spellings above stay until the
+	// catalog has moved and can then be retired together.
+	host.RawSetString("write", host.RawGetString("modbus_write"))
+	host.RawSetString("write_registers", host.RawGetString("modbus_write_multi"))
+	host.RawSetString("now_ms", host.RawGetString("millis"))
+
 	// Decode helpers for Modbus registers. Drivers read raw u16[] and
 	// need to combine pairs back into u32/i32. LE = little-endian
 	// (Sungrow's habit: lo-word first, then hi-word).

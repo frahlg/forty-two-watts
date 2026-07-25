@@ -90,6 +90,14 @@ the driver is a bug.
 telemetry, diagnostic metrics, identity, time/JSON helpers and capability-gated
 MQTT, Modbus, HTTP, WebSocket and raw TCP operations.
 
+Some calls answer to two names. `srcfl/device-drivers` treats the Blixt L1 host
+API as its naming reference and is converting its catalog to it, so `write`,
+`write_registers` and `now_ms` resolve to `modbus_write`, `modbus_write_multi`
+and `millis`. `host.emit` likewise reads `W` and `SoC_nom_fract` when `w` and
+`soc` are absent; when both are present the lowercase key wins. Prefer the
+canonical spelling in a new driver. The older names stay until the catalog has
+finished moving.
+
 A YAML driver entry grants only what the file needs:
 
 ```yaml

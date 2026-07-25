@@ -456,6 +456,13 @@ func (h *HostEnv) emitTelemetry(rawJSON []byte) error {
 		SoC             *float64 `json:"soc,omitempty"`
 		VehicleSoC      *float64 `json:"vehicle_soc,omitempty"`
 		VehicleSoCFract *float64 `json:"vehicle_soc_fract,omitempty"`
+
+		// Canonical @srcful/data-models spellings. srcfl/device-drivers is
+		// converting its catalog to these, one driver at a time. Accepting
+		// both lets a converted driver run here before the old names are
+		// retired, so no site loses telemetry mid-migration.
+		CanonicalW   *float64 `json:"W,omitempty"`
+		CanonicalSoC *float64 `json:"SoC_nom_fract,omitempty"`
 	}
 	if err := json.Unmarshal(rawJSON, &env); err != nil {
 		return fmt.Errorf("emit_telemetry: invalid json: %w", err)
@@ -463,6 +470,12 @@ func (h *HostEnv) emitTelemetry(rawJSON []byte) error {
 	t, err := telemetry.ParseDerType(env.Type)
 	if err != nil {
 		return err
+	}
+	if env.W == nil {
+		env.W = env.CanonicalW
+	}
+	if env.SoC == nil {
+		env.SoC = env.CanonicalSoC
 	}
 	rawW := 0.0
 	if env.W != nil {
