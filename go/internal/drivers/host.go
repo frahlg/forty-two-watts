@@ -495,6 +495,11 @@ func (h *HostEnv) emitTelemetry(rawJSON []byte) error {
 	if err := telemetry.ValidateReading(t, rawW, soc); err != nil {
 		return fmt.Errorf("emit_telemetry: %w", err)
 	}
+	// Rewrite alias keys onto the names the Nova payload reads, before the
+	// blob is buffered or stored. Without this a driver's energy counters and
+	// frequency never leave the gateway.
+	rawJSON = normalizeTelemetryKeys(rawJSON)
+
 	if h.bufferPollTelemetry(rawJSON) {
 		return nil
 	}
