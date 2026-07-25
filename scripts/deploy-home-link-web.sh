@@ -1,7 +1,7 @@
 #!/bin/bash
 # Deploy web/home-link.html + home-link-session.js + components/theme.css to
-# home.sourceful.energy. Run from the forty-two-watts repo root, on the commit
-# you want live. Mirrors the existing hand-rolled release layout; the previous
+# home.sourceful.energy. Run from the FTW repo root, on the commit you want
+# live. Mirrors the existing hand-rolled release layout; the previous
 # release directory is left in place so a rollback is one container recreate.
 set -euo pipefail
 
