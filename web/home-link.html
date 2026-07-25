@@ -466,14 +466,28 @@
         }
       }
 
+      var invite = null;
+
+      function reason(error) {
+        var text = error && error.message ? String(error.message) : "";
+        return text ? " (" + text + ")" : "";
+      }
+
+      // Each relay session is deliberately short lived, so reads open a new
+      // one instead of leaving the page dead until a manual reload.
+      function ensureSession() {
+        if (session && !session.isFailed()) return Promise.resolve();
+        session = new FTWHomeLinkSession.HomeLinkSession(invite);
+        return session.connect();
+      }
+
       setBusy(true);
       try {
         var sourceURL = window.__ftwHomeLinkSourceURL || window.location.href;
         window.__ftwHomeLinkSourceURL = "";
-        var invite = FTWHomeLinkSession.parseInvite(sourceURL);
+        invite = FTWHomeLinkSession.parseInvite(sourceURL);
         var pairing = FTWHomeLinkSession.parsePairing(sourceURL);
-        session = new FTWHomeLinkSession.HomeLinkSession(invite);
-        session.connect().then(function () {
+        ensureSession().then(function () {
           if (!pairing) return null;
           state.textContent = "Create your passkey to finish setup.";
           return session.enroll(pairing);
@@ -482,14 +496,12 @@
             ? "Passkey added · refresh the overview"
             : "Connected · refresh the overview";
           state.className = "home-link-state connected";
-          setBusy(false);
-        }).catch(function () {
-          state.textContent = "Could not reach this home.";
+        }).catch(function (error) {
+          state.textContent = "Could not reach this home." + reason(error);
           state.className = "home-link-state error";
-          setBusy(true);
-        });
-      } catch (_) {
-        state.textContent = "This Home Link invite is invalid.";
+        }).then(function () { setBusy(false); });
+      } catch (error) {
+        state.textContent = "This Home Link invite is invalid." + reason(error);
         state.className = "home-link-state error";
         setBusy(true);
       }
@@ -509,15 +521,18 @@
               until_ms: now, bucket_ms: 60 * 60 * 1000, limit: 24,
             };
           }
-          session.read(scope, history).then(function (response) {
+          ensureSession().then(function () {
+            return session.read(scope, history);
+          }).then(function (response) {
             renderResponse(scope, response);
-          }).catch(function () {
+          }).catch(function (error) {
             if (scope === "ftw.overview.read") {
-              state.textContent = "The overview read was denied. Try again.";
+              state.textContent = "The overview read failed." + reason(error) +
+                " Try again.";
               state.className = "home-link-state error";
             } else {
               showMessage(
-                "The read was denied or the connection closed. Reconnect and try again.",
+                "The read failed." + reason(error) + " Try again.",
                 "home-link-empty home-link-error"
               );
             }

@@ -503,6 +503,12 @@
     return result.credential;
   };
 
+  // The relay ends a browser stream on idle and caps its total lifetime, so a
+  // page that outlives one bounded session must open the next one itself.
+  HomeLinkSession.prototype.isFailed = function () {
+    return Boolean(this.failure);
+  };
+
   HomeLinkSession.prototype.close = function () {
     if (this.socket) this.socket.close();
   };
