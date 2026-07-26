@@ -509,14 +509,21 @@ test("an override is not offered an Update button", () => {
   assert.equal(overridden.updatable, false);
 });
 
-test("manifest data becomes text, never markup", () => {
+test("manifest data and driver source become text, never markup", () => {
   const { api } = load();
-  const picker = source.slice(
+  // Everything between these two builds DOM from remote or operator-supplied
+  // data: version strings from a signed manifest, and the Lua of a driver an
+  // operator may have written themselves.
+  const builders = source.slice(
     source.indexOf("function renderVersionPicker"),
     source.indexOf("function offerUndo"));
 
-  assert.ok(!/innerHTML/.test(picker),
-    "version strings come from a signed manifest, but a signed manifest is " +
-    "still remote input and must not be able to inject markup");
-  assert.match(picker, /createElement\("button"\)/);
+  // Assignment, not the word — a comment explaining why innerHTML is avoided
+  // is not a use of it.
+  assert.ok(!/innerHTML\s*=/.test(builders),
+    "a signed manifest is still remote input, and a driver file is whatever " +
+    "is on disk; neither may inject markup");
+  assert.match(builders, /createElement\("button"\)/);
+  assert.match(builders, /pre\.textContent = body\.lua/,
+    "driver source is set as text so it renders as code, not as HTML");
 });

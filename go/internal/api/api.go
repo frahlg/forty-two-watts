@@ -247,6 +247,7 @@ func (s *Server) routes() {
 	s.handle("GET  /api/drivers", s.handleDrivers)
 	s.handle("GET  /api/drivers/catalog", s.handleDriversCatalog)
 	s.handle("POST /api/drivers/test", s.handleDriverTest)
+	s.handle("GET  /api/drivers/{id}/source", s.handleDriverSource)
 	s.handle("POST /api/drivers/fingerprint", s.handleDriverFingerprint)
 	s.handle("GET  /api/drivers/{name}", s.handleDriverDetail)
 	s.handle("GET  /api/drivers/{name}/logs", s.handleDriverLogs)

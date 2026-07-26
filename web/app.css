@@ -1530,6 +1530,9 @@ body.ftw-app .driver-module-status {
   flex-wrap: wrap;
   gap: 8px;
   justify-content: flex-end;
+  /* Itself a flex item in the device header. Without this it grows to fit the
+     widest line of a driver's Lua and pushes the row out of the modal. */
+  min-width: 0;
 }
 body.ftw-app .driver-module-status .btn-add {
   margin-top: 0;
@@ -1542,6 +1545,35 @@ body.ftw-app .drv-module-detail,
 body.ftw-app .drv-version-detail {
   color: var(--fg-muted);
   font-size: 0.75rem;
+}
+/* The driver's Lua. Scrolls in its own box rather than stretching the modal,
+   and keeps the operator's own indentation. */
+body.ftw-app .drv-source-code {
+  background: var(--surface2, rgba(0, 0, 0, 0.25));
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  line-height: 1.5;
+  margin: 0;
+  max-height: 340px;
+  overflow: auto;
+  padding: 10px 12px;
+  tab-size: 2;
+  white-space: pre;
+}
+body.ftw-app .drv-module-source-panel {
+  border-top: 1px solid var(--line-soft);
+  flex-basis: 100%;
+  padding-top: 8px;
+  text-align: left;
+  /* A flex item sizes to its content by default, so a long Lua line would
+     stretch the whole row past the modal instead of scrolling inside the
+     block. min-width lets it shrink; the pre scrolls. */
+  min-width: 0;
+}
+body.ftw-app .drv-source-code {
+  max-width: 100%;
 }
 body.ftw-app .drv-module-versions-panel {
   /* Its own row under the controls, so the list reads as a list. */

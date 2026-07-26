@@ -384,6 +384,62 @@
     });
   }
 
+  // The Lua that is actually running, and where it came from. Built as DOM:
+  // driver source is a file on disk that an operator may have written, and
+  // setting it as innerHTML would execute whatever is in it.
+  function renderDriverSource(panel, body) {
+    panel.textContent = "";
+
+    var header = document.createElement("div");
+    header.style.display = "flex";
+    header.style.alignItems = "center";
+    header.style.flexWrap = "wrap";
+    header.style.gap = "8px";
+    header.style.marginBottom = "6px";
+
+    var badge = document.createElement("span");
+    badge.className = "creds-badge";
+    badge.textContent = body.version ? "v" + body.version : body.filename || "driver";
+    header.appendChild(badge);
+
+    var detail = document.createElement("span");
+    detail.className = "drv-version-detail";
+    detail.textContent = [originLabel(body.source), body.filename, describeSize(body.bytes)]
+      .filter(Boolean).join(" · ");
+    header.appendChild(detail);
+
+    // The published artifact carries generated metadata the repository copy
+    // does not, so this is a link to the file's history, not to these bytes.
+    if (body.repository_url) {
+      var link = document.createElement("a");
+      link.href = body.repository_url;
+      link.target = "_blank";
+      link.rel = "noopener";
+      link.textContent = "Open in device-drivers";
+      link.style.color = "var(--accent-e)";
+      link.style.fontSize = "0.75rem";
+      header.appendChild(link);
+    }
+    panel.appendChild(header);
+
+    var pre = document.createElement("pre");
+    pre.className = "drv-source-code";
+    pre.textContent = body.lua || "";
+    panel.appendChild(pre);
+
+    var digest = document.createElement("div");
+    digest.className = "drv-version-detail";
+    digest.style.marginTop = "6px";
+    digest.textContent = "sha256 " + String(body.sha256 || "").slice(0, 16) + "…";
+    panel.appendChild(digest);
+  }
+
+  function describeSize(bytes) {
+    if (typeof bytes !== "number" || bytes <= 0) return "";
+    if (bytes < 1024) return bytes + " bytes";
+    return (bytes / 1024).toFixed(1) + " kB";
+  }
+
   // Put back whatever was running before the switch. Which call does that
   // depends on what it was, not on its version number: a managed artifact of
   // the same version can sit on disk from an earlier trial, and activating
@@ -873,8 +929,14 @@
           html += ' <button class="btn-add drv-module-versions" type="button" data-driver-id="' +
             escHtml(entry.id) + '" data-source="' + escHtml(source) + '" data-running-version="' +
             escHtml(version) + '" data-logical-path="' + escHtml(entry.path) + '">Versions</button>';
+          // A driver is one Lua file and the repository is the source of
+          // truth, but from here there was no way to read the code that is
+          // running -- so a fix for someone's inverter stayed on their machine.
+          html += ' <button class="btn-add drv-module-source" type="button" data-driver-id="' +
+            escHtml(entry.id) + '">Source</button>';
           html += ' <span class="drv-module-action"></span>';
           html += '<div class="drv-module-versions-panel" style="display:none;margin-top:6px"></div>';
+          html += '<div class="drv-module-source-panel" style="display:none;margin-top:6px"></div>';
           slot.innerHTML = html;
         });
         bodyEl.querySelectorAll(".drv-module-update").forEach(function (btn) {
@@ -919,6 +981,25 @@
                   readOnlyEl: btn.parentElement.querySelector(".drv-module-readonly")
                 });
               })
+              .catch(function (err) { panel.textContent = err.message; });
+          });
+        });
+        bodyEl.querySelectorAll(".drv-module-source").forEach(function (btn) {
+          btn.addEventListener("click", function () {
+            var panel = btn.parentElement.querySelector(".drv-module-source-panel");
+            if (!panel) return;
+            if (panel.style.display !== "none") { panel.style.display = "none"; return; }
+            panel.style.display = "block";
+            panel.textContent = "Loading source…";
+            var id = btn.dataset.driverId;
+            apiFetch("/api/drivers/" + encodeURIComponent(id) + "/source")
+              .then(function (r) {
+                return r.json().then(function (body) {
+                  if (!r.ok) throw new Error(body.error || "could not read the driver");
+                  return body;
+                });
+              })
+              .then(function (body) { renderDriverSource(panel, body); })
               .catch(function (err) { panel.textContent = err.message; });
           });
         });
