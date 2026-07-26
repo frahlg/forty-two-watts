@@ -1575,6 +1575,28 @@ body.ftw-app .drv-module-source-panel {
 body.ftw-app .drv-source-code {
   max-width: 100%;
 }
+/* Same box as the read view, so switching to edit does not move the code. */
+body.ftw-app .drv-source-editor {
+  background: var(--surface2, rgba(0, 0, 0, 0.25));
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  line-height: 1.5;
+  max-width: 100%;
+  min-height: 300px;
+  padding: 10px 12px;
+  resize: vertical;
+  tab-size: 2;
+  white-space: pre;
+  width: 100%;
+}
+body.ftw-app .drv-draft-status {
+  color: var(--fg-muted);
+  font-family: var(--mono);
+  font-size: 0.72rem;
+}
 body.ftw-app .drv-module-versions-panel {
   /* Its own row under the controls, so the list reads as a list. */
   border-top: 1px solid var(--line-soft);

@@ -427,11 +427,173 @@
     pre.textContent = body.lua || "";
     panel.appendChild(pre);
 
-    var digest = document.createElement("div");
+    var footer = document.createElement("div");
+    footer.style.alignItems = "center";
+    footer.style.display = "flex";
+    footer.style.flexWrap = "wrap";
+    footer.style.gap = "8px";
+    footer.style.marginTop = "6px";
+
+    var digest = document.createElement("span");
     digest.className = "drv-version-detail";
-    digest.style.marginTop = "6px";
     digest.textContent = "sha256 " + String(body.sha256 || "").slice(0, 16) + "…";
-    panel.appendChild(digest);
+    footer.appendChild(digest);
+
+    var edit = document.createElement("button");
+    edit.type = "button";
+    edit.className = "btn-add";
+    edit.textContent = "Edit and try";
+    edit.addEventListener("click", function () {
+      renderDriverEditor(panel, body);
+    });
+    footer.appendChild(edit);
+
+    var status = document.createElement("span");
+    status.className = "drv-draft-status";
+    footer.appendChild(status);
+
+    panel.appendChild(footer);
+
+    // A draft may already be running from an earlier visit, or from another
+    // tab. The countdown belongs to the gateway, not to this page.
+    resumeDraft(panel, body, status);
+  }
+
+  // Edit in place and run it for a fixed window. Activating an edited driver on
+  // a live battery should not be a decision made once and forgotten, so the
+  // window expires on its own and the failure mode of walking away is the
+  // driver you started with.
+  function renderDriverEditor(panel, body) {
+    panel.textContent = "";
+
+    var note = document.createElement("div");
+    note.className = "drv-version-detail";
+    note.style.marginBottom = "6px";
+    note.textContent = "Your edit runs for the chosen window and then puts " +
+      (body.source === "local" ? "your previous file" : "this version") +
+      " back, unless you keep it.";
+    panel.appendChild(note);
+
+    var editor = document.createElement("textarea");
+    editor.className = "drv-source-editor";
+    editor.spellcheck = false;
+    editor.value = body.lua || "";
+    panel.appendChild(editor);
+
+    var controls = document.createElement("div");
+    controls.style.alignItems = "center";
+    controls.style.display = "flex";
+    controls.style.flexWrap = "wrap";
+    controls.style.gap = "8px";
+    controls.style.marginTop = "6px";
+
+    var windowPicker = document.createElement("select");
+    [5, 10, 30, 60].forEach(function (minutes) {
+      var opt = document.createElement("option");
+      opt.value = String(minutes);
+      opt.textContent = "Try for " + minutes + " min";
+      if (minutes === 10) opt.selected = true;
+      windowPicker.appendChild(opt);
+    });
+    controls.appendChild(windowPicker);
+
+    var status = document.createElement("span");
+    status.className = "drv-draft-status";
+
+    var run = document.createElement("button");
+    run.type = "button";
+    run.className = "btn-add";
+    run.textContent = "Run this draft";
+    run.addEventListener("click", function () {
+      run.disabled = true;
+      status.textContent = "Starting…";
+      apiFetch("/api/drivers/" + encodeURIComponent(body.id) + "/draft", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({lua: editor.value, minutes: parseInt(windowPicker.value, 10)})
+      }).then(function (r) {
+        return r.json().then(function (b) {
+          if (!r.ok) throw new Error(b.error || "the draft could not be started");
+          return b;
+        });
+      }).then(function (b) {
+        showDraftRunning(panel, body, status, b.expires_at_ms);
+      }).catch(function (err) {
+        status.textContent = err.message;
+        run.disabled = false;
+      });
+    });
+    controls.appendChild(run);
+
+    var cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "btn-add";
+    cancel.textContent = "Cancel";
+    cancel.addEventListener("click", function () { renderDriverSource(panel, body); });
+    controls.appendChild(cancel);
+
+    controls.appendChild(status);
+    panel.appendChild(controls);
+  }
+
+  function resumeDraft(panel, body, status) {
+    apiFetch("/api/drivers/" + encodeURIComponent(body.id) + "/draft")
+      .then(function (r) { return r.json(); })
+      .then(function (b) {
+        if (b && b.running) showDraftRunning(panel, body, status, b.expires_at_ms);
+      })
+      .catch(function () { /* nothing is running, which is the normal case */ });
+  }
+
+  // While a draft runs, the only two things worth offering are keeping it and
+  // putting it back. Both are one click, and the clock says how long the
+  // decision stays open.
+  function showDraftRunning(panel, body, status, expiresAtMS) {
+    var host = status.parentElement || panel;
+    host.querySelectorAll(".drv-draft-action").forEach(function (el) { el.remove(); });
+
+    function tick() {
+      var left = Math.max(0, Math.round((expiresAtMS - Date.now()) / 1000));
+      if (left <= 0) {
+        status.textContent = "The draft expired and the previous driver is back.";
+        clearInterval(timer);
+        return;
+      }
+      var minutes = Math.floor(left / 60);
+      var seconds = left % 60;
+      status.textContent = "Draft running · reverts in " + minutes + ":" +
+        (seconds < 10 ? "0" : "") + seconds;
+    }
+    var timer = setInterval(tick, 1000);
+    tick();
+
+    function act(path, label, done) {
+      var btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "btn-add drv-draft-action";
+      btn.textContent = label;
+      btn.addEventListener("click", function () {
+        btn.disabled = true;
+        apiFetch("/api/drivers/" + encodeURIComponent(body.id) + "/draft/" + path, {method: "POST"})
+          .then(function (r) {
+            return r.json().then(function (b) {
+              if (!r.ok) throw new Error(b.error || "could not " + path + " the draft");
+              return b;
+            });
+          }).then(function () {
+            clearInterval(timer);
+            status.textContent = done;
+            host.querySelectorAll(".drv-draft-action").forEach(function (el) { el.remove(); });
+          }).catch(function (err) {
+            status.textContent = err.message;
+            btn.disabled = false;
+          });
+      });
+      host.insertBefore(btn, status);
+    }
+
+    act("keep", "Keep it", "Kept. This is your own file now.");
+    act("revert", "Put it back", "Reverted.");
   }
 
   function describeSize(bytes) {

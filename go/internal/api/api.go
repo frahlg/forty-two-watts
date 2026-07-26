@@ -200,6 +200,11 @@ type Server struct {
 	versionUpdateMu sync.Mutex
 	driverUpdateMu  sync.Mutex
 	backupMu        sync.Mutex
+
+	// Timers that put a driver back after an edit has been tried for its
+	// window. The record on disk is what survives a restart; these only make
+	// the revert prompt while the process lives.
+	drafts *driverDrafts
 }
 
 // New creates a new API server.
@@ -214,8 +219,13 @@ func New(deps *Deps) *Server {
 		deps:       deps,
 		mux:        http.NewServeMux(),
 		dailyCache: make(map[string]state.DayEnergy),
+		drafts:     newDriverDrafts(),
 	}
 	s.routes()
+	// A draft's timer died with the previous process, so anything left behind
+	// goes back now. What runs after a restart should be the driver that was
+	// chosen, not a forgotten experiment.
+	s.RevertDraftsOnStart()
 	return s
 }
 
@@ -248,6 +258,10 @@ func (s *Server) routes() {
 	s.handle("GET  /api/drivers/catalog", s.handleDriversCatalog)
 	s.handle("POST /api/drivers/test", s.handleDriverTest)
 	s.handle("GET  /api/drivers/{id}/source", s.handleDriverSource)
+	s.handle("POST /api/drivers/{id}/draft", s.handleDriverDraft)
+	s.handle("GET  /api/drivers/{id}/draft", s.handleDriverDraftStatus)
+	s.handle("POST /api/drivers/{id}/draft/keep", s.handleDriverDraftKeep)
+	s.handle("POST /api/drivers/{id}/draft/revert", s.handleDriverDraftRevert)
 	s.handle("POST /api/drivers/fingerprint", s.handleDriverFingerprint)
 	s.handle("GET  /api/drivers/{name}", s.handleDriverDetail)
 	s.handle("GET  /api/drivers/{name}/logs", s.handleDriverLogs)
