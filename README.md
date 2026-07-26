@@ -43,8 +43,15 @@ rule. See [docs/architecture.md](docs/architecture.md).
 
 The local catalog is generated from `DRIVER` metadata. The public
 [`srcfl/device-drivers`](https://github.com/srcfl/device-drivers) repo is the
-editable source and FTW's default signed driver channel. The
-[`drivers/*.lua`](drivers/) tree remains FTW's bundled, offline recovery set.
+editable source and FTW's default signed driver channel.
+
+[`drivers/*.lua`](drivers/) is FTW's offline recovery set, and it is a
+**generated snapshot** of that repository at the commit pinned in
+[`drivers/BUNDLED_SOURCE.json`](drivers/BUNDLED_SOURCE.json). It exists because
+startup is deliberately local: a gateway boots and runs without the network, so
+a remote refresh must never block it. Editing a `.lua` file here is not a way to
+change a driver — fix it upstream, move the pin, and run
+`scripts/sync-bundled-drivers.sh`. CI fails if the two drift.
 
 ## Install on Linux
 

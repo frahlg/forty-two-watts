@@ -66,7 +66,7 @@ jobs:
                 web/*|package.json|package-lock.json)
                   web=true
                   ;;
-                drivers/*.lua)
+                drivers/*.lua|drivers/BUNDLED_SOURCE.json|scripts/sync-bundled-drivers.sh)
                   drivers=true
                   ;;
                 Dockerfile|Dockerfile.optimizer|docker-compose*.yml|scripts/enable-modular-stack.sh|scripts/migrate-legacy-compose.sh|scripts/test-modular-compose.sh|scripts/test-container-boundaries.sh|scripts/install-macos.sh)
@@ -177,6 +177,12 @@ jobs:
         with:
           go-version: '1.26'
           cache-dependency-path: go/go.sum
+      # drivers/ is a snapshot of srcfl/device-drivers, not a source. Hand-
+      # editing a file here made this a second source of truth and the two
+      # drifted: a Sungrow fix landed upstream while the bundled copy kept the
+      # bug that took a customer's inverter offline.
+      - name: Bundled drivers match the pinned device-drivers commit
+        run: bash scripts/sync-bundled-drivers.sh --check
       - name: Validate publication
         working-directory: go
         run: >-

@@ -10,7 +10,9 @@ The repository has three explicit modules:
 - **Core** — `go/cmd/ftw`, `go/internal` and `web`. Core owns state,
   telemetry, control, safety, API and UI.
 - **Drivers** — `drivers/*.lua`, hosted by `go/internal/drivers`. Drivers own
-  vendor protocols and are the only place power signs are converted.
+  vendor protocols and are the only place power signs are converted. This tree
+  is a generated snapshot of `srcfl/device-drivers`, pinned in
+  `drivers/BUNDLED_SOURCE.json`; change a driver there, not here.
 - **Optimizer** — `optimizer`, behind the contract in `go/internal/mpc`.
   It proposes plans; core validates them and retains a Go fallback.
 
