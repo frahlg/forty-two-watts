@@ -412,3 +412,75 @@ func TestStartupReconcilesCrashWindowAndRejectsModifiedArtifact(t *testing.T) {
 		t.Fatalf("active symlink still exists: %v", err)
 	}
 }
+
+// Installing a channel version over a bundled driver leaves nothing to step
+// back to: the bundled copy is not an install, so PreviousInstalledPath is
+// empty and ActivateInstalled answers "not retained locally" for its version.
+// Rolling back has to mean removing the managed entry, which is what makes
+// core fall back to the bundled driver again.
+//
+// This is the first move anyone makes when trying a new driver, so without it
+// "try it and put the old one back" is not available at all.
+func TestRollbackFromFirstInstallRestoresTheBundledDriver(t *testing.T) {
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture := &signedFixture{private: private}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/manifest.json":
+			_, _ = w.Write(fixture.envelope(t))
+		case "/demo.lua":
+			fixture.mu.Lock()
+			defer fixture.mu.Unlock()
+			_, _ = w.Write(fixture.driver)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	fixture.setVersion(server.URL, "1.0.0")
+
+	dir := t.TempDir()
+	store, err := state.Open(filepath.Join(dir, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	cfg := &config.DeviceRepository{Enabled: true, Repositories: []config.DriverRepositorySource{{
+		ID: "test", ManifestURL: server.URL + "/manifest.json", Enabled: true,
+		AllowInsecure: true, TrustedKeys: map[string]string{"test": base64.StdEncoding.EncodeToString(public)},
+	}}}
+	manager := New(cfg, dir, store)
+	if err := manager.Refresh(context.Background(), "test"); err != nil {
+		t.Fatal(err)
+	}
+	first, err := manager.Install(context.Background(), "test", "demo", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.PreviousInstalledPath != "" {
+		t.Fatalf("PreviousInstalledPath = %q, want empty for a first install", first.PreviousInstalledPath)
+	}
+	activePath := filepath.Join(manager.ActiveDir(), "demo.lua")
+	if _, err := os.Lstat(activePath); err != nil {
+		t.Fatalf("expected a managed entry after install: %v", err)
+	}
+
+	if _, err := manager.Rollback("drivers/demo.lua"); err != nil {
+		t.Fatalf("Rollback: %v", err)
+	}
+	if _, err := os.Lstat(activePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("managed entry still present after rollback: %v", err)
+	}
+	if active, err := store.ActiveDriverRepoInstall("drivers/demo.lua"); err == nil && active.Active {
+		t.Fatalf("install still active after rollback: %+v", active)
+	}
+
+	// The artifact stays on disk, so going forward again needs no network.
+	versions, err := manager.InstalledVersions("demo")
+	if err != nil || len(versions) != 1 {
+		t.Fatalf("installed versions = %+v err=%v", versions, err)
+	}
+}

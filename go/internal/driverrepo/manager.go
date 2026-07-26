@@ -613,7 +613,15 @@ func (m *Manager) Rollback(logicalPath string) (state.DriverRepoInstall, error) 
 		return state.DriverRepoInstall{}, err
 	}
 	if current.PreviousInstalledPath == "" {
-		return state.DriverRepoInstall{}, errors.New("driver has no previous managed artifact")
+		// The step before the first managed install is the bundled driver, so
+		// this is a rollback like any other. Refusing here left an operator who
+		// installed a channel version over a bundled driver with no way back --
+		// the case that matters most, since installing over the bundled driver
+		// is the first thing anyone trying a new one does.
+		if err := m.Deactivate(logicalPath); err != nil {
+			return state.DriverRepoInstall{}, err
+		}
+		return state.DriverRepoInstall{LogicalPath: logicalPath, DriverID: current.DriverID}, nil
 	}
 	previous, err := m.store.DriverRepoInstallByPath(current.PreviousInstalledPath)
 	if err != nil {

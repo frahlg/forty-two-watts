@@ -297,7 +297,15 @@ func (s *Server) restartManagedDrivers(ctx context.Context, artifact state.Drive
 }
 
 func (s *Server) restartManagedDriversExpected(ctx context.Context, artifact state.DriverRepoInstall, expectedIDs map[string]string) (managedDriverRestartState, error) {
-	activePath := filepath.Join(s.deps.DriverRepository.ActiveDir(), filepath.FromSlash(strings.TrimPrefix(artifact.LogicalPath, "drivers/")))
+	rel := filepath.FromSlash(strings.TrimPrefix(artifact.LogicalPath, "drivers/"))
+	activePath := filepath.Join(s.deps.DriverRepository.ActiveDir(), rel)
+	// Rolling back the first managed install removes the entry rather than
+	// swapping it, so there is no artifact and no symlink left to point at.
+	// The driver goes back to the bundled copy, which is where it ran before.
+	targetPath := activePath
+	if artifact.InstalledPath == "" {
+		targetPath = filepath.Join(s.deps.DriverDir, rel)
+	}
 	s.deps.CfgMu.Lock()
 	var affected []config.Driver
 	var originals []config.Driver
@@ -312,7 +320,7 @@ func (s *Server) restartManagedDriversExpected(ctx context.Context, artifact sta
 			continue
 		}
 		originals = append(originals, s.deps.Cfg.Drivers[i])
-		s.deps.Cfg.Drivers[i].Lua = activePath
+		s.deps.Cfg.Drivers[i].Lua = targetPath
 		affected = append(affected, s.deps.Cfg.Drivers[i])
 	}
 	s.deps.CfgMu.Unlock()

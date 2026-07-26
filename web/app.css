@@ -1521,6 +1521,37 @@ body.ftw-app .creds-badge.creds-missing {
   border-color: color-mix(in srgb, var(--accent-e) 35%, transparent);
   color: var(--accent-e);
 }
+/* Which driver version runs, and what it could be switched to. .btn-add is
+   full-width by default, which stacked these controls into a column and buried
+   the one line that says what is running. Here they belong on one row. */
+body.ftw-app .driver-module-status {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+body.ftw-app .driver-module-status .btn-add {
+  margin-top: 0;
+  padding: 4px 12px;
+  width: auto;
+}
+/* The version is the badge; where it came from and how well tested it is read
+   as prose beside it, so the row does not become a wall of capitals. */
+body.ftw-app .drv-module-detail,
+body.ftw-app .drv-version-detail {
+  color: var(--fg-muted);
+  font-size: 0.75rem;
+}
+body.ftw-app .drv-module-versions-panel {
+  /* Its own row under the controls, so the list reads as a list. */
+  border-top: 1px solid var(--line-soft);
+  flex-basis: 100%;
+  padding-top: 8px;
+}
+body.ftw-app .drv-module-versions-panel > div {
+  justify-content: flex-end;
+}
 body.ftw-app .driver-test-panel {
   align-items: center;
   border-top: 1px solid var(--line-soft);
