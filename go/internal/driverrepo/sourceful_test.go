@@ -285,6 +285,39 @@ func TestSourcefulIndexPackageInstallAndOfflineCache(t *testing.T) {
 	if local.RepositoryID != "" || local.PackageID != "" || local.ArtifactSHA256 != "" || local.UpdateAvailable {
 		t.Fatalf("local catalog claimed managed provenance = %+v", local)
 	}
+	// An override still has to be told what the channel offers. Running your
+	// own copy shadows the channel, so without this the operator is never told
+	// a newer version exists -- and the version they keep is their choice to
+	// make, not something to be silently replaced.
+	if local.UpstreamVersion != "1.1.1" {
+		t.Fatalf("local override was not told the channel has 1.1.1: %+v", local)
+	}
+
+	// An override carrying a real, older version is a genuine update, and the
+	// operator should see it. Resolution is unchanged: the local file keeps
+	// winning until they act on it.
+	older := manager.EnrichCatalog([]drivers.CatalogEntry{{
+		Path: "drivers/sdm630.lua", ID: "sdm630", Version: "1.0.0", Source: "local",
+	}})[0]
+	if !older.UpdateAvailable || older.UpstreamVersion != "1.1.1" {
+		t.Fatalf("older local override should offer an update = %+v", older)
+	}
+	if older.RepositoryID != "" || older.PackageID != "" {
+		t.Fatalf("an update offer is not provenance = %+v", older)
+	}
+
+	// A version that cannot be ordered must not produce a claim either way.
+	// compareSemver falls back to comparing strings, which would announce an
+	// update on alphabetical luck.
+	unversioned := manager.EnrichCatalog([]drivers.CatalogEntry{{
+		Path: "drivers/sdm630.lua", ID: "sdm630", Source: "local",
+	}})[0]
+	if unversioned.UpdateAvailable {
+		t.Fatalf("an unversioned override cannot be compared = %+v", unversioned)
+	}
+	if unversioned.UpstreamVersion != "1.1.1" {
+		t.Fatalf("it should still be told what exists = %+v", unversioned)
+	}
 	policy, err := manager.RuntimePolicy(config.Driver{
 		Name: "sdm630", Lua: filepath.Join(manager.ActiveDir(), "sdm630.lua"),
 	})

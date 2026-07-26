@@ -42,6 +42,90 @@
     return true;
   }
 
+  // Every version the channel has signed for this driver, and which one is
+  // running. Rollback steps back exactly one; this is how an operator reaches
+  // a specific older version, which is the whole reason the channel keeps a
+  // history in the first place.
+  function renderVersionPicker(panel, driverID, body) {
+    var installed = (body && body.installed) || [];
+    var available = (body && body.available) || [];
+    panel.textContent = "";
+
+    if (installed.length === 0 && available.length === 0) {
+      panel.textContent = "No versions found for this driver.";
+      return;
+    }
+
+    // Downloaded already: activating one is instant and needs no network.
+    var installedVersions = {};
+    installed.forEach(function (v) { if (v && v.version) installedVersions[v.version] = true; });
+
+    var rows = [];
+    installed.forEach(function (v) {
+      rows.push({version: v.version, sha256: v.sha256, active: !!v.active, local: true});
+    });
+    available.forEach(function (v) {
+      var version = typeof v === "string" ? v : (v && v.version);
+      if (!version || installedVersions[version]) return;
+      rows.push({version: version, active: false, local: false});
+    });
+
+    rows.forEach(function (row) {
+      var line = document.createElement("div");
+      line.style.display = "flex";
+      line.style.alignItems = "center";
+      line.style.gap = "8px";
+      line.style.marginTop = "4px";
+
+      var label = document.createElement("span");
+      label.className = "creds-badge";
+      label.textContent = "v" + row.version + (row.active ? " · running" : "");
+      line.appendChild(label);
+
+      if (!row.active) {
+        var action = document.createElement("button");
+        action.type = "button";
+        action.className = "btn-add";
+        // Already downloaded, so this only switches which one runs. A version
+        // that is not downloaded has to be fetched from the channel first.
+        action.textContent = row.local ? "Activate" : "Fetch and activate";
+        action.addEventListener("click", function () {
+          action.disabled = true;
+          var status = line.querySelector(".drv-version-status");
+          var endpoint = row.local ? "/activate" : "/install";
+          var payload = row.local
+            ? {version: row.version, sha256: row.sha256 || ""}
+            : {version: row.version};
+          if (status) status.textContent = row.local ? "Activating…" : "Fetching…";
+          apiFetch("/api/device_repository/drivers/" + encodeURIComponent(driverID) + endpoint, {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify(payload)
+          }).then(function (r) {
+            return r.json().then(function (b) {
+              if (!r.ok) throw new Error(b.error || "could not switch version");
+              return b;
+            });
+          }).then(function () {
+            if (status) status.textContent = "v" + row.version + " is now running.";
+          }).catch(function (err) {
+            if (status) status.textContent = err.message;
+            action.disabled = false;
+          });
+        });
+        line.appendChild(action);
+      }
+
+      var status = document.createElement("span");
+      status.className = "drv-version-status";
+      status.style.color = "var(--text-dim)";
+      status.style.fontSize = "0.75rem";
+      line.appendChild(status);
+
+      panel.appendChild(line);
+    });
+  }
+
   function configProfilesFor(entry) {
     if (!entry || entry.id !== "goodwe" || !versionAtLeast(entry.version, "1.0.2")) return [];
     return DRIVER_CONFIG_PROFILES.goodwe;
@@ -448,11 +532,27 @@
               '" data-repository-id="' + escHtml(entry.repository_id) + '" data-version="' + escHtml(entry.upstream_version) + '">Update to v' +
               escHtml(entry.upstream_version) + '</button>';
           }
+          // An override shadows the channel, so installing a newer version
+          // would not change what runs. Say that, rather than offering a
+          // button that appears to do nothing. Their copy stays active until
+          // they remove it themselves.
+          if (source === "local" && entry.upstream_version) {
+            html += ' <span class="creds-badge">channel has v' + escHtml(entry.upstream_version) + '</span>';
+            html += ' <span style="color:var(--text-dim);font-size:0.75rem">' +
+              'your own copy is used while it is present</span>';
+          }
           if (source === "managed") {
             html += ' <button class="btn-add drv-module-rollback" type="button" data-driver-id="' + escHtml(entry.id) +
               '" data-logical-path="' + escHtml(entry.path) + '">Rollback</button>';
           }
+          // Rollback only steps back one version. The channel keeps every
+          // version it has ever signed, so let an operator pick from them.
+          if (source !== "local") {
+            html += ' <button class="btn-add drv-module-versions" type="button" data-driver-id="' +
+              escHtml(entry.id) + '">Versions…</button>';
+          }
           html += ' <span class="drv-module-action"></span>';
+          html += '<div class="drv-module-versions-panel" style="display:none;margin-top:6px"></div>';
           slot.innerHTML = html;
         });
         bodyEl.querySelectorAll(".drv-module-update").forEach(function (btn) {
@@ -479,6 +579,25 @@
             }).then(function (r) { return r.json().then(function (body) { if (!r.ok) throw new Error(body.error || "rollback failed"); return body; }); })
               .then(function () { if (status) status.textContent = " Previous driver restored."; })
               .catch(function (err) { if (status) status.textContent = " " + err.message; btn.disabled = false; });
+          });
+        });
+        bodyEl.querySelectorAll(".drv-module-versions").forEach(function (btn) {
+          btn.addEventListener("click", function () {
+            var panel = btn.parentElement.querySelector(".drv-module-versions-panel");
+            if (!panel) return;
+            if (panel.style.display !== "none") { panel.style.display = "none"; return; }
+            panel.style.display = "block";
+            panel.textContent = "Loading versions…";
+            var id = btn.dataset.driverId;
+            apiFetch("/api/device_repository/drivers/" + encodeURIComponent(id) + "/versions")
+              .then(function (r) {
+                return r.json().then(function (body) {
+                  if (!r.ok) throw new Error(body.error || "could not list versions");
+                  return body;
+                });
+              })
+              .then(function (body) { renderVersionPicker(panel, id, body); })
+              .catch(function (err) { panel.textContent = err.message; });
           });
         });
         bodyEl.querySelectorAll(".drv-profile-slot").forEach(function (slot) {
