@@ -148,7 +148,11 @@
     versionRows: versionRows,
     render: function (panel, driverID, body, opts) {
       return renderVersionPicker(panel, driverID, body, opts);
-    }
+    },
+    renderSource: function (panel, body) { return renderDriverSource(panel, body); },
+    unifiedDiff: function (before, after, context) { return unifiedDiff(before, after, context); },
+    suggestUpstreamURL: function (body, edited) { return suggestUpstreamURL(body, edited); },
+    maxSuggestionURL: function () { return MAX_SUGGESTION_URL; }
   };
 
   // One list of everything this driver could run, and one click to switch.
@@ -448,6 +452,11 @@
     });
     footer.appendChild(edit);
 
+    // Everything points at the repository, including from the read view: a
+    // driver that is wrong for your hardware is worth reporting even if you
+    // have not written the fix yourself.
+    appendSuggestButton(footer, body, null);
+
     var status = document.createElement("span");
     status.className = "drv-draft-status";
     footer.appendChild(status);
@@ -532,6 +541,10 @@
     cancel.addEventListener("click", function () { renderDriverSource(panel, body); });
     controls.appendChild(cancel);
 
+    // From here it carries the edit itself, so the suggestion is the work
+    // rather than a description of it.
+    appendSuggestButton(controls, body, function () { return editor.value; });
+
     controls.appendChild(status);
     panel.appendChild(controls);
   }
@@ -594,6 +607,115 @@
 
     act("keep", "Keep it", "Kept. This is your own file now.");
     act("revert", "Put it back", "Reverted.");
+  }
+
+  // A line diff with a little context around each change, which is what fits
+  // in a URL and what a maintainer reads anyway.
+  //
+  // Longest-common-subsequence over lines. A driver is a few thousand lines,
+  // so the quadratic table is fine here and worth the exactness: a cheaper
+  // heuristic would drift out of alignment after the first edit and report
+  // changes that were never made.
+  function unifiedDiff(before, after, context) {
+    var a = String(before).split("\n");
+    var b = String(after).split("\n");
+    var contextLines = context === undefined ? 3 : context;
+
+    var lcs = [];
+    for (var i = 0; i <= a.length; i++) lcs.push(new Array(b.length + 1).fill(0));
+    for (var i = a.length - 1; i >= 0; i--) {
+      for (var j = b.length - 1; j >= 0; j--) {
+        lcs[i][j] = a[i] === b[j] ? lcs[i + 1][j + 1] + 1
+          : Math.max(lcs[i + 1][j], lcs[i][j + 1]);
+      }
+    }
+
+    var ops = [];
+    var x = 0, y = 0;
+    while (x < a.length && y < b.length) {
+      if (a[x] === b[y]) { ops.push([" ", a[x]]); x++; y++; }
+      else if (lcs[x + 1][y] >= lcs[x][y + 1]) { ops.push(["-", a[x]]); x++; }
+      else { ops.push(["+", b[y]]); y++; }
+    }
+    while (x < a.length) { ops.push(["-", a[x]]); x++; }
+    while (y < b.length) { ops.push(["+", b[y]]); y++; }
+
+    // Only the changed regions, so an unchanged driver body does not fill the
+    // issue with lines nobody needs to read.
+    var keep = new Array(ops.length).fill(false);
+    ops.forEach(function (op, index) {
+      if (op[0] === " ") return;
+      for (var k = Math.max(0, index - contextLines);
+           k <= Math.min(ops.length - 1, index + contextLines); k++) {
+        keep[k] = true;
+      }
+    });
+
+    var out = [];
+    var skipping = false;
+    ops.forEach(function (op, index) {
+      if (!keep[index]) {
+        if (!skipping) { out.push("@@"); skipping = true; }
+        return;
+      }
+      skipping = false;
+      out.push(op[0] + op[1]);
+    });
+    return out.join("\n");
+  }
+
+  // Suggest the edit back to the repository the driver came from.
+  //
+  // The gateway holds no GitHub token and needs none: GitHub accepts a
+  // pre-filled issue over a URL, and the operator is already signed in to
+  // their own browser. One click opens it with the driver, the version, the
+  // hardware and the edit already written out.
+  function suggestUpstreamURL(body, edited) {
+    var title = "[" + (body.id || "driver") + "] ";
+    var lines = [
+      "What I changed and why:",
+      "",
+      "",
+      "---",
+      "Driver: " + (body.id || "") + " " + (body.version ? "v" + body.version : ""),
+      "Came from: " + originLabel(body.source),
+      "File: " + (body.filename || ""),
+      "Original sha256: " + (body.sha256 || "")
+    ];
+    if (edited && edited !== body.lua) {
+      // A diff, not the file. Drivers run to tens of kilobytes and GitHub
+      // rejects a URL past about 8k, so sending the whole file meant the code
+      // never travelled at all -- while a fix is usually a handful of lines.
+      lines.push("", "```diff", unifiedDiff(body.lua || "", edited), "```");
+    }
+    return "https://github.com/srcfl/device-drivers/issues/new" +
+      "?title=" + encodeURIComponent(title) +
+      "&body=" + encodeURIComponent(lines.join("\n"));
+  }
+
+  // GitHub rejects a URL past roughly 8k, and an edited driver is usually
+  // larger than that. Past the limit the issue is opened without the file and
+  // says so, rather than opening a page that errors.
+  var MAX_SUGGESTION_URL = 8000;
+
+  function appendSuggestButton(host, body, getEdited) {
+    var suggest = document.createElement("button");
+    suggest.type = "button";
+    suggest.className = "btn-add";
+    suggest.textContent = "Suggest to repo";
+    suggest.addEventListener("click", function () {
+      var edited = getEdited ? getEdited() : "";
+      var url = suggestUpstreamURL(body, edited);
+      var note = host.querySelector(".drv-draft-status");
+      if (url.length > MAX_SUGGESTION_URL) {
+        url = suggestUpstreamURL(body, "");
+        if (note) {
+          note.textContent = "The driver is too large to prefill; paste it into the issue.";
+        }
+      }
+      window.open(url, "_blank", "noopener");
+    });
+    host.appendChild(suggest);
   }
 
   function describeSize(bytes) {

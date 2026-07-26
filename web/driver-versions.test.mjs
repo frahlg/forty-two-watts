@@ -21,13 +21,13 @@ const source = readFileSync(new URL("./settings/tabs/devices.js", import.meta.ur
 
 function element(tag) {
   const listeners = new Map();
+  let text = "";
   const el = {
     tag,
     children: [],
     className: "",
     disabled: false,
     style: {},
-    textContent: "",
     dataset: {},
     type: "",
     addEventListener(name, handler) { listeners.set(name, handler); },
@@ -48,6 +48,13 @@ function element(tag) {
     },
     querySelectorAll() { return []; },
   };
+  // Setting textContent clears the children, the way the DOM does. A stub that
+  // kept them let a test find a button from a view that had been replaced.
+  Object.defineProperty(el, "textContent", {
+    get() { return text; },
+    set(value) { text = String(value); el.children.length = 0; },
+    enumerable: true,
+  });
   return el;
 }
 
