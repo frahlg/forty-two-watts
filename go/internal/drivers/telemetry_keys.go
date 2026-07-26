@@ -40,6 +40,15 @@ var telemetryKeyAliases = map[string]string{
 	"L2_W":                "l2_w",
 	"L3_W":                "l3_w",
 
+	// Rated AC power reaches DerTelemetry as rated_power_w and arrives under
+	// three other spellings: rated_W is the canonical @srcful/data-models
+	// name, rated_power_W is what zap.lua emits, and rated_w is what most of
+	// the catalog still uses. None of them was mapped, so a device's rated
+	// power has never left the gateway.
+	"rated_W":       "rated_power_w",
+	"rated_power_W": "rated_power_w",
+	"rated_w":       "rated_power_w",
+
 	// Shorter spellings the catalog grew, which DerTelemetry never read.
 	"hz":           "freq_hz",
 	"import_wh":    "total_import_wh",

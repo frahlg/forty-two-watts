@@ -92,3 +92,22 @@ func TestMalformedInputIsReturnedUnchanged(t *testing.T) {
 		t.Error("a parse failure must never lose the reading")
 	}
 }
+
+// Rated AC power arrives under four spellings and none of them was mapped, so
+// it never reached Nova from any driver — including our own zap.lua.
+func TestRatedPowerReachesTheNovaName(t *testing.T) {
+	for _, spelling := range []string{"rated_W", "rated_power_W", "rated_w"} {
+		in := []byte(`{"type":"pv","w":-2000,"` + spelling + `":5000}`)
+		got := decode(t, normalizeTelemetryKeys(in))
+		if got["rated_power_w"] != float64(5000) {
+			t.Errorf("%s did not reach rated_power_w: %v", spelling, got)
+		}
+	}
+
+	// The name DerTelemetry reads is left alone when the driver uses it.
+	in := []byte(`{"type":"pv","w":-1,"rated_power_w":7,"rated_W":9}`)
+	got := decode(t, normalizeTelemetryKeys(in))
+	if got["rated_power_w"] != float64(7) {
+		t.Errorf("alias overwrote the driver's own value: %v", got["rated_power_w"])
+	}
+}
