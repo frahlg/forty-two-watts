@@ -131,6 +131,31 @@ func TestAssemble_V2XVehicleSoCFromDerReading(t *testing.T) {
 	}
 }
 
+// The Lua host stamps the nameplate a driver reported via host.set_model
+// and host.set_rated_w onto every emit blob. assemble overwrites the
+// envelope fields it owns (make, serial, hardware_id) but must leave
+// those two alone, otherwise the values never reach Nova.
+func TestAssemble_KeepsModelAndRatedPowerFromEmitBlob(t *testing.T) {
+	r := &telemetry.DerReading{
+		Driver:    "sungrow",
+		DerType:   telemetry.DerPV,
+		RawW:      -2500,
+		Data:      json.RawMessage(`{"w": -2500, "model": "SH10RT", "rated_power_w": 10000}`),
+		UpdatedAt: time.UnixMilli(1713610245123),
+	}
+	dev := state.Device{DeviceID: "sungrow:A2340", Make: "sungrow", Serial: "A2340"}
+	got := assemble(r, dev, 1713610245123)
+	if got.Model != "SH10RT" {
+		t.Errorf("model: got %q, want SH10RT", got.Model)
+	}
+	if got.RatedPowerW == nil || *got.RatedPowerW != 10000 {
+		t.Errorf("rated_power_w: got %v, want 10000", got.RatedPowerW)
+	}
+	if got.Make != "sungrow" || got.Serial != "A2340" {
+		t.Errorf("envelope regressed: %+v", got)
+	}
+}
+
 func TestAssemble_EmptyDataDoesNotPanic(t *testing.T) {
 	r := &telemetry.DerReading{
 		Driver: "x", DerType: telemetry.DerPV, RawW: -2500,

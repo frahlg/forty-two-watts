@@ -18,6 +18,10 @@
 //	host.set_poll_interval(ms)
 //	host.set_sn(s)                  -- device serial (metadata)
 //	host.set_make(s)                -- manufacturer name
+//	host.set_model(s)               -- device model name (metadata)
+//	host.set_rated_w(w)             -- rated AC power, watts (nameplate)
+//	host.set_warmup_s(s)            -- hold off the first poll for s seconds
+//	host.decode_string(regs, start, count) -- ASCII, 2 chars/register, hi byte first
 //	host.mqtt_sub(topic)            -- subscribe
 //	host.mqtt_pub(topic, payload)   -- publish
 //	host.mqtt_messages()            -- array of {topic, payload} since last call
@@ -715,6 +719,36 @@ func registerHost(L *lua.LState, env *HostEnv) {
 		return 0
 	}))
 
+	// host.set_model(name) — the device model, e.g. "SUN2000-10KTL".
+	// Nameplate, like make and serial: report it from driver_init as
+	// soon as the register read that carries it succeeds. It reaches
+	// Nova's `model` field on every emit; it is not part of device_id.
+	host.RawSetString("set_model", L.NewFunction(func(L *lua.LState) int {
+		env.setModel(L.CheckString(1))
+		return 0
+	}))
+
+	// host.set_rated_w(watts) — the device's rated AC power, read off
+	// the bus. Stored with the other nameplate values, not as telemetry:
+	// it is a property of the hardware, constant between polls, and the
+	// host repeats it on each emit so consumers see `rated_power_w`
+	// without the driver re-reading the register every tick.
+	host.RawSetString("set_rated_w", L.NewFunction(func(L *lua.LState) int {
+		env.setRatedW(float64(L.CheckNumber(1)))
+		return 0
+	}))
+
+	// host.set_warmup_s(seconds) — hold off the first poll for this
+	// many seconds after the driver starts. For devices that answer
+	// Modbus before their registers carry meaningful values, so the
+	// first reading is not a plausible-looking zero. Call it from
+	// driver_init; the run loop reads it once when arming its timer.
+	// Time already spent in driver_init counts towards the window.
+	host.RawSetString("set_warmup_s", L.NewFunction(func(L *lua.LState) int {
+		env.setWarmupS(float64(L.CheckNumber(1)))
+		return 0
+	}))
+
 	// host.persist_secret(key, value) -> ok, err
 	// Durably writes a config secret back into the driver's own config
 	// block (e.g. a rotated OAuth refresh_token) so it survives restarts.
@@ -980,6 +1014,34 @@ func registerHost(L *lua.LState, env *HostEnv) {
 	host.RawSetString("decode_i16", L.NewFunction(func(L *lua.LState) int {
 		v := int16(L.CheckInt(1))
 		L.Push(lua.LNumber(v))
+		return 1
+	}))
+
+	// host.decode_string(registers, start, count) — ASCII out of `count`
+	// registers beginning at 1-based index `start`, two characters per
+	// register, high byte first. Trailing NULs and whitespace (the two
+	// ways vendors pad a fixed-width serial field) are stripped.
+	//
+	// start and count are optional: they default to the whole table.
+	// A dozen drivers hand-roll this same byte loop to read a serial
+	// number; this is that loop, written once.
+	host.RawSetString("decode_string", L.NewFunction(func(L *lua.LState) int {
+		regs := L.CheckTable(1)
+		start := L.OptInt(2, 1)
+		if start < 1 {
+			start = 1
+		}
+		count := L.OptInt(3, regs.Len()-start+1)
+		var b []byte
+		for i := 0; i < count; i++ {
+			n, ok := regs.RawGetInt(start + i).(lua.LNumber)
+			if !ok {
+				break // short table: decode what is there
+			}
+			reg := uint16(int64(n))
+			b = append(b, byte(reg>>8), byte(reg))
+		}
+		L.Push(lua.LString(strings.TrimRight(string(b), "\x00\t\n\v\f\r ")))
 		return 1
 	}))
 

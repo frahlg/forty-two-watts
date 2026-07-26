@@ -138,6 +138,23 @@ type HostEnv struct {
 	SN       string
 	MAC      string // resolved by ARP after first connection (best-effort)
 	Endpoint string // e.g. "modbus://192.168.1.1:502" or "mqtt://broker:1883"
+	// Model is the device model name reported via host.set_model. It is
+	// nameplate, not a reading, so it lives beside Make and SN. It is
+	// deliberately NOT part of device_id resolution: a driver often learns
+	// the model from a register read that can fail or arrive late, and a
+	// device_id that changed when the model finally appeared would orphan
+	// every row of persistent state keyed on it.
+	Model string
+	// RatedW is the device's rated AC power in watts, reported via
+	// host.set_rated_w. Nameplate again — it is read off the bus once in
+	// driver_init and does not change between polls, so it belongs here
+	// rather than in each tick's telemetry. Zero means "not reported".
+	RatedW float64
+	// WarmupS holds off the first poll for this many seconds after the
+	// host started the driver, for devices that answer Modbus before
+	// their registers carry meaningful values. Set via host.set_warmup_s
+	// in driver_init; read once by the registry's run loop.
+	WarmupS float64
 
 	// PersistSecret, when non-nil, lets a driver durably write a config
 	// secret (e.g. a rotated OAuth refresh_token) back into its own
@@ -499,6 +516,7 @@ func (h *HostEnv) emitTelemetry(rawJSON []byte) error {
 	// blob is buffered or stored. Without this a driver's energy counters and
 	// frequency never leave the gateway.
 	rawJSON = normalizeTelemetryKeys(rawJSON)
+	rawJSON = h.stampIdentity(rawJSON)
 
 	if h.bufferPollTelemetry(rawJSON) {
 		return nil
@@ -563,6 +581,121 @@ func (h *HostEnv) setMake(m string) {
 	h.mu.Lock()
 	h.Make = m
 	h.mu.Unlock()
+}
+
+// setModel records the device model name.
+func (h *HostEnv) setModel(m string) {
+	h.mu.Lock()
+	h.Model = m
+	h.mu.Unlock()
+}
+
+// setRatedW records the device's rated AC power in watts.
+func (h *HostEnv) setRatedW(w float64) {
+	h.mu.Lock()
+	h.RatedW = w
+	h.mu.Unlock()
+}
+
+// setWarmupS records a startup hold before the first poll, in seconds.
+func (h *HostEnv) setWarmupS(s float64) {
+	h.mu.Lock()
+	h.WarmupS = s
+	h.mu.Unlock()
+}
+
+// DeviceModel returns the model name the driver reported, or "" if it
+// reported none. Named DeviceModel because the field is Model.
+func (h *HostEnv) DeviceModel() string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.Model
+}
+
+// RatedPowerW returns the rated AC power the driver reported, or 0.
+func (h *HostEnv) RatedPowerW() float64 {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.RatedW
+}
+
+// Warmup returns the startup hold the driver requested, or 0.
+func (h *HostEnv) Warmup() time.Duration {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.WarmupS <= 0 {
+		return 0
+	}
+	return time.Duration(h.WarmupS * float64(time.Second))
+}
+
+// FirstPollDelay is how long the run loop waits before the first poll.
+// Normally that is just the poll interval; a driver that asked for a
+// warmup gets whatever is left of the warmup window instead, measured
+// from host start so the time already spent in driver_init counts
+// towards it. A warmup shorter than the cadence changes nothing.
+func (h *HostEnv) FirstPollDelay() time.Duration {
+	interval := h.PollInterval()
+	warmup := h.Warmup()
+	if warmup <= 0 {
+		return interval
+	}
+	remaining := warmup - time.Since(h.Start)
+	if remaining > interval {
+		return remaining
+	}
+	return interval
+}
+
+// stampIdentity adds the nameplate values a driver reported once in
+// driver_init — model and rated AC power — to an outgoing telemetry
+// blob. nova.assemble unmarshals this blob straight into DerTelemetry,
+// so a key added here reaches Nova's `model` and `rated_power_w`
+// without every driver repeating the value on every emit.
+//
+// A key the driver set itself always wins: a live reading is closer to
+// the device than a value cached since init.
+func (h *HostEnv) stampIdentity(raw []byte) []byte {
+	h.mu.Lock()
+	model, ratedW := h.Model, h.RatedW
+	h.mu.Unlock()
+	if model == "" && ratedW == 0 {
+		return raw
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return raw
+	}
+	changed := false
+	set := func(key string, value any) {
+		if _, taken := fields[key]; taken {
+			return
+		}
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			return
+		}
+		fields[key] = encoded
+		changed = true
+	}
+	if model != "" {
+		set("model", model)
+	}
+	// The catalog spells rated power both ways. Honour either as
+	// "the driver already said it" so we never contradict a live read.
+	if ratedW != 0 {
+		if _, taken := fields["rated_power_W"]; !taken {
+			set("rated_power_w", ratedW)
+		}
+	}
+	if !changed {
+		return raw
+	}
+	out, err := json.Marshal(fields)
+	if err != nil {
+		return raw
+	}
+	return out
 }
 
 // PollInterval returns the driver's current requested poll cadence.
