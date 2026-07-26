@@ -805,19 +805,23 @@
              <div class="channel-options" role="group" aria-label="Optimizer update channel">${optimizerButtons}</div>
            </div>
            ${optimizerChannel !== selectedChannel
-             ? `<p class="channel-note">Optimizer tracks ${escapeHTML(optimizerChannel)} while Core and drivers track ${escapeHTML(selectedChannel)}.</p>`
+             ? `<p class="channel-note">Optimizer tracks ${escapeHTML(optimizerChannel)} while Core tracks ${escapeHTML(selectedChannel)}.</p>`
              : ""}`
         : "";
 
+      // Only Core and the optimizer subscribe to a channel. A driver is
+      // pinned to an exact version, and "stable"/"beta" only says where that
+      // artifact came from — so these buttons must not appear to govern it.
       return `<details class="snapshots channels">
         <summary>Update channel · Core ${escapeHTML(selectedChannel)}${optimizerConfigured && optimizerChannel !== selectedChannel ? ` · Optimizer ${escapeHTML(optimizerChannel)}` : ""}</summary>
         <div class="channel-body">
           <div class="channel-row">
-            <span class="channel-label">Core &amp; drivers</span>
+            <span class="channel-label">Core</span>
             <div class="channel-options" role="group" aria-label="Update channel">${channelButtons}</div>
           </div>
           <p class="channel-note">${escapeHTML(channelNote)}</p>
           ${optimizerRow}
+          <p class="channel-note">Drivers follow no channel. Each one is pinned to a version you pick per driver above, from either stream.</p>
         </div>
       </details>`;
     }

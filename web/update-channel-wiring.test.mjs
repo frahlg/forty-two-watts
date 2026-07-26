@@ -15,11 +15,21 @@ test("update dialog exposes stable and beta as a segmented channel control", () 
 test("both channel controls sit together so a split channel is visible", () => {
   assert.match(badge, /_channelSectionHTML\(\)/);
   assert.match(badge, /role="group" aria-label="Optimizer update channel"/);
-  assert.match(badge, /Core &amp; drivers/);
-  assert.match(badge, /Optimizer tracks \$\{escapeHTML\(optimizerChannel\)\} while Core and drivers track/);
+  assert.match(badge, /Optimizer tracks \$\{escapeHTML\(optimizerChannel\)\} while Core tracks/);
   // The optimizer channel used to be a second, unlabelled control buried in
   // the component row with no stated relation to the global one.
   assert.doesNotMatch(badge, /mini-channel/);
+});
+
+test("the channel control does not claim to govern drivers", () => {
+  // selfupdate.Channel drives the Core image only; driverrepo never reads it.
+  // A driver is pinned to an exact version and takes its channel per install
+  // (?channel=beta on the catalog, {version, channel} on the install call),
+  // so a host is never "on" a driver channel.
+  assert.match(badge, /Drivers follow no channel\./);
+  assert.match(badge, /pinned to a version you pick per driver/);
+  assert.doesNotMatch(badge, /Core &amp; drivers/);
+  assert.doesNotMatch(badge, /Core and drivers track/);
 });
 
 test("the summary counts the whole inventory and says when it last checked", () => {
