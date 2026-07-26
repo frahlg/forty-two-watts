@@ -729,12 +729,21 @@ func (m *Manager) directManifestRuntimePolicy(
 		}
 		return nil, nil
 	}
-	if !matched.ReadOnly || !matched.Metadata.ReadOnly || matched.ControlEnabled {
-		// This preserves the former runtime for old direct manifests. The new
-		// public channel marks both manifest and Lua metadata as read-only.
+	// read_only and control_enabled are two spellings of one fact. A driver
+	// that may control while claiming to be read-only reads as safe to
+	// anything that checks only one of them, so refuse the pair outright.
+	if matched.ReadOnly == matched.ControlEnabled || matched.ReadOnly != matched.Metadata.ReadOnly {
 		if installed.RepoURL == "https://github.com/srcfl/device-drivers" {
-			return nil, errors.New("public FTW driver lacks signed read-only policy")
+			return nil, errors.New("public FTW driver has a contradictory read-only policy")
 		}
+		return nil, nil
+	}
+	if matched.ControlEnabled {
+		// A driver the catalog marks control: true is published with its
+		// control path intact, and runs under the same terms as the copy
+		// bundled with this build -- which is the same source. Binding a
+		// read-only policy here made one file behave two ways depending on
+		// where it came from.
 		return nil, nil
 	}
 	permissions := make(map[string]bool, len(matched.Permissions))
