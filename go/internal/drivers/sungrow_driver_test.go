@@ -256,6 +256,11 @@ func TestSungrowFeedInCurtailPreservesConfiguredInstallerLimit(t *testing.T) {
 func TestSungrowPollSurfacesAndClearsThermalDeviceFault(t *testing.T) {
 	tel := telemetry.NewStore()
 	modbus := newRecordingModbus()
+	// An SH hybrid identifies itself at 4999, which is how the driver knows the
+	// 13xxx block below exists at all. Without it the mock looks like a device
+	// that does not answer the register, and the driver deliberately holds off
+	// reading a battery block it has no reason to believe is there.
+	modbus.regs[4999] = 0x0E0E  // SH10RT
 	modbus.regs[12999] = 0x0100 // Fault
 	modbus.regs[13055] = 0x0002 // System fault 2, bit 1: high ambient temperature
 	modbus.regs[5007] = 761     // 76.1 C
@@ -285,5 +290,44 @@ func TestSungrowPollSurfacesAndClearsThermalDeviceFault(t *testing.T) {
 	health = tel.DriverHealth("sungrow")
 	if health == nil || health.DeviceFault {
 		t.Fatalf("health after recovery = %+v, want fault cleared", health)
+	}
+}
+
+// A hybrid whose device-type register is unreadable must still find its way to
+// the 13xxx block. The driver holds off while detection is unresolved -- an SG
+// string inverter cannot afford a burst of failed reads, because the host fails
+// the whole poll on any failure -- and then falls back to probing. If that
+// fallback did not work, an SH inverter with a quiet 4999 would silently lose
+// its battery and its fault channel forever.
+func TestSungrowProbesTheHybridBlockWhenTheDeviceTypeNeverAnswers(t *testing.T) {
+	tel := telemetry.NewStore()
+	modbus := newRecordingModbus()
+	// 4999 left at 0: the documented "not present" sentinel, indistinguishable
+	// from a register the inverter does not implement.
+	modbus.regs[12999] = 0x0100 // Fault
+	modbus.regs[13055] = 0x0002
+	modbus.regs[5007] = 761
+	env := NewHostEnv("sungrow", tel).WithModbus(modbus)
+	d, err := NewLuaDriver("../../../drivers/sungrow.lua", env)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	defer d.Cleanup()
+
+	// Detection gets three tries in total, one of them in driver_init, so it
+	// settles within a couple of polls rather than retrying for the session.
+	var faulted bool
+	for poll := 0; poll < 4; poll++ {
+		if _, err := d.Poll(context.Background()); err != nil {
+			t.Fatalf("poll %d: %v", poll, err)
+		}
+		if health := tel.DriverHealth("sungrow"); health != nil && health.DeviceFault {
+			faulted = true
+			break
+		}
+	}
+	if !faulted {
+		t.Fatalf("a hybrid with an unreadable device type never reached its " +
+			"running state; the probing fallback is not working")
 	}
 }
