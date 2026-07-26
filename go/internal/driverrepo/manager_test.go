@@ -303,15 +303,38 @@ func TestDirectManifestBindsReadOnlyRuntimePolicy(t *testing.T) {
 		t.Fatalf("direct runtime identity = %+v", policy)
 	}
 
-	manager.mu.Lock()
-	manifest := manager.manifests["ftw-official"]
-	manifest.Drivers[0].ReadOnly = false
-	manager.manifests["ftw-official"] = manifest
-	manager.mu.Unlock()
+	// read_only and control_enabled are two spellings of one fact. A driver
+	// that may control while claiming to be read-only reads as safe to
+	// anything checking only one of them, so the pair is refused outright.
+	setManifestDriver := func(mutate func(*ManifestDriver)) {
+		manager.mu.Lock()
+		manifest := manager.manifests["ftw-official"]
+		mutate(&manifest.Drivers[0])
+		manager.manifests["ftw-official"] = manifest
+		manager.mu.Unlock()
+	}
+	setManifestDriver(func(d *ManifestDriver) { d.ReadOnly = false })
 	if _, err := manager.RuntimePolicy(config.Driver{
 		Name: "demo", Lua: filepath.Join(manager.ActiveDir(), "demo.lua"),
-	}); err == nil || !strings.Contains(err.Error(), "lacks signed read-only policy") {
-		t.Fatalf("unsigned write policy error = %v", err)
+	}); err == nil || !strings.Contains(err.Error(), "contradictory read-only policy") {
+		t.Fatalf("contradictory policy error = %v", err)
+	}
+
+	// A driver whose code carries a control path is published with it intact,
+	// and runs under the same terms as the copy bundled with this build --
+	// which is built from the same source. Binding a read-only policy here made
+	// one file behave two ways depending on where it came from.
+	setManifestDriver(func(d *ManifestDriver) {
+		d.ReadOnly = false
+		d.ControlEnabled = true
+		d.Metadata.ReadOnly = false
+		d.Permissions = []string{"modbus.read", "modbus.write"}
+	})
+	policy, err = manager.RuntimePolicy(config.Driver{
+		Name: "demo", Lua: filepath.Join(manager.ActiveDir(), "demo.lua"),
+	})
+	if err != nil || policy != nil {
+		t.Fatalf("control driver policy = %+v, %v; want none so it runs as the bundled copy does", policy, err)
 	}
 }
 
