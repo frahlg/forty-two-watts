@@ -613,15 +613,11 @@ func (m *Manager) Rollback(logicalPath string) (state.DriverRepoInstall, error) 
 		return state.DriverRepoInstall{}, err
 	}
 	if current.PreviousInstalledPath == "" {
-		// The step before the first managed install is the bundled driver, so
-		// this is a rollback like any other. Refusing here left an operator who
-		// installed a channel version over a bundled driver with no way back --
-		// the case that matters most, since installing over the bundled driver
-		// is the first thing anyone trying a new one does.
-		if err := m.Deactivate(logicalPath); err != nil {
-			return state.DriverRepoInstall{}, err
-		}
-		return state.DriverRepoInstall{LogicalPath: logicalPath, DriverID: current.DriverID}, nil
+		// Going back to the bundled copy is a different operation, not a step
+		// between managed artifacts: see UseBundled. Rolling back here would
+		// deactivate the only active row, leaving the caller's own recovery
+		// path -- a second Rollback -- with nothing to restore.
+		return state.DriverRepoInstall{}, errors.New("driver has no previous managed artifact")
 	}
 	previous, err := m.store.DriverRepoInstallByPath(current.PreviousInstalledPath)
 	if err != nil {
@@ -777,6 +773,37 @@ func (m *Manager) ActivateInstalled(driverID, version, sha256 string) (state.Dri
 		return state.DriverRepoInstall{}, err
 	}
 	return activated, nil
+}
+
+// UseBundled drops the managed entry so the driver resolves to the copy that
+// shipped with this build. It is the only way back once a channel version has
+// been installed over a bundled driver, since the bundled copy is not an
+// install and cannot be activated by version.
+//
+// bundledPath is checked before anything is deactivated: not every driver the
+// channel offers is bundled, and taking the managed entry away when there is
+// nothing behind it would stop the driver instead of reverting it.
+func (m *Manager) UseBundled(logicalPath, bundledPath string) (state.DriverRepoInstall, error) {
+	logicalPath, err := safeLogicalPath(logicalPath)
+	if err != nil {
+		return state.DriverRepoInstall{}, err
+	}
+	current, err := m.store.ActiveDriverRepoInstall(logicalPath)
+	if err != nil {
+		return state.DriverRepoInstall{}, err
+	}
+	if bundledPath == "" {
+		return state.DriverRepoInstall{}, errors.New("no bundled copy of this driver to fall back to")
+	}
+	if _, err := os.Stat(bundledPath); err != nil {
+		return state.DriverRepoInstall{}, fmt.Errorf("no bundled copy of this driver to fall back to: %w", err)
+	}
+	if err := m.Deactivate(logicalPath); err != nil {
+		return state.DriverRepoInstall{}, err
+	}
+	// Returned so the caller can put this exact artifact back if the bundled
+	// driver fails to start.
+	return current, nil
 }
 
 // Deactivate removes the managed resolver entry. It is used when the first

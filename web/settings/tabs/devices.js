@@ -92,9 +92,15 @@
     var rows = [];
     var seen = {};
 
+    // Two repositories can publish the same version number with different
+    // content, and ActivateInstalled tells them apart by hash. Keying on the
+    // version alone would drop one of them -- possibly the active one. The
+    // hash is the artifact's identity, so prefer it: the same file listed as
+    // both installed and available is one row, not two.
     function push(row) {
-      if (!row.version || seen[row.version]) return;
-      seen[row.version] = true;
+      var key = row.sha256 || row.version + "@" + (row.repositoryID || "");
+      if (!row.version || seen[key]) return;
+      seen[key] = true;
       rows.push(row);
     }
 
@@ -169,116 +175,249 @@
     }
 
     rows.forEach(function (row) {
-      var line = document.createElement("div");
-      line.style.display = "flex";
-      line.style.alignItems = "center";
-      line.style.gap = "8px";
-      line.style.marginTop = "4px";
+      renderVersionRow(panel, driverID, row, rows, opts, overridden);
+    });
 
-      var label = document.createElement("span");
-      label.className = "creds-badge";
-      label.textContent = "v" + row.version;
-      line.appendChild(label);
+    // The bundled copy is not an install, so /versions never lists it and no
+    // amount of activating reaches it. Once a channel version is running it is
+    // the only thing left to go back to, and it has to stay reachable after
+    // this panel closes -- not just as an undo that lives for one switch.
+    if (!overridden && opts && opts.runningSource !== "bundled") {
+      renderBundledRow(panel, driverID, opts);
+    }
+  }
 
-      var detail = document.createElement("span");
-      detail.className = "drv-version-detail";
-      var facts = [];
-      if (row.active && !overridden) facts.push("running now");
-      else if (row.downloaded) facts.push("on disk");
-      if (row.verification) facts.push(row.verification);
-      detail.textContent = facts.join(" · ");
-      line.appendChild(detail);
+  function renderVersionRow(panel, driverID, row, rows, opts, overridden) {
+    var line = document.createElement("div");
+    line.style.display = "flex";
+    line.style.alignItems = "center";
+    line.style.gap = "8px";
+    line.style.marginTop = "4px";
 
-      var status = document.createElement("span");
-      status.className = "drv-version-status";
-      status.style.color = "var(--text-dim)";
-      status.style.fontSize = "0.75rem";
+    var label = document.createElement("span");
+    label.className = "creds-badge";
+    label.textContent = "v" + row.version;
+    line.appendChild(label);
 
-      if (!row.active || overridden) {
-        var action = document.createElement("button");
-        action.type = "button";
-        action.className = "btn-add";
-        // An override means nothing here can take over, so the button must not
-        // claim it will. Otherwise: on disk switches instantly, anything else
-        // is fetched from the channel first.
-        action.textContent = overridden
-          ? (row.downloaded ? "Downloaded" : "Download")
-          : "Use this";
-        if (overridden && row.downloaded) action.disabled = true;
-        action.addEventListener("click", function () {
-          action.disabled = true;
-          var endpoint = row.downloaded ? "/activate" : "/install";
-          var payload = row.downloaded
-            ? {version: row.version, sha256: row.sha256 || ""}
-            : {version: row.version, repository_id: row.repositoryID || ""};
-          status.textContent = row.downloaded ? "Switching…" : "Fetching…";
-          apiFetch("/api/device_repository/drivers/" + encodeURIComponent(driverID) + endpoint, {
-            method: "POST",
-            headers: {"Content-Type": "application/json"},
-            body: JSON.stringify(payload)
-          }).then(function (r) {
-            return r.json().then(function (b) {
-              if (!r.ok) throw new Error(b.error || "could not switch version");
-              return b;
-            });
-          }).then(function () {
-            if (overridden) {
-              status.textContent = "Downloaded. Your own file still runs.";
-              action.textContent = "Downloaded";
-              return;
-            }
-            status.textContent = "v" + row.version + " is running.";
-            // Trying a driver and putting the old one back is the loop that
-            // makes testing safe. It must not need a second trip through the
-            // list, and it has to be repeatable -- undo re-arms this button so
-            // the next attempt is one click, not a reopened panel.
-            offerUndo(line, status, driverID, rows, opts, action);
-          }).catch(function (err) {
-            status.textContent = err.message;
-            action.disabled = false;
+    var detail = document.createElement("span");
+    detail.className = "drv-version-detail";
+    var facts = [];
+    if (row.active && !overridden) facts.push("running now");
+    else if (row.downloaded) facts.push("on disk");
+    if (row.verification) facts.push(row.verification);
+    detail.textContent = facts.join(" · ");
+    line.appendChild(detail);
+
+    var status = document.createElement("span");
+    status.className = "drv-version-status";
+
+    if (!row.active || overridden) {
+      var action = document.createElement("button");
+      action.type = "button";
+      action.className = "btn-add";
+      // An override means nothing here can take over, so the button must not
+      // claim it will. Otherwise: on disk switches instantly, anything else
+      // is fetched from the channel first.
+      action.textContent = overridden
+        ? (row.downloaded ? "Downloaded" : "Download")
+        : "Use this";
+      if (overridden && row.downloaded) action.disabled = true;
+      action.addEventListener("click", function () {
+        action.disabled = true;
+        var endpoint = row.downloaded ? "/activate" : "/install";
+        var payload = row.downloaded
+          ? {version: row.version, sha256: row.sha256 || ""}
+          : {version: row.version, repository_id: row.repositoryID || ""};
+        status.textContent = row.downloaded ? "Switching…" : "Fetching…";
+        apiFetch("/api/device_repository/drivers/" + encodeURIComponent(driverID) + endpoint, {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify(payload)
+        }).then(function (r) {
+          return r.json().then(function (b) {
+            if (!r.ok) throw new Error(b.error || "could not switch version");
+            return b;
           });
+        }).then(function () {
+          // It came down from the channel and is kept on disk now. Without
+          // this the next attempt would fetch it again, which fails offline
+          // for a file that is already there.
+          row.downloaded = true;
+          if (overridden) {
+            status.textContent = "Downloaded. Your own file still runs.";
+            action.textContent = "Downloaded";
+            action.disabled = true;
+            return;
+          }
+          status.textContent = "v" + row.version + " is running.";
+          // The line above the panel still named the old version, and the
+          // other rows still claimed to be running, so all three contradicted
+          // each other until the tab was re-rendered.
+          refreshSummary(opts, driverID);
+          markRunning(panel, row.version);
+          // Trying a driver and putting the old one back is the loop that
+          // makes testing safe. It must not need a second trip through the
+          // list, and it has to be repeatable -- undo re-arms this button so
+          // the next attempt is one click, not a reopened panel.
+          offerUndo(line, status, driverID, rows, opts, action, panel);
+        }).catch(function (err) {
+          status.textContent = err.message;
+          action.disabled = false;
         });
-        line.appendChild(action);
-      }
+      });
+      line.appendChild(action);
+    }
 
-      line.appendChild(status);
-      panel.appendChild(line);
+    line.appendChild(status);
+    panel.appendChild(line);
+  }
+
+  // "Back to what shipped with this build" as a standing choice, not a
+  // transient undo. POST /use_bundled refuses when no bundled copy exists
+  // rather than stopping the driver it was meant to revert.
+  function renderBundledRow(panel, driverID, opts) {
+    var line = document.createElement("div");
+    line.style.display = "flex";
+    line.style.alignItems = "center";
+    line.style.gap = "8px";
+    line.style.marginTop = "4px";
+
+    var label = document.createElement("span");
+    label.className = "creds-badge";
+    label.textContent = "bundled";
+    line.appendChild(label);
+
+    var detail = document.createElement("span");
+    detail.className = "drv-version-detail";
+    detail.textContent = "the copy shipped with this build";
+    line.appendChild(detail);
+
+    var status = document.createElement("span");
+    status.className = "drv-version-status";
+
+    var action = document.createElement("button");
+    action.type = "button";
+    action.className = "btn-add";
+    action.textContent = "Use this";
+    action.addEventListener("click", function () {
+      action.disabled = true;
+      status.textContent = "Switching…";
+      useBundled(driverID, opts).then(function () {
+        status.textContent = "The bundled driver is running.";
+        refreshSummary(opts, driverID);
+        markRunning(panel, null);
+        action.textContent = "Running";
+      }).catch(function (err) {
+        status.textContent = err.message;
+        action.disabled = false;
+      });
+    });
+
+    line.appendChild(action);
+    line.appendChild(status);
+    panel.appendChild(line);
+  }
+
+  function useBundled(driverID, opts) {
+    return apiFetch("/api/device_repository/drivers/" + encodeURIComponent(driverID) + "/use_bundled", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({logical_path: (opts && opts.logicalPath) || ""})
+    }).then(function (r) {
+      return r.json().then(function (b) {
+        if (!r.ok) throw new Error(b.error || "could not switch to the bundled driver");
+        return b;
+      });
+    });
+  }
+
+  // Keep the summary above the panel honest after a switch. Re-rendering the
+  // whole tab would say the same thing but close the panel, which is the
+  // opposite of what someone testing two versions against each other wants.
+  //
+  // It re-reads the catalog rather than editing the text in place: which
+  // version runs, where it came from, how well tested it is and whether it may
+  // control anything are all properties of the artifact now running, and
+  // guessing any of them from the old line gets one of them wrong. The
+  // telemetry-only badge in particular differs between versions of the same
+  // driver.
+  function refreshSummary(opts, driverID) {
+    var badge = opts && opts.headlineEl;
+    if (!badge || !opts.logicalPath) return Promise.resolve();
+    return apiFetch("/api/drivers/catalog")
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        var entries = (data && data.entries) || [];
+        var entry = null;
+        entries.forEach(function (e) { if (e && e.path === opts.logicalPath) entry = e; });
+        if (!entry) return;
+        var summary = runningSummary(entry);
+        badge.textContent = summary.headline;
+        if (opts.detailEl) opts.detailEl.textContent = summary.detail;
+        if (opts.readOnlyEl) opts.readOnlyEl.style.display = entry.read_only ? "" : "none";
+        // The Update shortcut offers one specific version; once that version
+        // is running it is an invitation to install what is already installed.
+        if (opts.updateEl) {
+          opts.updateEl.style.display = summary.updatable &&
+            opts.updateEl.dataset.version === entry.upstream_version ? "" : "none";
+        }
+      })
+      .catch(function () { /* the switch itself already reported its result */ });
+  }
+
+  // Only one row can be running. Leaving the old one marked would have the
+  // panel contradict the line above it and itself. Nothing else in the row is
+  // touched: whether a version is on disk did not change by switching away
+  // from it.
+  function markRunning(panel, version) {
+    if (!panel) return;
+    var wanted = version === null ? "bundled" : "v" + version;
+    Array.prototype.forEach.call(panel.children, function (line) {
+      var label = line.querySelector ? line.querySelector(".creds-badge") : null;
+      var detail = line.querySelector ? line.querySelector(".drv-version-detail") : null;
+      if (!label || !detail) return;
+      var facts = detail.textContent.split(" · ").filter(function (fact) {
+        return fact !== "running now";
+      });
+      if (label.textContent === wanted) facts.unshift("running now");
+      detail.textContent = facts.join(" · ");
     });
   }
 
   // Put back whatever was running before the switch. Which call does that
-  // depends on where the old version lives: one kept on disk is activated
-  // directly, while the bundled driver is not an install at all and comes back
-  // by rolling the managed install off it.
-  function offerUndo(line, status, driverID, rows, opts, action) {
+  // depends on what it was, not on its version number: a managed artifact of
+  // the same version can sit on disk from an earlier trial, and activating
+  // that is not the same file as the bundled one -- they can differ in whether
+  // the driver is allowed to control anything.
+  function offerUndo(line, status, driverID, rows, opts, action, panel) {
     var previousVersion = opts && opts.runningVersion;
     if (!previousVersion) return;
+    var wasBundled = opts.runningSource === "bundled";
     var onDisk = null;
-    rows.forEach(function (row) {
-      if (row.version === previousVersion && row.downloaded) onDisk = row;
-    });
+    if (!wasBundled) {
+      rows.forEach(function (row) {
+        if (row.version === previousVersion && row.downloaded) onDisk = row;
+      });
+    }
 
     var undo = document.createElement("button");
     undo.type = "button";
     undo.className = "btn-add";
-    undo.textContent = "Undo (back to v" + previousVersion + ")";
+    undo.textContent = wasBundled
+      ? "Undo (back to the bundled driver)"
+      : "Undo (back to v" + previousVersion + ")";
     undo.addEventListener("click", function () {
       undo.disabled = true;
       status.textContent = "Switching back…";
-      var request = onDisk
-        ? {path: "/activate", body: {version: previousVersion, sha256: onDisk.sha256 || ""}}
-        : {path: "/rollback", body: {logical_path: (opts && opts.logicalPath) || ""}};
-      apiFetch("/api/device_repository/drivers/" + encodeURIComponent(driverID) + request.path, {
-        method: "POST",
-        headers: {"Content-Type": "application/json"},
-        body: JSON.stringify(request.body)
-      }).then(function (r) {
-        return r.json().then(function (b) {
-          if (!r.ok) throw new Error(b.error || "could not switch back");
-          return b;
-        });
-      }).then(function () {
-        status.textContent = "v" + previousVersion + " is running again.";
+      var call = wasBundled
+        ? useBundled(driverID, opts)
+        : switchBack(driverID, previousVersion, onDisk, opts);
+      call.then(function () {
+        status.textContent = wasBundled
+          ? "The bundled driver is running again."
+          : "v" + previousVersion + " is running again.";
+        refreshSummary(opts, driverID);
+        markRunning(panel, wasBundled ? null : previousVersion);
         undo.remove();
         if (action) action.disabled = false;
       }).catch(function (err) {
@@ -287,6 +426,24 @@
       });
     });
     line.appendChild(undo);
+  }
+
+  // A managed version that is still on disk is activated; one that has been
+  // pruned has to be rolled back to, which steps to whatever preceded it.
+  function switchBack(driverID, version, onDisk, opts) {
+    var request = onDisk
+      ? {path: "/activate", body: {version: version, sha256: onDisk.sha256 || ""}}
+      : {path: "/rollback", body: {logical_path: (opts && opts.logicalPath) || ""}};
+    return apiFetch("/api/device_repository/drivers/" + encodeURIComponent(driverID) + request.path, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(request.body)
+    }).then(function (r) {
+      return r.json().then(function (b) {
+        if (!r.ok) throw new Error(b.error || "could not switch back");
+        return b;
+      });
+    });
   }
 
   function configProfilesFor(entry) {
@@ -691,11 +848,13 @@
           // from, and how well tested it is. The catalog has carried
           // verification_status all along and this view never showed it, so an
           // operator could update onto an untested driver without being told.
-          var html = '<span class="creds-badge">' + escHtml(summary.headline) + '</span>' +
+          var html = '<span class="creds-badge drv-module-headline">' + escHtml(summary.headline) + '</span>' +
             ' <span class="drv-module-detail">' + escHtml(summary.detail) + '</span>';
-          if (entry.read_only) {
-            html += ' <span class="creds-badge">telemetry only</span>';
-          }
+          // Always present, hidden when it does not apply, so a switch can
+          // show or hide it: whether a driver may control anything differs
+          // between versions of the same driver.
+          html += ' <span class="creds-badge drv-module-readonly"' +
+            (entry.read_only ? '' : ' style="display:none"') + '>telemetry only</span>';
           if (summary.updatable) {
             html += ' <button class="btn-add drv-module-update" type="button" data-driver-id="' + escHtml(entry.id) +
               '" data-repository-id="' + escHtml(entry.repository_id) + '" data-version="' + escHtml(entry.upstream_version) + '">Update to v' +
@@ -749,8 +908,15 @@
               .then(function (body) {
                 renderVersionPicker(panel, id, body, {
                   overridden: btn.dataset.source === "local",
+                  runningSource: btn.dataset.source,
                   runningVersion: btn.dataset.runningVersion,
-                  logicalPath: btn.dataset.logicalPath
+                  logicalPath: btn.dataset.logicalPath,
+                  // So a switch can correct the summary line above without
+                  // re-rendering the tab, which would close this panel.
+                  headlineEl: btn.parentElement.querySelector(".drv-module-headline"),
+                  detailEl: btn.parentElement.querySelector(".drv-module-detail"),
+                  updateEl: btn.parentElement.querySelector(".drv-module-update"),
+                  readOnlyEl: btn.parentElement.querySelector(".drv-module-readonly")
                 });
               })
               .catch(function (err) { panel.textContent = err.message; });

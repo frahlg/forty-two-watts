@@ -260,6 +260,7 @@ func (s *Server) routes() {
 	s.handle("POST /api/device_repository/refresh", s.handleDeviceRepositoryRefresh)
 	s.handle("POST /api/device_repository/drivers/{id}/install", s.handleDeviceRepositoryInstall)
 	s.handle("POST /api/device_repository/drivers/{id}/rollback", s.handleDeviceRepositoryRollback)
+	s.handle("POST /api/device_repository/drivers/{id}/use_bundled", s.handleDeviceRepositoryUseBundled)
 	s.handle("GET  /api/device_repository/drivers/{id}/versions", s.handleDeviceRepositoryVersions)
 	s.handle("POST /api/device_repository/drivers/{id}/activate", s.handleDeviceRepositoryActivate)
 	s.handle("GET  /api/components", s.handleComponents)
