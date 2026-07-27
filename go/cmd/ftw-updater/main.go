@@ -115,9 +115,13 @@ type server struct {
 	// imageID captures the image backing the running service before an update.
 	// healthCheck waits for the recreated service to become healthy. Both are
 	// injectable so the rollback path is testable without Docker.
-	imageID           func(ctx context.Context, service string) (string, error)
-	containerID       func(ctx context.Context, service string) (string, error)
-	healthCheck       func(ctx context.Context, service string) error
+	imageID     func(ctx context.Context, service string) (string, error)
+	containerID func(ctx context.Context, service string) (string, error)
+	healthCheck func(ctx context.Context, service string) error
+	// selfReplace brings the updater sidecar to the release Core just moved to.
+	// Injectable so the ordering — only after a verified Core update, never able
+	// to fail one — is testable without Docker. See self_replace.go.
+	selfReplace func(target string) error
 	chownFile         func(string, int, int) error
 	checkSnapshotFile func(context.Context, string, string, string) error
 	stageSnapshotFile func(context.Context, string, string, string, string) error
@@ -272,6 +276,11 @@ func main() {
 	srv.imageID = srv.currentServiceImageID
 	srv.containerID = srv.serviceContainerID
 	srv.healthCheck = srv.waitForServiceHealth
+	srv.selfReplace = func(target string) error {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+		defer cancel()
+		return srv.replaceUpdater(ctx, target)
+	}
 	srv.chownFile = os.Chown
 	srv.checkSnapshotFile = func(ctx context.Context, containerID, snapshotID, file string) error {
 		return srv.runner(ctx, nil, "exec", containerID, "test", "-f", "/app/data/snapshots/"+snapshotID+"/"+file)
@@ -611,6 +620,17 @@ func (s *server) runComponentJob(action, target, component string, startedAt tim
 	done := phaseState("done", "Update completed and service is ready", totalSteps)
 	done.PreviousImageID = previousImageID
 	s.writeState(done)
+
+	// Core is updated and healthy, and the terminal state is written. Only now
+	// bring the sidecar to the same release, so a future fix inside the updater
+	// reaches this site without anyone typing a compose command on it. Failure
+	// leaves new Core plus the old updater — where every install sits today —
+	// and must never reopen a finished update.
+	if action == "update" && spec.name == "core" && s.selfReplace != nil {
+		if err := s.selfReplace(target); err != nil {
+			slog.Warn("updater sidecar not replaced; site keeps its current updater", "target", target, "err", err)
+		}
+	}
 }
 
 // requireHealthyOptimizer keeps a Core image without embedded Python from
