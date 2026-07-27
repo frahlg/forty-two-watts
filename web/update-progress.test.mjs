@@ -17,6 +17,11 @@ test("update UI resumes work and shows each server phase", () => {
   assert.match(badge, /Database schema unchanged; full history backup not needed/);
 });
 
+test("update history shows failure message not only outcome", () => {
+  assert.match(badge, /event\.message/);
+  assert.match(badge, /outcome \|\| "\?"\} — \$\{event\.message\}/);
+});
+
 test("setup keeps polling when a safe update takes longer", () => {
   assert.match(setup, /SNAPSHOT_SOFT_TIMEOUT_MS = 15 \* 60 \* 1000/);
   assert.match(setup, /timed_out: true/);

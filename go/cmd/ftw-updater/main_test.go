@@ -933,3 +933,23 @@ func TestRecoverCrashedRollbackRestoresSafetyBackup(t *testing.T) {
 		t.Fatalf("crashed rollback recovery calls = %v", calls)
 	}
 }
+
+func TestContainerIDsFromDockerPS_IgnoresNoiseAndDedupes(t *testing.T) {
+	const id = "72d81f0fbb2faf0529c3bd611ed06b2d3f5c3f7a82ad1c24f925d81302c46f13"
+	out := "time=\"2026-07-27T18:13:41Z\" level=warning msg=\"orphan containers\"\n" + id + "\n" + id[:12] + "\nnot-an-id\n"
+	ids := containerIDsFromDockerPS(out)
+	if len(ids) != 1 || ids[0] != id {
+		t.Fatalf("ids = %v, want only full id after filtering noise + short prefix", ids)
+	}
+
+	// Pure noise used to become "resolved to 40 containers" via strings.Fields.
+	noise := strings.Repeat("warning about compose project configuration ", 10)
+	if got := containerIDsFromDockerPS(noise); len(got) != 0 {
+		t.Fatalf("noise parsed as ids: %v", got)
+	}
+
+	// Single clean ID (common happy path).
+	if got := containerIDsFromDockerPS(id + "\n"); len(got) != 1 || got[0] != id {
+		t.Fatalf("clean id = %v", got)
+	}
+}

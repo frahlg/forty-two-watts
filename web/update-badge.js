@@ -1005,7 +1005,10 @@
       const historyRows = history.map((event) => {
         const when = event.started_at_ms ? new Date(event.started_at_ms).toLocaleString() : "?";
         const range = (event.from_version || "?") + " → " + (event.to_version || "?");
-        return `<tr><td>${escapeHTML(when)}</td><td>${escapeHTML(event.kind + (event.kind === "driver" ? ":" + event.component_id : ""))}</td><td>${escapeHTML(range)}</td><td>${escapeHTML(event.outcome)}</td></tr>`;
+        const result = event.message
+          ? `${event.outcome || "?"} — ${event.message}`
+          : (event.outcome || "?");
+        return `<tr><td>${escapeHTML(when)}</td><td>${escapeHTML(event.kind + (event.kind === "driver" ? ":" + event.component_id : ""))}</td><td>${escapeHTML(range)}</td><td>${escapeHTML(result)}</td></tr>`;
       }).join("");
 
       const info = this._info || {};

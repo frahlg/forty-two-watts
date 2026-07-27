@@ -13,6 +13,7 @@
 package main
 
 import (
+	"bytes"
 	"compress/gzip"
 	"context"
 	"encoding/json"
@@ -1274,11 +1275,97 @@ func (s *server) serviceContainerID(ctx context.Context, service string) (string
 	if err != nil {
 		return "", err
 	}
-	ids := strings.Fields(out)
-	if len(ids) != 1 {
+	ids := containerIDsFromDockerPS(out)
+	switch len(ids) {
+	case 0:
+		return "", fmt.Errorf("service %q resolved to 0 containers", service)
+	case 1:
+		return ids[0], nil
+	default:
+		// Multiple IDs are common when Compose lists stopped leftovers or when
+		// stderr noise used to leak into CombinedOutput. Prefer a single
+		// running/healthy container for the service before failing closed.
+		if id, pickErr := s.preferRunningContainerID(ctx, ids); pickErr == nil {
+			return id, nil
+		}
 		return "", fmt.Errorf("service %q resolved to %d containers", service, len(ids))
 	}
-	return ids[0], nil
+}
+
+// containerIDsFromDockerPS keeps only docker ID tokens from `docker … ps -q`
+// output. Compose occasionally prints warnings on stdout; treating every field
+// as an ID produced false "resolved to N containers" failures (lab: stable→beta).
+func containerIDsFromDockerPS(out string) []string {
+	seen := make(map[string]struct{})
+	var ids []string
+	for _, field := range strings.Fields(out) {
+		id := strings.TrimSpace(field)
+		if !isDockerContainerID(id) {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	return collapseContainerIDPrefixes(ids)
+}
+
+// collapseContainerIDPrefixes drops short IDs that are prefixes of a longer ID
+// already in the list (docker ps -q may mix 12- and 64-char forms).
+func collapseContainerIDPrefixes(ids []string) []string {
+	if len(ids) < 2 {
+		return ids
+	}
+	var out []string
+	for i, id := range ids {
+		covered := false
+		for j, other := range ids {
+			if i == j || len(other) <= len(id) {
+				continue
+			}
+			if strings.HasPrefix(other, id) {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+func isDockerContainerID(id string) bool {
+	// docker ps -q may print 12-char short IDs or full 64-char IDs.
+	if n := len(id); n != 12 && n != 64 {
+		return false
+	}
+	for _, r := range id {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') && (r < 'A' || r > 'F') {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *server) preferRunningContainerID(ctx context.Context, ids []string) (string, error) {
+	var running []string
+	for _, id := range ids {
+		out, err := dockerOutput(ctx, "inspect", "--format", "{{.State.Status}}", id)
+		if err != nil {
+			continue
+		}
+		switch strings.TrimSpace(out) {
+		case "running", "healthy", "starting":
+			running = append(running, id)
+		}
+	}
+	if len(running) == 1 {
+		return running[0], nil
+	}
+	return "", fmt.Errorf("could not pick a unique running container from %d ids", len(ids))
 }
 
 func (s *server) currentServiceImageID(ctx context.Context, service string) (string, error) {
@@ -1366,11 +1453,28 @@ func dockerCompose(ctx context.Context, extraEnv []string, args ...string) error
 
 func dockerOutput(ctx context.Context, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "docker", args...)
-	out, err := cmd.CombinedOutput()
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	out := stdout.String()
+	errText := strings.TrimSpace(stderr.String())
 	if err != nil {
-		return "", fmt.Errorf("docker %s: %w: %s", strings.Join(args, " "), err, truncate(string(out), 400))
+		detail := out
+		if errText != "" {
+			if detail != "" {
+				detail += "\n"
+			}
+			detail += errText
+		}
+		return "", fmt.Errorf("docker %s: %w: %s", strings.Join(args, " "), err, truncate(detail, 400))
 	}
-	return string(out), nil
+	// Never merge stderr into successful stdout: callers parse IDs/status and
+	// warnings must not inflate token counts (see containerIDsFromDockerPS).
+	if errText != "" {
+		slog.Debug("docker stderr", "args", args, "stderr", truncate(errText, 200))
+	}
+	return out, nil
 }
 
 func truncate(s string, n int) string {
