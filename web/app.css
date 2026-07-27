@@ -676,6 +676,20 @@ body.ftw-app .prices-group {
   padding: var(--card-pad, 14px 16px);
 }
 
+/* ---- Price outlook — the Overview's compact cheap-or-dear strip. Same
+   card shell as .prices-group; the full chart it links to lives on
+   Energy. Stays on Overview (organizeDestinations does not move it). */
+body.ftw-app .price-outlook-row {
+  display: block;
+  margin: 12px 0;
+}
+body.ftw-app .price-outlook-group {
+  background: var(--ink-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  padding: var(--card-pad, 14px 16px);
+}
+
 /* ---- Energy today — one outer card with sub-tiles, mirrors fuse-card ---- */
 body.ftw-app .energy-row {
   display: block;
