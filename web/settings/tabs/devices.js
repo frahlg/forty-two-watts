@@ -468,85 +468,57 @@
     resumeDraft(panel, body, status);
   }
 
-  // Edit in place and run it for a fixed window. Activating an edited driver on
-  // a live battery should not be a decision made once and forgotten, so the
-  // window expires on its own and the failure mode of walking away is the
-  // driver you started with.
+  // The editor is its own surface now: a driver is tens of kilobytes of Lua,
+  // and editing that in a textarea wedged into a device row is squinting, not
+  // editing. This hands it the driver and the actions, and knows nothing about
+  // how the editor is drawn.
   function renderDriverEditor(panel, body) {
-    panel.textContent = "";
+    if (!S.openDriverEditor) {
+      panel.textContent = "The editor did not load.";
+      return;
+    }
+    var id = encodeURIComponent(body.id);
 
-    var note = document.createElement("div");
-    note.className = "drv-version-detail";
-    note.style.marginBottom = "6px";
-    note.textContent = "Your edit runs for the chosen window and then puts " +
-      (body.source === "local" ? "your previous file" : "this version") +
-      " back, unless you keep it.";
-    panel.appendChild(note);
-
-    var editor = document.createElement("textarea");
-    editor.className = "drv-source-editor";
-    editor.spellcheck = false;
-    editor.value = body.lua || "";
-    panel.appendChild(editor);
-
-    var controls = document.createElement("div");
-    controls.style.alignItems = "center";
-    controls.style.display = "flex";
-    controls.style.flexWrap = "wrap";
-    controls.style.gap = "8px";
-    controls.style.marginTop = "6px";
-
-    var windowPicker = document.createElement("select");
-    [5, 10, 30, 60].forEach(function (minutes) {
-      var opt = document.createElement("option");
-      opt.value = String(minutes);
-      opt.textContent = "Try for " + minutes + " min";
-      if (minutes === 10) opt.selected = true;
-      windowPicker.appendChild(opt);
-    });
-    controls.appendChild(windowPicker);
-
-    var status = document.createElement("span");
-    status.className = "drv-draft-status";
-
-    var run = document.createElement("button");
-    run.type = "button";
-    run.className = "btn-add";
-    run.textContent = "Run this draft";
-    run.addEventListener("click", function () {
-      run.disabled = true;
-      status.textContent = "Starting…";
-      apiFetch("/api/drivers/" + encodeURIComponent(body.id) + "/draft", {
+    function post(path, payload) {
+      return apiFetch("/api/drivers/" + id + path, {
         method: "POST",
         headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({lua: editor.value, minutes: parseInt(windowPicker.value, 10)})
+        body: payload === undefined ? null : JSON.stringify(payload)
       }).then(function (r) {
         return r.json().then(function (b) {
-          if (!r.ok) throw new Error(b.error || "the draft could not be started");
+          if (!r.ok) throw new Error(b.error || "the request was refused");
           return b;
         });
-      }).then(function (b) {
-        showDraftRunning(panel, body, status, b.expires_at_ms);
-      }).catch(function (err) {
-        status.textContent = err.message;
-        run.disabled = false;
       });
+    }
+
+    S.openDriverEditor({
+      id: body.id,
+      filename: body.filename,
+      version: body.version,
+      bytes: body.bytes,
+      lua: body.lua,
+      sha256: body.sha256,
+      source: body.source,
+      sourceLabel: originLabel(body.source),
+      repository_url: body.repository_url
+    }, {
+      runDraft: function (lua, minutes) { return post("/draft", {lua: lua, minutes: minutes}); },
+      keepDraft: function () { return post("/draft/keep"); },
+      revertDraft: function () { return post("/draft/revert"); },
+      draftStatus: function () {
+        return apiFetch("/api/drivers/" + id + "/draft").then(function (r) { return r.json(); });
+      },
+      lint: function (lua) { return post("/lint", {lua: lua}); },
+      suggest: function (lua, say) {
+        var url = suggestUpstreamURL(body, lua);
+        if (url.length > MAX_SUGGESTION_URL) {
+          url = suggestUpstreamURL(body, "");
+          say("The driver is too large to prefill; paste it into the issue.");
+        }
+        window.open(url, "_blank", "noopener");
+      }
     });
-    controls.appendChild(run);
-
-    var cancel = document.createElement("button");
-    cancel.type = "button";
-    cancel.className = "btn-add";
-    cancel.textContent = "Cancel";
-    cancel.addEventListener("click", function () { renderDriverSource(panel, body); });
-    controls.appendChild(cancel);
-
-    // From here it carries the edit itself, so the suggestion is the work
-    // rather than a description of it.
-    appendSuggestButton(controls, body, function () { return editor.value; });
-
-    controls.appendChild(status);
-    panel.appendChild(controls);
   }
 
   function resumeDraft(panel, body, status) {

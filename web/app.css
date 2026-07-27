@@ -1575,6 +1575,102 @@ body.ftw-app .drv-module-source-panel {
 body.ftw-app .drv-source-code {
   max-width: 100%;
 }
+/* The driver editor: its own surface over everything else. A driver is tens of
+   kilobytes of Lua, and the settings modal is not the shape for reading it. */
+body.ftw-app .drv-editor-overlay {
+  align-items: center;
+  background: rgba(0, 0, 0, 0.72);
+  display: flex;
+  inset: 0;
+  justify-content: center;
+  padding: 24px;
+  position: fixed;
+  z-index: 1200;
+}
+body.ftw-app .drv-editor-shell {
+  background: var(--bg, #0b0d10);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  max-height: 100%;
+  max-width: 1180px;
+  overflow: hidden;
+  width: 100%;
+}
+body.ftw-app .drv-editor-head,
+body.ftw-app .drv-editor-foot {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 12px 16px;
+}
+body.ftw-app .drv-editor-head {
+  border-bottom: 1px solid var(--line-soft);
+}
+body.ftw-app .drv-editor-foot {
+  border-top: 1px solid var(--line-soft);
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+}
+body.ftw-app .drv-editor-provenance {
+  color: var(--fg-muted);
+  font-family: var(--mono);
+  font-size: 0.72rem;
+}
+body.ftw-app .drv-editor-link {
+  color: var(--accent-e);
+  font-size: 0.75rem;
+}
+body.ftw-app .drv-editor-head .btn-add,
+body.ftw-app .drv-editor-controls .btn-add {
+  margin-top: 0;
+  padding: 4px 12px;
+  width: auto;
+}
+/* The editor takes whatever height is left, which is the point of the view. */
+body.ftw-app .drv-editor-surface {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+}
+body.ftw-app .drv-editor-controls {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+/* Problems are clickable: each one jumps the cursor to its line. */
+body.ftw-app .drv-editor-problems {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-height: 108px;
+  overflow-y: auto;
+}
+body.ftw-app .drv-editor-problem {
+  background: transparent;
+  border: 0;
+  border-left: 2px solid transparent;
+  color: var(--fg-dim);
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  padding: 1px 0 1px 8px;
+  text-align: left;
+}
+body.ftw-app .drv-editor-problem:hover { color: var(--fg); }
+body.ftw-app .drv-editor-error { border-left-color: var(--red-e); }
+body.ftw-app .drv-editor-warning { border-left-color: var(--accent-e); }
+body.ftw-app .drv-editor-clean {
+  color: var(--green-e);
+  font-family: var(--mono);
+  font-size: 0.72rem;
+}
+
 /* Same box as the read view, so switching to edit does not move the code. */
 body.ftw-app .drv-source-editor {
   background: var(--surface2, rgba(0, 0, 0, 0.25));
@@ -1592,7 +1688,8 @@ body.ftw-app .drv-source-editor {
   white-space: pre;
   width: 100%;
 }
-body.ftw-app .drv-draft-status {
+body.ftw-app .drv-draft-status,
+body.ftw-app .drv-editor-status {
   color: var(--fg-muted);
   font-family: var(--mono);
   font-size: 0.72rem;

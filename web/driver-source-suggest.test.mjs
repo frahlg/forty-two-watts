@@ -147,37 +147,58 @@ test("the read view can suggest without an edit", () => {
   assert.match(body, /What I changed and why/);
 });
 
-test("a driver too large to prefill opens the issue anyway, and says so", () => {
-  const { api, opened } = load();
-  const panel = element("div");
-  api.renderSource(panel, SOURCE_BODY);
+// The editor is its own surface now, so the devices tab hands it the driver
+// and a set of actions. These test that boundary: what the tab passes in.
+function openEditorFor(api, panel, body) {
+  api.renderSource(panel, body);
   findButton(panel, "Edit and try").click();
+}
+
+test("opening the editor hands it the driver and the actions it needs", () => {
+  const { api, window } = load();
+  const opened = [];
+  window.FTWSettings.openDriverEditor = (driver, actions) => opened.push({ driver, actions });
+
+  openEditorFor(api, element("div"), SOURCE_BODY);
+
+  assert.equal(opened.length, 1, "the tab opens the editor rather than drawing one");
+  const { driver, actions } = opened[0];
+  assert.equal(driver.id, "sungrow");
+  assert.equal(driver.lua, SOURCE_BODY.lua);
+  // Provenance is resolved here, so the editor does not need to know the
+  // three overlays exist.
+  assert.match(driver.sourceLabel, /official/);
+  for (const name of ["runDraft", "keepDraft", "revertDraft", "draftStatus", "lint", "suggest"]) {
+    assert.equal(typeof actions[name], "function", `actions.${name} is missing`);
+  }
+});
+
+test("a driver too large to prefill opens the issue anyway, and says so", () => {
+  const { api, opened, window } = load();
+  let actions = null;
+  window.FTWSettings.openDriverEditor = (_driver, a) => { actions = a; };
+  openEditorFor(api, element("div"), SOURCE_BODY);
 
   // GitHub rejects a URL past roughly 8k, and a real driver is tens of
   // kilobytes — so this is the normal case for an edit, not an edge case.
-  const editor = panel.querySelector(".drv-source-editor");
-  editor.value = "x".repeat(api.maxSuggestionURL() * 3);
-  findButton(panel, "Suggest to repo").click();
+  const said = [];
+  actions.suggest("x".repeat(api.maxSuggestionURL() * 3), (m) => said.push(m));
 
   assert.equal(opened.length, 1, "one tab, and it is not a page GitHub will reject");
   assert.ok(opened[0].length <= api.maxSuggestionURL(),
     "the oversized draft was dropped from the URL rather than sent");
-  assert.ok(!decodedBody(opened[0]).includes("```lua"),
-    "and the code block goes with it");
-  assert.match(panel.querySelector(".drv-draft-status").textContent, /too large to prefill/,
+  assert.ok(!decodedBody(opened[0]).includes("```diff"), "and the diff goes with it");
+  assert.match(said.join(" "), /too large to prefill/,
     "silently dropping the operator's edit would look like it was sent");
 });
 
 test("an edit that fits is carried in full", () => {
-  const { api, opened } = load();
-  const panel = element("div");
-  api.renderSource(panel, SOURCE_BODY);
-  findButton(panel, "Edit and try").click();
+  const { api, opened, window } = load();
+  let actions = null;
+  window.FTWSettings.openDriverEditor = (_driver, a) => { actions = a; };
+  openEditorFor(api, element("div"), SOURCE_BODY);
 
-  panel.querySelector(".drv-source-editor").value =
-    "DRIVER = { id = \"sungrow\" }\n-- read holding 5017 instead of 5016\n";
-  findButton(panel, "Suggest to repo").click();
-
+  actions.suggest(SOURCE_BODY.lua + "-- read holding 5017 instead of 5016\n", () => {});
   assert.match(decodedBody(opened[0]), /read holding 5017 instead of 5016/);
 });
 
