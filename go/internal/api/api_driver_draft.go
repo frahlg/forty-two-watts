@@ -160,7 +160,7 @@ func (s *Server) handleDriverDraft(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 500, map[string]string{"error": err.Error()})
 		return
 	}
-	if err := os.WriteFile(live, []byte(body.Lua), 0o600); err != nil {
+	if err := replaceFile(live, []byte(body.Lua)); err != nil {
 		_ = os.Remove(record)
 		writeJSON(w, 500, map[string]string{"error": err.Error()})
 		return
@@ -282,7 +282,7 @@ func (s *Server) revertDraft(filename string) bool {
 		return false
 	}
 	if saved, err := os.ReadFile(original); err == nil {
-		_ = os.WriteFile(live, saved, 0o600)
+		_ = replaceFile(live, saved)
 	} else {
 		_ = os.Remove(live)
 	}
@@ -378,6 +378,35 @@ func driverFilename(entry *drivers.CatalogEntry) string {
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+// replaceFile writes through a temporary file in the same directory and renames
+// it into place.
+//
+// Writing to the path directly fails when the file is owned by someone else,
+// which is the normal case for an operator's own override: they copy it in as
+// themselves, while the gateway runs as its own user. Rename needs write
+// permission on the directory, not on the file -- and it is atomic, so a
+// driver can never be caught half-written.
+func replaceFile(path string, content []byte) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".*")
+	if err != nil {
+		return err
+	}
+	name := tmp.Name()
+	defer os.Remove(name)
+	if _, err := tmp.Write(content); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(name, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(name, path)
 }
 
 // restartDriversUsing points every configured driver with this filename at

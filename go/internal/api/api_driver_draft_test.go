@@ -145,6 +145,37 @@ func TestKeepingADraftStopsTheClock(t *testing.T) {
 	}
 }
 
+// An operator copies their own override in as themselves; the gateway runs as
+// its own user. On a real Raspberry Pi that meant the draft could not be
+// written at all -- "permission denied" on a file the gateway does not own,
+// even though it owns the directory. Rename needs the directory, not the file.
+func TestDraftReplacesAnOverrideItDoesNotOwn(t *testing.T) {
+	srv, _, user, _ := draftServer(t)
+	override := filepath.Join(user, "demo.lua")
+	own := "DRIVER = {\n  id = \"demo\",\n  version = \"1.0.0\",\n}\n" +
+		"function driver_init(cfg) end\nfunction driver_poll() return 7 end\n"
+	if err := os.WriteFile(override, []byte(own), 0o444); err != nil {
+		t.Fatal(err)
+	}
+
+	if code, body := postDraft(t, srv, "demo", `{"lua":`+quote(draftLua)+`}`); code != 200 {
+		t.Fatalf("draft over a read-only override = %d %v", code, body)
+	}
+	live, err := os.ReadFile(override)
+	if err != nil || !strings.Contains(string(live), "return 99") {
+		t.Fatalf("overlay = %q, %v", live, err)
+	}
+
+	// And it still comes back, so the operator does not lose their file.
+	if code, _ := postDraftAction(t, srv, "demo", "revert"); code != 200 {
+		t.Fatal("revert failed")
+	}
+	restored, err := os.ReadFile(override)
+	if err != nil || !strings.Contains(string(restored), "return 7") {
+		t.Fatalf("restored = %q, %v", restored, err)
+	}
+}
+
 // Keep removes the record; a timer that fires in the same instant must not
 // then delete the file the operator just chose to keep.
 func TestAnExpiryRacingKeepDoesNotDeleteTheKeptFile(t *testing.T) {
