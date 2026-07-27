@@ -1575,6 +1575,72 @@ body.ftw-app .drv-module-source-panel {
 body.ftw-app .drv-source-code {
   max-width: 100%;
 }
+/* Finding a driver for hardware you own. Cards rather than a dropdown, because
+   which DERs a driver covers and whether anyone has ever run it are the two
+   things that decide the choice, and a line of text hides both. */
+body.ftw-app .drv-catalog-results {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(auto-fill, minmax(232px, 1fr));
+  margin: 8px 0 4px;
+  max-height: 340px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+body.ftw-app .drv-catalog-card {
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  text-align: left;
+}
+body.ftw-app .drv-catalog-card:hover { border-color: var(--fg-dim); }
+body.ftw-app .drv-catalog-card.is-chosen {
+  border-color: var(--accent-e);
+  box-shadow: inset 0 0 0 1px var(--accent-e);
+}
+body.ftw-app .drv-catalog-title {
+  color: var(--fg);
+  font-size: 0.85rem;
+  font-weight: 500;
+  line-height: 1.25;
+}
+body.ftw-app .drv-catalog-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+body.ftw-app .drv-catalog-tag {
+  border: 1px solid var(--line-soft);
+  border-radius: 999px;
+  color: var(--fg-muted);
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.06em;
+  padding: 1px 7px;
+  text-transform: uppercase;
+}
+/* Four of thirty-seven have run on customer hardware. That is the difference
+   worth showing, so it is the only tag that carries colour. */
+body.ftw-app .drv-catalog-proven {
+  border-color: color-mix(in srgb, var(--green-e) 40%, transparent);
+  color: var(--green-e);
+}
+body.ftw-app .drv-catalog-unproven {
+  border-color: color-mix(in srgb, var(--accent-e) 30%, transparent);
+  color: var(--accent-e);
+}
+body.ftw-app .drv-catalog-foot {
+  color: var(--fg-muted);
+  font-family: var(--mono);
+  font-size: 0.66rem;
+  line-height: 1.35;
+}
+
 /* The driver editor: its own surface over everything else. A driver is tens of
    kilobytes of Lua, and the settings modal is not the shape for reading it. */
 body.ftw-app .drv-editor-overlay {

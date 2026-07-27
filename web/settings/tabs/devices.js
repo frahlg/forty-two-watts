@@ -142,6 +142,51 @@
   // /versions payload. The previous version of this code read the wrong field
   // and rendered nothing; the test that covered it matched the source with a
   // regex, so it passed while the panel was empty on screen.
+  // Everything an operator might type: the manufacturer, the driver's name,
+  // and the models it has been run against. tested_models is the one that
+  // matters -- you know you own an SH10RT, not that you need "Sungrow SH
+  // Hybrid Inverter".
+  function catalogHaystack(e) {
+    return [e.name, e.manufacturer, e.id, e.filename]
+      .concat(e.tested_models || [])
+      .concat(e.protocols || [])
+      .join(" ").toLowerCase();
+  }
+
+  // Proven first. Four of thirty-seven have run on customer hardware and the
+  // rest have not; alphabetical order buries that.
+  var VERIFICATION_RANK = {production: 0, beta: 1, experimental: 2};
+
+  function catalogRank(e) {
+    var rank = VERIFICATION_RANK[e.verification_status];
+    return rank === undefined ? 3 : rank;
+  }
+
+  // Every term has to match somewhere, so "sungrow hybrid" narrows rather
+  // than widens.
+  function searchCatalog(entries, query) {
+    var terms = String(query || "").trim().toLowerCase().split(/\s+/).filter(Boolean);
+    var matches = (entries || []).filter(function (e) {
+      if (terms.length === 0) return true;
+      var hay = catalogHaystack(e);
+      return terms.every(function (t) { return hay.indexOf(t) >= 0; });
+    });
+    return matches.sort(function (a, b) {
+      var byRank = catalogRank(a) - catalogRank(b);
+      if (byRank !== 0) return byRank;
+      return String(a.name || "").localeCompare(String(b.name || ""));
+    });
+  }
+
+  // Several drivers already begin with the manufacturer, which read as
+  // "CTEK CTEK Chargestorm".
+  function catalogTitle(e) {
+    var name = e.name || e.filename || e.id || "";
+    var maker = e.manufacturer || "";
+    if (!maker || name.toLowerCase().indexOf(maker.toLowerCase()) === 0) return name;
+    return maker + " " + name;
+  }
+
   S.driverVersions = {
     runningSummary: runningSummary,
     verificationLabel: verificationLabel,
@@ -152,7 +197,9 @@
     renderSource: function (panel, body) { return renderDriverSource(panel, body); },
     unifiedDiff: function (before, after, context) { return unifiedDiff(before, after, context); },
     suggestUpstreamURL: function (body, edited) { return suggestUpstreamURL(body, edited); },
-    maxSuggestionURL: function () { return MAX_SUGGESTION_URL; }
+    maxSuggestionURL: function () { return MAX_SUGGESTION_URL; },
+    searchCatalog: function (entries, query) { return searchCatalog(entries, query); },
+    catalogTitle: function (entry) { return catalogTitle(entry); }
   };
 
   // One list of everything this driver could run, and one click to switch.
@@ -779,9 +826,17 @@
         '<label>Channel</label>' +
         '<select id="driver-catalog-channel"><option value="stable">Stable</option><option value="beta">Beta · test one driver</option></select>' +
         '</div><div>' +
-        '<label>Driver <span class="help" data-help="Pick a Lua driver from the drivers/ directory. Each driver declares its capabilities (MQTT/Modbus) + which manufacturer/model it supports.">?</span></label>' +
-        '<select id="driver-catalog-picker"><option value="">Loading catalog…</option></select>' +
-        '</div></div><div class="field-row"><div>' +
+        // You know your hardware, not which driver covers it. The catalog
+        // carries tested_models for most drivers, so searching those is what
+        // turns "I have an SH10RT" into the right answer.
+        '<label>Find your device ' + help('Search by manufacturer, model or driver name. Drivers that have run on real hardware are listed first.') + '</label>' +
+        '<input type="search" id="driver-catalog-search" placeholder="e.g. SH10RT, Ferroamp, Chargestorm" autocomplete="off">' +
+        '</div></div>' +
+        // The picker stays as the selection the rest of the form reads, but
+        // the cards are what an operator actually looks at.
+        '<select id="driver-catalog-picker" hidden><option value="">Loading catalog…</option></select>' +
+        '<div id="driver-catalog-results" class="drv-catalog-results">Loading catalog…</div>' +
+        '<div class="field-row"><div>' +
         '<label>Friendly name</label><input type="text" id="driver-catalog-name" placeholder="e.g. ferroamp-house">' +
         '</div><div id="driver-catalog-profile-wrap" hidden>' +
         '<label>Register profile ' + help('Select the register map used by this inverter. The Unit ID remains editable after the driver is added.') + '</label>' +
@@ -1118,6 +1173,10 @@
           sel.innerHTML = "<option value=''>(no drivers found)</option>";
           return;
         }
+        // Nothing is chosen until the operator chooses. A select takes its
+        // first option on its own, which with cards means one sits silently
+        // outlined and Add would fetch a driver nobody asked for.
+        sel.appendChild(document.createElement("option"));
         entries.forEach(function (e) {
           var opt = document.createElement("option");
           opt.value = e.path;
@@ -1134,7 +1193,81 @@
           opt.dataset.readOnly = e.read_only ? "true" : "false";
           sel.appendChild(opt);
         });
+        S.catalogEntries = entries;
+        renderCatalogCards(entries);
         syncCatalogProfilePicker();
+      }
+
+      function renderCatalogCards(entries) {
+        var host = document.getElementById("driver-catalog-results");
+        var search = document.getElementById("driver-catalog-search");
+        var picker = document.getElementById("driver-catalog-picker");
+        if (!host || !picker) return;
+
+        var query = (search && search.value || "").trim();
+        var matches = searchCatalog(entries, query);
+
+        host.textContent = "";
+        if (matches.length === 0) {
+          var empty = document.createElement("div");
+          empty.className = "drv-version-detail";
+          empty.textContent = "No driver matches “" + query + "”. " +
+            "Try the manufacturer, or the model printed on the unit.";
+          host.appendChild(empty);
+          return;
+        }
+
+        matches.forEach(function (e) {
+          host.appendChild(catalogCard(e, picker, host, entries));
+        });
+      }
+
+      function catalogCard(e, picker, host, entries) {
+        var card = document.createElement("button");
+        card.type = "button";
+        card.className = "drv-catalog-card";
+        if (picker.value === e.path) card.classList.add("is-chosen");
+
+        var title = document.createElement("div");
+        title.className = "drv-catalog-title";
+        title.textContent = catalogTitle(e);
+        card.appendChild(title);
+
+        var tags = document.createElement("div");
+        tags.className = "drv-catalog-tags";
+        (e.capabilities || []).forEach(function (cap) {
+          var tag = document.createElement("span");
+          tag.className = "drv-catalog-tag";
+          tag.textContent = cap;
+          tags.appendChild(tag);
+        });
+        var verdict = verificationLabel(e.verification_status);
+        if (verdict) {
+          var badge = document.createElement("span");
+          badge.className = "drv-catalog-tag drv-catalog-" +
+            (e.verification_status === "production" ? "proven" : "unproven");
+          badge.textContent = verdict;
+          tags.appendChild(badge);
+        }
+        card.appendChild(tags);
+
+        // The models this has actually been run against — the thing an
+        // operator can compare with the label on their own unit.
+        var models = (e.tested_models || []).slice(0, 3).join(", ");
+        var foot = document.createElement("div");
+        foot.className = "drv-catalog-foot";
+        foot.textContent = [(e.protocols || []).join(" + "), e.version ? "v" + e.version : "", models]
+          .filter(Boolean).join(" · ");
+        card.appendChild(foot);
+
+        card.addEventListener("click", function () {
+          picker.value = e.path;
+          // The rest of the form listens to the select, so tell it the value
+          // moved rather than only setting it.
+          picker.dispatchEvent(new Event("change", {bubbles: true}));
+          renderCatalogCards(entries);
+        });
+        return card;
       }
 
       apiFetch("/api/drivers/catalog").then(function (r) { return r.json(); }).then(function (data) {
@@ -1390,6 +1523,13 @@
         populateCatalogPicker(entries, "stable");
       });
 
+      // Filtering happens over the catalog already fetched, so typing costs
+      // nothing and there is no debounce to get wrong.
+      var catalogSearch = document.getElementById("driver-catalog-search");
+      if (catalogSearch) catalogSearch.addEventListener("input", function () {
+        renderCatalogCards(S.catalogEntries || []);
+      });
+
       var channelSelect = document.getElementById("driver-catalog-channel");
       if (channelSelect) channelSelect.addEventListener("change", function () {
         if (channelSelect.value === "stable") {
@@ -1433,7 +1573,17 @@
       if (btn) btn.addEventListener("click", function () {
         var sel = document.getElementById("driver-catalog-picker");
         var nameEl = document.getElementById("driver-catalog-name");
-        if (!sel || !sel.value) return;
+        if (!sel || !sel.value) {
+          // Doing nothing silently reads as a broken button.
+          var results = document.getElementById("driver-catalog-results");
+          if (results) {
+            var say = results.querySelector(".drv-catalog-hint") ||
+              results.insertBefore(document.createElement("div"), results.firstChild);
+            say.className = "drv-catalog-hint drv-version-detail";
+            say.textContent = "Pick a device above first.";
+          }
+          return;
+        }
         ctx.captureCurrentTab();
         var chosen = sel.options[sel.selectedIndex];
         var protocols = (chosen.dataset.protocols || "").split("+");
