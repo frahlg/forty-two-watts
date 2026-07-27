@@ -1,6 +1,7 @@
 -- Pixii PowerShaper Driver
--- Bundled offline recovery snapshot for Device Support package pixii 1.2.0.
--- Canonical shared releases live in srcfl/srcful-device-support.
+-- This repository is where the canonical driver lives; releases are cut from
+-- here. The header used to point at an internal repository, which stopped
+-- being true when the drivers moved out of FTW.
 -- Emits: Battery, Meter
 -- Protocol: Modbus TCP — SunSpec-compliant commercial battery storage
 -- Register type: ALL HOLDING (FC 0x03)
@@ -28,7 +29,7 @@ DRIVER = {
   id           = "pixii",
   name         = "Pixii PowerShaper",
   manufacturer = "Pixii",
-  version      = "1.2.0",
+  version      = "2.0.0",
   protocols    = { "modbus" },
   capabilities = { "battery", "meter" },
   description  = "Pixii PowerShaper commercial battery storage via Modbus TCP.",

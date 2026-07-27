@@ -21,11 +21,21 @@ import (
 )
 
 const (
+	// MaxSessionLifetime is the ceiling a verifier accepts for a session.
 	MaxSessionLifetime = 5 * time.Minute
-	keyBytes           = 32
-	keyMaterialBytes   = 2 * keyBytes
-	sessionKeyDomain   = "ftw-home-link-session-keys/v1"
-	sealedADDomain     = "ftw-home-link-sealed-ad/v1"
+	// MaxClockSkew is the allowance for the difference between the gateway
+	// clock that stamps an expiry and the browser clock that checks it. Both
+	// clocks are independent, so a verifier that rejected the exact ceiling
+	// would drop valid sessions over a few milliseconds of NTP drift.
+	MaxClockSkew = 30 * time.Second
+	// SessionLifetime is what a gateway issues. It stays below the ceiling by
+	// the skew allowance so the verifier never has to loosen the ceiling.
+	SessionLifetime = MaxSessionLifetime - MaxClockSkew
+
+	keyBytes         = 32
+	keyMaterialBytes = 2 * keyBytes
+	sessionKeyDomain = "ftw-home-link-session-keys/v1"
+	sealedADDomain   = "ftw-home-link-sealed-ad/v1"
 )
 
 type Manager struct {
@@ -35,17 +45,28 @@ type Manager struct {
 }
 
 type Session struct {
-	routeHandle string
-	streamID    string
-	sessionID   string
-	expiresAt   time.Time
-	now         func() time.Time
-	inbound     cipher.AEAD
-	outbound    cipher.AEAD
+	gatewayID       string
+	routeGeneration uint64
+	routeHandle     string
+	streamID        string
+	sessionID       string
+	expiresAt       time.Time
+	now             func() time.Time
+	inbound         cipher.AEAD
+	outbound        cipher.AEAD
 
 	mu          sync.Mutex
 	inboundSeq  uint64
 	outboundSeq uint64
+}
+
+type Context struct {
+	GatewayID       string
+	RouteGeneration uint64
+	RouteHandle     string
+	StreamID        string
+	SessionID       string
+	ExpiresAt       time.Time
 }
 
 func NewManager(identity gatewayidentity.Identity) (*Manager, error) {
@@ -99,7 +120,7 @@ func (m *Manager) Accept(hello wire.SessionHello) (wire.SessionAccept, *Session,
 	if err != nil {
 		return wire.SessionAccept{}, nil, err
 	}
-	expiresAt := m.now().UTC().Add(MaxSessionLifetime)
+	expiresAt := m.now().UTC().Add(SessionLifetime)
 	accept := wire.SessionAccept{
 		Version: wire.Version, Type: wire.TypeSessionAccept,
 		ConnectionID: hello.ConnectionID, GatewayID: m.identity.GatewayID(),
@@ -125,10 +146,19 @@ func (m *Manager) Accept(hello wire.SessionHello) (wire.SessionAccept, *Session,
 		return wire.SessionAccept{}, nil, err
 	}
 	return accept, &Session{
+		gatewayID: m.identity.GatewayID(), routeGeneration: hello.RouteGeneration,
 		routeHandle: hello.RouteHandle, streamID: hello.StreamID,
 		sessionID: sessionID, expiresAt: expiresAt, now: m.now,
 		inbound: inbound, outbound: outbound,
 	}, nil
+}
+
+func (s *Session) Context() Context {
+	return Context{
+		GatewayID: s.gatewayID, RouteGeneration: s.routeGeneration,
+		RouteHandle: s.routeHandle, StreamID: s.streamID,
+		SessionID: s.sessionID, ExpiresAt: s.expiresAt,
+	}
 }
 
 func (s *Session) Decrypt(message wire.Sealed) ([]byte, error) {

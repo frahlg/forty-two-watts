@@ -303,15 +303,38 @@ func TestDirectManifestBindsReadOnlyRuntimePolicy(t *testing.T) {
 		t.Fatalf("direct runtime identity = %+v", policy)
 	}
 
-	manager.mu.Lock()
-	manifest := manager.manifests["ftw-official"]
-	manifest.Drivers[0].ReadOnly = false
-	manager.manifests["ftw-official"] = manifest
-	manager.mu.Unlock()
+	// read_only and control_enabled are two spellings of one fact. A driver
+	// that may control while claiming to be read-only reads as safe to
+	// anything checking only one of them, so the pair is refused outright.
+	setManifestDriver := func(mutate func(*ManifestDriver)) {
+		manager.mu.Lock()
+		manifest := manager.manifests["ftw-official"]
+		mutate(&manifest.Drivers[0])
+		manager.manifests["ftw-official"] = manifest
+		manager.mu.Unlock()
+	}
+	setManifestDriver(func(d *ManifestDriver) { d.ReadOnly = false })
 	if _, err := manager.RuntimePolicy(config.Driver{
 		Name: "demo", Lua: filepath.Join(manager.ActiveDir(), "demo.lua"),
-	}); err == nil || !strings.Contains(err.Error(), "lacks signed read-only policy") {
-		t.Fatalf("unsigned write policy error = %v", err)
+	}); err == nil || !strings.Contains(err.Error(), "contradictory read-only policy") {
+		t.Fatalf("contradictory policy error = %v", err)
+	}
+
+	// A driver whose code carries a control path is published with it intact,
+	// and runs under the same terms as the copy bundled with this build --
+	// which is built from the same source. Binding a read-only policy here made
+	// one file behave two ways depending on where it came from.
+	setManifestDriver(func(d *ManifestDriver) {
+		d.ReadOnly = false
+		d.ControlEnabled = true
+		d.Metadata.ReadOnly = false
+		d.Permissions = []string{"modbus.read", "modbus.write"}
+	})
+	policy, err = manager.RuntimePolicy(config.Driver{
+		Name: "demo", Lua: filepath.Join(manager.ActiveDir(), "demo.lua"),
+	})
+	if err != nil || policy != nil {
+		t.Fatalf("control driver policy = %+v, %v; want none so it runs as the bundled copy does", policy, err)
 	}
 }
 
@@ -411,4 +434,128 @@ func TestStartupReconcilesCrashWindowAndRejectsModifiedArtifact(t *testing.T) {
 	if _, err := os.Lstat(activePath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("active symlink still exists: %v", err)
 	}
+}
+
+// Installing a channel version over a bundled driver leaves nothing to step
+// back to: the bundled copy is not an install, so PreviousInstalledPath is
+// empty and ActivateInstalled answers "not retained locally" for its version.
+// UseBundled is the way back -- it removes the managed entry, which is what
+// makes core resolve the bundled driver again.
+//
+// This is the first move anyone makes when trying a new driver, so without it
+// "try it and put the old one back" is not available at all.
+func TestUseBundledAfterFirstInstallRestoresTheBundledDriver(t *testing.T) {
+	manager, store, dir, cleanup := installedOverBundled(t)
+	defer cleanup()
+
+	bundled := filepath.Join(dir, "bundled", "demo.lua")
+	if err := os.MkdirAll(filepath.Dir(bundled), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(bundled, testDriver("0.9.0"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	replaced, err := manager.UseBundled("drivers/demo.lua", bundled)
+	if err != nil {
+		t.Fatalf("UseBundled: %v", err)
+	}
+	// Returned so the caller can put this exact artifact back if the bundled
+	// driver fails to start.
+	if replaced.Version != "1.0.0" || replaced.SHA256 == "" {
+		t.Fatalf("replaced = %+v, want the artifact that was active", replaced)
+	}
+	activePath := filepath.Join(manager.ActiveDir(), "demo.lua")
+	if _, err := os.Lstat(activePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("managed entry still present: %v", err)
+	}
+	if active, err := store.ActiveDriverRepoInstall("drivers/demo.lua"); err == nil && active.Active {
+		t.Fatalf("install still active: %+v", active)
+	}
+
+	// The artifact stays on disk, so going back to it needs no network.
+	if _, err := manager.ActivateInstalled("demo", replaced.Version, replaced.SHA256); err != nil {
+		t.Fatalf("reactivate the artifact we just replaced: %v", err)
+	}
+}
+
+// Not every driver the channel offers is bundled. Deactivating the managed
+// entry when there is nothing behind it would stop the driver rather than
+// revert it, so the file is checked before anything is touched.
+func TestUseBundledRefusesWhenNoBundledCopyExists(t *testing.T) {
+	manager, store, dir, cleanup := installedOverBundled(t)
+	defer cleanup()
+
+	if _, err := manager.UseBundled("drivers/demo.lua", filepath.Join(dir, "bundled", "absent.lua")); err == nil {
+		t.Fatal("UseBundled must refuse when the bundled file is missing")
+	}
+	if _, err := manager.UseBundled("drivers/demo.lua", ""); err == nil {
+		t.Fatal("UseBundled must refuse an empty bundled path")
+	}
+	// Still running what it was running.
+	active, err := store.ActiveDriverRepoInstall("drivers/demo.lua")
+	if err != nil || !active.Active || active.Version != "1.0.0" {
+		t.Fatalf("active = %+v err=%v, want the managed install untouched", active, err)
+	}
+	if _, err := os.Lstat(filepath.Join(manager.ActiveDir(), "demo.lua")); err != nil {
+		t.Fatalf("managed entry was removed despite the refusal: %v", err)
+	}
+}
+
+// Rollback still refuses a first install, because it steps between managed
+// artifacts: deactivating the only active row would leave the caller's own
+// recovery path -- a second Rollback -- with nothing to restore.
+func TestRollbackStillRefusesTheFirstInstall(t *testing.T) {
+	manager, _, _, cleanup := installedOverBundled(t)
+	defer cleanup()
+
+	if _, err := manager.Rollback("drivers/demo.lua"); err == nil {
+		t.Fatal("Rollback must refuse when there is no previous managed artifact")
+	}
+}
+
+// One signed install over a bundled driver, which is where all three cases
+// above start.
+func installedOverBundled(t *testing.T) (*Manager, *state.Store, string, func()) {
+	t.Helper()
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture := &signedFixture{private: private}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/manifest.json":
+			_, _ = w.Write(fixture.envelope(t))
+		case "/demo.lua":
+			fixture.mu.Lock()
+			defer fixture.mu.Unlock()
+			_, _ = w.Write(fixture.driver)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	fixture.setVersion(server.URL, "1.0.0")
+
+	dir := t.TempDir()
+	store, err := state.Open(filepath.Join(dir, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.DeviceRepository{Enabled: true, Repositories: []config.DriverRepositorySource{{
+		ID: "test", ManifestURL: server.URL + "/manifest.json", Enabled: true,
+		AllowInsecure: true, TrustedKeys: map[string]string{"test": base64.StdEncoding.EncodeToString(public)},
+	}}}
+	manager := New(cfg, dir, store)
+	if err := manager.Refresh(context.Background(), "test"); err != nil {
+		t.Fatal(err)
+	}
+	first, err := manager.Install(context.Background(), "test", "demo", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.PreviousInstalledPath != "" {
+		t.Fatalf("PreviousInstalledPath = %q, want empty for a first install", first.PreviousInstalledPath)
+	}
+	return manager, store, dir, func() { server.Close(); store.Close() }
 }

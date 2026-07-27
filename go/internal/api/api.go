@@ -131,6 +131,11 @@ type Deps struct {
 	// Optional: HA MQTT bridge (nil if disabled).
 	HA *ha.Bridge
 
+	// HomeLink owns local-only pairing, passkey enrollment, revocation and
+	// status. Nil reports that this host has no safe Home Link identity.
+	HomeLink        HomeLinkAdmin
+	HomeLinkEnabled bool
+
 	// Driver registry — used by lifecycle endpoints (restart/disable/enable)
 	// and EV command dispatch. Nil disables those endpoints (returns 503).
 	Registry *drivers.Registry
@@ -195,6 +200,11 @@ type Server struct {
 	versionUpdateMu sync.Mutex
 	driverUpdateMu  sync.Mutex
 	backupMu        sync.Mutex
+
+	// Timers that put a driver back after an edit has been tried for its
+	// window. The record on disk is what survives a restart; these only make
+	// the revert prompt while the process lives.
+	drafts *driverDrafts
 }
 
 // New creates a new API server.
@@ -209,8 +219,13 @@ func New(deps *Deps) *Server {
 		deps:       deps,
 		mux:        http.NewServeMux(),
 		dailyCache: make(map[string]state.DayEnergy),
+		drafts:     newDriverDrafts(),
 	}
 	s.routes()
+	// A draft's timer died with the previous process, so anything left behind
+	// goes back now. What runs after a restart should be the driver that was
+	// chosen, not a forgotten experiment.
+	s.RevertDraftsOnStart()
 	return s
 }
 
@@ -242,6 +257,12 @@ func (s *Server) routes() {
 	s.handle("GET  /api/drivers", s.handleDrivers)
 	s.handle("GET  /api/drivers/catalog", s.handleDriversCatalog)
 	s.handle("POST /api/drivers/test", s.handleDriverTest)
+	s.handle("GET  /api/drivers/{id}/source", s.handleDriverSource)
+	s.handle("POST /api/drivers/{id}/lint", s.handleDriverLint)
+	s.handle("POST /api/drivers/{id}/draft", s.handleDriverDraft)
+	s.handle("GET  /api/drivers/{id}/draft", s.handleDriverDraftStatus)
+	s.handle("POST /api/drivers/{id}/draft/keep", s.handleDriverDraftKeep)
+	s.handle("POST /api/drivers/{id}/draft/revert", s.handleDriverDraftRevert)
 	s.handle("POST /api/drivers/fingerprint", s.handleDriverFingerprint)
 	s.handle("GET  /api/drivers/{name}", s.handleDriverDetail)
 	s.handle("GET  /api/drivers/{name}/logs", s.handleDriverLogs)
@@ -255,6 +276,7 @@ func (s *Server) routes() {
 	s.handle("POST /api/device_repository/refresh", s.handleDeviceRepositoryRefresh)
 	s.handle("POST /api/device_repository/drivers/{id}/install", s.handleDeviceRepositoryInstall)
 	s.handle("POST /api/device_repository/drivers/{id}/rollback", s.handleDeviceRepositoryRollback)
+	s.handle("POST /api/device_repository/drivers/{id}/use_bundled", s.handleDeviceRepositoryUseBundled)
 	s.handle("GET  /api/device_repository/drivers/{id}/versions", s.handleDeviceRepositoryVersions)
 	s.handle("POST /api/device_repository/drivers/{id}/activate", s.handleDeviceRepositoryActivate)
 	s.handle("GET  /api/components", s.handleComponents)
@@ -263,6 +285,9 @@ func (s *Server) routes() {
 	s.handle("POST /api/components/optimizer/rollback", s.handleOptimizerComponentRollback)
 	s.handle("POST /api/components/optimizer/channel", s.handleOptimizerComponentChannel)
 	s.handle("GET  /api/ha/status", s.handleHAStatus)
+	s.handle("GET  /api/home-link/status", s.handleHomeLinkStatus)
+	s.handle("POST /api/home-link/pairing", s.handleHomeLinkPairing)
+	s.handle("POST /api/home-link/passkeys/revoke", s.handleHomeLinkPasskeyRevoke)
 	s.handle("GET  /api/caldav/status", s.handleCalDAVStatus)
 	s.handle("GET  /api/caldav/credentials", s.handleCalDAVCredentials)
 	s.handle("GET  /api/notifications/status", s.handleNotificationsStatus)

@@ -330,7 +330,10 @@ func (r *Registry) Add(ctx context.Context, cfg config.Driver) error {
 func (r *Registry) runLoop(rd *runningDriver) {
 	defer close(rd.done)
 	ctx := context.Background()
-	interval := rd.env.PollInterval()
+	// The first tick can be held back by host.set_warmup_s for a device
+	// that answers Modbus before its registers mean anything. Every
+	// later tick uses the plain poll interval.
+	interval := rd.env.FirstPollDelay()
 	timer := time.NewTimer(interval)
 	defer timer.Stop()
 	leaseTimer := time.NewTimer(time.Hour)

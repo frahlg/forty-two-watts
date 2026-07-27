@@ -90,6 +90,14 @@ the driver is a bug.
 telemetry, diagnostic metrics, identity, time/JSON helpers and capability-gated
 MQTT, Modbus, HTTP, WebSocket and raw TCP operations.
 
+Some calls answer to two names. `srcfl/device-drivers` treats the Blixt L1 host
+API as its naming reference and is converting its catalog to it, so `write`,
+`write_registers` and `now_ms` resolve to `modbus_write`, `modbus_write_multi`
+and `millis`. `host.emit` likewise reads `W` and `SoC_nom_fract` when `w` and
+`soc` are absent; when both are present the lowercase key wins. Prefer the
+canonical spelling in a new driver. The older names stay until the catalog has
+finished moving.
+
 A YAML driver entry grants only what the file needs:
 
 ```yaml
@@ -110,8 +118,17 @@ setup problem.
 
 Call `host.set_make` and `host.set_sn` as soon as stable identity is known.
 Core then keys durable device state by hardware identity rather than the YAML
-name. Use `host.emit_metric(name, value, unit)` for scalar diagnostics that do
-not belong in structured meter/PV/battery/EV telemetry.
+name. `host.set_model` and `host.set_rated_w` record the rest of the nameplate;
+the host repeats both on every emit, so read them once in `driver_init` rather
+than every poll. Neither takes part in device-id resolution. Use
+`host.emit_metric(name, value, unit)` for scalar diagnostics that do not belong
+in structured meter/PV/battery/EV telemetry.
+
+A device that answers Modbus before its registers mean anything can call
+`host.set_warmup_s(seconds)` in `driver_init` to hold off the first poll.
+`host.decode_string(registers, start, count)` reads ASCII from a register block,
+two characters per register, high byte first, trailing padding stripped — use it
+instead of hand-rolling the byte loop.
 
 ## Implementation sequence
 

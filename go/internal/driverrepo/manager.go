@@ -414,9 +414,10 @@ func (m *Manager) EnrichCatalog(entries []drivers.CatalogEntry) []drivers.Catalo
 		activeByLogical[in.LogicalPath] = in
 	}
 	for i := range entries {
-		if entries[i].Source == "local" {
-			continue
-		}
+		// A local file is an operator's own copy and is not a managed install,
+		// so none of the install metadata below applies to it. It still needs
+		// the upstream comparison: an override shadows the channel silently,
+		// and without this the operator is never told a newer version exists.
 		if in, ok := activeByLogical[entries[i].Path]; ok && entries[i].Source == "managed" {
 			entries[i].InstalledVersion = in.Version
 			entries[i].RepositoryID = in.RepoID
@@ -434,20 +435,31 @@ func (m *Manager) EnrichCatalog(entries []drivers.CatalogEntry) []drivers.Catalo
 				break
 			}
 		}
+		local := entries[i].Source == "local"
 		for _, candidate := range candidates {
 			if candidate.Driver.ID != entries[i].ID {
 				continue
 			}
 			if entries[i].UpstreamVersion == "" || compareSemver(candidate.Driver.Version, entries[i].UpstreamVersion) > 0 {
 				entries[i].UpstreamVersion = candidate.Driver.Version
-				entries[i].RepositoryID = candidate.RepositoryID
+				// A local file came from the operator, not from a repository.
+				// Naming one here would read as provenance it does not have.
+				if !local {
+					entries[i].RepositoryID = candidate.RepositoryID
+				}
 			}
 		}
 		base := entries[i].Version
 		if entries[i].InstalledVersion != "" {
 			base = entries[i].InstalledVersion
 		}
-		entries[i].UpdateAvailable = entries[i].UpstreamVersion != "" && compareSemver(entries[i].UpstreamVersion, base) > 0
+		// Only claim an update when both sides are real versions that can be
+		// ordered. A local driver often carries no version, or something like
+		// "local", and comparing that as a string would announce an update
+		// on nothing better than alphabetical luck.
+		entries[i].UpdateAvailable = entries[i].UpstreamVersion != "" &&
+			isSemver(entries[i].UpstreamVersion) && isSemver(base) &&
+			compareSemver(entries[i].UpstreamVersion, base) > 0
 	}
 	return entries
 }
@@ -601,6 +613,10 @@ func (m *Manager) Rollback(logicalPath string) (state.DriverRepoInstall, error) 
 		return state.DriverRepoInstall{}, err
 	}
 	if current.PreviousInstalledPath == "" {
+		// Going back to the bundled copy is a different operation, not a step
+		// between managed artifacts: see UseBundled. Rolling back here would
+		// deactivate the only active row, leaving the caller's own recovery
+		// path -- a second Rollback -- with nothing to restore.
 		return state.DriverRepoInstall{}, errors.New("driver has no previous managed artifact")
 	}
 	previous, err := m.store.DriverRepoInstallByPath(current.PreviousInstalledPath)
@@ -757,6 +773,37 @@ func (m *Manager) ActivateInstalled(driverID, version, sha256 string) (state.Dri
 		return state.DriverRepoInstall{}, err
 	}
 	return activated, nil
+}
+
+// UseBundled drops the managed entry so the driver resolves to the copy that
+// shipped with this build. It is the only way back once a channel version has
+// been installed over a bundled driver, since the bundled copy is not an
+// install and cannot be activated by version.
+//
+// bundledPath is checked before anything is deactivated: not every driver the
+// channel offers is bundled, and taking the managed entry away when there is
+// nothing behind it would stop the driver instead of reverting it.
+func (m *Manager) UseBundled(logicalPath, bundledPath string) (state.DriverRepoInstall, error) {
+	logicalPath, err := safeLogicalPath(logicalPath)
+	if err != nil {
+		return state.DriverRepoInstall{}, err
+	}
+	current, err := m.store.ActiveDriverRepoInstall(logicalPath)
+	if err != nil {
+		return state.DriverRepoInstall{}, err
+	}
+	if bundledPath == "" {
+		return state.DriverRepoInstall{}, errors.New("no bundled copy of this driver to fall back to")
+	}
+	if _, err := os.Stat(bundledPath); err != nil {
+		return state.DriverRepoInstall{}, fmt.Errorf("no bundled copy of this driver to fall back to: %w", err)
+	}
+	if err := m.Deactivate(logicalPath); err != nil {
+		return state.DriverRepoInstall{}, err
+	}
+	// Returned so the caller can put this exact artifact back if the bundled
+	// driver fails to start.
+	return current, nil
 }
 
 // Deactivate removes the managed resolver entry. It is used when the first
@@ -1072,6 +1119,13 @@ func decodeBase64(value string) ([]byte, error) {
 }
 
 var semverRE = regexp.MustCompile(`^([0-9]+)\.([0-9]+)\.([0-9]+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$`)
+
+// isSemver reports whether a version can be ordered at all. compareSemver
+// falls back to comparing strings, which is fine for sorting and wrong for
+// deciding whether a newer release exists.
+func isSemver(value string) bool {
+	return semverRE.MatchString(value)
+}
 
 func compareSemver(a, b string) int {
 	type version struct {

@@ -1,20 +1,27 @@
-// <ftw-price-chart> — full-width bar chart of known electricity spot
-// prices (next 48 h or so), with a toggle to include VAT (default on)
-// and hover tooltip per slot. Peaks + lows are marked. Self-fetching:
-// hits /api/prices and /api/config on connect, polls /api/prices
-// every 5 min after that.
+// <ftw-price-chart> — full-width bar chart of known electricity prices
+// (next 48 h or so), with a toggle between the consumer total (default)
+// and raw spot, and a hover tooltip per slot. Peaks + lows are marked.
+// Self-fetching: hits /api/prices and /api/config on connect, polls
+// /api/prices every 5 min after that.
 //
 // Inputs (none — autonomous). The component renders its own header
-// (label + VAT toggle) and the SVG chart underneath.
+// (label + price-mode toggle) and the SVG chart underneath.
 //
 // Data shape from /api/prices:
 //   { zone: "SE4", enabled: true, items: [
 //       { slot_ts_ms, slot_len_min, spot_ore_kwh, total_ore_kwh, ... }
 //     ] }
 //
-// Sweden VAT rate (25 %) is read from /api/config price.vat_percent
-// when available; falls back to 25 for the toggle math when the
-// config endpoint is missing.
+// The consumer total is (spot + grid tariff) × (1 + VAT/100) — the same
+// formula as prices.Applier on the Go side and the plan chart's tooltip.
+// Grid tariff and VAT come from /api/config (price.grid_tariff_ore_kwh,
+// price.vat_percent); we recompute rather than read the stored
+// total_ore_kwh so a tariff change in settings applies to already-fetched
+// slots too. Missing config falls back to 0 tariff / 25 % VAT.
+//
+// The default used to be spot × 1.25 labelled "incl. VAT", which left the
+// grid tariff out — on a 70 öre/kWh tariff that reported 21 öre for a slot
+// the plan chart (correctly) priced at 109 öre.
 
 import { FtwElement } from "./ftw-element.js";
 import { apiFetch } from "./api-fetch.js";
@@ -22,6 +29,7 @@ import {
   buildCompactPriceView,
   formatPriceSlotLabel,
 } from "./price-summary.js";
+import { consumerTotalOre, priceParts } from "./price-math.js";
 
 class FtwPriceChart extends FtwElement {
   static styles = `
@@ -93,7 +101,7 @@ class FtwPriceChart extends FtwElement {
       transition: transform 240ms cubic-bezier(0.4, 0, 0.2, 1);
       z-index: 0;
     }
-    .toggle[data-vat="off"]::before {
+    .toggle[data-price-mode="spot"]::before {
       transform: translateX(100%);
     }
     /* Horizon pill is a 3-position selector (Today / +Tomorrow / Tomorrow);
@@ -180,6 +188,13 @@ class FtwPriceChart extends FtwElement {
     }
     .tip-price.peak  { color: var(--red-e); }
     .tip-price.low   { color: var(--green-e); }
+    /* Component breakdown under the total, so the tooltip answers "why is
+       it that much?" without a trip to the plan page. */
+    .tip-parts {
+      color: var(--fg-dim);
+      font-size: 10px;
+      margin-top: 3px;
+    }
 
     .compact-head {
       display: flex;
@@ -382,11 +397,12 @@ class FtwPriceChart extends FtwElement {
     super();
     this._data = null;        // { zone, items: [{tsMs, ore}], min, max, vatPct }
     this._priceState = "loading";
-    this._vatOn = readVatPref(); // persisted across reloads, defaults to true
+    this._totalOn = readTotalPref(); // consumer total vs raw spot, persisted
     this._horizon = readHorizonPref(); // "today" or "all", persisted
     this._refreshTimer = null;
     this._hover = null;       // { idx, x, y } during hover
     this._vatPct = 25;        // fallback; overwritten from /api/config
+    this._gridTariff = 0;     // öre/kWh excl. VAT; from /api/config
     this._geom = null;        // { padL, plotW, n, W } — set in _renderChart
     this._isTouching = false; // suppresses synthesized mouse events after touch
   }
@@ -409,13 +425,13 @@ class FtwPriceChart extends FtwElement {
       if (this._mql.addEventListener) this._mql.addEventListener("change", this._mqlListener);
       else if (this._mql.addListener) this._mql.addListener(this._mqlListener);
     }
-    this._vatSyncListener = (event) => {
-      const next = event && event.detail && event.detail.vatOn;
-      if (typeof next !== "boolean" || next === this._vatOn) return;
-      this._vatOn = next;
+    this._modeSyncListener = (event) => {
+      const next = event && event.detail && event.detail.totalOn;
+      if (typeof next !== "boolean" || next === this._totalOn) return;
+      this._totalOn = next;
       this.update();
     };
-    window.addEventListener("ftw-price-vat-change", this._vatSyncListener);
+    window.addEventListener("ftw-price-mode-change", this._modeSyncListener);
   }
 
   disconnectedCallback() {
@@ -429,9 +445,9 @@ class FtwPriceChart extends FtwElement {
       this._mql = null;
       this._mqlListener = null;
     }
-    if (this._vatSyncListener) {
-      window.removeEventListener("ftw-price-vat-change", this._vatSyncListener);
-      this._vatSyncListener = null;
+    if (this._modeSyncListener) {
+      window.removeEventListener("ftw-price-mode-change", this._modeSyncListener);
+      this._modeSyncListener = null;
     }
   }
 
@@ -439,12 +455,18 @@ class FtwPriceChart extends FtwElement {
     try {
       const r = await apiFetch("/api/config");
       const j = await r.json();
-      const v = j && j.price && j.price.vat_percent;
-      if (typeof v === "number" && v > 0) {
-        this._vatPct = v;
-        this.update();
+      const p = (j && j.price) || {};
+      let changed = false;
+      if (typeof p.vat_percent === "number" && p.vat_percent > 0) {
+        this._vatPct = p.vat_percent;
+        changed = true;
       }
-    } catch (e) { /* ignore — fallback 25 % is fine */ }
+      if (typeof p.grid_tariff_ore_kwh === "number" && p.grid_tariff_ore_kwh >= 0) {
+        this._gridTariff = p.grid_tariff_ore_kwh;
+        changed = true;
+      }
+      if (changed) this.update();
+    } catch (e) { /* ignore — fallback 0 tariff / 25 % VAT is fine */ }
   }
 
   async _loadPrices() {
@@ -466,11 +488,9 @@ class FtwPriceChart extends FtwElement {
       } else if (!j || !Array.isArray(j.items)) {
         throw new Error("Price response did not include items");
       } else {
-        // Items already carry both spot_ore_kwh and total_ore_kwh, but
-        // the operator's mental model is "spot price ± VAT" — so we
-        // base on spot and let the toggle add VAT. Keeps the toggle
-        // semantics honest (it's NOT a tariff/grid-fee toggle, just
-        // VAT) and matches the API spec the user asked for.
+        // We keep only spot and derive the total from live config, so the
+        // toggle is a view over one number rather than two independently
+        // aged ones. See the file header for why.
         const items = j.items.map((it) => ({
           tsMs:  Number(it.slot_ts_ms) || 0,
           lenMin: Number(it.slot_len_min) || 60,
@@ -486,11 +506,16 @@ class FtwPriceChart extends FtwElement {
     }
   }
 
-  // Resolved öre/kWh per slot for the active toggle.
+  // Resolved öre/kWh per slot for the active toggle. "Total" is what the
+  // slot actually costs to import: (spot + grid tariff) × (1 + VAT/100).
   _priceFor(item) {
-    return this._vatOn
-      ? item.spot * (1 + this._vatPct / 100)
-      : item.spot;
+    if (!this._totalOn) return item.spot;
+    return consumerTotalOre(item.spot, this._gridTariff, this._vatPct);
+  }
+
+  // Breakdown of the consumer total for one slot, in öre/kWh.
+  _partsFor(item) {
+    return priceParts(item.spot, this._gridTariff, this._vatPct);
   }
 
   render() {
@@ -502,7 +527,11 @@ class FtwPriceChart extends FtwElement {
     // the stored preference. The stored value is kept untouched so the
     // user's choice re-applies once tomorrow's prices publish.
     const effectiveHorizon = hasTomorrow ? this._horizon : "today";
-    const vatLabel = this._vatOn ? "incl. VAT" : "spot only";
+    // Name what the numbers include. "incl. VAT" alone was read as "this
+    // is what I pay", which it wasn't while the grid tariff sat outside it.
+    const modeLabel = this._totalOn
+      ? (this._gridTariff > 0 ? "incl. grid tariff + VAT" : "incl. VAT")
+      : "spot only";
     const horizonLabel =
       effectiveHorizon === "today"    ? "today" :
       effectiveHorizon === "tomorrow" ? "tomorrow" :
@@ -520,10 +549,10 @@ class FtwPriceChart extends FtwElement {
       else if (effectiveHorizon === "tomorrow") visible = filterTomorrow(data.items);
       else                                      visible = data.items;
     }
-    // Compute stats over the visible window using the consumer-resolved
-    // öre/kWh (spot + grid + VAT, matching whichever toggle is active),
-    // so the numbers in the subtitle line up exactly with what the
-    // chart bars are showing. `current` is the slot covering wall-clock
+    // Compute stats over the visible window using the resolved öre/kWh for
+    // whichever toggle is active, so the numbers in the subtitle line up
+    // exactly with what the chart bars are showing. `current` is the slot
+    // covering wall-clock
     // now if it's in the window, else the nearest. Empty horizon → no
     // stats row, falls through to the existing "no data" message.
     let statsHtml = "";
@@ -564,13 +593,13 @@ class FtwPriceChart extends FtwElement {
       <div class="head">
         <div>
           <div class="label">Electricity prices</div>
-          <div class="meta">${data ? `${escapeXml(data.zone)} · ${vatLabel} · ${horizonLabel}` : "—"}</div>
+          <div class="meta">${data ? `${escapeXml(data.zone)} · ${modeLabel} · ${horizonLabel}` : "—"}</div>
           ${statsHtml}
         </div>
         <div class="toggles">
-          <div class="toggle" role="tablist" data-vat="${this._vatOn ? "on" : "off"}">
-            <button type="button" data-vat="on"  class="${this._vatOn ? "active" : ""}" aria-selected="${this._vatOn}">Incl. VAT</button>
-            <button type="button" data-vat="off" class="${!this._vatOn ? "active" : ""}" aria-selected="${!this._vatOn}">Spot</button>
+          <div class="toggle" role="tablist" data-price-mode="${this._totalOn ? "total" : "spot"}">
+            <button type="button" data-price-mode="total" class="${this._totalOn ? "active" : ""}" aria-selected="${this._totalOn}">Total</button>
+            <button type="button" data-price-mode="spot"  class="${!this._totalOn ? "active" : ""}" aria-selected="${!this._totalOn}">Spot</button>
           </div>${horizonToggleHtml}
         </div>
       </div>
@@ -591,7 +620,8 @@ class FtwPriceChart extends FtwElement {
       state: this._priceState,
       items: data && data.items,
       now: Date.now(),
-      vatOn: this._vatOn,
+      totalOn: this._totalOn,
+      gridTariffOre: this._gridTariff,
       vatPercent: this._vatPct,
     });
     const head = `
@@ -626,7 +656,9 @@ class FtwPriceChart extends FtwElement {
     const lowTime = summary.nextLow
       ? formatPriceSlotLabel(summary.nextLow.tsMs)
       : "No later slot published";
-    const vatLabel = this._vatOn ? "incl. VAT" : "spot only";
+    const vatLabel = this._totalOn
+      ? (this._gridTariff > 0 ? "incl. grid tariff + VAT" : "incl. VAT")
+      : "spot only";
     const stale = view.stale
       ? `<span class="compact-stale">Last update failed</span>`
       : "";
@@ -910,6 +942,7 @@ class FtwPriceChart extends FtwElement {
         <div class="tip" data-tip>
           <div class="tip-time" data-tip-time>—</div>
           <div class="tip-price" data-tip-price>—</div>
+          <div class="tip-parts" data-tip-parts hidden></div>
         </div>
       </div>
     `;
@@ -917,16 +950,18 @@ class FtwPriceChart extends FtwElement {
 
   afterRender() {
     const root = this.shadowRoot;
-    const vatToggle = root.querySelector(".toggle[data-vat]");
-    if (vatToggle) {
-      vatToggle.querySelectorAll("button[data-vat]").forEach((b) => {
+    const modeToggle = root.querySelector(".toggle[data-price-mode]");
+    if (modeToggle) {
+      modeToggle.querySelectorAll("button[data-price-mode]").forEach((b) => {
         b.addEventListener("click", () => {
-          const next = b.dataset.vat === "on";
-          if (next === this._vatOn) return;
-          this._vatOn = next;
-          writeVatPref(next);
-          window.dispatchEvent(new CustomEvent("ftw-price-vat-change", {
-            detail: { vatOn: next },
+          const next = b.dataset.priceMode === "total";
+          if (next === this._totalOn) return;
+          this._totalOn = next;
+          writeTotalPref(next);
+          // Overview renders a second instance in compact mode; this keeps
+          // the two from disagreeing about which price is on screen.
+          window.dispatchEvent(new CustomEvent("ftw-price-mode-change", {
+            detail: { totalOn: next },
           }));
           this.update();
         });
@@ -1049,6 +1084,20 @@ class FtwPriceChart extends FtwElement {
       `${fmtClock(item.tsMs)}–${fmtClock(tEnd)}`;
     const priceEl = tip.querySelector("[data-tip-price]");
     priceEl.textContent = `${roundOre(price)} öre`;
+    // Breakdown line — only in Total mode, and only when there is
+    // something beyond spot to break out.
+    const partsEl = tip.querySelector("[data-tip-parts]");
+    if (partsEl) {
+      const showParts = this._totalOn && (this._gridTariff > 0 || this._vatPct > 0);
+      if (showParts) {
+        const p = this._partsFor(item);
+        partsEl.textContent =
+          `spot ${roundOre(p.spot)} + grid ${roundOre(p.grid)} + VAT ${roundOre(p.vat)}`;
+        partsEl.hidden = false;
+      } else {
+        partsEl.hidden = true;
+      }
+    }
     // Annotate peak/low per the same indices used in render.
     const items = this._data.items;
     const prices = items.map((it) => this._priceFor(it));
@@ -1101,17 +1150,23 @@ class FtwPriceChart extends FtwElement {
   }
 }
 
-const VAT_PREF_KEY = "ftw.priceChart.vatOn";
-function readVatPref() {
+// "Show more than raw spot" — the stored preference under the old
+// vatOn key means the same thing, so it carries over instead of
+// resetting everyone to the default.
+const TOTAL_PREF_KEY  = "ftw.priceChart.totalOn";
+const LEGACY_PREF_KEY = "ftw.priceChart.vatOn";
+function readTotalPref() {
   try {
-    const v = localStorage.getItem(VAT_PREF_KEY);
-    if (v === "0" || v === "false") return false;
-    if (v === "1" || v === "true")  return true;
+    for (const key of [TOTAL_PREF_KEY, LEGACY_PREF_KEY]) {
+      const v = localStorage.getItem(key);
+      if (v === "0" || v === "false") return false;
+      if (v === "1" || v === "true")  return true;
+    }
   } catch (_) { /* private mode / disabled storage — fall through */ }
   return true;
 }
-function writeVatPref(on) {
-  try { localStorage.setItem(VAT_PREF_KEY, on ? "1" : "0"); } catch (_) {}
+function writeTotalPref(on) {
+  try { localStorage.setItem(TOTAL_PREF_KEY, on ? "1" : "0"); } catch (_) {}
 }
 
 const HORIZON_PREF_KEY = "ftw.priceChart.horizon";

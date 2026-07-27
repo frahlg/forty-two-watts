@@ -9,7 +9,7 @@ DRIVER = {
   id           = "sungrow-shx",
   name         = "Sungrow SH Hybrid Inverter",
   manufacturer = "Sungrow",
-  version      = "1.1.0",
+  version      = "1.4.0",
   protocols    = { "modbus" },
   capabilities = { "meter", "pv", "battery", "pv-curtail" },
   description  = "Sungrow SH-series hybrid inverters with LFP battery, via Modbus TCP.",
@@ -52,6 +52,8 @@ DRIVER = {
 PROTOCOL = "modbus"
 
 local sn_read = false
+local SN_ATTEMPTS = 3
+local sn_tries = 0
 local init_verified = false
 local rated_ac_w = 0
 local pv_curtail_control_enabled = false
@@ -72,6 +74,92 @@ local function bit_is_set(value, bit)
 end
 
 ----------------------------------------------------------------------------
+-- Model family
+--
+-- Sungrow ships two families behind one driver and they do not share a
+-- register map. SH hybrids answer the 13xxx block: battery, running state,
+-- energy counters. SG string inverters have no battery and do not answer any
+-- of it.
+--
+-- The host counts every failed read against the poll and one failure fails the
+-- whole poll, so reading the hybrid block on a string inverter does not merely
+-- return nothing -- it takes the site offline. An SG12RT lost all telemetry
+-- this way: 12 of 19 reads failed on every poll.
+----------------------------------------------------------------------------
+
+-- The device type code says which family this is. 0x0Dxx and 0x0Exx are the SH
+-- hybrids; 0 and 0xFFFF are the "not present" sentinel and mean nothing.
+-- Shared with driver_fingerprint so there is one classification, not two that
+-- can drift apart.
+local function classify_device_type(code)
+    if code == nil or code == 0 or code == 0xFFFF then return nil end
+    local family = math.floor(code / 256)
+    if family == 0x0D or family == 0x0E then return "hybrid" end
+    return "string"
+end
+
+local model_family = nil -- "hybrid", "string", "unknown", or nil while asking
+
+-- Detection has to give up. Retrying a register the inverter never answers
+-- costs one failed read on every poll for the rest of the session, which is
+-- the same outage by a slower route.
+local DETECT_ATTEMPTS = 3
+local detect_tries = 0
+
+local function detect_model_family()
+    detect_tries = detect_tries + 1
+    local ok, regs = pcall(host.modbus_read, 4999, 1, "input")
+    local family = nil
+    if ok and regs ~= nil then family = classify_device_type(regs[1]) end
+    if family then return family end
+    if detect_tries >= DETECT_ATTEMPTS then
+        host.log("info", "Sungrow: register 4999 never gave a usable device "
+            .. "type; probing the hybrid block instead")
+        return "unknown"
+    end
+    return nil
+end
+
+-- Whether the 13xxx block is worth reading. While detection is still running
+-- we hold off rather than probe: it normally settles on the first poll, so a
+-- hybrid loses nothing, and a string inverter is spared a burst of failed
+-- reads it cannot afford. Only once detection has given up do we probe.
+local function hybrid_block_worth_reading()
+    return model_family == "hybrid" or model_family == "unknown"
+end
+
+-- A register that answers on one model and not another. Absence has to be
+-- proved: a single timeout or a busy bus must not silence a register for the
+-- rest of the session, so only a run of failures counts.
+local MISSES_BEFORE_SKIP = 3
+local miss_counts = {}
+
+local function optional_read(address, count, kind)
+    if (miss_counts[address] or 0) >= MISSES_BEFORE_SKIP then
+        return nil
+    end
+    local ok, registers = pcall(host.modbus_read, address, count, kind)
+    -- Check every register asked for, not just the first. A short reply leaves
+    -- the rest nil, and arithmetic on nil ends the whole poll.
+    if ok and registers ~= nil then
+        for i = 1, count do
+            if registers[i] == nil then ok = false break end
+        end
+    end
+    if ok and registers ~= nil then
+        miss_counts[address] = nil
+        return registers
+    end
+    local misses = (miss_counts[address] or 0) + 1
+    miss_counts[address] = misses
+    if misses >= MISSES_BEFORE_SKIP then
+        host.log("info", "Sungrow: register " .. address .. " failed "
+            .. misses .. " reads in a row; treating it as absent")
+    end
+    return nil
+end
+
+----------------------------------------------------------------------------
 -- Fingerprint
 ----------------------------------------------------------------------------
 
@@ -86,15 +174,15 @@ end
 --           reads back as the 0 / 0xFFFF "not present" sentinel
 function driver_fingerprint()
     local ok, regs = pcall(host.modbus_read, 4999, 1, "input")
-    if not ok or regs == nil or regs[1] == nil then
+    if not ok or regs == nil then
         return nil
     end
     local code = regs[1]
-    if code == 0 or code == 0xFFFF then
-        return nil -- empty / sentinel read — inconclusive
+    local family = classify_device_type(code)
+    if family == nil then
+        return nil -- unreadable, or the 0 / 0xFFFF sentinel — inconclusive
     end
-    local hi = math.floor(code / 256)
-    if hi == 0x0E or hi == 0x0D then
+    if family == "hybrid" then
         return true, {
             make = "Sungrow",
             model = string.format("0x%04X", code),
@@ -121,10 +209,18 @@ function driver_init(config)
     end
     feed_in_release_w = tonumber(config.feed_in_release_w) or 0
 
-    -- Read and log device info
+    -- Read the device type once here and remember which family it is. This
+    -- read already happened; it just threw the answer away after logging it,
+    -- which is why an SG string inverter went on to be read with the hybrid
+    -- map. driver_poll retries while the family is still unknown.
+    detect_tries = detect_tries + 1
     local ok, dev = pcall(host.modbus_read, 4999, 1, "input")
     if ok and dev then
         host.log("info", "Device type code: " .. tostring(dev[1]))
+        model_family = classify_device_type(dev[1])
+        if model_family then
+            host.log("info", "Sungrow: detected a " .. model_family .. " inverter")
+        end
     end
 
     -- Cache rated AC power before the first poll so a manual curtail command
@@ -209,12 +305,26 @@ end
 ----------------------------------------------------------------------------
 
 function driver_poll()
-    -- Read serial number once
-    if not sn_read then
+    -- driver_init already asked once. Keep asking while the answer is unknown,
+    -- up to DETECT_ATTEMPTS, then settle on probing.
+    if model_family == nil and detect_tries < DETECT_ATTEMPTS then
+        model_family = detect_model_family()
+        if model_family then
+            host.log("info", "Sungrow: detected a " .. model_family .. " inverter")
+        end
+    elseif model_family == nil then
+        model_family = "unknown"
+    end
+
+    -- Read serial number once. Bounded like the device type: an inverter that
+    -- never answers this would otherwise cost a failed read on every poll.
+    if not sn_read and sn_tries < SN_ATTEMPTS then
+        sn_tries = sn_tries + 1
         local ok, sn_regs = pcall(host.modbus_read, 4990, 10, "input")
         if ok and sn_regs then
             local sn = ""
             for i = 1, 10 do
+                if sn_regs[i] == nil then break end
                 local hi = math.floor(sn_regs[i] / 256)
                 local lo = sn_regs[i] % 256
                 if hi > 32 and hi < 127 then sn = sn .. string.char(hi) end
@@ -231,13 +341,21 @@ function driver_poll()
     -- 12999). Power-flow status is documented 13001 (host address 13000):
     -- bit 2 = discharging, bit 1 = charging. Keep both as diagnostics so a
     -- reachable-but-stopped inverter is no longer misreported as merely 0 W.
-    local ok_running, running_regs = pcall(host.modbus_read, 12999, 1, "input")
+    -- Hybrid only: an SG string inverter answers neither, and asking fails
+    -- the whole poll.
     local running_state = 0
-    if ok_running and running_regs then running_state = running_regs[1] end
-
-    local ok_flow, flow_regs = pcall(host.modbus_read, 13000, 1, "input")
     local power_flow_status = 0
-    if ok_flow and flow_regs then power_flow_status = flow_regs[1] end
+    local running_state_known = false
+    if hybrid_block_worth_reading() then
+        local running_regs = optional_read(12999, 1, "input")
+        if running_regs then
+            running_state = running_regs[1]
+            running_state_known = true
+        end
+
+        local flow_regs = optional_read(13000, 1, "input")
+        if flow_regs then power_flow_status = flow_regs[1] end
+    end
     local is_discharging = (math.floor(power_flow_status / 4) % 2) == 1
 
     -- PV power: 5016-5017, U32 LE, watts
@@ -284,10 +402,12 @@ function driver_poll()
     end
 
     -- PV lifetime energy: 13002-13003, U32 LE × 0.1 kWh
-    local ok_pvgen, pvgen_regs = pcall(host.modbus_read, 13002, 2, "input")
     local pv_gen_wh = 0
-    if ok_pvgen and pvgen_regs then
-        pv_gen_wh = host.decode_u32_le(pvgen_regs[1], pvgen_regs[2]) * 0.1 * 1000
+    if hybrid_block_worth_reading() then
+        local pvgen_regs = optional_read(13002, 2, "input")
+        if pvgen_regs then
+            pv_gen_wh = host.decode_u32_le(pvgen_regs[1], pvgen_regs[2]) * 0.1 * 1000
+        end
     end
 
     -- Rated power: 5000, U16 × 0.1 kW
@@ -347,9 +467,12 @@ function driver_poll()
     -- Contiguous bitfields from documented input registers 13050-13079
     -- (zero-based host addresses 13049-13078). One read gives enough evidence
     -- to distinguish thermal, grid, PV/DC, battery and BMS shutdowns.
-    local ok_faults, fault_regs = pcall(host.modbus_read, 13049, 30, "input")
+    local fault_regs = nil
+    if hybrid_block_worth_reading() then
+        fault_regs = optional_read(13049, 30, "input")
+    end
     local fault_values = {}
-    if ok_faults and fault_regs and #fault_regs >= 30 then
+    if fault_regs and #fault_regs >= 30 then
         local fault_names = {
             "sungrow_inverter_alarm_bits",
             "sungrow_grid_fault_bits",
@@ -389,58 +512,69 @@ function driver_poll()
                 heatsink_c, running_state)
         end
         host.set_device_fault(true, reason)
-    elseif ok_running and running_regs and running_regs[1] ~= nil then
+    elseif running_state_known then
+        -- Clear only on a running state we actually read. A string inverter
+        -- never reads it, so it neither raises nor clears a fault here.
         host.set_device_fault(false, "")
     end
 
-    -- Battery: 13019-13022 (voltage, current, power, SoC)
-    local ok_bat, bat_regs = pcall(host.modbus_read, 13019, 4, "input")
+    -- Battery: 13019-13022 (voltage, current, power, SoC). Hybrid only -- an
+    -- SG string inverter has no battery and answers none of this.
     local bat_v, bat_a, bat_w, bat_soc = 0, 0, 0, 0
-    if ok_bat and bat_regs then
+    local bat_regs = nil
+    if hybrid_block_worth_reading() then
+        bat_regs = optional_read(13019, 4, "input")
+    end
+    if bat_regs then
         bat_v   = bat_regs[1] * 0.1
         bat_a   = bat_regs[2] * 0.1
         bat_w   = bat_regs[3]
         bat_soc = bat_regs[4] * 0.1 / 100  -- 0-1 fraction
+
+        -- Apply sign: Sungrow reports power as unsigned, direction from the
+        -- status register. EMS convention: positive = charging.
+        if is_discharging then
+            bat_w = -bat_w
+        end
     end
 
-    -- Apply sign: Sungrow reports power as unsigned, direction from status register
-    -- EMS convention: positive = charging, negative = discharging
-    if is_discharging then
-        bat_w = -bat_w
-    end
+    if bat_regs then
+        local battery = {
+            w   = bat_w,
+            v   = bat_v,
+            a   = bat_a,
+            soc = bat_soc,
+        }
 
-    -- Battery charge energy: 13040-13041, U32 LE × 0.1 kWh
-    local ok_bchg, bchg_regs = pcall(host.modbus_read, 13040, 2, "input")
-    local bat_charge_wh = 0
-    if ok_bchg and bchg_regs then
-        bat_charge_wh = host.decode_u32_le(bchg_regs[1], bchg_regs[2]) * 0.1 * 1000
-    end
+        -- Energy counters are separate reads. Add each only if it answered:
+        -- a counter reported as zero would look like a reset meter.
+        local bchg_regs = optional_read(13040, 2, "input")
+        if bchg_regs then
+            battery.charge_wh =
+                host.decode_u32_le(bchg_regs[1], bchg_regs[2]) * 0.1 * 1000
+        end
 
-    -- Battery discharge energy: 13026-13027, U32 LE × 0.1 kWh
-    local ok_bdis, bdis_regs = pcall(host.modbus_read, 13026, 2, "input")
-    local bat_discharge_wh = 0
-    if ok_bdis and bdis_regs then
-        bat_discharge_wh = host.decode_u32_le(bdis_regs[1], bdis_regs[2]) * 0.1 * 1000
-    end
+        local bdis_regs = optional_read(13026, 2, "input")
+        if bdis_regs then
+            battery.discharge_wh =
+                host.decode_u32_le(bdis_regs[1], bdis_regs[2]) * 0.1 * 1000
+        end
 
-    host.emit("battery", {
-        w            = bat_w,
-        v            = bat_v,
-        a            = bat_a,
-        soc          = bat_soc,
-        charge_wh    = bat_charge_wh,
-        discharge_wh = bat_discharge_wh,
-    })
-    host.emit_metric("battery_dc_v", bat_v)
-    host.emit_metric("battery_dc_a", bat_a)
+        host.emit("battery", battery)
+        host.emit_metric("battery_dc_v", bat_v)
+        host.emit_metric("battery_dc_a", bat_a)
+    end
 
     -- EMS state diagnostics — what the inverter *actually* has latched
     -- in its control registers right now. With the #164 write-order fix
     -- these should track whatever the dispatcher sent last tick; any
     -- drift between target and ems_force_w points at external writers
     -- (iSolarCloud, HA integration, another EMS) racing the driver.
-    local ok_emsd, emsd = pcall(host.modbus_read, 13049, 3, "holding")
-    if ok_emsd and emsd then
+    local emsd = nil
+    if hybrid_block_worth_reading() then
+        emsd = optional_read(13049, 3, "holding")
+    end
+    if emsd then
         host.emit_metric("sungrow_ems_mode",  emsd[1]) -- 0=self, 2=forced, 3=ext
         host.emit_metric("sungrow_force_cmd", emsd[2]) -- 0xAA=170 chg, 0xBB=187 dis, 0xCC=204 stop
         host.emit_metric("sungrow_force_w",   emsd[3])
@@ -480,18 +614,20 @@ function driver_poll()
         l3_a = ma_regs[3] * 0.01
     end
 
-    -- Import energy: 13036-13037, U32 LE × 0.1 kWh
-    local ok_imp, imp_regs = pcall(host.modbus_read, 13036, 2, "input")
-    local import_wh = 0
-    if ok_imp and imp_regs then
-        import_wh = host.decode_u32_le(imp_regs[1], imp_regs[2]) * 0.1 * 1000
-    end
-
-    -- Export energy: 13045-13046, U32 LE × 0.1 kWh
-    local ok_exp, exp_regs = pcall(host.modbus_read, 13045, 2, "input")
-    local export_wh = 0
-    if ok_exp and exp_regs then
-        export_wh = host.decode_u32_le(exp_regs[1], exp_regs[2]) * 0.1 * 1000
+    -- Import and export energy: 13036-13037 and 13045-13046, U32 LE × 0.1 kWh.
+    -- In the hybrid block, so an SG string inverter reports neither. Left out
+    -- rather than zeroed when absent: a counter reading zero looks like a
+    -- meter that was reset.
+    local import_wh, export_wh = nil, nil
+    if hybrid_block_worth_reading() then
+        local imp_regs = optional_read(13036, 2, "input")
+        if imp_regs then
+            import_wh = host.decode_u32_le(imp_regs[1], imp_regs[2]) * 0.1 * 1000
+        end
+        local exp_regs = optional_read(13045, 2, "input")
+        if exp_regs then
+            export_wh = host.decode_u32_le(exp_regs[1], exp_regs[2]) * 0.1 * 1000
+        end
     end
 
     host.emit("meter", {

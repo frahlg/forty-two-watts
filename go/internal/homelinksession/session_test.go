@@ -58,8 +58,17 @@ func TestSessionHandshakeSignatureAndBidirectionalEncryption(t *testing.T) {
 	if accept.RouteHandle != handle || accept.BrowserKey != hello.BrowserKey ||
 		accept.GatewayID != identity.GatewayID() ||
 		accept.BrowserNonce != hello.BrowserNonce ||
-		accept.ExpiresAtMS != now.Add(MaxSessionLifetime).UnixMilli() {
+		accept.ExpiresAtMS != now.Add(SessionLifetime).UnixMilli() {
 		t.Fatalf("session accept lost binding: %+v", accept)
+	}
+	sessionContext := session.Context()
+	if sessionContext.GatewayID != identity.GatewayID() ||
+		sessionContext.RouteGeneration != hello.RouteGeneration ||
+		sessionContext.RouteHandle != hello.RouteHandle ||
+		sessionContext.StreamID != hello.StreamID ||
+		sessionContext.SessionID != accept.SessionID ||
+		!sessionContext.ExpiresAt.Equal(now.Add(SessionLifetime)) {
+		t.Fatalf("session context lost binding: %+v", sessionContext)
 	}
 
 	browserOutbound, browserInbound := browserAEADs(t, browserPrivate, accept, transcript)
@@ -237,7 +246,7 @@ func TestSessionRejectsReplayTamperWrongStreamAndExpiry(t *testing.T) {
 	if _, err := session.Decrypt(wrongStream); err == nil {
 		t.Fatal("wrong stream was accepted")
 	}
-	now = now.Add(MaxSessionLifetime)
+	now = now.Add(SessionLifetime)
 	if _, err := session.Encrypt([]byte("late")); err == nil {
 		t.Fatal("expired session encrypted a response")
 	}
@@ -318,4 +327,34 @@ func rawURL(length int, fill byte) string {
 		raw[i] = fill
 	}
 	return base64.RawURLEncoding.EncodeToString(raw)
+}
+
+// TestVerifyAcceptToleratesGatewayClockAhead pins the reason SessionLifetime
+// sits below MaxSessionLifetime. The gateway stamps the expiry on its own
+// clock and the browser checks it on another, so an issued lifetime equal to
+// the ceiling made a few milliseconds of NTP drift reject every session.
+func TestVerifyAcceptToleratesGatewayClockAhead(t *testing.T) {
+	identity := newSessionTestIdentity(t)
+	gatewayNow := time.Now().UTC().Truncate(time.Millisecond)
+	manager, err := newManager(identity, rand.Reader, func() time.Time { return gatewayNow })
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, hello := newBrowserHello(t, identity)
+	accept, _, err := manager.Accept(hello)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, skew := range []time.Duration{0, time.Millisecond, time.Second, MaxClockSkew} {
+		verifierNow := gatewayNow.Add(-skew)
+		if err := VerifyAccept(identity.GatewayID(), hello, verifierNow, accept); err != nil {
+			t.Fatalf("gateway clock %s ahead of the verifier was rejected: %v", skew, err)
+		}
+	}
+
+	tooFarAhead := gatewayNow.Add(-(MaxClockSkew + time.Millisecond))
+	if err := VerifyAccept(identity.GatewayID(), hello, tooFarAhead, accept); err == nil {
+		t.Fatal("accept beyond the lifetime ceiling was accepted")
+	}
 }

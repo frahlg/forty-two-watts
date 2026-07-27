@@ -5,17 +5,26 @@ import test from "node:test";
 const badge = readFileSync(new URL("./update-badge.js", import.meta.url), "utf8");
 const devices = readFileSync(new URL("./settings/tabs/devices.js", import.meta.url), "utf8");
 
-test("Update Center lists only configured drivers with a signed update", () => {
+test("the dialog lists every configured driver, not just the updatable ones", () => {
   assert.match(badge, /apiFetch\("\/api\/drivers\/catalog"\)/);
   assert.match(badge, /apiFetch\("\/api\/config"\)/);
   assert.match(badge, /device_repository\/catalog\?channel=beta/);
   assert.match(badge, /configured\.has\(driverFileKey/);
-  assert.match(badge, /stableAvailable \|\| betaAvailable/);
-  assert.match(badge, /Driver updates · choose stable or beta/);
-  assert.match(badge, /driverRows \? `<div class="component-subtitle">Driver updates/);
+  assert.match(badge, /pending_update: stableAvailable \|\| betaAvailable/);
+  // A driver with nothing waiting still gets a row, so the inventory does
+  // not change shape depending on what happens to be releasable today.
+  assert.doesNotMatch(badge, /return stableAvailable \|\| betaAvailable;/);
+  assert.doesNotMatch(badge, /if \(entry\.source === "local"\) return false;/);
   assert.doesNotMatch(badge, /No configured drivers found/);
   assert.doesNotMatch(badge, /apiFetch\("\/api\/device_repository\/catalog"\)/);
   assert.doesNotMatch(badge, /No managed driver candidates cached yet/);
+});
+
+test("a locally edited driver is listed but offered no signed action", () => {
+  assert.match(badge, /const managed = entry\.source !== "local"/);
+  assert.match(badge, /title="Edited on this device; no signed version to switch to">local copy</);
+  assert.match(badge, /managed && entry\.update_available/);
+  assert.match(badge, /managed && betaDriver && betaDriver\.version/);
 });
 
 test("Update Center can install one signed beta driver without a Core update", () => {
@@ -48,10 +57,18 @@ test("Update Center only offers stable or beta when that signed version differs"
   assert.match(badge, /entry\.update_available && entry\.repository_id && entry\.upstream_version/);
   assert.match(badge, /"Stable " \+ escapeHTML\(entry\.upstream_version\)/);
   assert.match(badge, /betaDriver\.version !== current/);
-  assert.match(badge, /this\._driverCatalog\.entries\.length > 0/);
   assert.doesNotMatch(badge, />current<\/span>/);
   assert.doesNotMatch(badge, /entry\.update_available \|\| !entry\.installed/);
   assert.doesNotMatch(badge, /\? "Update" : "Install"/);
+});
+
+test("the badge counts only drivers with work waiting, not the whole inventory", () => {
+  assert.match(badge, /_pendingUpdates\(\)/);
+  assert.match(badge, /filter\(\(entry\) => entry\.pending_update\)\.length/);
+  assert.match(badge, /showDot = pending\.total > 0/);
+  // The old signal lit the dot for any listed driver, which now means all
+  // of them.
+  assert.doesNotMatch(badge, /this\._driverCatalog\.entries\.length > 0/);
 });
 
 test("Devices links to repository support data without traffic-light claims", () => {

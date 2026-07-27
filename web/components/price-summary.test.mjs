@@ -20,7 +20,7 @@ describe("compact price summary", () => {
   it("resolves the current slot and VAT using the shared display preference", () => {
     const summary = buildPriceSummary(
       [slot(0, 9, 80), slot(0, 10, 100), slot(0, 11, 60)],
-      { now: at(0, 10, 15), vatOn: true, vatPercent: 25 },
+      { now: at(0, 10, 15), totalOn: true, gridTariffOre: 0, vatPercent: 25 },
     );
 
     assert.equal(summary.current.tsMs, at(0, 10));
@@ -37,7 +37,7 @@ describe("compact price summary", () => {
         slot(0, 12, 40),
         slot(1, 1, 30),
       ],
-      { now: at(0, 10, 15), vatOn: false, vatPercent: 25 },
+      { now: at(0, 10, 15), totalOn: false, vatPercent: 25 },
     );
 
     assert.equal(summary.nextLow.tsMs, at(1, 1));
@@ -47,7 +47,7 @@ describe("compact price summary", () => {
   it("keeps the profile inside the current local calendar day", () => {
     const summary = buildPriceSummary(
       [slot(-1, 23, 5), slot(0, 0, 50), slot(0, 23, 150), slot(1, 0, 10)],
-      { now: at(0, 12), vatOn: false, vatPercent: 25 },
+      { now: at(0, 12), totalOn: false, vatPercent: 25 },
     );
 
     assert.deepEqual(summary.today.map((item) => item.tsMs), [at(0, 0), at(0, 23)]);
@@ -58,18 +58,40 @@ describe("compact price summary", () => {
   it("returns no current slot when wall-clock time falls in a gap", () => {
     const summary = buildPriceSummary(
       [slot(0, 8, 30), slot(0, 12, 20)],
-      { now: at(0, 10), vatOn: false, vatPercent: 25 },
+      { now: at(0, 10), totalOn: false, vatPercent: 25 },
     );
 
     assert.equal(summary.current, null);
     assert.equal(summary.nextLow.tsMs, at(0, 12));
   });
 
+  it("charges the grid tariff, not just VAT", () => {
+    // The compact card leads with this number. Applying VAT to bare spot
+    // reported 21 öre for a slot that costs 109 on a 70 öre/kWh tariff —
+    // the same fault the full price chart had.
+    const summary = buildPriceSummary(
+      [slot(0, 10, 17.4)],
+      { now: at(0, 10, 15), totalOn: true, gridTariffOre: 70, vatPercent: 25 },
+    );
+
+    assert.equal(summary.current.ore.toFixed(1), "109.3");
+  });
+
+  it("shows raw spot when the total is switched off", () => {
+    const summary = buildPriceSummary(
+      [slot(0, 10, 17.4)],
+      { now: at(0, 10, 15), totalOn: false, gridTariffOre: 70, vatPercent: 25 },
+    );
+
+    assert.equal(summary.current.ore, 17.4);
+  });
+
   it("returns a stable empty shape for missing data", () => {
     assert.deepEqual(
       buildPriceSummary([], {
         now: at(0, 10),
-        vatOn: true,
+        totalOn: true,
+        gridTariffOre: 0,
         vatPercent: 25,
       }),
       {
@@ -104,7 +126,7 @@ describe("compact price states", () => {
       state: "stale",
       items: [slot(0, 10, 100), slot(0, 12, 60)],
       now: at(0, 10, 15),
-      vatOn: false,
+      totalOn: false,
       vatPercent: 25,
     });
 

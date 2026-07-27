@@ -234,13 +234,31 @@ import { derivePlanBrief } from "./plan-brief.js";
     const now = Date.now();
     const { tMin, tMax } = horizonBounds(state.horizon);
     const xScale = t => pad.l + (t - tMin) / (tMax - tMin) * plotW;
+    const plan = state.plan;
 
     // Layout: price bars (top) | mode band (thin strip) | power bars (middle) | SoC (bottom)
     const modeBandH = 10;
 
-    // Price range
+    // Price range.
+    //
+    // The bars come from the plan's actions whenever a plan exists, because
+    // those cover the whole horizon — including slots whose day-ahead price
+    // hasn't published yet and is filled in by the ML price twin. The scale
+    // and the tercile thresholds must be derived from the SAME set. Deriving
+    // them from state.prices (published slots only) put every predicted slot
+    // above the known maximum: its bar was drawn past the top of the price
+    // band and over the mode strip, and it always landed above p75 so the
+    // entire forecast period read as "expensive".
     const prices = (state.prices || []).filter(p => p.slot_ts_ms >= tMin && p.slot_ts_ms <= tMax);
-    const totals = prices.map(p => p.total_ore_kwh);
+    const barSource = (plan && plan.actions && plan.actions.length) ? plan.actions : prices;
+    const priceBars = barSource.filter(b => {
+      const ts = b.slot_ts_ms ?? b.slot_start_ms;
+      const len = b.slot_len_min;
+      if (ts == null || len == null) return false;
+      if ((b.total_ore_kwh ?? b.price_ore) == null) return false;
+      return ts + len * 60 * 1000 >= tMin && ts <= tMax;
+    });
+    const totals = priceBars.map(b => b.total_ore_kwh ?? b.price_ore);
     const priceMin = totals.length ? Math.min(0, ...totals) : 0;
     const priceMax = totals.length ? Math.max(...totals, 1) : 200;
     const priceRange = priceMax - priceMin;
@@ -254,13 +272,20 @@ import { derivePlanBrief } from "./plan-brief.js";
     // is active per slot. Color-coded so operators see the schedule at a
     // glance without reading per-slot tooltips.
     const modeBandY0 = priceY0 + priceH + 2;
+    // Price bars are clipped to their band as a backstop. The scale above
+    // is derived from the bars themselves so nothing should overflow, but
+    // a single bad slot must never be able to paint over the mode strip
+    // and the power band the way the old known-prices-only scale did.
+    const clipPriceBand = () => {
+      ctx.beginPath();
+      ctx.rect(pad.l, priceY0, plotW, priceH);
+      ctx.clip();
+    };
 
     // Power band in middle — covers battery + grid.
-    // Several later sections ("Plan battery bars", "Load forecast",
-    // predicted-zone shade, etc.) reference `plan` directly. Keep this
-    // alias — removing it leaves those `plan` references undefined and
-    // the whole render throws, wiping the chart.
-    const plan = state.plan;
+    // `plan` is aliased at the top of render() because the price scale
+    // needs it too; several later sections ("Plan battery bars", "Load
+    // forecast", predicted-zone shade) reference it directly.
     renderPlanBrief(plan);
     renderOptimizerFallbackAlert(plan);
     const powerY0 = modeBandY0 + modeBandH + 4;
@@ -359,13 +384,12 @@ import { derivePlanBrief } from "./plan-brief.js";
     const gridTariff = (state.priceCfg && state.priceCfg.grid_tariff_ore_kwh) || 0;
     const vatPct     = (state.priceCfg && state.priceCfg.vat_percent) || 0;
     state.priceBarBounds = []; // {x0,x1,yMinPx,yMaxPx, action} for hover hit-test
-    const barSource = (plan && plan.actions && plan.actions.length) ? plan.actions : prices;
-    for (const bar of barSource) {
+    ctx.save();
+    clipPriceBand();
+    for (const bar of priceBars) {
       const ts = bar.slot_ts_ms ?? bar.slot_start_ms;
       const len = bar.slot_len_min;
       const priceVal = bar.total_ore_kwh ?? bar.price_ore;
-      if (ts == null || priceVal == null) continue;
-      if (ts + len * 60 * 1000 < tMin || ts > tMax) continue;
       const x0 = xScale(ts);
       const x1 = xScale(ts + len * 60 * 1000);
       const zero = priceY(Math.max(0, priceMin));
@@ -409,20 +433,27 @@ import { derivePlanBrief } from "./plan-brief.js";
         const segTopY    = priceY(runningOre + part.ore);
         const segY = Math.min(segBottomY, segTopY);
         const segH = Math.abs(segBottomY - segTopY);
-        const alpha = isPredicted ? part.alpha * 0.2 : part.alpha;
+        const alpha = isPredicted ? part.alpha * 0.45 : part.alpha;
         ctx.fillStyle = `rgba(${part.rgb},${alpha})`;
         ctx.fillRect(rectX, segY, rectW, segH);
         runningOre += part.ore;
       }
       if (isPredicted) {
-        // Dashed outline across the whole bar so predicted slots still
-        // read as "uncertain ghost" regardless of how it's stacked.
-        const outlineRgb = parts[0].rgb;
-        ctx.strokeStyle = `rgba(${outlineRgb},0.75)`;
-        ctx.lineWidth = 1;
-        ctx.setLineDash([3, 3]);
-        ctx.strokeRect(rectX + 0.5, Math.min(topY, zero) + 0.5, rectW - 1, Math.abs(topY - zero) - 1);
-        ctx.setLineDash([]);
+        // Predicted slots are marked by a cap on top of the bar, not by an
+        // outline around it. The outline was written for hourly slots; at
+        // the 15-minute resolution NordPool publishes, ~96 dashed frames a
+        // day merge into a solid hatched wall that hides the prices behind
+        // it. The cap survives any bar width, and the shaded band plus the
+        // "predicted →" label already mark the zone.
+        ctx.fillStyle = `rgba(${parts[0].rgb},0.9)`;
+        ctx.fillRect(rectX, Math.min(topY, zero), rectW, 1.5);
+        if (rectW >= 6) {
+          ctx.strokeStyle = `rgba(${parts[0].rgb},0.55)`;
+          ctx.lineWidth = 1;
+          ctx.setLineDash([3, 3]);
+          ctx.strokeRect(rectX + 0.5, Math.min(topY, zero) + 0.5, rectW - 1, Math.abs(topY - zero) - 1);
+          ctx.setLineDash([]);
+        }
       }
       // Track for hover hit-test.
       state.priceBarBounds.push({
@@ -431,6 +462,7 @@ import { derivePlanBrief } from "./plan-brief.js";
         action: bar, // either PricePoint or Action
       });
     }
+    ctx.restore();
     // Price axis labels
     ctx.fillStyle = C.dim;
     ctx.textAlign = 'right';

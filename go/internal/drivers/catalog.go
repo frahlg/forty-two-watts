@@ -271,12 +271,32 @@ func normalizeVerificationStatus(s string) string {
 
 var driverBlockRe = regexp.MustCompile(`(?s)DRIVER\s*=\s*\{(.*?)\n\}`)
 
+// Signed artifacts do not write the table inline. tools/ftw_repository.py
+// builds it as a local and assigns it twice -- once up front and once after
+// the source has loaded -- so that a driver cannot overwrite its own declared
+// identity. That leaves `DRIVER = __sourceful_ftw_metadata`, which the inline
+// pattern does not match.
+var driverAliasRe = regexp.MustCompile(`(?m)^\s*DRIVER\s*=\s*([A-Za-z_][A-Za-z0-9_]*)\s*$`)
+
 func extractDriverBlock(src string) string {
-	m := driverBlockRe.FindStringSubmatch(src)
-	if len(m) < 2 {
+	if m := driverBlockRe.FindStringSubmatch(src); len(m) >= 2 {
+		return m[1]
+	}
+	// Follow the alias to the table it names. Without this, every signed
+	// driver parses as empty metadata, and the installer rejects it for an
+	// id/version mismatch it can never satisfy.
+	alias := driverAliasRe.FindStringSubmatch(src)
+	if len(alias) < 2 {
 		return ""
 	}
-	return m[1]
+	aliasBlockRe, err := regexp.Compile(`(?s)local\s+` + regexp.QuoteMeta(alias[1]) + `\s*=\s*\{(.*?)\n\}`)
+	if err != nil {
+		return ""
+	}
+	if m := aliasBlockRe.FindStringSubmatch(src); len(m) >= 2 {
+		return m[1]
+	}
+	return ""
 }
 
 // pickString matches `name = "value"` inside the block.

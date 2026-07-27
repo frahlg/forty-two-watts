@@ -1,14 +1,23 @@
+import { consumerTotalOre } from "./price-math.js";
+
+// `totalOn` picks the consumer total — (spot + grid tariff) × (1 + VAT/100),
+// the same arithmetic as prices.Applier and the plan chart — over raw spot.
+// Applying VAT to bare spot here reported 21 öre for a slot that costs 109
+// on a 70 öre/kWh tariff, which is the number this summary leads with.
 export function buildPriceSummary(items, {
   now = Date.now(),
-  vatOn = true,
+  totalOn = true,
+  gridTariffOre = 0,
   vatPercent = 25,
 } = {}) {
-  const vatMultiplier = vatOn ? 1 + (Number(vatPercent) || 0) / 100 : 1;
+  const resolve = (spot) => (totalOn
+    ? consumerTotalOre(spot, gridTariffOre, vatPercent)
+    : spot);
   const normalized = (Array.isArray(items) ? items : [])
     .map((item) => ({
       tsMs: Number(item && item.tsMs),
       lenMin: Number(item && item.lenMin) || 60,
-      ore: (Number(item && item.spot) || 0) * vatMultiplier,
+      ore: resolve(Number(item && item.spot) || 0),
     }))
     .filter((item) => Number.isFinite(item.tsMs))
     .sort((a, b) => a.tsMs - b.tsMs);
@@ -45,7 +54,8 @@ export function buildCompactPriceView({
   state = "loading",
   items = null,
   now = Date.now(),
-  vatOn = true,
+  totalOn = true,
+  gridTariffOre = 0,
   vatPercent = 25,
 } = {}) {
   if (!Array.isArray(items)) {
@@ -63,7 +73,7 @@ export function buildCompactPriceView({
   return {
     kind: "ready",
     stale: state === "stale",
-    summary: buildPriceSummary(items, { now, vatOn, vatPercent }),
+    summary: buildPriceSummary(items, { now, totalOn, gridTariffOre, vatPercent }),
   };
 }
 

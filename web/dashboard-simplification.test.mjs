@@ -131,7 +131,10 @@ describe("simplified dashboard overview", () => {
     );
     assert.match(price, /observedAttributes[\s\S]*compact/);
     assert.match(price, /buildCompactPriceView/);
-    assert.match(price, /ftw-price-vat-change/);
+    // The toggle now chooses consumer total vs raw spot, not VAT on/off, so
+    // the sync event is named for what it carries.
+    assert.match(price, /ftw-price-mode-change/);
+    assert.match(price, /detail: \{ totalOn: next \}/);
     assert.match(price, /href="#energy"/);
   });
 
