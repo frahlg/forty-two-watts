@@ -25,7 +25,12 @@
 
 import { FtwElement } from "./ftw-element.js";
 import { apiFetch } from "./api-fetch.js";
-import { consumerTotalOre, priceParts } from "./price-math.js";
+import {
+  buildCompactPriceView,
+  formatPriceSlotLabel,
+} from "./price-summary.js";
+import { bestBlock, consumerTotalOre, priceParts } from "./price-math.js";
+import { buildPriceStrip } from "./price-strip.js";
 
 class FtwPriceChart extends FtwElement {
   static styles = `
@@ -192,6 +197,203 @@ class FtwPriceChart extends FtwElement {
       margin-top: 3px;
     }
 
+    .compact-head {
+      display: flex;
+      align-items: start;
+      justify-content: space-between;
+      gap: 14px;
+      margin-bottom: 14px;
+    }
+    .compact-kicker {
+      margin-bottom: 3px;
+      color: var(--accent-e);
+      font-family: var(--mono);
+      font-size: 9px;
+      font-weight: 700;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+    }
+    .compact-title {
+      color: var(--fg);
+      font-family: var(--sans);
+      font-size: 16px;
+      font-weight: 700;
+      letter-spacing: -0.015em;
+    }
+    .compact-link,
+    .compact-setup {
+      color: var(--accent-e);
+      font-family: var(--mono);
+      font-size: 10px;
+      font-weight: 650;
+      letter-spacing: 0.08em;
+      text-decoration: none;
+      text-transform: uppercase;
+    }
+    .compact-link {
+      padding-top: 3px;
+      white-space: nowrap;
+    }
+    .compact-link:hover,
+    .compact-setup:hover {
+      color: var(--fg);
+    }
+    .compact-link:focus-visible,
+    .compact-setup:focus-visible {
+      outline: 2px solid var(--accent-e);
+      outline-offset: 4px;
+      border-radius: 2px;
+    }
+    /* The compact card is a container, so its layout follows its own width
+       rather than the window's. On Overview it sits in a column that can be
+       far narrower than the viewport — a @media breakpoint never fired there
+       and the headline ran straight through the cheapest-window column. */
+    :host([compact]) { container-type: inline-size; }
+
+    .compact-summary {
+      display: grid;
+      grid-template-columns: minmax(0, 1.2fr) minmax(130px, 0.8fr);
+      align-items: end;
+      gap: 18px;
+    }
+    .compact-current {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      align-items: baseline;
+      column-gap: 7px;
+    }
+    .compact-value {
+      color: var(--fg);
+      font-family: var(--mono);
+      /* cqi, not vw: the number scales with the card it lives in. At 5vw a
+         420px card on a wide screen rendered it at the 3.15rem ceiling and
+         it overflowed its column. */
+      font-size: clamp(1.9rem, 13cqi, 3.15rem);
+      font-weight: 750;
+      font-variant-numeric: tabular-nums;
+      letter-spacing: -0.065em;
+      line-height: 0.95;
+      min-width: 0;
+    }
+    .compact-unit {
+      color: var(--fg-dim);
+      font-family: var(--mono);
+      font-size: 11px;
+      white-space: nowrap;
+    }
+    .compact-meta {
+      grid-column: 1 / -1;
+      margin-top: 6px;
+      color: var(--fg-muted);
+      font-family: var(--mono);
+      font-size: 10px;
+      letter-spacing: 0.04em;
+    }
+    .compact-low {
+      display: flex;
+      min-width: 0;
+      flex-direction: column;
+      padding-left: 16px;
+      border-left: 1px solid var(--line);
+    }
+    .compact-low > span {
+      color: var(--fg-label);
+      font-family: var(--mono);
+      font-size: 9px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+    }
+    .compact-low strong {
+      margin-top: 3px;
+      color: var(--green-e);
+      font-family: var(--mono);
+      font-size: 1rem;
+      font-variant-numeric: tabular-nums;
+    }
+    /* Wraps rather than truncating: "Tomorrow 11:00–13:00" cut to
+       "Tomorrow 11:00–13…" loses the end of the window, which is the half
+       that says how long you have. */
+    .compact-low small {
+      margin-top: 1px;
+      color: var(--fg-muted);
+      font-family: var(--mono);
+      font-size: 10px;
+      line-height: 1.35;
+    }
+
+    /* Below ~400px of card the two columns stack: the headline keeps its
+       own line and the cheapest window sits under a rule instead of beside
+       one. */
+    @container (max-width: 400px) {
+      .compact-summary {
+        grid-template-columns: minmax(0, 1fr);
+        gap: 12px;
+      }
+      .compact-low {
+        padding-left: 0;
+        padding-top: 10px;
+        border-left: 0;
+        border-top: 1px solid var(--line);
+      }
+    }
+    @container (max-width: 300px) {
+      .compact-head { flex-wrap: wrap; }
+    }
+    .compact-profile {
+      display: block;
+      width: 100%;
+      height: 58px;
+      margin-top: 16px;
+      overflow: visible;
+    }
+    /* Bars sit above or below the average line; the side already says
+       dear or cheap, so colour is reinforcement and the strip still reads
+       in greyscale. */
+    .compact-profile rect { opacity: 0.85; }
+    .compact-profile rect.is-dear  { fill: var(--red-e); }
+    .compact-profile rect.is-cheap { fill: var(--green-e); }
+    .compact-profile rect.is-flat  { fill: var(--fg-muted); }
+    .compact-profile rect.is-current {
+      fill: var(--accent-e);
+      opacity: 1;
+    }
+    .compact-profile line {
+      stroke: var(--fg-muted);
+      stroke-width: 1.5;
+      opacity: 0.9;
+    }
+    .compact-profile-note {
+      margin-top: 4px;
+      color: var(--fg-muted);
+      font-family: var(--mono);
+      font-size: 10px;
+    }
+    .compact-stale,
+    .compact-profile-empty {
+      display: block;
+      margin-top: 8px;
+      color: var(--fg-muted);
+      font-family: var(--mono);
+      font-size: 10px;
+    }
+    .compact-stale {
+      color: var(--amber);
+    }
+    .compact-empty {
+      display: flex;
+      min-height: 126px;
+      flex-direction: column;
+      align-items: flex-start;
+      justify-content: center;
+      gap: 9px;
+      color: var(--fg-muted);
+    }
+    .compact-empty strong {
+      color: var(--fg-dim);
+      font-family: var(--mono);
+      font-size: 15px;
+    }
+
     /* Phone layout — the JS picks a taller viewBox H on small screens
        so bars get more vertical room WITHOUT vertically stretching
        text (which made labels like "NOW" look horizontally squeezed
@@ -204,12 +406,24 @@ class FtwPriceChart extends FtwElement {
         transform: translate(-50%, 0);
         transition: opacity 80ms, left 120ms cubic-bezier(.4, 0, .2, 1);
       }
+      /* Compact-card sizing lives in the @container blocks above — it has
+         to follow the card, not the window. Only the profile height stays
+         here, as a phone-ergonomics call rather than a fit one. */
+      .compact-profile {
+        height: 44px;
+        margin-top: 10px;
+      }
     }
   `;
+
+  static get observedAttributes() {
+    return ["compact"];
+  }
 
   constructor() {
     super();
     this._data = null;        // { zone, items: [{tsMs, ore}], min, max, vatPct }
+    this._priceState = "loading";
     this._totalOn = readTotalPref(); // consumer total vs raw spot, persisted
     this._horizon = readHorizonPref(); // "today" or "all", persisted
     this._refreshTimer = null;
@@ -218,6 +432,10 @@ class FtwPriceChart extends FtwElement {
     this._gridTariff = 0;     // öre/kWh excl. VAT; from /api/config
     this._geom = null;        // { padL, plotW, n, W } — set in _renderChart
     this._isTouching = false; // suppresses synthesized mouse events after touch
+  }
+
+  attributeChangedCallback() {
+    this.update();
   }
 
   connectedCallback() {
@@ -234,6 +452,13 @@ class FtwPriceChart extends FtwElement {
       if (this._mql.addEventListener) this._mql.addEventListener("change", this._mqlListener);
       else if (this._mql.addListener) this._mql.addListener(this._mqlListener);
     }
+    this._modeSyncListener = (event) => {
+      const next = event && event.detail && event.detail.totalOn;
+      if (typeof next !== "boolean" || next === this._totalOn) return;
+      this._totalOn = next;
+      this.update();
+    };
+    window.addEventListener("ftw-price-mode-change", this._modeSyncListener);
   }
 
   disconnectedCallback() {
@@ -246,6 +471,10 @@ class FtwPriceChart extends FtwElement {
       else if (this._mql.removeListener) this._mql.removeListener(this._mqlListener);
       this._mql = null;
       this._mqlListener = null;
+    }
+    if (this._modeSyncListener) {
+      window.removeEventListener("ftw-price-mode-change", this._modeSyncListener);
+      this._modeSyncListener = null;
     }
   }
 
@@ -278,9 +507,13 @@ class FtwPriceChart extends FtwElement {
       const since = midnight.getTime();
       const until = Date.now() + 48 * 3600_000;
       const r = await apiFetch(`/api/prices?since_ms=${since}&until_ms=${until}`);
+      if (r.ok === false) throw new Error(`Price request failed: ${r.status}`);
       const j = await r.json();
-      if (!j || !Array.isArray(j.items)) {
+      if (j && j.enabled === false) {
         this._data = null;
+        this._priceState = "unconfigured";
+      } else if (!j || !Array.isArray(j.items)) {
+        throw new Error("Price response did not include items");
       } else {
         // We keep only spot and derive the total from live config, so the
         // toggle is a view over one number rather than two independently
@@ -291,10 +524,11 @@ class FtwPriceChart extends FtwElement {
           spot:  Number(it.spot_ore_kwh) || 0,
         })).sort((a, b) => a.tsMs - b.tsMs);
         this._data = { zone: j.zone || "", items };
+        this._priceState = "ready";
       }
       this.update();
     } catch (e) {
-      this._data = null;
+      this._priceState = this._data ? "stale" : "error";
       this.update();
     }
   }
@@ -312,6 +546,7 @@ class FtwPriceChart extends FtwElement {
   }
 
   render() {
+    if (this.hasAttribute("compact")) return this._renderCompact();
     const data = this._data;
     const hasTomorrow = data ? itemsIncludeTomorrow(data.items) : false;
     // No tomorrow data → no choice to make, so the toggle is hidden
@@ -404,6 +639,112 @@ class FtwPriceChart extends FtwElement {
       return head + `<div class="empty">No price data for ${which}.</div>`;
     }
     return head + this._renderChart({ ...data, items: visible });
+  }
+
+  _renderCompact() {
+    const data = this._data;
+    const view = buildCompactPriceView({
+      state: this._priceState,
+      items: data && data.items,
+      now: Date.now(),
+      totalOn: this._totalOn,
+      gridTariffOre: this._gridTariff,
+      vatPercent: this._vatPct,
+    });
+    const head = `
+      <div class="compact-head">
+        <div>
+          <div class="compact-kicker">Market now</div>
+          <div class="compact-title">Electricity price</div>
+        </div>
+        <a class="compact-link" href="#energy">Full view <span aria-hidden="true">→</span></a>
+      </div>
+    `;
+    if (view.kind !== "ready") {
+      const settings = view.kind === "unconfigured"
+        ? `<a class="compact-setup" href="#more">Open price settings</a>`
+        : "";
+      return `${head}
+        <div class="compact-empty" role="status">
+          <strong>${escapeXml(view.message)}</strong>
+          ${settings}
+        </div>
+      `;
+    }
+
+    const summary = view.summary;
+    const formatOre = (value) => {
+      if (!Number.isFinite(value)) return "—";
+      const digits = Math.abs(value) >= 100 ? 0 : 1;
+      return Number(value).toFixed(digits);
+    };
+    const currentValue = summary.current ? formatOre(summary.current.ore) : "—";
+    // The cheapest contiguous 2 h ahead, not the cheapest single slot: a
+    // dishwasher cycle or an EV top-up is the unit these decisions come in,
+    // and a lone 15-minute trough is not something you can run anything in.
+    const cheapBlock = bestBlock(
+      summary.upcoming,
+      summary.upcoming.map((it) => it.ore),
+      2,
+      "min",
+    );
+    const lowValue = cheapBlock ? formatOre(cheapBlock.mean) : "—";
+    const lowTime = cheapBlock
+      ? `${formatPriceSlotLabel(cheapBlock.startMs)}–${fmtClock(cheapBlock.endMs)}`
+      : "No 2 h window published";
+    const vatLabel = this._totalOn
+      ? (this._gridTariff > 0 ? "incl. grid tariff + VAT" : "incl. VAT")
+      : "spot only";
+    const stale = view.stale
+      ? `<span class="compact-stale">Last update failed</span>`
+      : "";
+    const accessible = summary.current
+      ? `Current electricity price ${currentValue} öre per kilowatt-hour. Cheapest two hours ${lowValue} öre at ${lowTime}.`
+      : `No current electricity price slot. Cheapest two hours ${lowValue} öre at ${lowTime}.`;
+
+    return `${head}
+      <div class="compact-summary" aria-label="${escapeXml(accessible)}">
+        <div class="compact-current">
+          <span class="compact-value">${currentValue}</span>
+          <span class="compact-unit">öre/kWh</span>
+          <span class="compact-meta">${escapeXml(data.zone || "—")} · ${vatLabel}</span>
+        </div>
+        <div class="compact-low">
+          <span>Cheapest 2 h</span>
+          <strong>${lowValue} öre</strong>
+          <small>${escapeXml(lowTime)}</small>
+        </div>
+      </div>
+      ${this._renderCompactProfile(summary)}
+      ${stale}
+    `;
+  }
+
+  _renderCompactProfile(summary) {
+    // The strip covers what is still ahead, the same slots the cheapest-2h
+    // search runs over. Drawing "today" instead put the strip and the window
+    // on different days — by evening the profile was nearly spent while the
+    // headline pointed at tomorrow.
+    const strip = buildPriceStrip(summary.upcoming, {
+      currentTsMs: summary.current ? summary.current.tsMs : null,
+    });
+    if (!strip) {
+      return `<div class="compact-profile-empty">No prices published ahead yet.</div>`;
+    }
+    const bars = strip.bars.map((b) => {
+      const cls = [b.side === "up" ? "is-dear" : b.side === "down" ? "is-cheap" : "is-flat",
+                   b.current ? "is-current" : ""].filter(Boolean).join(" ");
+      return `<rect class="${cls}" x="${b.x.toFixed(2)}" y="${b.y.toFixed(2)}"
+                    width="${b.w.toFixed(2)}" height="${b.h.toFixed(2)}" />`;
+    }).join("");
+    return `
+      <svg class="compact-profile" viewBox="0 0 ${strip.W} ${strip.H}" preserveAspectRatio="none"
+           role="img" aria-label="Price against today's average of ${roundOre(strip.mean)} öre per kWh. Bars above the line are dearer, below are cheaper.">
+        ${bars}
+        <line x1="0" x2="${strip.W}" y1="${strip.midY.toFixed(2)}" y2="${strip.midY.toFixed(2)}" />
+      </svg>
+      <div class="compact-profile-note">vs the average ahead, ${roundOre(strip.mean)} öre</div>
+    `;
   }
 
   _renderChart(data) {
@@ -645,6 +986,11 @@ class FtwPriceChart extends FtwElement {
           if (next === this._totalOn) return;
           this._totalOn = next;
           writeTotalPref(next);
+          // Overview renders a second instance in compact mode; this keeps
+          // the two from disagreeing about which price is on screen.
+          window.dispatchEvent(new CustomEvent("ftw-price-mode-change", {
+            detail: { totalOn: next },
+          }));
           this.update();
         });
       });
