@@ -1,5 +1,9 @@
 import { consumerTotalOre } from "./price-math.js";
 
+// Re-exported so the compact card can search for a usable window without
+// importing two price modules.
+export { bestBlock } from "./price-math.js";
+
 // `totalOn` picks the consumer total — (spot + grid tariff) × (1 + VAT/100),
 // the same arithmetic as prices.Applier and the plan chart — over raw spot.
 // Applying VAT to bare spot here reported 21 öre for a slot that costs 109
@@ -41,9 +45,17 @@ export function buildPriceSummary(items, {
   ));
   const todayPrices = today.map((item) => item.ore);
 
+  // Everything still ahead, including the slot in progress — what a window
+  // search has to work from. `today` stops at midnight, so on an evening it
+  // holds too little to find a usable block in.
+  const upcoming = normalized.filter(
+    (item) => item.tsMs + item.lenMin * 60_000 > now,
+  );
+
   return {
     current,
     nextLow,
+    upcoming,
     today,
     minOre: todayPrices.length ? Math.min(...todayPrices) : null,
     maxOre: todayPrices.length ? Math.max(...todayPrices) : null,

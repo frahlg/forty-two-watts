@@ -97,6 +97,7 @@ describe("compact price summary", () => {
       {
         current: null,
         nextLow: null,
+        upcoming: [],
         today: [],
         minOre: null,
         maxOre: null,

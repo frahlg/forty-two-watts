@@ -29,7 +29,8 @@ import {
   buildCompactPriceView,
   formatPriceSlotLabel,
 } from "./price-summary.js";
-import { consumerTotalOre, priceParts } from "./price-math.js";
+import { bestBlock, consumerTotalOre, priceParts } from "./price-math.js";
+import { buildPriceStrip } from "./price-strip.js";
 
 class FtwPriceChart extends FtwElement {
   static styles = `
@@ -315,21 +316,27 @@ class FtwPriceChart extends FtwElement {
       margin-top: 16px;
       overflow: visible;
     }
-    .compact-profile rect {
-      fill: var(--fg-muted);
-      opacity: 0.38;
-    }
+    /* Bars sit above or below the average line; the side already says
+       dear or cheap, so colour is reinforcement and the strip still reads
+       in greyscale. */
+    .compact-profile rect { opacity: 0.85; }
+    .compact-profile rect.is-dear  { fill: var(--red-e); }
+    .compact-profile rect.is-cheap { fill: var(--green-e); }
+    .compact-profile rect.is-flat  { fill: var(--fg-muted); }
     .compact-profile rect.is-current {
       fill: var(--accent-e);
       opacity: 1;
     }
-    .compact-profile rect.is-low {
-      fill: var(--green-e);
+    .compact-profile line {
+      stroke: var(--fg-muted);
+      stroke-width: 1.5;
       opacity: 0.9;
     }
-    .compact-profile line {
-      stroke: var(--line);
-      stroke-width: 1;
+    .compact-profile-note {
+      margin-top: 4px;
+      color: var(--fg-muted);
+      font-family: var(--mono);
+      font-size: 10px;
     }
     .compact-stale,
     .compact-profile-empty {
@@ -652,10 +659,19 @@ class FtwPriceChart extends FtwElement {
       return Number(value).toFixed(digits);
     };
     const currentValue = summary.current ? formatOre(summary.current.ore) : "—";
-    const lowValue = summary.nextLow ? formatOre(summary.nextLow.ore) : "—";
-    const lowTime = summary.nextLow
-      ? formatPriceSlotLabel(summary.nextLow.tsMs)
-      : "No later slot published";
+    // The cheapest contiguous 2 h ahead, not the cheapest single slot: a
+    // dishwasher cycle or an EV top-up is the unit these decisions come in,
+    // and a lone 15-minute trough is not something you can run anything in.
+    const cheapBlock = bestBlock(
+      summary.upcoming,
+      summary.upcoming.map((it) => it.ore),
+      2,
+      "min",
+    );
+    const lowValue = cheapBlock ? formatOre(cheapBlock.mean) : "—";
+    const lowTime = cheapBlock
+      ? `${formatPriceSlotLabel(cheapBlock.startMs)}–${fmtClock(cheapBlock.endMs)}`
+      : "No 2 h window published";
     const vatLabel = this._totalOn
       ? (this._gridTariff > 0 ? "incl. grid tariff + VAT" : "incl. VAT")
       : "spot only";
@@ -663,8 +679,8 @@ class FtwPriceChart extends FtwElement {
       ? `<span class="compact-stale">Last update failed</span>`
       : "";
     const accessible = summary.current
-      ? `Current electricity price ${currentValue} öre per kilowatt-hour. Next low ${lowValue} öre at ${lowTime}.`
-      : `No current electricity price slot. Next low ${lowValue} öre at ${lowTime}.`;
+      ? `Current electricity price ${currentValue} öre per kilowatt-hour. Cheapest two hours ${lowValue} öre at ${lowTime}.`
+      : `No current electricity price slot. Cheapest two hours ${lowValue} öre at ${lowTime}.`;
 
     return `${head}
       <div class="compact-summary" aria-label="${escapeXml(accessible)}">
@@ -674,7 +690,7 @@ class FtwPriceChart extends FtwElement {
           <span class="compact-meta">${escapeXml(data.zone || "—")} · ${vatLabel}</span>
         </div>
         <div class="compact-low">
-          <span>Next low</span>
+          <span>Cheapest 2 h</span>
           <strong>${lowValue} öre</strong>
           <small>${escapeXml(lowTime)}</small>
         </div>
@@ -685,37 +701,29 @@ class FtwPriceChart extends FtwElement {
   }
 
   _renderCompactProfile(summary) {
-    const items = summary.today;
-    if (!items.length) {
-      return `<div class="compact-profile-empty">Today’s profile is not published yet.</div>`;
+    // The strip covers what is still ahead, the same slots the cheapest-2h
+    // search runs over. Drawing "today" instead put the strip and the window
+    // on different days — by evening the profile was nearly spent while the
+    // headline pointed at tomorrow.
+    const strip = buildPriceStrip(summary.upcoming, {
+      currentTsMs: summary.current ? summary.current.tsMs : null,
+    });
+    if (!strip) {
+      return `<div class="compact-profile-empty">No prices published ahead yet.</div>`;
     }
-    const W = 360;
-    const H = 58;
-    const pad = 2;
-    const values = items.map((item) => item.ore);
-    const min = Math.min(0, ...values);
-    const max = Math.max(0, ...values);
-    const range = Math.max(1, max - min);
-    const y = (value) => pad + ((max - value) / range) * (H - pad * 2);
-    const zeroY = y(0);
-    const slotW = W / items.length;
-    const bars = items.map((item, index) => {
-      const valueY = y(item.ore);
-      const top = Math.min(zeroY, valueY);
-      const height = Math.max(1, Math.abs(zeroY - valueY));
-      const current = summary.current && summary.current.tsMs === item.tsMs;
-      const low = summary.nextLow && summary.nextLow.tsMs === item.tsMs;
-      const className = current ? "is-current" : low ? "is-low" : "";
-      return `<rect class="${className}" x="${(index * slotW + 1).toFixed(2)}"
-                    y="${top.toFixed(2)}" width="${Math.max(1, slotW - 2).toFixed(2)}"
-                    height="${height.toFixed(2)}" />`;
+    const bars = strip.bars.map((b) => {
+      const cls = [b.side === "up" ? "is-dear" : b.side === "down" ? "is-cheap" : "is-flat",
+                   b.current ? "is-current" : ""].filter(Boolean).join(" ");
+      return `<rect class="${cls}" x="${b.x.toFixed(2)}" y="${b.y.toFixed(2)}"
+                    width="${b.w.toFixed(2)}" height="${b.h.toFixed(2)}" />`;
     }).join("");
     return `
-      <svg class="compact-profile" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none"
-           role="img" aria-label="Today’s electricity price profile">
-        <line x1="0" x2="${W}" y1="${zeroY.toFixed(2)}" y2="${zeroY.toFixed(2)}" />
+      <svg class="compact-profile" viewBox="0 0 ${strip.W} ${strip.H}" preserveAspectRatio="none"
+           role="img" aria-label="Price against today's average of ${roundOre(strip.mean)} öre per kWh. Bars above the line are dearer, below are cheaper.">
         ${bars}
+        <line x1="0" x2="${strip.W}" y1="${strip.midY.toFixed(2)}" y2="${strip.midY.toFixed(2)}" />
       </svg>
+      <div class="compact-profile-note">vs the average ahead, ${roundOre(strip.mean)} öre</div>
     `;
   }
 
