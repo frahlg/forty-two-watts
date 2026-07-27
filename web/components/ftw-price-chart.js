@@ -244,6 +244,12 @@ class FtwPriceChart extends FtwElement {
       outline-offset: 4px;
       border-radius: 2px;
     }
+    /* The compact card is a container, so its layout follows its own width
+       rather than the window's. On Overview it sits in a column that can be
+       far narrower than the viewport — a @media breakpoint never fired there
+       and the headline ran straight through the cheapest-window column. */
+    :host([compact]) { container-type: inline-size; }
+
     .compact-summary {
       display: grid;
       grid-template-columns: minmax(0, 1.2fr) minmax(130px, 0.8fr);
@@ -259,11 +265,15 @@ class FtwPriceChart extends FtwElement {
     .compact-value {
       color: var(--fg);
       font-family: var(--mono);
-      font-size: clamp(2rem, 5vw, 3.15rem);
+      /* cqi, not vw: the number scales with the card it lives in. At 5vw a
+         420px card on a wide screen rendered it at the 3.15rem ceiling and
+         it overflowed its column. */
+      font-size: clamp(1.9rem, 13cqi, 3.15rem);
       font-weight: 750;
       font-variant-numeric: tabular-nums;
       letter-spacing: -0.065em;
       line-height: 0.95;
+      min-width: 0;
     }
     .compact-unit {
       color: var(--fg-dim);
@@ -300,14 +310,34 @@ class FtwPriceChart extends FtwElement {
       font-size: 1rem;
       font-variant-numeric: tabular-nums;
     }
+    /* Wraps rather than truncating: "Tomorrow 11:00–13:00" cut to
+       "Tomorrow 11:00–13…" loses the end of the window, which is the half
+       that says how long you have. */
     .compact-low small {
-      overflow: hidden;
       margin-top: 1px;
       color: var(--fg-muted);
       font-family: var(--mono);
       font-size: 10px;
-      text-overflow: ellipsis;
-      white-space: nowrap;
+      line-height: 1.35;
+    }
+
+    /* Below ~400px of card the two columns stack: the headline keeps its
+       own line and the cheapest window sits under a rule instead of beside
+       one. */
+    @container (max-width: 400px) {
+      .compact-summary {
+        grid-template-columns: minmax(0, 1fr);
+        gap: 12px;
+      }
+      .compact-low {
+        padding-left: 0;
+        padding-top: 10px;
+        border-left: 0;
+        border-top: 1px solid var(--line);
+      }
+    }
+    @container (max-width: 300px) {
+      .compact-head { flex-wrap: wrap; }
     }
     .compact-profile {
       display: block;
@@ -376,19 +406,9 @@ class FtwPriceChart extends FtwElement {
         transform: translate(-50%, 0);
         transition: opacity 80ms, left 120ms cubic-bezier(.4, 0, .2, 1);
       }
-      .compact-summary {
-        grid-template-columns: minmax(0, 1fr) minmax(112px, 0.75fr);
-        gap: 12px;
-      }
-      .compact-value {
-        font-size: 2rem;
-      }
-      .compact-low {
-        padding-left: 12px;
-      }
-      .compact-head {
-        margin-bottom: 10px;
-      }
+      /* Compact-card sizing lives in the @container blocks above — it has
+         to follow the card, not the window. Only the profile height stays
+         here, as a phone-ergonomics call rather than a fit one. */
       .compact-profile {
         height: 44px;
         margin-top: 10px;

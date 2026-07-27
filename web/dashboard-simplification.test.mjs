@@ -138,6 +138,22 @@ describe("simplified dashboard overview", () => {
     assert.match(price, /href="#energy"/);
   });
 
+  it("sizes the compact card from its own width, not the window's", () => {
+    // On Overview this card sits in a column much narrower than the
+    // viewport, so a @media breakpoint never fired for it: the headline was
+    // set from 5vw, hit its ceiling, and ran through the cheapest-window
+    // column beside it.
+    assert.match(price, /:host\(\[compact\]\) \{ container-type: inline-size; \}/);
+    assert.match(price, /font-size: clamp\([^)]*cqi[^)]*\)/);
+    assert.match(price, /@container \(max-width: 400px\)/);
+    // The window label wraps instead of truncating — "Tomorrow 11:00–13…"
+    // drops the end of the window, which is half the answer.
+    assert.doesNotMatch(price, /\.compact-low small \{[^}]*text-overflow: ellipsis/s);
+    // No compact sizing left behind in the viewport breakpoint.
+    const mediaBlock = price.match(/@media \(max-width: 600px\) \{[\s\S]*?\n    \}/)?.[0] || "";
+    assert.doesNotMatch(mediaBlock, /\.compact-summary|\.compact-value|\.compact-low/);
+  });
+
   it("renders Overview and Plan from the sole plan polling path", () => {
     assert.match(html, /<script type="module" src="\/plan\.js\?v=dashboard1"><\/script>/);
     assert.match(plan, /import \{ derivePlanBrief \} from "\.\/plan-brief\.js"/);
