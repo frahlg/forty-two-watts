@@ -95,9 +95,33 @@
   --card-pad-tight: 12px 14px;
 }
 
-/* ----- Light application theme. Base tokens remain stable for the setup
-        wizard and shared component fallbacks. ----- */
+/* ----- Light application theme. ----- */
 html[data-theme="light"] {
+  /* Base palette. These eleven tokens predate the oklch palette below and
+     are still used in ~250 places across style.css, app.css and the
+     components. Until this block existed they kept their dark values in
+     light mode: --text is #e0e0e0, so 24 places rendered near-white text
+     on paper, --border painted 49 dark-violet rules, and --surface /
+     --surface2 left 31 dark cards on a light page.
+
+     Each one maps to its equivalent in the palette below rather than
+     getting a hand-picked hex, so the two systems cannot drift apart.
+     The dark values are deliberately left alone — mapping them the same
+     way would also work, but the legacy set is lighter and more violet
+     than the oklch set, so it would silently restyle every dark surface.
+     That is a design call, not a bug fix. */
+  --bg:       var(--ink);
+  --surface:  var(--ink-raised);
+  --surface2: var(--ink-sunken);
+  --border:   var(--line);
+  --text:     var(--fg);
+  --text-dim: var(--fg-muted);
+  --green:    var(--green-e);
+  --red:      var(--red-e);
+  --yellow:   var(--amber);
+  --blue:     var(--cyan);
+  --accent:   var(--accent-e);
+
   --ink:        oklch(0.985 0.005 250);
   --ink-raised: oklch(0.975 0.005 250);
   --ink-sunken: oklch(0.95 0.008 250);
