@@ -50,8 +50,14 @@ editable source and FTW's default signed driver channel.
 [`drivers/BUNDLED_SOURCE.json`](drivers/BUNDLED_SOURCE.json). It exists because
 startup is deliberately local: a gateway boots and runs without the network, so
 a remote refresh must never block it. Editing a `.lua` file here is not a way to
-change a driver — fix it upstream, move the pin, and run
-`scripts/sync-bundled-drivers.sh`. CI fails if the two drift.
+change a driver — fix it upstream, move the pin, and run `make drivers`.
+CI fails if the two drift.
+
+A fresh clone gets the files from git today. `make drivers` fetches the same
+bytes from the pin, and CI proves the two agree on every pull request by
+throwing the committed copies away and rebuilding from the pin alone. That is
+the groundwork for dropping them from git entirely, so this repository holds no
+driver source at all.
 
 ## Install on Linux
 

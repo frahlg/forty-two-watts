@@ -13,7 +13,8 @@
 
 .PHONY: help test optimizer-install optimizer-test compose-migration-test container-boundary-test build build-arm64 build-amd64 build-windows-amd64 release \
         run-sim dev fmt vet clean e2e ci ci-ui ci-hw-pi docs \
-		verify verify-all install-hooks driver-repository-validate driver-versions
+		verify verify-all install-hooks driver-repository-validate driver-versions \
+        drivers drivers-present
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X main.Version=$(VERSION)
@@ -42,11 +43,31 @@ help:
 	@echo "  ci-ui                browser smoke against FTW_BASE_URL"
 	@echo "  ci-hw-pi             deploy candidate to Pi CI slot + browser smoke"
 	@echo "  fmt vet              Go format + static checks"
+	@echo "  drivers              fetch drivers/ from the pinned device-drivers commit"
 	@echo "  clean                nuke build artifacts"
+
+# ---- Bundled drivers ----
+#
+# drivers/ is a snapshot of srcfl/device-drivers at the commit pinned in
+# drivers/BUNDLED_SOURCE.json. It is fetched, not authored here. The Go tests
+# read it, the container image copies it, and the release tarballs carry it,
+# so it has to be populated before any of those run.
+
+# Fetch the snapshot. Safe to re-run; it writes the same bytes every time.
+drivers:
+	bash scripts/sync-bundled-drivers.sh
+
+# Cheap enough to run before every test invocation, and it costs no network.
+# Fetching here instead would put a remote call in the inner loop.
+drivers-present:
+	@ls drivers/*.lua >/dev/null 2>&1 || { \
+	  echo "drivers/ has no .lua files. Run 'make drivers' to fetch the" >&2; \
+	  echo "snapshot pinned in drivers/BUNDLED_SOURCE.json." >&2; \
+	  exit 1; }
 
 # ---- Testing ----
 
-test: optimizer/.venv/.installed
+test: optimizer/.venv/.installed drivers-present
 	@status=0; \
 	optimizer/.venv/bin/pytest -q optimizer/tests & py_pid=$$!; \
 	(cd go && go test ./...) & go_pid=$$!; \
