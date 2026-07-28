@@ -65,8 +65,10 @@ func (s *server) replaceUpdater(ctx context.Context, target string) error {
 		return fmt.Errorf("current updater image: %w", err)
 	}
 
+	// Pull and recreate must resolve the same config, or they could disagree
+	// about which image the sidecar runs. Both use the host files only.
 	env := []string{updaterTagEnv + "=" + target}
-	if err := s.runner(ctx, env, s.composeArgs("pull", service)...); err != nil {
+	if err := s.runner(ctx, env, s.hostComposeArgs("pull", service)...); err != nil {
 		return fmt.Errorf("pull updater %s: %w", target, err)
 	}
 
@@ -76,7 +78,7 @@ func (s *server) replaceUpdater(ctx context.Context, target string) error {
 	_ = s.runner(ctx, nil, "rm", "-f", selfReplaceContainerName)
 
 	projectDir := filepath.Dir(s.composeFile)
-	upArgs := append(s.composeArgs("up", "-d", "--no-deps"), service)
+	upArgs := append(s.hostComposeArgs("up", "-d", "--no-deps"), service)
 	script := fmt.Sprintf("sleep %d; exec docker %s", int(selfReplaceDelay.Seconds()), strings.Join(upArgs, " "))
 
 	runArgs := []string{
@@ -102,11 +104,41 @@ func (s *server) replaceUpdater(ctx context.Context, target string) error {
 	return nil
 }
 
+// hostComposeArgs builds a compose invocation the detached helper can actually
+// run: only files that exist on the host, never the updater-owned transient
+// override.
+//
+// composeArgs appends that override, which lives in this container's /tmp and
+// is deleted when the job returns. The helper is a separate container and runs
+// three seconds later, so it would fail twice over — the path is not in its
+// mount namespace, and by then the file is gone. Caught on real hardware:
+// "open /tmp/ftw-compose-update-1611897995.yml: no such file or directory".
+//
+// The override only exists to pin Core's image for deployments that hard-code
+// it. Recreating the sidecar does not need it: the tag comes from
+// FTW_UPDATER_IMAGE_TAG in the helper's environment.
+func (s *server) hostComposeArgs(sub ...string) []string {
+	out := []string{"compose", "-f", s.composeFile}
+	for _, o := range s.hostComposeFiles() {
+		if o != s.composeFile {
+			out = append(out, "-f", o)
+		}
+	}
+	return append(out, sub...)
+}
+
+// hostComposeFiles is composeFiles minus the transient override, for the same
+// reason. The updater service must also be resolved from these files and not
+// the merged set: the helper recreates what these declare.
+func (s *server) hostComposeFiles() []string {
+	return append([]string{s.composeFile}, s.overrideFiles...)
+}
+
 // updaterServiceName finds the compose service running the updater image. It
 // matches on the image rather than a fixed name so a renamed service, or the
 // compatibility GHCR namespace, still resolves.
 func (s *server) updaterServiceName() (string, error) {
-	files := s.composeFiles()
+	files := s.hostComposeFiles()
 	var found []string
 	for _, name := range composeServiceNames(files) {
 		image, ok, err := serviceImageFromComposeFiles(files, name)

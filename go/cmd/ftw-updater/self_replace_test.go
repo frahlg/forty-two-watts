@@ -24,6 +24,11 @@ const composeWithUpdater = `services:
 func TestReplaceUpdaterPullsThenStartsDetachedHelper(t *testing.T) {
 	s, runner := newTestServer(t)
 	writeCompose(t, s.composeFile, composeWithUpdater)
+	// A Core update is normally still holding its transient image pin when the
+	// sidecar replacement starts. That file lives in this container's /tmp and
+	// is deleted on return, so the helper must never be handed it. Real
+	// hardware failed here with "no such file or directory".
+	s.updateOverrideFile = "/tmp/ftw-compose-update-1611897995.yml"
 
 	if err := s.replaceUpdater(context.Background(), "v1.12.0-beta.8"); err != nil {
 		t.Fatalf("replaceUpdater: %v", err)
@@ -66,6 +71,51 @@ func TestReplaceUpdaterPullsThenStartsDetachedHelper(t *testing.T) {
 		if !strings.Contains(run, want) {
 			t.Errorf("helper command missing %q\ngot: %s", want, run)
 		}
+	}
+	if strings.Contains(run, s.updateOverrideFile) {
+		t.Errorf("helper was handed the updater-owned transient override; it cannot read it\ngot: %s", run)
+	}
+}
+
+// Pull and recreate have to agree on the config, or they could resolve
+// different images for the same service.
+func TestReplaceUpdaterPullAndHelperResolveTheSameConfig(t *testing.T) {
+	s, runner := newTestServer(t)
+	writeCompose(t, s.composeFile, composeWithUpdater)
+	s.updateOverrideFile = "/tmp/ftw-compose-update-42.yml"
+
+	if err := s.replaceUpdater(context.Background(), "v1.13.2-beta.1"); err != nil {
+		t.Fatalf("replaceUpdater: %v", err)
+	}
+	calls := runner.snapshot()
+	pull, helper := strings.Join(calls[0], " "), strings.Join(calls[2], " ")
+	if strings.Contains(pull, s.updateOverrideFile) {
+		t.Errorf("pull must not depend on the transient override either\ngot: %s", pull)
+	}
+	// Same -f list on both sides.
+	files := "-f " + s.composeFile
+	if !strings.Contains(pull, files) || !strings.Contains(helper, files) {
+		t.Errorf("pull and helper disagree on compose files\npull:   %s\nhelper: %s", pull, helper)
+	}
+}
+
+// A deployment that hard-codes the sidecar image in its own override — which is
+// how the Pi is set up — must still resolve, because the helper recreates what
+// the host files declare.
+func TestUpdaterServiceResolvesThroughHostOverride(t *testing.T) {
+	s, _ := newTestServer(t)
+	writeCompose(t, s.composeFile, composeWithUpdater)
+	override := filepath.Join(filepath.Dir(s.composeFile), "docker-compose.override.yml")
+	writeCompose(t, override, `services:
+  ftw-updater:
+    image: ghcr.io/srcfl/ftw-updater:v1.10.0-beta.1
+`)
+	s.overrideFiles = []string{override}
+	s.updateOverrideFile = "/tmp/ftw-compose-update-42.yml"
+
+	got, err := s.updaterServiceName()
+	if err != nil || got != "ftw-updater" {
+		t.Fatalf("updaterServiceName() = %q, %v; want ftw-updater", got, err)
 	}
 }
 
