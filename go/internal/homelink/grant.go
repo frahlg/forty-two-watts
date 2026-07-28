@@ -30,6 +30,7 @@ const (
 const (
 	PairingGrantMaxTTL = 10 * time.Minute
 	AccessGrantMaxTTL  = 5 * time.Minute
+	ReadSessionMaxTTL  = 30 * time.Minute
 	grantTokenBytes    = 32
 	maxMonotonicTime   = time.Duration(1<<63 - 1)
 	// A normal home has only a few credentials. Keep a firm memory bound in
@@ -243,8 +244,9 @@ var (
 type GrantPurpose string
 
 const (
-	GrantPurposePairing GrantPurpose = "pairing"
-	GrantPurposeAccess  GrantPurpose = "access"
+	GrantPurposePairing     GrantPurpose = "pairing"
+	GrantPurposeAccess      GrantPurpose = "access"
+	GrantPurposeReadSession GrantPurpose = "read-session"
 )
 
 // Grant is returned once to the local caller and permits exactly one use. The
@@ -255,6 +257,14 @@ type Grant struct {
 	GatewayID string
 	Purpose   GrantPurpose
 	Scope     Scope
+	ExpiresAt time.Time
+}
+
+// ReadSessionGrant stays inside Core and permits repeated fixed reads from one
+// exact encrypted browser session until that session expires.
+type ReadSessionGrant struct {
+	Token     string
+	GatewayID string
 	ExpiresAt time.Time
 }
 
@@ -325,6 +335,7 @@ type grantRecord struct {
 	revoked   bool
 	consumed  bool
 	binding   *ReadBinding
+	session   *ReadSessionBinding
 }
 
 func NewGrantManager(gatewayID string, opts GrantManagerOptions) (*GrantManager, error) {
@@ -467,23 +478,10 @@ func (m *GrantManager) issueOneUseAccess(
 	defer m.coordinator.operations.RUnlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	principal, assertionBinding, err := m.authority.VerifyAndConsumeAssertion(
-		ctx, challengeID, assertion, credentialSiteOperation{
-			coordinator: m.coordinator,
-		},
+	principal, _, err := m.verifyAssertionLocked(
+		ctx, challengeID, assertion,
 	)
 	if err != nil {
-		return Grant{}, fmt.Errorf("verify local passkey: %w", err)
-	}
-	monotonicNow, err := m.clock.sample(m.monotonicNow)
-	if err != nil {
-		return Grant{}, err
-	}
-	if err := assertionBinding.validate(m.assertionSession, monotonicNow); err != nil {
-		return Grant{}, err
-	}
-	principal = clonePrincipal(principal)
-	if err := principal.validate(); err != nil {
 		return Grant{}, err
 	}
 	if err := validateReadScope(scope); err != nil {
@@ -493,6 +491,100 @@ func (m *GrantManager) issueOneUseAccess(
 		return Grant{}, fmt.Errorf("grant lifetime must be from 1ns through %s", AccessGrantMaxTTL)
 	}
 	return m.issueLocked(GrantPurposeAccess, principal, scope, ttl, AccessGrantMaxTTL, binding)
+}
+
+func (m *GrantManager) verifyAssertionLocked(
+	ctx context.Context,
+	challengeID string,
+	assertion PasskeyAssertion,
+) (Principal, time.Duration, error) {
+	principal, assertionBinding, err := m.authority.VerifyAndConsumeAssertion(
+		ctx, challengeID, assertion, credentialSiteOperation{
+			coordinator: m.coordinator,
+		},
+	)
+	if err != nil {
+		return Principal{}, 0, fmt.Errorf("verify local passkey: %w", err)
+	}
+	monotonicNow, err := m.clock.sample(m.monotonicNow)
+	if err != nil {
+		return Principal{}, 0, err
+	}
+	if err := assertionBinding.validate(m.assertionSession, monotonicNow); err != nil {
+		return Principal{}, 0, err
+	}
+	principal = clonePrincipal(principal)
+	if err := principal.validate(); err != nil {
+		return Principal{}, 0, err
+	}
+	return principal, monotonicNow, nil
+}
+
+// IssueReadSession verifies one local passkey assertion and creates a
+// reusable read authorization for one exact encrypted browser session.
+func (m *GrantManager) IssueReadSession(
+	ctx context.Context,
+	challengeID string,
+	assertion PasskeyAssertion,
+	ttl time.Duration,
+	binding ReadSessionBinding,
+) (ReadSessionGrant, error) {
+	if !m.enabled {
+		return ReadSessionGrant{}, ErrRemoteDisabled
+	}
+	if err := validateAssertionChallengeID(challengeID); err != nil {
+		return ReadSessionGrant{}, err
+	}
+	if err := binding.Validate(); err != nil {
+		return ReadSessionGrant{}, err
+	}
+	if binding.GatewayID != m.gatewayID {
+		return ReadSessionGrant{}, ErrWrongSite
+	}
+	if ttl <= 0 || ttl > ReadSessionMaxTTL {
+		return ReadSessionGrant{}, fmt.Errorf(
+			"read session lifetime must be from 1ns through %s", ReadSessionMaxTTL,
+		)
+	}
+
+	m.coordinator.operations.RLock()
+	defer m.coordinator.operations.RUnlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	principal, monotonicNow, err := m.verifyAssertionLocked(ctx, challengeID, assertion)
+	if err != nil {
+		return ReadSessionGrant{}, err
+	}
+	deadline, err := m.clock.deadline(monotonicNow, ttl)
+	if err != nil {
+		return ReadSessionGrant{}, err
+	}
+	wallNow := m.now().UTC()
+	m.pruneLocked(monotonicNow)
+	if m.credentialBlockedLocked(principal.CredentialID) {
+		return ReadSessionGrant{}, ErrCredentialRevoked
+	}
+	for range 4 {
+		raw := make([]byte, grantTokenBytes)
+		if _, err := io.ReadFull(m.random, raw); err != nil {
+			return ReadSessionGrant{}, fmt.Errorf("create read session: %w", err)
+		}
+		hash := sha256.Sum256(raw)
+		if _, exists := m.records[hash]; exists {
+			continue
+		}
+		session := binding
+		m.records[hash] = &grantRecord{
+			gatewayID: m.gatewayID, purpose: GrantPurposeReadSession,
+			principal: clonePrincipal(principal), deadline: deadline,
+			session: &session,
+		}
+		return ReadSessionGrant{
+			Token:     base64.RawURLEncoding.EncodeToString(raw),
+			GatewayID: m.gatewayID, ExpiresAt: wallNow.Add(ttl),
+		}, nil
+	}
+	return ReadSessionGrant{}, errors.New("could not create a unique read session")
 }
 
 func (m *GrantManager) issue(purpose GrantPurpose, principal Principal, scope Scope, ttl, maxTTL time.Duration) (Grant, error) {
@@ -528,12 +620,8 @@ func (m *GrantManager) issueLocked(
 	wallNow := m.now().UTC()
 	expiresAt := wallNow.Add(ttl)
 	m.pruneLocked(monotonicNow)
-	if purpose == GrantPurposeAccess {
-		if _, revoked := m.blockedCredentials[string(principal.CredentialID)]; revoked ||
-			m.blockedAll {
-			return Grant{}, ErrCredentialRevoked
-		}
-		if m.coordinator.credentialBlocked(principal.CredentialID) {
+	if purpose == GrantPurposeAccess || purpose == GrantPurposeReadSession {
+		if m.credentialBlockedLocked(principal.CredentialID) {
 			return Grant{}, ErrCredentialRevoked
 		}
 	}
@@ -557,6 +645,14 @@ func (m *GrantManager) issueLocked(
 		}, nil
 	}
 	return Grant{}, errors.New("could not create a unique grant")
+}
+
+func (m *GrantManager) credentialBlockedLocked(credentialID []byte) bool {
+	if _, revoked := m.blockedCredentials[string(credentialID)]; revoked ||
+		m.blockedAll {
+		return true
+	}
+	return m.coordinator.credentialBlocked(credentialID)
 }
 
 // ConsumePairing consumes only an enrollment grant and returns no read
@@ -611,6 +707,80 @@ func (m *GrantManager) consumeForBoundDispatch(
 	)
 	m.coordinator.operations.RUnlock()
 	return record, dispatchCtx, dispatch, nil
+}
+
+func (m *GrantManager) readSessionForDispatch(
+	ctx context.Context,
+	token string,
+	gatewayID string,
+	binding ReadSessionBinding,
+) (grantRecord, context.Context, *credentialDispatch, error) {
+	m.coordinator.operations.RLock()
+	record, err := m.readSessionSiteLocked(token, gatewayID, binding)
+	if err != nil {
+		m.coordinator.operations.RUnlock()
+		return grantRecord{}, nil, nil, err
+	}
+	dispatchCtx, dispatch := m.coordinator.startDispatch(
+		ctx, record.principal.CredentialID,
+	)
+	m.coordinator.operations.RUnlock()
+	return record, dispatchCtx, dispatch, nil
+}
+
+func (m *GrantManager) readSessionSiteLocked(
+	token string,
+	gatewayID string,
+	binding ReadSessionBinding,
+) (grantRecord, error) {
+	if !m.enabled {
+		return grantRecord{}, ErrRemoteDisabled
+	}
+	if err := binding.Validate(); err != nil {
+		return grantRecord{}, ErrWrongBinding
+	}
+	hash, err := grantHash(token)
+	if err != nil {
+		return grantRecord{}, ErrInvalidGrant
+	}
+	normalized, err := gatewayidentity.NormalizeGatewayID(gatewayID)
+	if err != nil {
+		return grantRecord{}, ErrWrongSite
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	record, ok := m.records[hash]
+	if !ok {
+		return grantRecord{}, ErrInvalidGrant
+	}
+	if record.revoked {
+		return grantRecord{}, ErrGrantRevoked
+	}
+	monotonicNow, err := m.clock.sample(m.monotonicNow)
+	if err != nil {
+		return grantRecord{}, err
+	}
+	if monotonicNow >= record.deadline {
+		return grantRecord{}, ErrGrantExpired
+	}
+	if normalized != record.gatewayID {
+		return grantRecord{}, ErrWrongSite
+	}
+	if record.purpose != GrantPurposeReadSession {
+		return grantRecord{}, ErrWrongPurpose
+	}
+	if record.session == nil || *record.session != binding {
+		return grantRecord{}, ErrWrongBinding
+	}
+	if m.credentialBlockedLocked(record.principal.CredentialID) {
+		return grantRecord{}, ErrCredentialRevoked
+	}
+	if err := record.principal.validate(); err != nil {
+		return grantRecord{}, err
+	}
+	result := *record
+	result.principal = clonePrincipal(record.principal)
+	return result, nil
 }
 
 func (m *GrantManager) consumeSiteLocked(
@@ -736,7 +906,9 @@ func (m *GrantManager) RevokeCredential(ctx context.Context, credentialID []byte
 	m.mu.Lock()
 	m.blockCredentialLocked(id)
 	for _, record := range m.records {
-		if record.purpose == GrantPurposeAccess && bytes.Equal(record.principal.CredentialID, id) {
+		if (record.purpose == GrantPurposeAccess ||
+			record.purpose == GrantPurposeReadSession) &&
+			bytes.Equal(record.principal.CredentialID, id) {
 			record.revoked = true
 		}
 	}

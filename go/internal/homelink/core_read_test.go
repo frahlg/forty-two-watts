@@ -111,6 +111,93 @@ func TestBoundReadConsumesOnceAndRejectsAnotherSession(t *testing.T) {
 	}
 }
 
+func TestReadSessionReusesOnePasskeyAcrossFixedReads(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	manager := newGrantTestManager(t, true, &now, 79)
+	var dispatches atomic.Int32
+	manager.readDispatcher = resultReadDispatcherFunc(func(
+		_ context.Context,
+		_ ReadTarget,
+		request ReadRequest,
+		_ Principal,
+	) (ReadResponse, error) {
+		dispatches.Add(1)
+		switch request.Scope {
+		case ScopeHealthRead:
+			return ReadResponse{
+				Version: ReadContractVersion, Scope: ScopeHealthRead,
+				Health: &HealthReadResponse{Status: "ok", CheckedAtMS: 1},
+			}, nil
+		case ScopePlanRead:
+			return ReadResponse{
+				Version: ReadContractVersion, Scope: ScopePlanRead,
+				Plan: &PlanReadResponse{Available: false},
+			}, nil
+		default:
+			return ReadResponse{}, errors.New("unexpected scope")
+		}
+	})
+
+	planRequest := testReadRequest(ScopePlanRead)
+	planID := testRawURL(16, 10)
+	planBinding := testReadBinding(t, planID, planRequest)
+	challenge, err := manager.BeginLocalAssertion(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	grant, err := manager.IssueReadSession(
+		context.Background(), challenge.ID, testAssertion(), 20*time.Minute,
+		planBinding.SessionBinding(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if grant.Token == "" || !grant.ExpiresAt.Equal(now.Add(20*time.Minute)) {
+		t.Fatalf("read session grant = %+v", grant)
+	}
+
+	wrong := planBinding
+	wrong.StreamID = testRawURL(16, 11)
+	if _, err := manager.VerifyAndDispatchSessionRead(
+		context.Background(), grant.Token, planID, planRequest, wrong,
+	); !errors.Is(err, ErrWrongBinding) {
+		t.Fatalf("other stream read = %v", err)
+	}
+	if _, err := manager.VerifyAndDispatchSessionRead(
+		context.Background(), grant.Token, planID, planRequest, planBinding,
+	); err != nil {
+		t.Fatalf("plan read = %v", err)
+	}
+
+	healthRequest := testReadRequest(ScopeHealthRead)
+	healthID := testRawURL(16, 12)
+	healthBinding := testReadBinding(t, healthID, healthRequest)
+	healthBinding.RouteHandle = planBinding.RouteHandle
+	healthBinding.RouteGeneration = planBinding.RouteGeneration
+	healthBinding.SessionID = planBinding.SessionID
+	healthBinding.StreamID = planBinding.StreamID
+	if _, err := manager.VerifyAndDispatchSessionRead(
+		context.Background(), grant.Token, healthID, healthRequest, healthBinding,
+	); err != nil {
+		t.Fatalf("health read = %v", err)
+	}
+	if dispatches.Load() != 2 {
+		t.Fatalf("session dispatched %d reads, want 2", dispatches.Load())
+	}
+
+	if err := manager.RevokeCredential(
+		context.Background(), testAssertion().CredentialID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.VerifyAndDispatchSessionRead(
+		context.Background(), grant.Token, healthID, healthRequest, healthBinding,
+	); !errors.Is(err, ErrGrantRevoked) &&
+		!errors.Is(err, ErrCredentialRevoked) {
+		t.Fatalf("revoked session read = %v", err)
+	}
+}
+
 func TestBoundReadFailureAndCancelDoNotRestoreGrant(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	manager := newGrantTestManager(t, true, &now, 72)

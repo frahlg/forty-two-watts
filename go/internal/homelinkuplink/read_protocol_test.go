@@ -45,7 +45,15 @@ type authorizedReadExecutor struct {
 		time.Duration,
 		homelink.ReadBinding,
 	) (homelink.Grant, error)
-	dispatch readExecutorFunc
+	sessionIssue func(
+		context.Context,
+		string,
+		homelink.PasskeyAssertion,
+		time.Duration,
+		homelink.ReadSessionBinding,
+	) (homelink.ReadSessionGrant, error)
+	sessionDispatch readExecutorFunc
+	dispatch        readExecutorFunc
 }
 
 type remoteAccessExecutor struct {
@@ -105,6 +113,32 @@ func (f authorizedReadExecutor) VerifyAndDispatchBoundRead(
 	binding homelink.ReadBinding,
 ) (homelink.ReadResponse, error) {
 	return f.dispatch(ctx, token, requestID, request, binding)
+}
+
+func (f authorizedReadExecutor) IssueReadSession(
+	ctx context.Context,
+	challengeID string,
+	assertion homelink.PasskeyAssertion,
+	ttl time.Duration,
+	binding homelink.ReadSessionBinding,
+) (homelink.ReadSessionGrant, error) {
+	if f.sessionIssue == nil {
+		return homelink.ReadSessionGrant{}, errors.New("unexpected read session")
+	}
+	return f.sessionIssue(ctx, challengeID, assertion, ttl, binding)
+}
+
+func (f authorizedReadExecutor) VerifyAndDispatchSessionRead(
+	ctx context.Context,
+	token string,
+	requestID string,
+	request homelink.ReadRequest,
+	binding homelink.ReadBinding,
+) (homelink.ReadResponse, error) {
+	if f.sessionDispatch == nil {
+		return homelink.ReadResponse{}, errors.New("unexpected session read")
+	}
+	return f.sessionDispatch(ctx, token, requestID, request, binding)
 }
 
 func TestEncryptedReadReturnsTypedResponse(t *testing.T) {
@@ -280,6 +314,164 @@ func TestEncryptedRemotePasskeyAuthorizesOneBoundRead(t *testing.T) {
 		dispatchCalls.Load() != 1 {
 		t.Fatalf("authorized read = %+v calls=%d/%d/%d",
 			response, beginCalls.Load(), issueCalls.Load(), dispatchCalls.Load())
+	}
+}
+
+func TestEncryptedRemotePasskeyUnlocksSeveralSessionReads(t *testing.T) {
+	identity := newUplinkTestIdentity(t)
+	var beginCalls atomic.Int32
+	var issueCalls atomic.Int32
+	var dispatchCalls atomic.Int32
+	executor := authorizedReadExecutor{
+		begin: func(context.Context) (homelink.LocalAssertionChallenge, error) {
+			beginCalls.Add(1)
+			return homelink.LocalAssertionChallenge{
+				ID: "challenge-session", Challenge: []byte("browser-challenge"),
+				RPID:                     "home.sourceful.energy",
+				AllowCredentials:         [][]byte{{1, 2, 3}},
+				UserVerificationRequired: true,
+			}, nil
+		},
+		issue: func(
+			context.Context,
+			string,
+			homelink.PasskeyAssertion,
+			homelink.Scope,
+			time.Duration,
+			homelink.ReadBinding,
+		) (homelink.Grant, error) {
+			return homelink.Grant{}, errors.New("one-use grant was not expected")
+		},
+		sessionIssue: func(
+			_ context.Context,
+			challengeID string,
+			assertion homelink.PasskeyAssertion,
+			ttl time.Duration,
+			binding homelink.ReadSessionBinding,
+		) (homelink.ReadSessionGrant, error) {
+			issueCalls.Add(1)
+			if challengeID != "challenge-session" ||
+				string(assertion.ResponseJSON) != `{"id":"credential","response":{}}` ||
+				ttl <= 0 || ttl > homelink.ReadSessionMaxTTL ||
+				binding.GatewayID != uplinkTestGatewayID ||
+				binding.RouteGeneration != 1 ||
+				binding.SessionID == "" || binding.StreamID == "" {
+				t.Fatalf(
+					"session issue changed: id=%q assertion=%s ttl=%v binding=%+v",
+					challengeID, assertion.ResponseJSON, ttl, binding,
+				)
+			}
+			return homelink.ReadSessionGrant{
+				Token: testGrantToken(42), GatewayID: binding.GatewayID,
+				ExpiresAt: time.Now().Add(ttl),
+			}, nil
+		},
+		sessionDispatch: func(
+			_ context.Context,
+			token string,
+			requestID string,
+			request homelink.ReadRequest,
+			binding homelink.ReadBinding,
+		) (homelink.ReadResponse, error) {
+			call := dispatchCalls.Add(1)
+			if token != testGrantToken(42) || binding.RequestHash == ([32]byte{}) {
+				t.Fatalf("session dispatch binding changed: token=%q binding=%+v",
+					token, binding)
+			}
+			switch call {
+			case 1:
+				if requestID != testRequestID(42) ||
+					request.Scope != homelink.ScopeHealthRead {
+					t.Fatalf("first session read = %q %+v", requestID, request)
+				}
+				return homelink.ReadResponse{
+					Version: homelink.ReadContractVersion,
+					Scope:   homelink.ScopeHealthRead,
+					Health:  &homelink.HealthReadResponse{Status: "ok", CheckedAtMS: 1},
+				}, nil
+			case 2:
+				if requestID != testRequestID(43) ||
+					request.Scope != homelink.ScopePlanRead {
+					t.Fatalf("second session read = %q %+v", requestID, request)
+				}
+				return homelink.ReadResponse{
+					Version: homelink.ReadContractVersion,
+					Scope:   homelink.ScopePlanRead,
+					Plan:    &homelink.PlanReadResponse{Available: false},
+				}, nil
+			default:
+				return homelink.ReadResponse{}, errors.New("too many session reads")
+			}
+		},
+		dispatch: func(
+			context.Context,
+			string,
+			string,
+			homelink.ReadRequest,
+			homelink.ReadBinding,
+		) (homelink.ReadResponse, error) {
+			return homelink.ReadResponse{}, errors.New("one-use dispatch was not expected")
+		},
+	}
+	service, err := NewServiceWithAuthorizedReads(identity, executor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport, accept, browserOutbound, browserInbound, cancel, result :=
+		startConfirmedReadService(t, service, identity)
+	defer stopReadService(t, cancel, result)
+
+	begin := `{"version":1,"type":"assertion.begin","request_id":"` +
+		testRequestID(40) + `"}`
+	transport.frames <- Frame{Type: wire.TypeSealed, Sealed: browserSeal(
+		t, browserOutbound, accept, 2, []byte(begin),
+	)}
+	_ = browserOpen(t, browserInbound, accept, waitValue(t, transport.sealed))
+
+	authorize := `{"version":1,"type":"session.authorize","request_id":"` +
+		testRequestID(41) +
+		`","challenge_id":"challenge-session","assertion":{"id":"credential","response":{}}}`
+	transport.frames <- Frame{Type: wire.TypeSealed, Sealed: browserSeal(
+		t, browserOutbound, accept, 3, []byte(authorize),
+	)}
+	var authorized sessionAuthorizedMessage
+	if err := wire.DecodeStrict(
+		browserOpen(t, browserInbound, accept, waitValue(t, transport.sealed)),
+		wire.MaxPlaintextBytes, &authorized,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if authorized.Type != sessionAuthorizedType ||
+		authorized.RequestID != testRequestID(41) ||
+		authorized.ExpiresAtMS <= time.Now().UnixMilli() ||
+		authorized.Error != "" {
+		t.Fatalf("session authorization = %+v", authorized)
+	}
+
+	for index, read := range []string{
+		`{"version":1,"type":"session.read","request_id":"` +
+			testRequestID(42) + `","scope":"ftw.health.read"}`,
+		`{"version":1,"type":"session.read","request_id":"` +
+			testRequestID(43) + `","scope":"ftw.plan.read"}`,
+	} {
+		transport.frames <- Frame{Type: wire.TypeSealed, Sealed: browserSeal(
+			t, browserOutbound, accept, uint64(index+4), []byte(read),
+		)}
+		var response readResponseMessage
+		if err := wire.DecodeStrict(
+			browserOpen(t, browserInbound, accept, waitValue(t, transport.sealed)),
+			wire.MaxPlaintextBytes, &response,
+		); err != nil {
+			t.Fatal(err)
+		}
+		if response.Error != "" || response.Response == nil {
+			t.Fatalf("session read %d = %+v", index, response)
+		}
+	}
+	if beginCalls.Load() != 1 || issueCalls.Load() != 1 ||
+		dispatchCalls.Load() != 2 {
+		t.Fatalf("session calls = begin %d issue %d dispatch %d",
+			beginCalls.Load(), issueCalls.Load(), dispatchCalls.Load())
 	}
 }
 

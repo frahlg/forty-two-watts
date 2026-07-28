@@ -31,6 +31,9 @@ const (
 	registrationFinishType    = "registration.finish"
 	registrationResultType    = "registration.result"
 	authorizedReadType        = "read.authorize"
+	sessionAuthorizeType      = "session.authorize"
+	sessionAuthorizedType     = "session.authorized"
+	sessionReadType           = "session.read"
 	readResponseType          = "read.response"
 )
 
@@ -55,6 +58,20 @@ type AuthorizedReadExecutor interface {
 		time.Duration,
 		homelink.ReadBinding,
 	) (homelink.Grant, error)
+	IssueReadSession(
+		context.Context,
+		string,
+		homelink.PasskeyAssertion,
+		time.Duration,
+		homelink.ReadSessionBinding,
+	) (homelink.ReadSessionGrant, error)
+	VerifyAndDispatchSessionRead(
+		context.Context,
+		string,
+		string,
+		homelink.ReadRequest,
+		homelink.ReadBinding,
+	) (homelink.ReadResponse, error)
 }
 
 type RemoteAccessExecutor interface {
@@ -98,6 +115,30 @@ type authorizedReadRequestMessage struct {
 	Assertion   json.RawMessage     `json:"assertion"`
 	Scope       homelink.Scope      `json:"scope"`
 	History     *readHistoryRequest `json:"history,omitempty"`
+}
+
+type sessionAuthorizeMessage struct {
+	Version     int             `json:"version"`
+	Type        string          `json:"type"`
+	RequestID   string          `json:"request_id"`
+	ChallengeID string          `json:"challenge_id"`
+	Assertion   json.RawMessage `json:"assertion"`
+}
+
+type sessionAuthorizedMessage struct {
+	Version     int    `json:"version"`
+	Type        string `json:"type"`
+	RequestID   string `json:"request_id"`
+	ExpiresAtMS int64  `json:"expires_at_ms,omitempty"`
+	Error       string `json:"error,omitempty"`
+}
+
+type sessionReadRequestMessage struct {
+	Version   int                 `json:"version"`
+	Type      string              `json:"type"`
+	RequestID string              `json:"request_id"`
+	Scope     homelink.Scope      `json:"scope"`
+	History   *readHistoryRequest `json:"history,omitempty"`
 }
 
 type registrationBeginMessage struct {
@@ -162,11 +203,50 @@ func applicationMessageType(data []byte) (string, error) {
 	}
 	switch messageType {
 	case readRequestType, assertionBeginType, authorizedReadType,
+		sessionAuthorizeType, sessionReadType,
 		registrationBeginType, registrationFinishType:
 		return messageType, nil
 	default:
 		return "", errors.New("Home Link application type is invalid")
 	}
+}
+
+func decodeSessionAuthorize(data []byte) (sessionAuthorizeMessage, error) {
+	var message sessionAuthorizeMessage
+	if err := wire.DecodeStrict(data, maxReadRequestBytes, &message); err != nil {
+		return message, err
+	}
+	if message.Version != applicationVersion ||
+		message.Type != sessionAuthorizeType ||
+		!validReadRequestID(message.RequestID) ||
+		message.ChallengeID == "" ||
+		len(message.Assertion) == 0 {
+		return message, errors.New("Home Link session authorization is invalid")
+	}
+	var assertionObject map[string]json.RawMessage
+	if err := wire.DecodeStrict(
+		message.Assertion, maxAssertionBytes, &assertionObject,
+	); err != nil || assertionObject == nil {
+		return message, errors.New("Home Link passkey assertion is invalid")
+	}
+	return message, nil
+}
+
+func encodeSessionAuthorized(
+	requestID string,
+	expiresAt time.Time,
+	err error,
+) ([]byte, error) {
+	message := sessionAuthorizedMessage{
+		Version: applicationVersion, Type: sessionAuthorizedType,
+		RequestID: requestID,
+	}
+	if err != nil {
+		message.Error = readErrorCode(err)
+	} else {
+		message.ExpiresAtMS = expiresAt.UnixMilli()
+	}
+	return wire.Encode(message, wire.MaxPlaintextBytes)
 }
 
 func decodeRegistrationBegin(data []byte) (registrationBeginMessage, error) {
@@ -329,41 +409,38 @@ func decodeReadRequest(
 		return message, homelink.ReadRequest{}, homelink.ReadBinding{},
 			errors.New("Home Link read envelope is invalid")
 	}
-	request := homelink.ReadRequest{
-		Version:   homelink.ReadContractVersion,
-		GatewayID: session.GatewayID,
-		Scope:     message.Scope,
-	}
-	if message.History != nil {
-		request.History = &state.EnergyHistoryQuery{
-			AssetID:  message.History.AssetID,
-			SinceMS:  message.History.SinceMS,
-			UntilMS:  message.History.UntilMS,
-			BucketMS: message.History.BucketMS,
-			Limit:    message.History.Limit,
-		}
-	}
-	if err := request.Validate(); err != nil {
-		return message, homelink.ReadRequest{}, homelink.ReadBinding{}, err
-	}
-	if request.Scope == homelink.ScopeEnergyHistoryRead &&
-		request.History.Limit > homelink.MaxRemotePoints {
-		return message, homelink.ReadRequest{}, homelink.ReadBinding{},
-			errors.New("Home Link history limit is too large")
-	}
-	hash, err := homelink.ReadRequestHash(message.RequestID, request)
+	request, binding, err := buildReadRequest(
+		message.RequestID, message.Scope, message.History, session,
+	)
 	if err != nil {
 		return message, homelink.ReadRequest{}, homelink.ReadBinding{}, err
 	}
-	binding := homelink.ReadBinding{
-		GatewayID:       session.GatewayID,
-		RouteHandle:     session.RouteHandle,
-		RouteGeneration: session.RouteGeneration,
-		SessionID:       session.SessionID,
-		StreamID:        session.StreamID,
-		RequestHash:     hash,
+	return message, request, binding, nil
+}
+
+func decodeSessionReadRequest(
+	data []byte,
+	session homelinksession.Context,
+) (
+	sessionReadRequestMessage,
+	homelink.ReadRequest,
+	homelink.ReadBinding,
+	error,
+) {
+	var message sessionReadRequestMessage
+	if err := wire.DecodeStrict(data, maxReadRequestBytes, &message); err != nil {
+		return message, homelink.ReadRequest{}, homelink.ReadBinding{}, err
 	}
-	if err := binding.Validate(); err != nil {
+	if message.Version != applicationVersion ||
+		message.Type != sessionReadType ||
+		!validReadRequestID(message.RequestID) {
+		return message, homelink.ReadRequest{}, homelink.ReadBinding{},
+			errors.New("Home Link session read envelope is invalid")
+	}
+	request, binding, err := buildReadRequest(
+		message.RequestID, message.Scope, message.History, session,
+	)
+	if err != nil {
 		return message, homelink.ReadRequest{}, homelink.ReadBinding{}, err
 	}
 	return message, request, binding, nil
@@ -397,28 +474,43 @@ func decodeAuthorizedReadRequest(
 		return message, homelink.ReadRequest{}, homelink.ReadBinding{},
 			errors.New("Home Link passkey assertion is invalid")
 	}
+	request, binding, err := buildReadRequest(
+		message.RequestID, message.Scope, message.History, session,
+	)
+	if err != nil {
+		return message, homelink.ReadRequest{}, homelink.ReadBinding{}, err
+	}
+	return message, request, binding, nil
+}
+
+func buildReadRequest(
+	requestID string,
+	scope homelink.Scope,
+	history *readHistoryRequest,
+	session homelinksession.Context,
+) (homelink.ReadRequest, homelink.ReadBinding, error) {
 	request := homelink.ReadRequest{
 		Version: homelink.ReadContractVersion, GatewayID: session.GatewayID,
-		Scope: message.Scope,
+		Scope: scope,
 	}
-	if message.History != nil {
+	if history != nil {
 		request.History = &state.EnergyHistoryQuery{
-			AssetID: message.History.AssetID, SinceMS: message.History.SinceMS,
-			UntilMS: message.History.UntilMS, BucketMS: message.History.BucketMS,
-			Limit: message.History.Limit,
+			AssetID: history.AssetID, SinceMS: history.SinceMS,
+			UntilMS: history.UntilMS, BucketMS: history.BucketMS,
+			Limit: history.Limit,
 		}
 	}
 	if err := request.Validate(); err != nil {
-		return message, homelink.ReadRequest{}, homelink.ReadBinding{}, err
+		return homelink.ReadRequest{}, homelink.ReadBinding{}, err
 	}
 	if request.Scope == homelink.ScopeEnergyHistoryRead &&
 		request.History.Limit > homelink.MaxRemotePoints {
-		return message, homelink.ReadRequest{}, homelink.ReadBinding{},
+		return homelink.ReadRequest{}, homelink.ReadBinding{},
 			errors.New("Home Link history limit is too large")
 	}
-	hash, err := homelink.ReadRequestHash(message.RequestID, request)
+	hash, err := homelink.ReadRequestHash(requestID, request)
 	if err != nil {
-		return message, homelink.ReadRequest{}, homelink.ReadBinding{}, err
+		return homelink.ReadRequest{}, homelink.ReadBinding{}, err
 	}
 	binding := homelink.ReadBinding{
 		GatewayID: session.GatewayID, RouteHandle: session.RouteHandle,
@@ -426,9 +518,9 @@ func decodeAuthorizedReadRequest(
 		StreamID: session.StreamID, RequestHash: hash,
 	}
 	if err := binding.Validate(); err != nil {
-		return message, homelink.ReadRequest{}, homelink.ReadBinding{}, err
+		return homelink.ReadRequest{}, homelink.ReadBinding{}, err
 	}
-	return message, request, binding, nil
+	return request, binding, nil
 }
 
 func validReadRequestID(value string) bool {

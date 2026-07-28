@@ -27,7 +27,7 @@ const (
 	authTimeout       = 5 * time.Second
 	confirmTimeout    = 10 * time.Second
 	browserIdle       = 60 * time.Second
-	sessionLifetime   = 5 * time.Minute
+	sessionLifetime   = 30 * time.Minute
 	writeTimeout      = 5 * time.Second
 	pongTimeout       = 45 * time.Second
 	pingInterval      = 20 * time.Second

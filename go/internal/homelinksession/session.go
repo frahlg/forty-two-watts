@@ -22,7 +22,7 @@ import (
 
 const (
 	// MaxSessionLifetime is the ceiling a verifier accepts for a session.
-	MaxSessionLifetime = 5 * time.Minute
+	MaxSessionLifetime = 30 * time.Minute
 	// MaxClockSkew is the allowance for the difference between the gateway
 	// clock that stamps an expiry and the browser clock that checks it. Both
 	// clocks are independent, so a verifier that rejected the exact ceiling

@@ -12,6 +12,7 @@
   var MAX_INBOUND_FRAME_BYTES = 256 * 1024;
   var MAX_PENDING_MESSAGES = 4;
   var DEFAULT_WAIT_TIMEOUT_MS = 15000;
+  var REMEMBERED_HOME_KEY = "ftw-home-link-home-v1";
 
   function bytesToRawURL(value) {
     var bytes = new Uint8Array(value);
@@ -98,6 +99,52 @@
     if (rawURLToBytes(route).length !== 32) throw new Error("invalid route");
     if (rawURLToBytes(key).length !== 64) throw new Error("invalid gateway key");
     return { gateway: gateway, route: route, key: key };
+  }
+
+  function rememberInvite(invite, storage) {
+    if (!storage) return;
+    var checked = parseInvite(
+      "https://home.sourceful.energy/home-link.html?gateway=" +
+      encodeURIComponent(invite.gateway) + "&route=" +
+      encodeURIComponent(invite.route) + "&key=" +
+      encodeURIComponent(invite.key)
+    );
+    storage.setItem(REMEMBERED_HOME_KEY, JSON.stringify(checked));
+  }
+
+  function loadRememberedInvite(storage) {
+    if (!storage) return null;
+    var raw = storage.getItem(REMEMBERED_HOME_KEY);
+    if (!raw) return null;
+    try {
+      var value = JSON.parse(raw);
+      return parseInvite(
+        "https://home.sourceful.energy/home-link.html?gateway=" +
+        encodeURIComponent(value.gateway) + "&route=" +
+        encodeURIComponent(value.route) + "&key=" +
+        encodeURIComponent(value.key)
+      );
+    } catch (_) {
+      storage.removeItem(REMEMBERED_HOME_KEY);
+      return null;
+    }
+  }
+
+  function forgetInvite(storage) {
+    if (storage) storage.removeItem(REMEMBERED_HOME_KEY);
+  }
+
+  function resolveInvite(locationValue, storage) {
+    var url = new URL(locationValue);
+    var hasExplicit = ["gateway", "route", "key"].some(function (key) {
+      return url.searchParams.has(key);
+    });
+    if (hasExplicit) {
+      return parseInvite(locationValue);
+    }
+    var remembered = loadRememberedInvite(storage);
+    if (!remembered) throw new Error("no remembered home");
+    return remembered;
   }
 
   function assertionJSON(credential) {
@@ -262,6 +309,8 @@
     this.waiters = [];
     this.waitTimeoutMS = waitTimeoutMS || DEFAULT_WAIT_TIMEOUT_MS;
     this.failure = null;
+    this.expiresAtMS = 0;
+    this.authorizationExpiresAtMS = 0;
   }
 
   HomeLinkSession.prototype._push = function (value) {
@@ -372,7 +421,7 @@
         accept.browser_key !== hello.browser_key || accept.browser_nonce !== hello.browser_nonce ||
         accept.gateway_public_key !== this.gatewayKey ||
         !Number.isSafeInteger(accept.expires_at_ms) || accept.expires_at_ms <= now ||
-        accept.expires_at_ms > now + 5 * 60 * 1000) {
+        accept.expires_at_ms > now + 30 * 60 * 1000) {
       throw new Error("gateway session did not match the invite");
     }
     rawURLToBytes(accept.session_id);
@@ -408,6 +457,7 @@
     );
     this.streamID = accept.stream_id;
     this.sessionID = accept.session_id;
+    this.expiresAtMS = accept.expires_at_ms;
     await this.send({ version: 1, type: "session.confirm" });
     var ready = await this.receive();
     if (!exactKeys(ready, ["version", "type"]) ||
@@ -450,7 +500,7 @@
     return JSON.parse(textDecoder.decode(plaintext));
   };
 
-  HomeLinkSession.prototype.read = async function (scope, history) {
+  HomeLinkSession.prototype.authorize = async function () {
     var beginID = randomRawURL(16);
     await this.send({ version: 1, type: "assertion.begin", request_id: beginID });
     var challenge = await this.receive();
@@ -461,17 +511,53 @@
       publicKey: assertionPublicKey(challenge, beginID),
     });
     var requestID = randomRawURL(16);
-    var request = {
-      version: 1, type: "read.authorize", request_id: requestID,
+    await this.send({
+      version: 1, type: "session.authorize", request_id: requestID,
       challenge_id: challenge.challenge_id,
-      assertion: assertionJSON(credential), scope: scope,
+      assertion: assertionJSON(credential),
+    });
+    var result = await this.receive();
+    if (!exactKeys(
+      result, ["version", "type", "request_id", "expires_at_ms"]
+    ) || result.version !== 1 || result.type !== "session.authorized" ||
+        result.request_id !== requestID ||
+        !Number.isSafeInteger(result.expires_at_ms) ||
+        result.expires_at_ms <= Date.now() ||
+        result.expires_at_ms > this.expiresAtMS) {
+      this.authorizationExpiresAtMS = 0;
+      throw new Error((result && result.error) || "session authorization failed");
+    }
+    this.authorizationExpiresAtMS = result.expires_at_ms;
+    return result.expires_at_ms;
+  };
+
+  HomeLinkSession.prototype.isAuthorized = function () {
+    return !this.failure &&
+      this.authorizationExpiresAtMS > Date.now() &&
+      this.authorizationExpiresAtMS <= this.expiresAtMS;
+  };
+
+  HomeLinkSession.prototype.read = async function (scope, history) {
+    if (!this.isAuthorized()) throw new Error("passkey unlock required");
+    var requestID = randomRawURL(16);
+    var request = {
+      version: 1, type: "session.read", request_id: requestID, scope: scope,
     };
     if (history) request.history = history;
     await this.send(request);
     var response = await this.receive();
-    if (response.version !== 1 || response.type !== "read.response" ||
-        response.request_id !== requestID || response.error) {
-      throw new Error(response.error || "remote read failed");
+    var errorResponse = response && typeof response.error === "string";
+    var expectedKeys = errorResponse
+      ? ["version", "type", "request_id", "error"]
+      : ["version", "type", "request_id", "response"];
+    if (!exactKeys(response, expectedKeys) ||
+        response.version !== 1 || response.type !== "read.response" ||
+        response.request_id !== requestID || errorResponse) {
+      if (errorResponse &&
+          ["grant-expired", "grant-revoked", "denied"].includes(response.error)) {
+        this.authorizationExpiresAtMS = 0;
+      }
+      throw new Error(errorResponse ? response.error : "remote read failed");
     }
     return response.response;
   };
@@ -516,6 +602,10 @@
   var api = {
     HomeLinkSession: HomeLinkSession,
     parseInvite: parseInvite,
+    resolveInvite: resolveInvite,
+    rememberInvite: rememberInvite,
+    loadRememberedInvite: loadRememberedInvite,
+    forgetInvite: forgetInvite,
     parsePairing: parsePairing,
     withoutFragment: withoutFragment,
     assertionPublicKey: assertionPublicKey,

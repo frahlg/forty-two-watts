@@ -27,6 +27,30 @@ describe("Home Link browser session", () => {
     ));
   });
 
+  it("remembers only the non-secret home invite and can forget it", () => {
+    const values = new Map();
+    const storage = {
+      getItem: key => values.get(key) || null,
+      setItem: (key, value) => values.set(key, value),
+      removeItem: key => values.delete(key),
+    };
+    const invite = {
+      gateway: "001122334455667788",
+      route: encoded(32, 7),
+      key: encoded(64, 8),
+    };
+    session.rememberInvite(invite, storage);
+    const stored = Array.from(values.values()).join("");
+    assert.doesNotMatch(stored, /pairing|secret/);
+    assert.deepEqual(session.loadRememberedInvite(storage), invite);
+    assert.deepEqual(
+      session.resolveInvite("https://home.sourceful.energy/home-link.html", storage),
+      invite
+    );
+    session.forgetInvite(storage);
+    assert.equal(session.loadRememberedInvite(storage), null);
+  });
+
   it("reads one pairing from the fragment without putting the secret in the query", () => {
     const id = encoded(24, 5);
     const secret = encoded(32, 6);
@@ -205,5 +229,138 @@ describe("Home Link browser session", () => {
     waiting.socket = { close: () => { closes++; } };
     await assert.rejects(waiting._next(), /timed out/);
     assert.equal(closes, 2);
+  });
+
+  it("asks for one passkey and reuses the encrypted session for reads", async () => {
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+    let passkeyPrompts = 0;
+    Object.defineProperty(globalThis, "navigator", {
+      configurable: true,
+      value: {
+        credentials: {
+          get: async () => {
+            passkeyPrompts++;
+            return {
+              id: "credential",
+              rawId: new Uint8Array([1, 2, 3]).buffer,
+              type: "public-key",
+              authenticatorAttachment: "platform",
+              response: {
+                clientDataJSON: new Uint8Array([1]).buffer,
+                authenticatorData: new Uint8Array([2]).buffer,
+                signature: new Uint8Array([3]).buffer,
+                userHandle: null,
+              },
+              getClientExtensionResults: () => ({}),
+            };
+          },
+        },
+      },
+    });
+    try {
+      const instance = new session.HomeLinkSession({
+        gateway: "001122334455667788",
+        route: encoded(32, 1),
+        key: encoded(64, 2),
+      });
+      const now = Date.now();
+      instance.expiresAtMS = now + 20 * 60 * 1000;
+      const sent = [];
+      instance.send = async message => { sent.push(message); };
+      const responses = [
+        {
+          version: 1,
+          type: "assertion.challenge",
+          request_id: "",
+          challenge_id: encoded(24, 2),
+          challenge: encoded(32, 3),
+          rp_id: "home.sourceful.energy",
+          allow_credentials: [encoded(32, 4)],
+          user_verification: "required",
+        },
+        null,
+        {
+          version: 1, type: "read.response", request_id: "",
+          response: { version: 1, scope: "ftw.health.read", health: { status: "ok" } },
+        },
+        {
+          version: 1, type: "read.response", request_id: "",
+          response: { version: 1, scope: "ftw.plan.read", plan: { available: false } },
+        },
+      ];
+      instance.receive = async () => {
+        const value = responses.shift();
+        const last = sent.at(-1);
+        if (value && "request_id" in value) value.request_id = last.request_id;
+        if (value && value.type === "session.authorized") {
+          value.expires_at_ms = now + 10 * 60 * 1000;
+        }
+        return value;
+      };
+      responses[1] = {
+        version: 1, type: "session.authorized", request_id: "",
+        expires_at_ms: now + 10 * 60 * 1000,
+      };
+
+      await instance.authorize();
+      await instance.read("ftw.health.read");
+      await instance.read("ftw.plan.read");
+      assert.equal(passkeyPrompts, 1);
+      assert.deepEqual(sent.map(value => value.type), [
+        "assertion.begin", "session.authorize", "session.read", "session.read",
+      ]);
+      assert.equal(
+        sent.filter(value => Object.hasOwn(value, "assertion")).length,
+        1
+      );
+    } finally {
+      if (descriptor) Object.defineProperty(globalThis, "navigator", descriptor);
+      else delete globalThis.navigator;
+    }
+  });
+
+  it("locks again when Core expires or revokes the session", async () => {
+    const instance = new session.HomeLinkSession({
+      gateway: "001122334455667788",
+      route: encoded(32, 1),
+      key: encoded(64, 2),
+    });
+    instance.expiresAtMS = Date.now() + 20 * 60 * 1000;
+    instance.authorizationExpiresAtMS = Date.now() + 10 * 60 * 1000;
+    let requestID = "";
+    instance.send = async message => { requestID = message.request_id; };
+    instance.receive = async () => ({
+      version: 1, type: "read.response", request_id: requestID,
+      error: "grant-revoked",
+    });
+    await assert.rejects(instance.read("ftw.health.read"), /grant-revoked/);
+    assert.equal(instance.isAuthorized(), false);
+  });
+
+  it("rejects extra fields in a remote read response", async () => {
+    const instance = new session.HomeLinkSession({
+      gateway: "001122334455667788",
+      route: encoded(32, 1),
+      key: encoded(64, 2),
+    });
+    instance.expiresAtMS = Date.now() + 20 * 60 * 1000;
+    instance.authorizationExpiresAtMS = Date.now() + 10 * 60 * 1000;
+    let requestID = "";
+    instance.send = async message => { requestID = message.request_id; };
+    instance.receive = async () => ({
+      version: 1,
+      type: "read.response",
+      request_id: requestID,
+      response: {
+        version: 1,
+        scope: "ftw.health.read",
+        health: { status: "ok" },
+      },
+      unexpected: true,
+    });
+    await assert.rejects(
+      instance.read("ftw.health.read"),
+      /remote read failed/
+    );
   });
 });

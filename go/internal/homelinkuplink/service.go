@@ -35,10 +35,12 @@ type streamState struct {
 	confirmed bool
 	session   *homelinksession.Session
 
-	mu     sync.Mutex
-	busy   bool
-	closed bool
-	cancel context.CancelFunc
+	mu                   sync.Mutex
+	busy                 bool
+	closed               bool
+	cancel               context.CancelFunc
+	readSessionToken     string
+	readSessionExpiresAt time.Time
 }
 
 type sessionConfirm struct {
@@ -229,6 +231,32 @@ func (s *Service) serve(ctx context.Context, connection transport) error {
 					go s.executeAuthorizedRead(
 						serviceCtx, connection, state, message, request, binding,
 					)
+				case sessionAuthorizeType:
+					message, err := decodeSessionAuthorize(plaintext)
+					if err != nil || s.authorizedReads == nil {
+						state.finishRead()
+						state.stop()
+						_ = connection.CloseStream(frame.Sealed.StreamID, "invalid-read")
+						delete(streams, frame.Sealed.StreamID)
+						continue
+					}
+					go s.executeSessionAuthorize(
+						serviceCtx, connection, state, message,
+					)
+				case sessionReadType:
+					message, request, binding, err := decodeSessionReadRequest(
+						plaintext, state.session.Context(),
+					)
+					if err != nil || s.authorizedReads == nil {
+						state.finishRead()
+						state.stop()
+						_ = connection.CloseStream(frame.Sealed.StreamID, "invalid-read")
+						delete(streams, frame.Sealed.StreamID)
+						continue
+					}
+					go s.executeSessionRead(
+						serviceCtx, connection, state, message, request, binding,
+					)
 				case registrationBeginType:
 					message, err := decodeRegistrationBegin(plaintext)
 					if err != nil || s.remoteAccess == nil {
@@ -281,6 +309,81 @@ func (s *Service) serve(ctx context.Context, connection transport) error {
 			return errors.New("Home Link uplink delivered an unsupported frame")
 		}
 	}
+}
+
+func (s *Service) executeSessionAuthorize(
+	parent context.Context,
+	connection transport,
+	state *streamState,
+	message sessionAuthorizeMessage,
+) {
+	ctx, cancel := context.WithTimeout(parent, s.readTimeout)
+	state.setReadCancel(cancel)
+	defer func() {
+		cancel()
+		state.finishRead()
+	}()
+	sessionContext := state.session.Context()
+	ttl := time.Until(sessionContext.ExpiresAt)
+	if ttl > homelink.ReadSessionMaxTTL {
+		ttl = homelink.ReadSessionMaxTTL
+	}
+	var grant homelink.ReadSessionGrant
+	var err error
+	if ttl <= 0 {
+		err = homelink.ErrGrantExpired
+	} else {
+		grant, err = s.authorizedReads.IssueReadSession(
+			ctx,
+			message.ChallengeID,
+			homelink.PasskeyAssertion{
+				ResponseJSON: append([]byte(nil), message.Assertion...),
+			},
+			ttl,
+			homelink.ReadSessionBinding{
+				GatewayID:       sessionContext.GatewayID,
+				RouteHandle:     sessionContext.RouteHandle,
+				RouteGeneration: sessionContext.RouteGeneration,
+				SessionID:       sessionContext.SessionID,
+				StreamID:        sessionContext.StreamID,
+			},
+		)
+	}
+	if err == nil {
+		state.setReadSession(grant.Token, grant.ExpiresAt)
+	}
+	payload, encodeErr := encodeSessionAuthorized(
+		message.RequestID, grant.ExpiresAt, err,
+	)
+	s.sendApplicationResponse(parent, connection, state, payload, encodeErr)
+}
+
+func (s *Service) executeSessionRead(
+	parent context.Context,
+	connection transport,
+	state *streamState,
+	message sessionReadRequestMessage,
+	request homelink.ReadRequest,
+	binding homelink.ReadBinding,
+) {
+	ctx, cancel := context.WithTimeout(parent, s.readTimeout)
+	state.setReadCancel(cancel)
+	defer func() {
+		cancel()
+		state.finishRead()
+	}()
+	token, ok := state.readSession()
+	var response homelink.ReadResponse
+	var err error
+	if !ok {
+		err = homelink.ErrInvalidGrant
+	} else {
+		response, err = s.authorizedReads.VerifyAndDispatchSessionRead(
+			ctx, token, message.RequestID, request, binding,
+		)
+	}
+	payload, encodeErr := encodeReadResponse(message.RequestID, response, err)
+	s.sendApplicationResponse(parent, connection, state, payload, encodeErr)
 }
 
 func (s *Service) executeRegistrationBegin(
@@ -450,6 +553,25 @@ func (s *streamState) canReply() bool {
 	return !s.closed
 }
 
+func (s *streamState) setReadSession(token string, expiresAt time.Time) {
+	s.mu.Lock()
+	if !s.closed {
+		s.readSessionToken = token
+		s.readSessionExpiresAt = expiresAt
+	}
+	s.mu.Unlock()
+}
+
+func (s *streamState) readSession() (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed || s.readSessionToken == "" ||
+		!time.Now().Before(s.readSessionExpiresAt) {
+		return "", false
+	}
+	return s.readSessionToken, true
+}
+
 func (s *streamState) finishRead() {
 	s.mu.Lock()
 	s.busy = false
@@ -460,6 +582,8 @@ func (s *streamState) finishRead() {
 func (s *streamState) stop() {
 	s.mu.Lock()
 	s.closed = true
+	s.readSessionToken = ""
+	s.readSessionExpiresAt = time.Time{}
 	if s.cancel != nil {
 		s.cancel()
 	}

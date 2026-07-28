@@ -103,6 +103,44 @@ func (b ReadBinding) Validate() error {
 	return nil
 }
 
+// ReadSessionBinding binds one passkey authorization to one encrypted browser
+// session. The request hash remains per read in ReadBinding.
+type ReadSessionBinding struct {
+	GatewayID       string
+	RouteHandle     string
+	RouteGeneration uint64
+	SessionID       string
+	StreamID        string
+}
+
+func (b ReadSessionBinding) Validate() error {
+	normalized, err := gatewayidentity.NormalizeGatewayID(b.GatewayID)
+	if err != nil || normalized != b.GatewayID {
+		return errors.New("read session gateway is invalid")
+	}
+	if err := validateRawURLValue(b.RouteHandle, gatewayidentity.RouteHandleBytes); err != nil {
+		return errors.New("read session route is invalid")
+	}
+	if b.RouteGeneration == 0 {
+		return errors.New("read session generation is invalid")
+	}
+	if err := validateRawURLValue(b.SessionID, wire.SessionIDBytes); err != nil {
+		return errors.New("read session id is invalid")
+	}
+	if err := validateRawURLValue(b.StreamID, wire.StreamIDBytes); err != nil {
+		return errors.New("read session stream is invalid")
+	}
+	return nil
+}
+
+func (b ReadBinding) SessionBinding() ReadSessionBinding {
+	return ReadSessionBinding{
+		GatewayID: b.GatewayID, RouteHandle: b.RouteHandle,
+		RouteGeneration: b.RouteGeneration, SessionID: b.SessionID,
+		StreamID: b.StreamID,
+	}
+}
+
 func validateRawURLValue(value string, size int) error {
 	raw, err := base64.RawURLEncoding.DecodeString(value)
 	if err != nil || len(raw) != size ||
@@ -440,6 +478,64 @@ func (m *GrantManager) VerifyAndDispatchBoundRead(
 	}
 	record, dispatchCtx, dispatch, err := m.consumeForBoundDispatch(
 		ctx, token, request.GatewayID, request.Scope, binding,
+	)
+	if err != nil {
+		return ReadResponse{}, err
+	}
+	defer m.coordinator.finishDispatch(dispatch)
+	if err := record.principal.validate(); err != nil {
+		return ReadResponse{}, err
+	}
+	response, err := dispatcher.DispatchReadResult(
+		dispatchCtx, readTargets[request.Scope], request, clonePrincipal(record.principal),
+	)
+	if err != nil {
+		return ReadResponse{}, err
+	}
+	if dispatchCtx.Err() != nil {
+		return ReadResponse{}, dispatchCtx.Err()
+	}
+	if response.Scope != request.Scope {
+		return ReadResponse{}, errors.New("Core read response scope is invalid")
+	}
+	if err := response.Validate(); err != nil {
+		return ReadResponse{}, err
+	}
+	return response, nil
+}
+
+// VerifyAndDispatchSessionRead performs one fixed read under a reusable
+// authorization that is bound to the current encrypted browser session. The
+// authorization never leaves Core, expires with the session, and is checked
+// against credential revocation before every dispatch.
+func (m *GrantManager) VerifyAndDispatchSessionRead(
+	ctx context.Context,
+	token string,
+	requestID string,
+	request ReadRequest,
+	binding ReadBinding,
+) (ReadResponse, error) {
+	if !m.enabled {
+		return ReadResponse{}, ErrRemoteDisabled
+	}
+	dispatcher, ok := m.readDispatcher.(ReadResultDispatcher)
+	if !ok {
+		return ReadResponse{}, errors.New("typed Core read dispatcher is missing")
+	}
+	request = cloneReadRequest(request)
+	if err := request.Validate(); err != nil {
+		return ReadResponse{}, err
+	}
+	hash, err := ReadRequestHash(requestID, request)
+	if err != nil {
+		return ReadResponse{}, err
+	}
+	if err := binding.Validate(); err != nil || binding.GatewayID != request.GatewayID ||
+		!bytes.Equal(binding.RequestHash[:], hash[:]) {
+		return ReadResponse{}, ErrWrongBinding
+	}
+	record, dispatchCtx, dispatch, err := m.readSessionForDispatch(
+		ctx, token, request.GatewayID, binding.SessionBinding(),
 	)
 	if err != nil {
 		return ReadResponse{}, err
