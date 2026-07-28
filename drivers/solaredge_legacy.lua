@@ -89,6 +89,13 @@ PROTOCOL = "modbus"
 -- and removes the failure-vs-zero ambiguity entirely.
 local sn_read    = false
 local sunspec_ok = nil  -- true / false / nil (= not yet probed)
+-- Once we've confirmed the MPPT block at 40123 isn't exposed by this
+-- firmware (K-series returns Modbus exception 2), stop attempting the
+-- read. The Go host counts every failed modbus_read toward the
+-- driver-poll error tally regardless of Lua-side pcall handling — so
+-- retrying an unsupported register makes the poll flap "1 of N failed"
+-- forever. nil = unknown, true = supported, false = confirmed absent.
+local mppt_supported = nil
 
 -- Curtail state — see header comment for the protocol.
 local nominal_w = 0
@@ -254,17 +261,30 @@ function driver_poll()
     -- (40160-40161). reg_off below converts a doc address into the
     -- 1-based block index.
     local mppt1_a, mppt1_v, mppt2_a, mppt2_v = 0, 0, 0, 0
-    local ok_mppt, mppt_regs = pcall(host.modbus_read, 40123, 39, "holding")
-    if ok_mppt and mppt_regs and #mppt_regs >= 39 then
-        local function reg_off(addr) return mppt_regs[addr - 40123 + 1] end
-        local mppt_a_sf = host.decode_i16(reg_off(40123))
-        local mppt_v_sf = host.decode_i16(reg_off(40124))
-        mppt1_a = scale(reg_off(40140), mppt_a_sf)
-        mppt1_v = scale(reg_off(40141), mppt_v_sf)
-        -- Single-string K-series units return zeros for MPPT2; that's
-        -- the correct emit, no warning needed.
-        mppt2_a = scale(reg_off(40160), mppt_a_sf)
-        mppt2_v = scale(reg_off(40161), mppt_v_sf)
+    if mppt_supported ~= false then
+        local ok_mppt, mppt_regs = pcall(host.modbus_read, 40123, 39, "holding")
+        if ok_mppt and mppt_regs and #mppt_regs >= 39 then
+            mppt_supported = true
+            local function reg_off(addr) return mppt_regs[addr - 40123 + 1] end
+            local mppt_a_sf = host.decode_i16(reg_off(40123))
+            local mppt_v_sf = host.decode_i16(reg_off(40124))
+            mppt1_a = scale(reg_off(40140), mppt_a_sf)
+            mppt1_v = scale(reg_off(40141), mppt_v_sf)
+            -- Single-string K-series units return zeros for MPPT2; that's
+            -- the correct emit, no warning needed.
+            mppt2_a = scale(reg_off(40160), mppt_a_sf)
+            mppt2_v = scale(reg_off(40161), mppt_v_sf)
+        elseif mppt_supported == nil then
+            -- First attempt failed. On K-series firmware the MPPT block
+            -- at 40123 returns Modbus exception 2 ("illegal data
+            -- address") — the registers just aren't there. Lock it off
+            -- so we stop hitting the failed-read counter every 5 s;
+            -- Model 103 metrics keep emitting fine.
+            mppt_supported = false
+            host.log("info",
+                "SolarEdge-legacy: MPPT block at 40123 not readable on this " ..
+                "firmware — emitting Model 103 metrics only. Reprobe on next restart.")
+        end
     end
 
     -- Site convention: generation is negative W.
