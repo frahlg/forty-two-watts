@@ -101,6 +101,29 @@ If the socket/process fails, times out or returns invalid output, core falls
 back to its Go planner. Optimizer deployment and dependency churn therefore do
 not enlarge the safety-critical runtime.
 
+## Versioning a module contract
+
+Drivers and the optimizer release on their own schedules, so core cannot assume
+the version on the other side of either contract. Both use the same rule.
+
+Each side declares the **window** of contract versions it speaks — core in
+`go/internal/components` and `go/internal/optimizercontract`, a driver in its
+`host_api_min`/`host_api_max` metadata, the optimizer in its handshake reply.
+An overlap of one version is enough. Declaring a single version means a window
+of one.
+
+Grow the contract by adding **features** to the handshake, not by bumping the
+version. A feature an old peer does not advertise costs nothing — core simply
+does not ask it for what it cannot do — while a version bump makes every peer
+outside the new window incompatible at once. That is the mistake the `champion`
+requirement made: it landed in core before any optimizer image advertised it,
+and every site that had not updated the optimizer silently fell back to the Go
+planner.
+
+When the framing or the request shape genuinely changes, bump the version and
+**widen** the window rather than moving it, so sites that have not updated the
+module keep working.
+
 ## Failure boundaries
 
 Core enforces these invariants regardless of mode or module:

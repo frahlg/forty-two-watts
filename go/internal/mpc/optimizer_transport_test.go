@@ -12,12 +12,28 @@ import (
 	"testing"
 	"time"
 
+	"github.com/srcfl/ftw/go/internal/components"
 	"github.com/srcfl/ftw/go/internal/optimizercontract"
 )
 
 func TestOptimizerProtocolVersionKeepsContractAlias(t *testing.T) {
 	if OptimizerProtocolVersion != optimizercontract.ProtocolVersion {
 		t.Fatalf("OptimizerProtocolVersion = %d, want %d", OptimizerProtocolVersion, optimizercontract.ProtocolVersion)
+	}
+	if OptimizerProtocolMinVersion != optimizercontract.MinProtocolVersion {
+		t.Fatalf("OptimizerProtocolMinVersion = %d, want %d", OptimizerProtocolMinVersion, optimizercontract.MinProtocolVersion)
+	}
+	// Diagnostics read the bounds from components; the transport enforces them
+	// from optimizercontract. If those ever disagree, /api/components would
+	// advertise a window Core does not actually accept.
+	if components.OptimizerProtocolVersion != OptimizerProtocolVersion ||
+		components.OptimizerProtocolMinVersion != OptimizerProtocolMinVersion {
+		t.Fatalf("components window = %d-%d, transport window = %d-%d",
+			components.OptimizerProtocolMinVersion, components.OptimizerProtocolVersion,
+			OptimizerProtocolMinVersion, OptimizerProtocolVersion)
+	}
+	if OptimizerProtocolMinVersion > OptimizerProtocolVersion {
+		t.Fatalf("protocol window %d-%d is inverted", OptimizerProtocolMinVersion, OptimizerProtocolVersion)
 	}
 }
 
@@ -252,7 +268,12 @@ func TestHandshakeRejectionNamesTheRemedy(t *testing.T) {
 		{
 			name: "protocol ahead of Core",
 			line: `{"name":"ftw-optimizer","version":"9.0.0","protocol_version":99,"features":["champion"]}`,
-			want: []string{"protocol 99", "needs 1", "update Optimizer in Update Center"},
+			want: []string{"protocol 99", "accepts 1", "update Optimizer in Update Center"},
+		},
+		{
+			name: "declared window sits entirely above Core",
+			line: `{"name":"ftw-optimizer","version":"9.0.0","protocol_version":5,"protocol_min":4,"protocol_max":6,"features":["champion"]}`,
+			want: []string{"protocol 4-6", "accepts 1", "update Optimizer in Update Center"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -276,5 +297,59 @@ func TestHandshakeAcceptsCurrentOptimizer(t *testing.T) {
 	}
 	if info.Version != "1.3.2" || info.Transport != "unix" {
 		t.Fatalf("info = %+v", info)
+	}
+}
+
+// The point of the window is that neither side has to move in lockstep. These
+// cases are what a future protocol bump has to keep working; today every
+// optimizer reports a single version, so they all collapse to "1".
+func TestHandshakeAcceptsAnyOverlappingProtocolWindow(t *testing.T) {
+	for _, tc := range []struct {
+		name, line string
+		wantOK     bool
+	}{
+		{
+			name:   "single version matching Core",
+			line:   `{"name":"ftw-optimizer","version":"1.3.2","protocol_version":1,"features":["champion"]}`,
+			wantOK: true,
+		},
+		{
+			name:   "newer optimizer that still speaks Core's version",
+			line:   `{"name":"ftw-optimizer","version":"2.0.0","protocol_version":2,"protocol_min":1,"protocol_max":2,"features":["champion"]}`,
+			wantOK: true,
+		},
+		{
+			name:   "window touching Core only at its lower bound",
+			line:   `{"name":"ftw-optimizer","version":"3.0.0","protocol_version":3,"protocol_min":1,"protocol_max":3,"features":["champion"]}`,
+			wantOK: true,
+		},
+		{
+			name:   "window entirely above Core",
+			line:   `{"name":"ftw-optimizer","version":"9.0.0","protocol_version":7,"protocol_min":7,"protocol_max":9,"features":["champion"]}`,
+			wantOK: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := decodeOptimizerHandshake([]byte(tc.line), "unix")
+			if tc.wantOK && err != nil {
+				t.Fatalf("overlapping window must be accepted: %v", err)
+			}
+			if !tc.wantOK && err == nil {
+				t.Fatal("disjoint window must be rejected")
+			}
+		})
+	}
+}
+
+func TestProtocolWindowDefaultsToTheReportedVersion(t *testing.T) {
+	// Every optimizer released so far omits the bounds entirely.
+	info := OptimizerRuntimeInfo{ProtocolVersion: 4}
+	if min, max := info.protocolWindow(); min != 4 || max != 4 {
+		t.Fatalf("window = %d-%d, want 4-4", min, max)
+	}
+	// A producer that swaps the bounds should not silently exclude itself.
+	info = OptimizerRuntimeInfo{ProtocolVersion: 2, ProtocolMin: 3, ProtocolMax: 1}
+	if min, max := info.protocolWindow(); min != 1 || max != 3 {
+		t.Fatalf("window = %d-%d, want 1-3", min, max)
 	}
 }

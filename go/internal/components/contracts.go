@@ -2,9 +2,14 @@
 // released FTW modules. Core remains the safety and dispatch authority.
 package components
 
+import "github.com/srcfl/ftw/go/internal/optimizercontract"
+
 const (
 	ComponentManifestSchemaVersion = 1
-	OptimizerProtocolVersion       = 1
+	// Optimizer protocol bounds alias the wire contract so diagnostics and the
+	// transport can never disagree about what this Core accepts.
+	OptimizerProtocolMinVersion = optimizercontract.MinProtocolVersion
+	OptimizerProtocolVersion    = optimizercontract.ProtocolVersion
 	// DriverHostAPIVersion is the newest API implemented by this host. The
 	// v1 surface remains available for read-only and legacy drivers; v2 is a
 	// separate, restricted control surface selected by signed package metadata.

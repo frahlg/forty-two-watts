@@ -55,3 +55,42 @@ def test_healthcheck_rejects_handshakes_core_cannot_use(field: str, value: objec
     response[field] = value
     with pytest.raises(ValueError):
         validate_handshake(response)
+
+
+def test_worker_advertises_the_protocol_window_it_speaks() -> None:
+    from ftw_optimizer.worker import MIN_PROTOCOL_VERSION, PROTOCOL_VERSION, handshake
+
+    reply = handshake({"type": "handshake"})
+    assert reply is not None
+    assert reply["protocol_min"] == MIN_PROTOCOL_VERSION
+    assert reply["protocol_max"] == PROTOCOL_VERSION
+    # Core resolves a missing window to protocol_version, so the bounds must
+    # never exclude it — that would make this optimizer reject itself.
+    assert reply["protocol_min"] <= reply["protocol_version"] <= reply["protocol_max"]
+
+
+def test_healthcheck_accepts_a_widened_window() -> None:
+    validate_handshake(
+        {
+            "name": "ftw-optimizer",
+            "version": "v1.4.0",
+            "protocol_version": 1,
+            "protocol_min": 1,
+            "protocol_max": 3,
+            "features": ["champion"],
+        }
+    )
+
+
+def test_healthcheck_rejects_a_window_excluding_its_own_version() -> None:
+    with pytest.raises(ValueError):
+        validate_handshake(
+            {
+                "name": "ftw-optimizer",
+                "version": "v1.4.0",
+                "protocol_version": 1,
+                "protocol_min": 2,
+                "protocol_max": 3,
+                "features": ["champion"],
+            }
+        )

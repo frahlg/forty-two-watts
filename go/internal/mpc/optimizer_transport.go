@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -17,18 +18,51 @@ import (
 	"github.com/srcfl/ftw/go/internal/optimizercontract"
 )
 
-const OptimizerProtocolVersion = optimizercontract.ProtocolVersion
+const (
+	OptimizerProtocolVersion    = optimizercontract.ProtocolVersion
+	OptimizerProtocolMinVersion = optimizercontract.MinProtocolVersion
+)
+
+// formatProtocolRange keeps a single-version window reading as "1" rather than
+// "1-1", because that is what both sides report today.
+func formatProtocolRange(min, max int) string {
+	if min == max {
+		return strconv.Itoa(min)
+	}
+	return strconv.Itoa(min) + "-" + strconv.Itoa(max)
+}
 
 // OptimizerRuntimeInfo is returned by the sidecar handshake and exposed to
 // component diagnostics. Protocol compatibility, not matching app versions,
 // decides whether core may use a separately released optimizer.
 type OptimizerRuntimeInfo struct {
-	Name            string   `json:"name"`
-	Version         string   `json:"version"`
-	ProtocolVersion int      `json:"protocol_version"`
-	Features        []string `json:"features"`
-	BuildSHA        string   `json:"build_sha,omitempty"`
-	Transport       string   `json:"transport"`
+	Name            string `json:"name"`
+	Version         string `json:"version"`
+	ProtocolVersion int    `json:"protocol_version"`
+	// ProtocolMin and ProtocolMax are the optional window an optimizer speaks.
+	// Omitting them means "exactly ProtocolVersion", which is what every
+	// optimizer released so far reports.
+	ProtocolMin int      `json:"protocol_min,omitempty"`
+	ProtocolMax int      `json:"protocol_max,omitempty"`
+	Features    []string `json:"features"`
+	BuildSHA    string   `json:"build_sha,omitempty"`
+	Transport   string   `json:"transport"`
+}
+
+// protocolWindow resolves the versions this optimizer claims to speak. An
+// optimizer that reports only protocol_version pins to that single value.
+func (i OptimizerRuntimeInfo) protocolWindow() (int, int) {
+	min, max := i.ProtocolMin, i.ProtocolMax
+	if min == 0 {
+		min = i.ProtocolVersion
+	}
+	if max == 0 {
+		max = i.ProtocolVersion
+	}
+	if max < min {
+		min, max = max, min
+	}
+	return min, max
 }
 
 // OptimizerTransport owns request framing and lifecycle only. The request
@@ -256,8 +290,10 @@ func decodeOptimizerHandshake(line []byte, transport string) (OptimizerRuntimeIn
 	// old Optimizer reports itself healthy while Core refuses to use it. The
 	// only signal an operator gets is a plan silently served by the Go
 	// fallback, so these strings have to say what to do, not just what failed.
-	if info.ProtocolVersion != OptimizerProtocolVersion {
-		return OptimizerRuntimeInfo{}, fmt.Errorf("optimizer speaks protocol %d but this Core needs %d — update Optimizer in Update Center", info.ProtocolVersion, OptimizerProtocolVersion)
+	if min, max := info.protocolWindow(); !optimizercontract.Compatible(min, max) {
+		return OptimizerRuntimeInfo{}, fmt.Errorf("optimizer speaks protocol %s but this Core accepts %s — update Optimizer in Update Center",
+			formatProtocolRange(min, max),
+			formatProtocolRange(OptimizerProtocolMinVersion, OptimizerProtocolVersion))
 	}
 	if !optimizerHasFeature(info, "champion") {
 		which := "optimizer"

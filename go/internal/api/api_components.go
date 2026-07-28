@@ -18,11 +18,19 @@ func (s *Server) handleComponents(w http.ResponseWriter, r *http.Request) {
 	result := map[string]any{
 		"manifest_schema_version": components.ComponentManifestSchemaVersion,
 		"core":                    map[string]any{"version": s.deps.Version, "role": "safety_authority"},
-		"optimizer":               map[string]any{"configured": false, "protocol_version": components.OptimizerProtocolVersion},
+		"optimizer": map[string]any{
+			"configured":           false,
+			"protocol_version":     components.OptimizerProtocolVersion,
+			"protocol_min_version": components.OptimizerProtocolMinVersion,
+		},
 		"drivers":                 map[string]any{"host_api": components.DriverHostAPIVersion},
 	}
 	if s.deps.MPC != nil && s.deps.MPC.Optimizer != nil {
-		optimizer := map[string]any{"configured": true, "protocol_version": components.OptimizerProtocolVersion}
+		optimizer := map[string]any{
+			"configured":           true,
+			"protocol_version":     components.OptimizerProtocolVersion,
+			"protocol_min_version": components.OptimizerProtocolMinVersion,
+		}
 		if health, ok := s.deps.MPC.Optimizer.(optimizerHealth); ok {
 			ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 			info, err := health.Health(ctx)
