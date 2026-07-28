@@ -248,6 +248,13 @@ jobs:
           go run ./cmd/ftw-driver-repository check-versions
           -repo-root ..
           -base "${{ needs.changes.outputs.base_sha }}"
+
+      # The check above diffs this repository's history. What reaches a
+      # gateway is decided by where the pin points, so this asks the same
+      # question of the pins -- and keeps asking it once the .lua files stop
+      # being committed here. Quiet on a pull request that does not move it.
+      - name: Require version bumps across the pin
+        run: bash scripts/check-driver-versions.sh "${{ needs.changes.outputs.base_sha }}"
           -head "${{ needs.changes.outputs.head_sha }}"
 
   device-support-contract:

@@ -59,6 +59,12 @@ throwing the committed copies away and rebuilding from the pin alone. That is
 the groundwork for dropping them from git entirely, so this repository holds no
 driver source at all.
 
+Moving the pin is a driver release. `make driver-versions-across-pin` compares
+the drivers at the old pin against the drivers at the new one and fails when a
+file changed without its `DRIVER` version moving — the signed channel refuses to
+publish changed bytes under a version it already published, and a gateway
+offered the same version twice cannot tell them apart.
+
 ## Install on Linux
 
 The installer supports Raspberry Pi OS, Debian and Ubuntu:

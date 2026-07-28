@@ -14,7 +14,7 @@
 .PHONY: help test optimizer-install optimizer-test compose-migration-test container-boundary-test build build-arm64 build-amd64 build-windows-amd64 release \
         run-sim dev fmt vet clean e2e ci ci-ui ci-hw-pi docs \
 		verify verify-all install-hooks driver-repository-validate driver-versions \
-        drivers drivers-present
+        drivers drivers-present driver-versions-across-pin
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X main.Version=$(VERSION)
@@ -39,6 +39,7 @@ help:
 	@echo "  install-hooks        install git pre-commit + pre-push hooks (opt-in)"
 	@echo "  driver-repository-validate  build and validate unsigned driver release artifacts"
 	@echo "  driver-versions      require changed Lua drivers to increase SemVer"
+	@echo "  driver-versions-across-pin  same rule, asked of the pinned snapshots"
 	@echo "  ci                   run local CI incl. browser smoke"
 	@echo "  ci-ui                browser smoke against FTW_BASE_URL"
 	@echo "  ci-hw-pi             deploy candidate to Pi CI slot + browser smoke"
@@ -86,7 +87,7 @@ optimizer-test: optimizer/.venv/.installed
 	optimizer/.venv/bin/pytest -q optimizer/tests
 
 compose-migration-test:
-	bash -n scripts/enable-modular-stack.sh scripts/migrate-legacy-compose.sh scripts/install-macos.sh scripts/deploy-home-link-web.sh scripts/sync-bundled-drivers.sh
+	bash -n scripts/enable-modular-stack.sh scripts/migrate-legacy-compose.sh scripts/install-macos.sh scripts/deploy-home-link-web.sh scripts/sync-bundled-drivers.sh scripts/check-driver-versions.sh
 	bash scripts/test-modular-compose.sh
 
 container-boundary-test:
@@ -104,6 +105,12 @@ driver-repository-validate:
 DRIVER_BASE ?= origin/master
 driver-versions:
 	cd go && go run ./cmd/ftw-driver-repository check-versions -repo-root .. -base $(DRIVER_BASE) -head WORKTREE
+
+# The same rule asked of the pins rather than of this repository's history:
+# a bundled driver whose bytes moved between the old pin and the new one must
+# have moved its version too. Quiet when the pin has not moved.
+driver-versions-across-pin:
+	bash scripts/check-driver-versions.sh $(DRIVER_BASE)
 
 ci:
 	./scripts/ci-local.sh
