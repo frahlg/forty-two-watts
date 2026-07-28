@@ -65,6 +65,12 @@ file changed without its `DRIVER` version moving — the signed channel refuses 
 publish changed bytes under a version it already published, and a gateway
 offered the same version twice cannot tell them apart.
 
+The pin needs watching in both directions. Every pull request runs
+`--check`, which catches a driver edited here. A daily job runs `--behind`,
+which catches the opposite: the pin left in place while a fix lands upstream.
+It opens one issue and keeps it up to date, and stays quiet unless a bundled
+driver actually changed.
+
 ## Install on Linux
 
 The installer supports Raspberry Pi OS, Debian and Ubuntu:
