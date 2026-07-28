@@ -249,11 +249,22 @@ func decodeOptimizerHandshake(line []byte, transport string) (OptimizerRuntimeIn
 	if info.Name != "ftw-optimizer" {
 		return OptimizerRuntimeInfo{}, fmt.Errorf("optimizer handshake name %q, want %q", info.Name, "ftw-optimizer")
 	}
+	// Both mismatches below mean the same thing in the field: the Optimizer
+	// image is older than this Core. Core updates do not touch Optimizer — it
+	// has its own release series and its own button — and the container's own
+	// healthcheck validates its own handshake against its own constants, so an
+	// old Optimizer reports itself healthy while Core refuses to use it. The
+	// only signal an operator gets is a plan silently served by the Go
+	// fallback, so these strings have to say what to do, not just what failed.
 	if info.ProtocolVersion != OptimizerProtocolVersion {
-		return OptimizerRuntimeInfo{}, fmt.Errorf("optimizer protocol version %d, want %d", info.ProtocolVersion, OptimizerProtocolVersion)
+		return OptimizerRuntimeInfo{}, fmt.Errorf("optimizer speaks protocol %d but this Core needs %d — update Optimizer in Update Center", info.ProtocolVersion, OptimizerProtocolVersion)
 	}
 	if !optimizerHasFeature(info, "champion") {
-		return OptimizerRuntimeInfo{}, errors.New("optimizer handshake is missing required champion feature")
+		which := "optimizer"
+		if v := strings.TrimSpace(info.Version); v != "" {
+			which = "optimizer " + v
+		}
+		return OptimizerRuntimeInfo{}, fmt.Errorf("%s is too old for this Core (no champion solver) — update Optimizer in Update Center", which)
 	}
 	info.Transport = transport
 	return info, nil

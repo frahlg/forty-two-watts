@@ -122,8 +122,15 @@ func TestProcessTransportHealthRejectsIncompatibleHandshake(t *testing.T) {
 	t.Cleanup(func() { _ = transport.Close() })
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	if _, err := transport.Health(ctx); err == nil || !strings.Contains(err.Error(), "protocol version 2") {
+	_, err = transport.Health(ctx)
+	if err == nil || !strings.Contains(err.Error(), "protocol 2") {
 		t.Fatalf("Health error = %v, want protocol mismatch", err)
+	}
+	// An operator reads this string in a badge tooltip, so it has to name the
+	// fix. Core updates never move Optimizer, and Optimizer's own healthcheck
+	// calls itself healthy — nothing else tells them what to do.
+	if !strings.Contains(err.Error(), "update Optimizer in Update Center") {
+		t.Errorf("handshake rejection must name the remedy, got %q", err)
 	}
 }
 
@@ -219,5 +226,55 @@ func TestAutoTransportHealthReportsBothFailures(t *testing.T) {
 	}
 	if strings.Index(err.Error(), sidecarErr.Error()) >= strings.Index(err.Error(), processErr.Error()) {
 		t.Fatalf("Health error = %q, want sidecar cause first", err)
+	}
+}
+
+// The field failure mode: an Optimizer image older than #563 has no champion
+// solver. Its own healthcheck predates the requirement, so Docker and the
+// updater both call it healthy while Core quietly refuses to use it and plans
+// on the Go fallback instead. The rejection string is the only thing an
+// operator ever sees, so it has to name the fix.
+func TestHandshakeRejectionNamesTheRemedy(t *testing.T) {
+	for _, tc := range []struct {
+		name, line string
+		want       []string
+	}{
+		{
+			name: "old optimizer without champion",
+			line: `{"name":"ftw-optimizer","version":"1.2.0","protocol_version":1,"features":["recourse"]}`,
+			want: []string{"1.2.0", "too old", "update Optimizer in Update Center"},
+		},
+		{
+			name: "champion missing and version unreported",
+			line: `{"name":"ftw-optimizer","protocol_version":1,"features":[]}`,
+			want: []string{"optimizer is too old", "update Optimizer in Update Center"},
+		},
+		{
+			name: "protocol ahead of Core",
+			line: `{"name":"ftw-optimizer","version":"9.0.0","protocol_version":99,"features":["champion"]}`,
+			want: []string{"protocol 99", "needs 1", "update Optimizer in Update Center"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := decodeOptimizerHandshake([]byte(tc.line), "unix")
+			if err == nil {
+				t.Fatal("incompatible handshake must be rejected")
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q missing %q", err, want)
+				}
+			}
+		})
+	}
+}
+
+func TestHandshakeAcceptsCurrentOptimizer(t *testing.T) {
+	info, err := decodeOptimizerHandshake([]byte(`{"name":"ftw-optimizer","version":"1.3.2","protocol_version":1,"features":["champion","recourse"]}`), "unix")
+	if err != nil {
+		t.Fatalf("current optimizer must be accepted: %v", err)
+	}
+	if info.Version != "1.3.2" || info.Transport != "unix" {
+		t.Fatalf("info = %+v", info)
 	}
 }
