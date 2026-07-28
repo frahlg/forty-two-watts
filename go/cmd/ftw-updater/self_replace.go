@@ -35,8 +35,10 @@ import (
 
 const (
 	canonicalUpdaterImage = "ghcr.io/srcfl/ftw-updater"
-	// updaterTagEnv pins the sidecar image the same way FTW_IMAGE_TAG pins Core.
+	// updaterTagEnv pins the sidecar image the same way mainTagEnv pins Core.
+	// These must match the tagEnv values in componentSpec.
 	updaterTagEnv = "FTW_UPDATER_IMAGE_TAG"
+	mainTagEnv    = "FTW_IMAGE_TAG"
 	// selfReplaceContainerName is fixed so a previous attempt's logs survive for
 	// diagnosis and a stuck helper can be found by name.
 	selfReplaceContainerName = "ftw-updater-self-replace"
@@ -79,7 +81,25 @@ func (s *server) replaceUpdater(ctx context.Context, target string) error {
 
 	projectDir := filepath.Dir(s.composeFile)
 	upArgs := append(s.hostComposeArgs("up", "-d", "--no-deps"), service)
-	script := fmt.Sprintf("sleep %d; exec docker %s", int(selfReplaceDelay.Seconds()), strings.Join(upArgs, " "))
+
+	steps := []string{fmt.Sprintf("sleep %d", int(selfReplaceDelay.Seconds()))}
+	// Record the tags this update installed so a later plain `docker compose
+	// up -d` on the host does not resolve :latest and undo it. Skipped, with
+	// the update left intact, if the current .env cannot be read — overwriting
+	// a file we could not see would be worse than the rollback risk.
+	if existing, err := readEnvFile(projectDir); err != nil {
+		slog.Warn("image tags not persisted; a later `docker compose up` may roll this update back",
+			"env", filepath.Join(projectDir, ".env"), "err", err)
+	} else {
+		// Core and the sidecar are the same release, and this only ever runs
+		// after a Core update, so one target pins both.
+		steps = append(steps, envPinScript(projectDir, mergeEnvFile(existing, map[string]string{
+			mainTagEnv:    target,
+			updaterTagEnv: target,
+		})))
+	}
+	steps = append(steps, "exec docker "+strings.Join(upArgs, " "))
+	script := strings.Join(steps, "; ")
 
 	runArgs := []string{
 		"run", "-d",
@@ -87,8 +107,9 @@ func (s *server) replaceUpdater(ctx context.Context, target string) error {
 		"-v", "/var/run/docker.sock:/var/run/docker.sock",
 		// The daemon resolves the compose file's relative binds as absolute
 		// host paths, so the helper must see the project at its host path for
-		// the recreated sidecar to mount the same directories.
-		"-v", projectDir + ":" + projectDir + ":ro",
+		// the recreated sidecar to mount the same directories. Writable because
+		// the helper persists .env; it already holds the Docker socket.
+		"-v", projectDir + ":" + projectDir,
 		"-w", projectDir,
 		"-e", updaterTagEnv + "=" + target,
 	}

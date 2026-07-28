@@ -58,7 +58,7 @@ func TestReplaceUpdaterPullsThenStartsDetachedHelper(t *testing.T) {
 		"run -d",
 		"--name " + selfReplaceContainerName,
 		"-v /var/run/docker.sock:/var/run/docker.sock",
-		"-v " + projectDir + ":" + projectDir + ":ro",
+		"-v " + projectDir + ":" + projectDir,
 		"-w " + projectDir,
 		"-e FTW_UPDATER_IMAGE_TAG=v1.12.0-beta.8",
 		"--entrypoint sh",
