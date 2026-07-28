@@ -119,7 +119,10 @@ jobs:
         run: go vet ./...
       - name: Test
         working-directory: go
-        run: go test -count=1 ./...
+        # -timeout is per package. The slowest one takes about 25s, so 120s
+        # leaves plenty of room while capping a hung package at two minutes
+        # instead of the ten-minute default.
+        run: go test -count=1 -timeout 120s ./...
 
   optimizer:
     name: optimizer (Python + contract)
