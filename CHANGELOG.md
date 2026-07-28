@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.13.1
+
+### Patch Changes
+
+- af438fa: When Core rejects the Optimizer's handshake it now says the Optimizer is too old and to update it in Update Center, instead of naming an internal feature flag. This failure is silent by construction: a Core update never moves Optimizer, and the Optimizer container validates its own handshake against its own constants — so an image older than the champion solver reports itself healthy to Docker and to the updater while Core quietly refuses it and plans on the Go fallback. The rejection string is the only thing an operator ever sees, so it has to name the fix.
+- 8495496: Core and the Optimizer now negotiate a protocol window instead of demanding an exact match. Each side declares the range of wire-protocol versions it speaks, and one shared version is enough — the same rule the driver host API already uses. Nothing changes today, because both sides speak exactly protocol 1; the point is that the next protocol change no longer has to land on both sides at the same moment. The contract is meant to move rarely: growing it means adding a feature to the handshake, which costs an older peer nothing, rather than bumping a version, which makes every peer outside the window incompatible at once.
+
 ## 1.13.0
 
 ### Minor Changes
