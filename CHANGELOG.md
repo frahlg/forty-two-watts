@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.13.5
+
+### Patch Changes
+
+- 1acface: Let Home Link unlock once per encrypted session and show the remote home in the same dashboard style as local FTW.
+
 ## 1.13.4
 
 ### Patch Changes
