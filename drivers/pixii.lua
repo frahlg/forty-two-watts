@@ -89,10 +89,36 @@ local function scale(v, sf)
     return v * (10 ^ sf)
 end
 
+-- Cache of scale-factor registers that this hardware confirms as
+-- absent. On K-series-like Pixii firmware, some SunSpec model 213
+-- meter SFs (notably 40288 meter_energy_sf) return Modbus exception 2
+-- "illegal data address". The Lua `pcall` in read_sf below catches the
+-- error and falls back to SF=0 correctly — but the Go host counts the
+-- underlying failed modbus_read toward a driver-poll error tally
+-- regardless, forcing the driver into permanent "1 of N failed" state.
+-- We probe each SF address once, cache "unsupported", and skip on
+-- subsequent polls so the counter stays clean.
+local sf_supported = {}  -- addr → true / false / nil (= not probed)
+
 -- Read a single i16-typed scale factor register, returning 0 on error.
+-- After the first read fails, cache the result so subsequent polls
+-- don't hit the failed-read counter again.
 local function read_sf(addr)
+    if sf_supported[addr] == false then
+        return 0
+    end
     local ok, regs = pcall(host.modbus_read, addr, 1, "holding")
-    if ok and regs then return host.decode_i16(regs[1]) end
+    if ok and regs then
+        sf_supported[addr] = true
+        return host.decode_i16(regs[1])
+    end
+    if sf_supported[addr] == nil then
+        sf_supported[addr] = false
+        host.log("info", string.format(
+            "Pixii: scale factor at %d not exposed by this firmware — " ..
+            "treating as SF=0 (×1 scaling) henceforth. Reprobe on next restart.",
+            addr))
+    end
     return 0
 end
 
