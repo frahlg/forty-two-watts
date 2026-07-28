@@ -760,3 +760,49 @@ func TestTrigger_NoSocket(t *testing.T) {
 		t.Error("expected 'socket not configured' error")
 	}
 }
+
+// Reported from the field: an amber update badge on a site already running the
+// newest stable. The badge counts Core + optimizer + drivers, and the optimizer
+// was the one claiming an update — its current version was never learned, so
+// the "is a newer release available" comparison treated it as older than
+// everything. Absence of knowledge must not read as an old version.
+func TestUnknownCurrentVersionDoesNotClaimAnUpdate(t *testing.T) {
+	for _, tc := range []struct {
+		name, latest, current string
+		want                  bool
+	}{
+		{name: "never learned the optimizer version", latest: "v1.3.2", current: "", want: false},
+		{name: "whitespace is still unknown", latest: "v1.3.2", current: "   ", want: false},
+		// An unstamped local build reports a real value and keeps the update
+		// flow testable; see docs/self-update.md.
+		{name: "unstamped dev build still sees releases", latest: "v1.3.2", current: "dev", want: true},
+		{name: "stable site on the newest release", latest: "v1.13.0", current: "v1.13.0", want: false},
+		{name: "stable site behind a release", latest: "v1.13.1", current: "v1.13.0", want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := channelUpdateAvailable(tc.latest, tc.current); got != tc.want {
+				t.Fatalf("channelUpdateAvailable(%q, %q) = %v, want %v", tc.latest, tc.current, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSetCurrentVersionClearsAStaleUpdateClaim(t *testing.T) {
+	c := New(Config{CurrentVersion: "", StoragePrefix: "optimizer."}, newMemStore())
+	c.mu.Lock()
+	c.info.Latest = "v1.3.2"
+	c.info.UpdateAvailable = channelUpdateAvailable(c.info.Latest, c.info.Current)
+	c.mu.Unlock()
+	if c.Info().UpdateAvailable {
+		t.Fatal("an unknown current version must not claim an update")
+	}
+	// The handshake later succeeds and reports the version actually running.
+	c.SetCurrentVersion("v1.3.2")
+	if c.Info().UpdateAvailable {
+		t.Fatal("learning we already run the latest must clear the claim")
+	}
+	c.SetCurrentVersion("v1.3.1")
+	if !c.Info().UpdateAvailable {
+		t.Fatal("learning we run an older version must raise the claim")
+	}
+}

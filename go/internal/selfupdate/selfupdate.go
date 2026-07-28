@@ -846,6 +846,15 @@ func channelUpdateAvailable(latest, current string) bool {
 	if latest == "" || latest == current {
 		return false
 	}
+	// An empty current version means the component never told us what it is —
+	// the optimizer handshake failed, or it had not finished starting. That is
+	// absence of knowledge, not an old version, and isNewer would read it as
+	// "older than everything" and light the update badge forever. A component
+	// that reports a version, including the literal "dev" of an unstamped
+	// build, still falls through to isNewer so local update flows stay testable.
+	if strings.TrimSpace(current) == "" {
+		return false
+	}
 	return isNewer(latest, current)
 }
 

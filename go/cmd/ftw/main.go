@@ -1983,7 +1983,12 @@ func main() {
 			Bus: bus,
 		}, st)
 		selfUpdater.Start(ctx)
-		optimizerCurrent := "dev"
+		// Empty means "not known yet", which is the honest answer when the
+		// optimizer is still starting or its handshake is rejected. Claiming
+		// "dev" here made the checker treat the optimizer as older than every
+		// release and light the update badge on an up-to-date stable site.
+		// /api/components calls SetCurrentVersion once a handshake succeeds.
+		optimizerCurrent := ""
 		if mpcSvc != nil && mpcSvc.Optimizer != nil {
 			if health, ok := mpcSvc.Optimizer.(interface {
 				Health(context.Context) (mpc.OptimizerRuntimeInfo, error)
