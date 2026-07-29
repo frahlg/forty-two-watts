@@ -17,7 +17,7 @@
     "for coverage. Run scripts/sync-bundled-drivers.sh to update."
   ],
   "repository": "srcfl/device-drivers",
-  "commit": "edb32ffed2f1225da160cc51c0cce8fe8e0adfd9",
+  "commit": "a4d0205d5f4439f0994b2b708a4d69a7a0c20023",
   "source_dir": "drivers/lua",
   "drivers": [
     "ambibox_v2x", "ctek", "ctek_hybrid", "ctek_v2", "deye", "easee_cloud",

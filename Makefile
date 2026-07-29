@@ -96,10 +96,10 @@ container-boundary-test:
 optimizer/.venv/.installed: optimizer/pyproject.toml
 	$(MAKE) optimizer-install
 
-e2e:
+e2e: drivers-present
 	cd go && FTW_E2E=1 go test ./test/e2e -v -timeout 180s
 
-driver-repository-validate:
+driver-repository-validate: drivers-present
 	cd go && go run ./cmd/ftw-driver-repository publish -unsigned -drivers ../drivers -output ../dist/driver-repository -base-url https://example.invalid/releases/download/drivers-local -repository https://github.com/srcfl/ftw
 
 DRIVER_BASE ?= origin/master
@@ -187,7 +187,7 @@ build-windows-amd64:
 
 # ---- Release archives ----
 
-release: build-arm64 build-amd64 build-windows-amd64
+release: drivers-present build-arm64 build-amd64 build-windows-amd64
 	@mkdir -p release
 	@# Per-arch staging dirs ship ftw and its compatibility alias.
 	@for arch in arm64 amd64; do \

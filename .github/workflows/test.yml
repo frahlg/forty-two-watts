@@ -117,6 +117,11 @@ jobs:
       - name: Vet
         working-directory: go
         run: go vet ./...
+      # drivers/ is gitignored and fetched from the pin, so a checkout alone
+      # leaves it empty. Anything that loads a driver needs this first.
+      - name: Fetch the bundled drivers
+        run: make drivers
+
       - name: Test
         working-directory: go
         run: go test -count=1 ./...
@@ -227,11 +232,16 @@ jobs:
         with:
           go-version: '1.26'
           cache-dependency-path: go/go.sum
+      # drivers/ is gitignored and fetched from the pin, so a checkout alone
+      # leaves it empty. Anything that loads a driver needs this first.
+      - name: Fetch the bundled drivers
+        run: make drivers
+
       # drivers/ is a snapshot of srcfl/device-drivers, not a source. Hand-
       # editing a file here made this a second source of truth and the two
       # drifted: a Sungrow fix landed upstream while the bundled copy kept the
       # bug that took a customer's inverter offline.
-      - name: Bundled drivers match the pinned device-drivers commit
+      - name: No driver source is committed here
         run: bash scripts/sync-bundled-drivers.sh --check
       - name: Validate publication
         working-directory: go
@@ -389,6 +399,11 @@ jobs:
         with:
           go-version: '1.26'
           cache-dependency-path: go/go.sum
+      # drivers/ is gitignored and fetched from the pin, so a checkout alone
+      # leaves it empty. Anything that loads a driver needs this first.
+      - name: Fetch the bundled drivers
+        run: make drivers
+
       - run: make e2e
 
   test:

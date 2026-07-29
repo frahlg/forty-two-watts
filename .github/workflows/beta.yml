@@ -88,6 +88,12 @@ jobs:
         with:
           ref: ${{ needs.tag.outputs.version }}
 
+      # drivers/ is gitignored and fetched from the commit pinned in
+      # drivers/BUNDLED_SOURCE.json. The image copies it, so it has to exist
+      # in the build context before buildx runs.
+      - name: Fetch the bundled drivers
+        run: make drivers
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
