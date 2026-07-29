@@ -13,7 +13,7 @@ DRIVER = {
   id           = "solaredge-pv",
   name         = "SolarEdge inverter (PV only)",
   manufacturer = "SolarEdge",
-  version      = "1.1.0",
+  version      = "1.2.1",
   protocols    = { "modbus" },
   capabilities = { "pv", "pv-curtail" },
   description  = "SolarEdge HD-Wave / StorEdge PV-only via Modbus TCP (SunSpec) with PV active-power-limit curtail.",
@@ -95,9 +95,47 @@ local function scale(value, sf)
     return value * pow10(sf)
 end
 
+-- A register the inverter never answers costs a failed read on every poll for
+-- as long as the driver keeps asking. The host counts those failures against
+-- the poll whether or not the pcall caught them, so a driver that keeps
+-- reporting telemetry while permanently failing one read gets the whole site
+-- marked offline. Give a register three chances, then leave it alone until
+-- restart. Three rather than one: a single failure is not proof, the link may
+-- just have been slow.
+--
+-- The Model 103 block read below is deliberately left out of this: when it
+-- fails the driver emits nothing at all, which is the honest outcome and costs
+-- no false "device is fine" claim. Bounding it would silence the driver
+-- permanently after three transient blips instead of letting it recover.
+local GIVE_UP_AFTER = 3
+local read_failures = {}
+
+local function probe_read(addr, count, kind)
+    if (read_failures[addr] or 0) >= GIVE_UP_AFTER then return nil end
+    local ok, regs = pcall(host.modbus_read, addr, count, kind)
+    if ok and regs and regs[1] ~= nil then
+        read_failures[addr] = nil
+        return regs
+    end
+    local failures = (read_failures[addr] or 0) + 1
+    read_failures[addr] = failures
+    if failures == GIVE_UP_AFTER then
+        host.log("info", string.format(
+            "SolarEdge-PV: register %d did not answer %d times; leaving it alone " ..
+            "until restart", addr, GIVE_UP_AFTER))
+    end
+    return nil
+end
+
 -- Read a contiguous Model 103 block starting at 40069 so every value
 -- and every paired scale factor come from the same Modbus transaction.
 -- Returns the raw register slice, or nil on error.
+--
+-- NOT bounded by probe_read on purpose. This is the driver's whole data
+-- block: when it does not answer, driver_poll returns without emitting, so the
+-- failing read is already the honest report that the device is unreadable, not
+-- a claim that everything is fine. A device that recovers must be able to come
+-- back on the next poll.
 local function read_inverter_block()
     -- 40069..40120 covers the header (id + len) + everything we care
     -- about: AC V/A/W + SFs, DC V/A/W + SFs, temperatures + SF, state.
@@ -145,8 +183,8 @@ end
 function driver_poll()
     -- ---- Serial number (SunSpec common block, one-shot) ----
     if not sn_read then
-        local ok_sn, sn_regs = pcall(host.modbus_read, 40052, 16, "holding")
-        if ok_sn and sn_regs then
+        local sn_regs = probe_read(40052, 16, "holding")
+        if sn_regs then
             local sn = decode_ascii(sn_regs, 16)
             if #sn > 0 then
                 host.set_sn(sn)
@@ -182,20 +220,20 @@ function driver_poll()
     -- block past the standard inverter model), so they need their own
     -- reads. These are occasional / optional, so failures are silent.
     local mppt_a_sf, mppt_v_sf = 0, 0
-    local ok_mppt_sf, mppt_sf_regs = pcall(host.modbus_read, 40123, 2, "holding")
-    if ok_mppt_sf and mppt_sf_regs then
+    local mppt_sf_regs = probe_read(40123, 2, "holding")
+    if mppt_sf_regs then
         mppt_a_sf = host.decode_i16(mppt_sf_regs[1])
         mppt_v_sf = host.decode_i16(mppt_sf_regs[2])
     end
     local mppt1_a, mppt1_v = 0, 0
-    local ok_m1, m1_regs = pcall(host.modbus_read, 40140, 2, "holding")
-    if ok_m1 and m1_regs then
+    local m1_regs = probe_read(40140, 2, "holding")
+    if m1_regs then
         mppt1_a = scale(m1_regs[1], mppt_a_sf)
         mppt1_v = scale(m1_regs[2], mppt_v_sf)
     end
     local mppt2_a, mppt2_v = 0, 0
-    local ok_m2, m2_regs = pcall(host.modbus_read, 40160, 2, "holding")
-    if ok_m2 and m2_regs then
+    local m2_regs = probe_read(40160, 2, "holding")
+    if m2_regs then
         mppt2_a = scale(m2_regs[1], mppt_a_sf)
         mppt2_v = scale(m2_regs[2], mppt_v_sf)
     end

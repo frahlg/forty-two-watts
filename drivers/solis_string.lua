@@ -11,7 +11,7 @@ DRIVER = {
   id           = "solis-string",
   name         = "Solis string inverter",
   manufacturer = "Ginlong Solis",
-  version      = "1.0.0",
+  version      = "1.1.1",
   protocols    = { "modbus" },
   capabilities = { "pv" },
   description  = "Solis non-hybrid PV inverters via Modbus TCP.",
@@ -49,10 +49,34 @@ function driver_init(config)
     host.log("info", "Solis string: driver_init")
 end
 
-local function read_input(addr, count)
-    local ok, regs = pcall(host.modbus_read, addr, count, "input")
-    if ok and regs then return regs end
+-- The host counts every failed modbus_read against the poll whether or not
+-- Lua caught it, so a block this inverter does not answer -- a single-MPPT
+-- model has no 3021 range worth reading -- costs a failed read on every poll
+-- forever, and the stale-telemetry watchdog takes the site offline while the
+-- driver goes on emitting. Ask three times, since one miss can just be a slow
+-- link, then leave the block alone. A restart re-probes.
+local GIVE_UP_AFTER = 3
+local read_failures = {}
+
+local function probe_read(addr, count, kind)
+    if (read_failures[addr] or 0) >= GIVE_UP_AFTER then return nil end
+    local ok, regs = pcall(host.modbus_read, addr, count, kind)
+    if ok and regs and regs[1] ~= nil then
+        read_failures[addr] = nil
+        return regs
+    end
+    local failures = (read_failures[addr] or 0) + 1
+    read_failures[addr] = failures
+    if failures == GIVE_UP_AFTER then
+        host.log("info", string.format(
+            "Solis string: register %d did not answer %d times; leaving it " ..
+            "alone until restart", addr, GIVE_UP_AFTER))
+    end
     return nil
+end
+
+local function read_input(addr, count)
+    return probe_read(addr, count, "input")
 end
 
 local function u16(regs, idx)

@@ -14,7 +14,7 @@ DRIVER = {
   id           = "fronius-smart-meter",
   name         = "Fronius Smart Meter",
   manufacturer = "Fronius",
-  version      = "1.0.0",
+  version      = "2.1.1",
   protocols    = { "modbus" },
   capabilities = { "meter" },
   description  = "Fronius Smart Meter three-phase energy meter via Modbus TCP (SunSpec).",
@@ -79,12 +79,43 @@ local function decode_f32_be(hi, lo)
     return sign * value
 end
 
+----------------------------------------------------------------------------
+-- Bounded register probe
+----------------------------------------------------------------------------
+
+-- The host counts every failed host.modbus_read against the poll, even one
+-- pcall caught here. A driver that keeps emitting while a register keeps
+-- failing is marked offline by the stale-telemetry watchdog, and the site
+-- then reports nothing at all. So: three tries, then leave the register
+-- alone. Three rather than one because a single failure is not proof the
+-- register is missing -- the link may just have been slow.
+local GIVE_UP_AFTER = 3
+local read_failures = {}
+
+local function probe_read(addr, count, kind)
+    if (read_failures[addr] or 0) >= GIVE_UP_AFTER then return nil end
+    local ok, regs = pcall(host.modbus_read, addr, count, kind)
+    if ok and regs and regs[1] ~= nil then
+        read_failures[addr] = nil
+        return regs
+    end
+    local failures = (read_failures[addr] or 0) + 1
+    read_failures[addr] = failures
+    if failures == GIVE_UP_AFTER then
+        host.log("info", string.format(
+            "Fronius Smart Meter: register %d did not answer %d times; " ..
+            "leaving it alone until restart", addr, GIVE_UP_AFTER))
+    end
+    return nil
+end
+
 -- Helper: read a contiguous F32 BE pair at `addr` and return the decoded
 -- float. On Modbus error, returns 0 so the poll cycle still emits a
--- well-shaped table.
+-- well-shaped table. Every read in this driver goes through here, so
+-- bounding it bounds the whole driver.
 local function read_f32(addr)
-    local ok, regs = pcall(host.modbus_read, addr, 2, "holding")
-    if ok and regs then
+    local regs = probe_read(addr, 2, "holding")
+    if regs then
         return decode_f32_be(regs[1], regs[2])
     end
     return 0

@@ -10,7 +10,7 @@ DRIVER = {
   id           = "kostal",
   name         = "Kostal Plenticore",
   manufacturer = "Kostal",
-  version      = "1.0.0",
+  version      = "2.1.1",
   protocols    = { "modbus" },
   capabilities = { "meter", "pv", "battery" },
   description  = "Kostal Plenticore Plus and Piko IQ via Modbus TCP (SunSpec plus Kostal custom map).",
@@ -38,11 +38,41 @@ local function apply_sf(v, sf)
     return v / (10 ^ -sf)
 end
 
+-- Registers this device has stopped answering.
+--
+-- The host counts every failed host.modbus_read against the poll whether or
+-- not this driver caught the error — "driver_poll: N of M modbus reads
+-- failed". So a register retried on every poll costs a failed poll on every
+-- poll, and the stale-telemetry watchdog takes the driver offline. The site
+-- then reports nothing at all, which is worse than reporting one field less.
+--
+-- Three attempts absorb a transient blip; after that we stop asking. A
+-- restart re-probes, so firmware that gains the register is picked up.
+local GIVE_UP_AFTER = 3
+local read_failures = {}
+
+local function probe_read(addr, count, kind)
+    if (read_failures[addr] or 0) >= GIVE_UP_AFTER then return nil end
+    local ok, regs = pcall(host.modbus_read, addr, count, kind)
+    if ok and regs and regs[1] ~= nil then
+        read_failures[addr] = nil
+        return regs
+    end
+    local failures = (read_failures[addr] or 0) + 1
+    read_failures[addr] = failures
+    if failures == GIVE_UP_AFTER then
+        host.log("info", string.format(
+            "Kostal: register %d did not answer %d times; leaving it alone " ..
+            "until restart", addr, GIVE_UP_AFTER))
+    end
+    return nil
+end
+
 -- Read a single holding register as signed i16 (e.g. scale factors).
 -- Returns the decoded value, or the default if the read fails.
 local function read_i16(addr, default)
-    local ok, regs = pcall(host.modbus_read, addr, 1, "holding")
-    if ok and regs and regs[1] then
+    local regs = probe_read(addr, 1, "holding")
+    if regs then
         return host.decode_i16(regs[1])
     end
     return default
@@ -50,8 +80,8 @@ end
 
 -- Read a single holding register as unsigned u16.
 local function read_u16(addr, default)
-    local ok, regs = pcall(host.modbus_read, addr, 1, "holding")
-    if ok and regs and regs[1] then
+    local regs = probe_read(addr, 1, "holding")
+    if regs then
         return regs[1]
     end
     return default
@@ -59,8 +89,8 @@ end
 
 -- Read a u32 big-endian pair (SunSpec standard word order).
 local function read_u32_be(addr, default)
-    local ok, regs = pcall(host.modbus_read, addr, 2, "holding")
-    if ok and regs and regs[1] and regs[2] then
+    local regs = probe_read(addr, 2, "holding")
+    if regs and regs[2] then
         return host.decode_u32_be(regs[1], regs[2])
     end
     return default
@@ -84,8 +114,8 @@ function driver_poll()
     -- 40020-40035 is Opt (model string) — NOT serial number.)
     -- -----------------------------------------------------------------
     if not sn_read then
-        local ok_sn, sn_regs = pcall(host.modbus_read, 40052, 16, "holding")
-        if ok_sn and sn_regs then
+        local sn_regs = probe_read(40052, 16, "holding")
+        if sn_regs then
             local sn = ""
             for i = 1, 16 do
                 local hi = math.floor(sn_regs[i] / 256)
@@ -160,8 +190,8 @@ function driver_poll()
     local bat_soc     = bat_soc_raw / 100.0    -- percent → 0-1 fraction
 
     local bat_w = 0
-    local ok_bw, bw_regs = pcall(host.modbus_read, 40138, 1, "holding")
-    if ok_bw and bw_regs and bw_regs[1] then
+    local bw_regs = probe_read(40138, 1, "holding")
+    if bw_regs then
         -- Kostal reports battery power with EMS-compatible sign already:
         -- positive = charging, negative = discharging.
         bat_w = host.decode_i16(bw_regs[1])
@@ -188,8 +218,8 @@ function driver_poll()
 
     -- Per-phase current: 40191-40193, I16
     local l1_a, l2_a, l3_a = 0, 0, 0
-    local ok_la, la_regs = pcall(host.modbus_read, 40191, 3, "holding")
-    if ok_la and la_regs then
+    local la_regs = probe_read(40191, 3, "holding")
+    if la_regs then
         l1_a = -apply_sf(host.decode_i16(la_regs[1]), meter_a_sf)
         l2_a = -apply_sf(host.decode_i16(la_regs[2]), meter_a_sf)
         l3_a = -apply_sf(host.decode_i16(la_regs[3]), meter_a_sf)
@@ -197,8 +227,8 @@ function driver_poll()
 
     -- Per-phase voltage: 40196-40198, I16
     local l1_v, l2_v, l3_v = 0, 0, 0
-    local ok_lv, lv_regs = pcall(host.modbus_read, 40196, 3, "holding")
-    if ok_lv and lv_regs then
+    local lv_regs = probe_read(40196, 3, "holding")
+    if lv_regs then
         l1_v = apply_sf(host.decode_i16(lv_regs[1]), meter_v_sf)
         l2_v = apply_sf(host.decode_i16(lv_regs[2]), meter_v_sf)
         l3_v = apply_sf(host.decode_i16(lv_regs[3]), meter_v_sf)
@@ -206,8 +236,8 @@ function driver_poll()
 
     -- Per-phase power: 40207-40209, I16
     local l1_w, l2_w, l3_w = 0, 0, 0
-    local ok_lw, lw_regs = pcall(host.modbus_read, 40207, 3, "holding")
-    if ok_lw and lw_regs then
+    local lw_regs = probe_read(40207, 3, "holding")
+    if lw_regs then
         l1_w = -apply_sf(host.decode_i16(lw_regs[1]), meter_w_sf)
         l2_w = -apply_sf(host.decode_i16(lw_regs[2]), meter_w_sf)
         l3_w = -apply_sf(host.decode_i16(lw_regs[3]), meter_w_sf)

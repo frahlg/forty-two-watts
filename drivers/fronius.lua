@@ -15,7 +15,7 @@ DRIVER = {
   id           = "fronius",
   name         = "Fronius GEN24",
   manufacturer = "Fronius",
-  version      = "1.0.0",
+  version      = "2.1.1",
   protocols    = { "modbus" },
   capabilities = { "pv", "battery" },
   description  = "Fronius Symo / Primo GEN24 hybrid inverters via Modbus TCP (SunSpec).",
@@ -94,6 +94,36 @@ end
 -- Initialization
 ----------------------------------------------------------------------------
 
+-- Registers this device has stopped answering.
+--
+-- The host counts every failed host.modbus_read against the poll whether or
+-- not this driver caught the error — "driver_poll: N of M modbus reads
+-- failed". So a register retried on every poll costs a failed poll on every
+-- poll, and the stale-telemetry watchdog takes the driver offline. The site
+-- then reports nothing at all, which is worse than reporting one field less.
+--
+-- Three attempts absorb a transient blip; after that we stop asking. A
+-- restart re-probes, so firmware that gains the register is picked up.
+local GIVE_UP_AFTER = 3
+local read_failures = {}
+
+local function probe_read(addr, count, kind)
+    if (read_failures[addr] or 0) >= GIVE_UP_AFTER then return nil end
+    local ok, regs = pcall(host.modbus_read, addr, count, kind)
+    if ok and regs and regs[1] ~= nil then
+        read_failures[addr] = nil
+        return regs
+    end
+    local failures = (read_failures[addr] or 0) + 1
+    read_failures[addr] = failures
+    if failures == GIVE_UP_AFTER then
+        host.log("info", string.format(
+            "Fronius: register %d did not answer %d times; leaving it alone " ..
+            "until restart", addr, GIVE_UP_AFTER))
+    end
+    return nil
+end
+
 function driver_init(config)
     host.set_make("Fronius")
 end
@@ -106,8 +136,8 @@ function driver_poll()
     -- Read SunSpec Common block serial number once (40052, 16 regs = 32 chars).
     -- Some gateways don't expose the common block; fall back silently.
     if not sn_read then
-        local ok_sn, sn_regs = pcall(host.modbus_read, 40052, 16, "holding")
-        if ok_sn and sn_regs then
+        local sn_regs = probe_read(40052, 16, "holding")
+        if sn_regs then
             local sn = regs_to_string(sn_regs, 16)
             if #sn > 0 then
                 host.set_sn(sn)
@@ -120,94 +150,94 @@ function driver_poll()
     -- Scale factors live in separate i16 registers.
 
     local rated_w_sf = 0
-    local ok_rwsf, rwsf_regs = pcall(host.modbus_read, 40135, 1, "holding")
-    if ok_rwsf and rwsf_regs then rated_w_sf = host.decode_i16(rwsf_regs[1]) end
+    local rwsf_regs = probe_read(40135, 1, "holding")
+    if rwsf_regs then rated_w_sf = host.decode_i16(rwsf_regs[1]) end
 
     local mppt_a_sf = 0
-    local ok_masf, masf_regs = pcall(host.modbus_read, 40265, 1, "holding")
-    if ok_masf and masf_regs then mppt_a_sf = host.decode_i16(masf_regs[1]) end
+    local masf_regs = probe_read(40265, 1, "holding")
+    if masf_regs then mppt_a_sf = host.decode_i16(masf_regs[1]) end
 
     local mppt_v_sf = 0
-    local ok_mvsf, mvsf_regs = pcall(host.modbus_read, 40266, 1, "holding")
-    if ok_mvsf and mvsf_regs then mppt_v_sf = host.decode_i16(mvsf_regs[1]) end
+    local mvsf_regs = probe_read(40266, 1, "holding")
+    if mvsf_regs then mppt_v_sf = host.decode_i16(mvsf_regs[1]) end
 
     local max_charge_sf = 0
-    local ok_mcsf, mcsf_regs = pcall(host.modbus_read, 40331, 1, "holding")
-    if ok_mcsf and mcsf_regs then max_charge_sf = host.decode_i16(mcsf_regs[1]) end
+    local mcsf_regs = probe_read(40331, 1, "holding")
+    if mcsf_regs then max_charge_sf = host.decode_i16(mcsf_regs[1]) end
 
     local soc_sf = 0
-    local ok_socsf, socsf_regs = pcall(host.modbus_read, 40335, 1, "holding")
-    if ok_socsf and socsf_regs then soc_sf = host.decode_i16(socsf_regs[1]) end
+    local socsf_regs = probe_read(40335, 1, "holding")
+    if socsf_regs then soc_sf = host.decode_i16(socsf_regs[1]) end
 
     local bat_v_sf = 0
-    local ok_bvsf, bvsf_regs = pcall(host.modbus_read, 40337, 1, "holding")
-    if ok_bvsf and bvsf_regs then bat_v_sf = host.decode_i16(bvsf_regs[1]) end
+    local bvsf_regs = probe_read(40337, 1, "holding")
+    if bvsf_regs then bat_v_sf = host.decode_i16(bvsf_regs[1]) end
 
     local charge_rate_sf = 0
-    local ok_crsf, crsf_regs = pcall(host.modbus_read, 40338, 1, "holding")
-    if ok_crsf and crsf_regs then charge_rate_sf = host.decode_i16(crsf_regs[1]) end
+    local crsf_regs = probe_read(40338, 1, "holding")
+    if crsf_regs then charge_rate_sf = host.decode_i16(crsf_regs[1]) end
 
     -- ---------------------------------------------------------------- PV
     -- Inverter/AC values are SunSpec F32 BE pairs.
 
     local ac_w = 0
-    local ok_acw, acw_regs = pcall(host.modbus_read, 40091, 2, "holding")
-    if ok_acw and acw_regs then ac_w = decode_f32_be(acw_regs[1], acw_regs[2]) end
+    local acw_regs = probe_read(40091, 2, "holding")
+    if acw_regs then ac_w = decode_f32_be(acw_regs[1], acw_regs[2]) end
 
     local hz = 0
-    local ok_hz, hz_regs = pcall(host.modbus_read, 40093, 2, "holding")
-    if ok_hz and hz_regs then hz = decode_f32_be(hz_regs[1], hz_regs[2]) end
+    local hz_regs = probe_read(40093, 2, "holding")
+    if hz_regs then hz = decode_f32_be(hz_regs[1], hz_regs[2]) end
 
     local lifetime_wh = 0
-    local ok_le, le_regs = pcall(host.modbus_read, 40101, 2, "holding")
-    if ok_le and le_regs then lifetime_wh = decode_f32_be(le_regs[1], le_regs[2]) end
+    local le_regs = probe_read(40101, 2, "holding")
+    if le_regs then lifetime_wh = decode_f32_be(le_regs[1], le_regs[2]) end
 
     local dc_w = 0
-    local ok_dcw, dcw_regs = pcall(host.modbus_read, 40107, 2, "holding")
-    if ok_dcw and dcw_regs then dc_w = decode_f32_be(dcw_regs[1], dcw_regs[2]) end
+    local dcw_regs = probe_read(40107, 2, "holding")
+    if dcw_regs then dc_w = decode_f32_be(dcw_regs[1], dcw_regs[2]) end
 
     local heatsink_c = 0
-    local ok_temp, temp_regs = pcall(host.modbus_read, 40111, 2, "holding")
-    if ok_temp and temp_regs then heatsink_c = decode_f32_be(temp_regs[1], temp_regs[2]) end
+    local temp_regs = probe_read(40111, 2, "holding")
+    if temp_regs then heatsink_c = decode_f32_be(temp_regs[1], temp_regs[2]) end
 
     -- Rated W: 40134, U16 raw × 10^rated_w_sf
     local rated_w = 0
-    local ok_rw, rw_regs = pcall(host.modbus_read, 40134, 1, "holding")
-    if ok_rw and rw_regs then rated_w = apply_sf(rw_regs[1], rated_w_sf) end
+    local rw_regs = probe_read(40134, 1, "holding")
+    if rw_regs then rated_w = apply_sf(rw_regs[1], rated_w_sf) end
 
     -- MPPT1 A/V: 40282-40283, U16 each
     local mppt1_a, mppt1_v = 0, 0
-    local ok_m1, m1_regs = pcall(host.modbus_read, 40282, 2, "holding")
-    if ok_m1 and m1_regs then
+    local m1_regs = probe_read(40282, 2, "holding")
+    if m1_regs then
         mppt1_a = apply_sf(m1_regs[1], mppt_a_sf)
         mppt1_v = apply_sf(m1_regs[2], mppt_v_sf)
     end
 
     -- MPPT2 A/V: 40302-40303, U16 each
     local mppt2_a, mppt2_v = 0, 0
-    local ok_m2, m2_regs = pcall(host.modbus_read, 40302, 2, "holding")
-    if ok_m2 and m2_regs then
+    local m2_regs = probe_read(40302, 2, "holding")
+    if m2_regs then
         mppt2_a = apply_sf(m2_regs[1], mppt_a_sf)
         mppt2_v = apply_sf(m2_regs[2], mppt_v_sf)
     end
 
     -- Per-phase AC current: 40073, 40075, 40077 (F32 BE pairs)
     local l1_a, l2_a, l3_a = 0, 0, 0
-    local ok_l1a, l1a_regs = pcall(host.modbus_read, 40073, 2, "holding")
-    if ok_l1a and l1a_regs then l1_a = decode_f32_be(l1a_regs[1], l1a_regs[2]) end
-    local ok_l2a, l2a_regs = pcall(host.modbus_read, 40075, 2, "holding")
-    if ok_l2a and l2a_regs then l2_a = decode_f32_be(l2a_regs[1], l2a_regs[2]) end
-    local ok_l3a, l3a_regs = pcall(host.modbus_read, 40077, 2, "holding")
-    if ok_l3a and l3a_regs then l3_a = decode_f32_be(l3a_regs[1], l3a_regs[2]) end
+    local l1a_regs = probe_read(40073, 2, "holding")
+    if l1a_regs then l1_a = decode_f32_be(l1a_regs[1], l1a_regs[2]) end
+    local l2a_regs = probe_read(40075, 2, "holding")
+    if l2a_regs then l2_a = decode_f32_be(l2a_regs[1], l2a_regs[2]) end
+    local l3a_regs = probe_read(40077, 2, "holding")
+    if l3a_regs then l3_a = decode_f32_be(l3a_regs[1], l3a_regs[2]) end
 
     -- Per-phase AC voltage: 40085, 40087, 40089 (F32 BE pairs)
     local l1_v, l2_v, l3_v = 0, 0, 0
-    local ok_l1v, l1v_regs = pcall(host.modbus_read, 40085, 2, "holding")
-    if ok_l1v and l1v_regs then l1_v = decode_f32_be(l1v_regs[1], l1v_regs[2]) end
-    local ok_l2v, l2v_regs = pcall(host.modbus_read, 40087, 2, "holding")
-    if ok_l2v and l2v_regs then l2_v = decode_f32_be(l2v_regs[1], l2v_regs[2]) end
-    local ok_l3v, l3v_regs = pcall(host.modbus_read, 40089, 2, "holding")
-    if ok_l3v and l3v_regs then l3_v = decode_f32_be(l3v_regs[1], l3v_regs[2]) end
+    local l1v_regs = probe_read(40085, 2, "holding")
+    if l1v_regs then l1_v = decode_f32_be(l1v_regs[1], l1v_regs[2]) end
+    local l2v_regs = probe_read(40087, 2, "holding")
+    if l2v_regs then l2_v = decode_f32_be(l2v_regs[1], l2v_regs[2]) end
+    local l3v_regs = probe_read(40089, 2, "holding")
+    if l3v_regs then l3_v = decode_f32_be(l3v_regs[1], l3v_regs[2]) end
 
     -- Emit PV (dc_w magnitude → negative for generation, per site convention)
     host.emit("pv", {
@@ -232,36 +262,36 @@ function driver_poll()
 
     -- Max charge power: 40315, U16 raw × 10^max_charge_sf
     local max_charge_w = 0
-    local ok_maxchg, maxchg_regs = pcall(host.modbus_read, 40315, 1, "holding")
-    if ok_maxchg and maxchg_regs then
+    local maxchg_regs = probe_read(40315, 1, "holding")
+    if maxchg_regs then
         max_charge_w = apply_sf(maxchg_regs[1], max_charge_sf)
     end
 
     -- Battery SoC: 40321, U16 raw (percent), convert to 0..1 fraction
     local bat_soc = 0
-    local ok_bsoc, bsoc_regs = pcall(host.modbus_read, 40321, 1, "holding")
-    if ok_bsoc and bsoc_regs then
+    local bsoc_regs = probe_read(40321, 1, "holding")
+    if bsoc_regs then
         bat_soc = apply_sf(bsoc_regs[1], soc_sf) / 100
     end
 
     -- Battery voltage: 40323, U16 raw × 10^bat_v_sf
     local bat_v = 0
-    local ok_batv, batv_regs = pcall(host.modbus_read, 40323, 1, "holding")
-    if ok_batv and batv_regs then
+    local batv_regs = probe_read(40323, 1, "holding")
+    if batv_regs then
         bat_v = apply_sf(batv_regs[1], bat_v_sf)
     end
 
     -- Discharge rate % (I16): 40325
     local discharge_rate = 0
-    local ok_dis, dis_regs = pcall(host.modbus_read, 40325, 1, "holding")
-    if ok_dis and dis_regs then
+    local dis_regs = probe_read(40325, 1, "holding")
+    if dis_regs then
         discharge_rate = apply_sf(host.decode_i16(dis_regs[1]), charge_rate_sf)
     end
 
     -- Charge rate % (I16): 40326
     local charge_rate = 0
-    local ok_chg, chg_regs = pcall(host.modbus_read, 40326, 1, "holding")
-    if ok_chg and chg_regs then
+    local chg_regs = probe_read(40326, 1, "holding")
+    if chg_regs then
         charge_rate = apply_sf(host.decode_i16(chg_regs[1]), charge_rate_sf)
     end
 

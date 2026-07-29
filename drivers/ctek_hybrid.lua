@@ -70,7 +70,7 @@ DRIVER = {
   id           = "ctek-chargestorm-hybrid",
   name         = "CTEK Chargestorm (Modbus + MQTT)",
   manufacturer = "CTEK",
-  version      = "0.2.0",
+  version      = "0.3.1",
   protocols    = { "modbus", "mqtt" },
   capabilities = { "ev" },
   description  = "CTEK Chargestorm Connected 2/3 — MQTT for state + live telemetry (preferred), Modbus/TCP for control + telemetry fallback.",
@@ -172,6 +172,37 @@ local function decode_ascii(regs, n)
     return s
 end
 
+-- A register the CCU never answers costs a failed read on every poll for as
+-- long as the driver keeps asking. The host counts those failures against the
+-- poll whether or not the pcall caught them, so a driver that keeps reporting
+-- telemetry while permanently failing one read gets the whole site marked
+-- offline. Give a register three chances, then leave it alone until restart.
+-- Three rather than one: a single failure is not proof, the link may just have
+-- been slow.
+--
+-- Poll-path reads only. driver_init's API-version check and read_setpoint run
+-- once at startup and driver_command only writes, so nothing bounded here can
+-- veto a charging command.
+local GIVE_UP_AFTER = 3
+local read_failures = {}
+
+local function probe_read(addr, count, kind)
+    if (read_failures[addr] or 0) >= GIVE_UP_AFTER then return nil end
+    local ok, regs = pcall(host.modbus_read, addr, count, kind)
+    if ok and regs and regs[1] ~= nil then
+        read_failures[addr] = nil
+        return regs
+    end
+    local failures = (read_failures[addr] or 0) + 1
+    read_failures[addr] = failures
+    if failures == GIVE_UP_AFTER then
+        host.log("info", string.format(
+            "CTEK-hybrid: register %d did not answer %d times; leaving it alone " ..
+            "until restart", addr, GIVE_UP_AFTER))
+    end
+    return nil
+end
+
 local function write_setpoint(amps)
     local err = host.modbus_write(REG_CHARGE_LIMIT, amps)
     if err ~= nil and err ~= "" then
@@ -182,6 +213,8 @@ local function write_setpoint(amps)
     return true
 end
 
+-- Startup readback only, called once from driver_init. Left unbounded on
+-- purpose: it never runs from driver_poll, so it costs no failed poll.
 local function read_setpoint()
     local ok, regs = pcall(host.modbus_read, REG_CHARGE_LIMIT, 1, "holding")
     if not ok or not regs or not regs[1] then return nil end
@@ -429,8 +462,8 @@ end
 function driver_poll()
     -- One-shot serial read, anchors device identity to the EVSE serial.
     if not sn_read then
-        local ok_sn, sn_regs = pcall(host.modbus_read, REG_SERIAL_BASE, 6, "holding")
-        if ok_sn and sn_regs then
+        local sn_regs = probe_read(REG_SERIAL_BASE, 6, "holding")
+        if sn_regs then
             local sn = decode_ascii(sn_regs, 6)
             if #sn > 0 then
                 serial = sn
@@ -483,9 +516,12 @@ function driver_poll()
     -- Control-block readback is cheap (2 regs) and required regardless of
     -- telemetry source: we need the live charging-limit + max-assignment
     -- for both the EV emit and the loadpoint clamp.
+    -- If the CCU stops answering this block the driver keeps its own
+    -- last_set_a — every setpoint the driver writes updates it — so giving up
+    -- costs the readback, not control.
     local limit, max_assign = last_set_a, max_a
-    local ok_ctl, ctl = pcall(host.modbus_read, REG_CHARGE_LIMIT, 2, "holding")
-    if ok_ctl and ctl then
+    local ctl = probe_read(REG_CHARGE_LIMIT, 2, "holding")
+    if ctl then
         limit       = ctl[1] or last_set_a
         max_assign  = ctl[2] or max_a
         last_set_a  = limit
@@ -511,8 +547,8 @@ function driver_poll()
         hz          = mqtt_em_hz
     else
         -- Modbus fallback: 9-reg telemetry block in a single transaction.
-        local ok_tel, tel = pcall(host.modbus_read, REG_TELEMETRY, 9, "holding")
-        if ok_tel and tel then
+        local tel = probe_read(REG_TELEMETRY, 9, "holding")
+        if tel then
             lifetime_wh = host.decode_u32_be(tel[1], tel[2])
             i_l1 = (tel[3] or 0) / 1000
             i_l2 = (tel[4] or 0) / 1000

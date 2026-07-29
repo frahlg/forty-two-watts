@@ -8,7 +8,7 @@ DRIVER = {
   id           = "victron",
   name         = "Victron Energy GX",
   manufacturer = "Victron Energy",
-  version      = "1.0.0",
+  version      = "2.1.1",
   protocols    = { "modbus" },
   capabilities = { "meter", "pv", "battery" },
   description  = "Victron Cerbo GX / Venus GX monitoring via Modbus TCP.",
@@ -44,6 +44,39 @@ DRIVER = {
 PROTOCOL = "modbus"
 
 ----------------------------------------------------------------------------
+-- Absent-register guard
+----------------------------------------------------------------------------
+-- The host counts every failed modbus_read against the poll whether or not
+-- Lua caught it. So a register this driver can live without must stop being
+-- read once the GX has made clear it will not answer — otherwise the poll
+-- keeps failing, the stale-telemetry watchdog marks the device offline, and
+-- the site reports nothing at all instead of one field less. A GX with no
+-- battery service, or with no DC-coupled MPPT, is a normal install and must
+-- not cost a failed read every five seconds.
+--
+-- Three strikes rather than one: a single miss is more often a slow link
+-- than a missing register. A restart re-probes.
+local GIVE_UP_AFTER = 3
+local read_failures = {}
+
+local function probe_read(addr, count, kind)
+    if (read_failures[addr] or 0) >= GIVE_UP_AFTER then return nil end
+    local ok, regs = pcall(host.modbus_read, addr, count, kind)
+    if ok and regs and regs[1] ~= nil then
+        read_failures[addr] = nil
+        return regs
+    end
+    local failures = (read_failures[addr] or 0) + 1
+    read_failures[addr] = failures
+    if failures == GIVE_UP_AFTER then
+        host.log("info", string.format(
+            "Victron: register %d did not answer %d times; leaving it " ..
+            "alone until restart", addr, GIVE_UP_AFTER))
+    end
+    return nil
+end
+
+----------------------------------------------------------------------------
 -- Initialization
 ----------------------------------------------------------------------------
 
@@ -68,16 +101,16 @@ function driver_poll()
 
     -- PV AC-coupled output power: registers 808/809/810 (U16, W per phase L1/L2/L3).
     -- Sum all three phases for total AC-coupled PV.
-    local ok_pvac, pvac_regs = pcall(host.modbus_read, 808, 3, "holding")
+    local pvac_regs = probe_read(808, 3, "holding")
     local pv_ac_w = 0
-    if ok_pvac and pvac_regs then
+    if pvac_regs then
         pv_ac_w = (pvac_regs[1] or 0) + (pvac_regs[2] or 0) + (pvac_regs[3] or 0)
     end
 
     -- PV DC-coupled MPPT output power: register 850 (U16, W)
-    local ok_pvdc, pvdc_regs = pcall(host.modbus_read, 850, 1, "holding")
+    local pvdc_regs = probe_read(850, 1, "holding")
     local pv_dc_w = 0
-    if ok_pvdc and pvdc_regs then
+    if pvdc_regs then
         pv_dc_w = pvdc_regs[1]
     end
 
@@ -96,9 +129,9 @@ function driver_poll()
     -- Grid per-phase power: 820/821/822 (I16, W), import positive (matches site).
     -- NOTE: 823-825 are genset power (not voltage), 826 is active-input source
     -- (not current). Only 820-822 are grid power registers on Venus OS unit 100.
-    local ok_grid, grid_regs = pcall(host.modbus_read, 820, 3, "holding")
+    local grid_regs = probe_read(820, 3, "holding")
     local l1_w, l2_w, l3_w = 0, 0, 0
-    if ok_grid and grid_regs then
+    if grid_regs then
         l1_w = host.decode_i16(grid_regs[1])
         l2_w = host.decode_i16(grid_regs[2])
         l3_w = host.decode_i16(grid_regs[3])
@@ -128,9 +161,9 @@ function driver_poll()
     --   842 — power    (I16, W)     — positive = charging (matches site)
     --   843 — SoC      (U16, %)     — convert to 0.0–1.0 fraction
     --   844 — temp     (I16, 0.1 C)
-    local ok_bat, bat_regs = pcall(host.modbus_read, 840, 5, "holding")
+    local bat_regs = probe_read(840, 5, "holding")
     local bat_v, bat_a, bat_w, bat_soc, bat_temp = 0, 0, 0, 0, 0
-    if ok_bat and bat_regs then
+    if bat_regs then
         bat_v    = bat_regs[1] * 0.1
         bat_a    = host.decode_i16(bat_regs[2]) * 0.1
         bat_w    = host.decode_i16(bat_regs[3])

@@ -24,7 +24,7 @@ DRIVER = {
   id           = "ferroamp-modbus",
   name         = "Ferroamp EnergyHub (Modbus)",
   manufacturer = "Ferroamp",
-  version      = "1.0.0",
+  version      = "2.1.1",
   protocols    = { "modbus" },
   capabilities = { "meter", "pv", "battery" },
   description  = "Ferroamp EnergyHub XL via Modbus TCP (alternative transport to drivers/ferroamp.lua).",
@@ -116,6 +116,40 @@ local function encode_f32_ws(value)
 end
 
 ----------------------------------------------------------------------------
+-- Bounded reads
+----------------------------------------------------------------------------
+
+-- A register the EnergyHub never answers costs a failed read on every poll for
+-- as long as the driver keeps asking. The host counts those failures against
+-- the poll whether or not the pcall caught them, so a driver that keeps
+-- reporting telemetry while permanently failing one read gets the whole site
+-- marked offline. Give a register three chances, then leave it alone until
+-- restart. Three rather than one: a single failure is not proof, the link may
+-- just have been slow.
+--
+-- Only the poll path goes through here. driver_command writes, it never reads,
+-- so a poll-time give-up can never veto a battery or curtail setpoint.
+local GIVE_UP_AFTER = 3
+local read_failures = {}
+
+local function probe_read(addr, count, kind)
+    if (read_failures[addr] or 0) >= GIVE_UP_AFTER then return nil end
+    local ok, regs = pcall(host.modbus_read, addr, count, kind)
+    if ok and regs and regs[1] ~= nil then
+        read_failures[addr] = nil
+        return regs
+    end
+    local failures = (read_failures[addr] or 0) + 1
+    read_failures[addr] = failures
+    if failures == GIVE_UP_AFTER then
+        host.log("info", string.format(
+            "Ferroamp Modbus: register %d did not answer %d times; leaving it alone " ..
+            "until restart", addr, GIVE_UP_AFTER))
+    end
+    return nil
+end
+
+----------------------------------------------------------------------------
 -- Driver interface
 ----------------------------------------------------------------------------
 
@@ -133,29 +167,29 @@ function driver_poll()
     --------------------------------------------------------------------------
 
     -- Grid frequency: input 2016, float32, Hz (2 regs, word-swapped)
-    local ok_hz, hz_regs = pcall(host.modbus_read, 2016, 2, "input")
+    local hz_regs = probe_read(2016, 2, "input")
     local hz = 0
-    if ok_hz and hz_regs then hz = decode_f32_ws_at(hz_regs, 1) end
+    if hz_regs then hz = decode_f32_ws_at(hz_regs, 1) end
 
     -- Grid voltage L1/L2/L3: input 2032/2036/2040, float32, Vrms.
     -- Each value occupies 4 regs (2 f32 + 2 unused), so read 10 regs for 3 values.
-    local ok_v, v_regs = pcall(host.modbus_read, 2032, 10, "input")
+    local v_regs = probe_read(2032, 10, "input")
     local l1_v, l2_v, l3_v = 0, 0, 0
-    if ok_v and v_regs then
+    if v_regs then
         l1_v = decode_f32_ws_at(v_regs, 1)   -- 2032-2033
         l2_v = decode_f32_ws_at(v_regs, 5)   -- 2036-2037
         l3_v = decode_f32_ws_at(v_regs, 9)   -- 2040-2041
     end
 
     -- Grid active power (total): input 3100, float32, kW
-    local ok_gw, gw_regs = pcall(host.modbus_read, 3100, 2, "input")
+    local gw_regs = probe_read(3100, 2, "input")
     local grid_w = 0
-    if ok_gw and gw_regs then grid_w = decode_f32_ws_at(gw_regs, 1) * 1000 end
+    if gw_regs then grid_w = decode_f32_ws_at(gw_regs, 1) * 1000 end
 
     -- Grid active current L1/L2/L3: input 3112/3116/3120, float32, Arms
-    local ok_ga, ga_regs = pcall(host.modbus_read, 3112, 10, "input")
+    local ga_regs = probe_read(3112, 10, "input")
     local l1_a, l2_a, l3_a = 0, 0, 0
-    if ok_ga and ga_regs then
+    if ga_regs then
         l1_a = decode_f32_ws_at(ga_regs, 1)   -- 3112-3113
         l2_a = decode_f32_ws_at(ga_regs, 5)   -- 3116-3117
         l3_a = decode_f32_ws_at(ga_regs, 9)   -- 3120-3121
@@ -167,9 +201,9 @@ function driver_poll()
     local l3_w = l3_v * l3_a
 
     -- Grid energy: export at 3064, import at 3068, float32, kWh (8 regs, two values)
-    local ok_ge, ge_regs = pcall(host.modbus_read, 3064, 8, "input")
+    local ge_regs = probe_read(3064, 8, "input")
     local export_wh, import_wh = 0, 0
-    if ok_ge and ge_regs then
+    if ge_regs then
         export_wh = decode_f32_ws_at(ge_regs, 1) * 1000   -- 3064-3065
         import_wh = decode_f32_ws_at(ge_regs, 5) * 1000   -- 3068-3069
     end
@@ -206,14 +240,14 @@ function driver_poll()
     --------------------------------------------------------------------------
 
     -- Solar power: input 5100, float32, kW (always positive from Ferroamp)
-    local ok_pv, pv_regs = pcall(host.modbus_read, 5100, 2, "input")
+    local pv_regs = probe_read(5100, 2, "input")
     local pv_w = 0
-    if ok_pv and pv_regs then pv_w = decode_f32_ws_at(pv_regs, 1) * 1000 end
+    if pv_regs then pv_w = decode_f32_ws_at(pv_regs, 1) * 1000 end
 
     -- Solar energy produced: input 5064, float32, kWh
-    local ok_pe, pe_regs = pcall(host.modbus_read, 5064, 2, "input")
+    local pe_regs = probe_read(5064, 2, "input")
     local pv_lifetime_wh = 0
-    if ok_pe and pe_regs then pv_lifetime_wh = decode_f32_ws_at(pe_regs, 1) * 1000 end
+    if pe_regs then pv_lifetime_wh = decode_f32_ws_at(pe_regs, 1) * 1000 end
 
     host.emit("pv", {
         w           = -pv_w,   -- negative = generation (site convention)
@@ -227,19 +261,21 @@ function driver_poll()
     -- Battery power: input 6100, float32, kW.
     -- Ferroamp: positive = discharging. Site convention: positive = charging.
     -- Negate and convert kW → W (matches drivers/ferroamp.lua's sign handling).
-    local ok_bw, bw_regs = pcall(host.modbus_read, 6100, 2, "input")
+    local bw_regs = probe_read(6100, 2, "input")
     local bat_w = 0
-    if ok_bw and bw_regs then bat_w = -decode_f32_ws_at(bw_regs, 1) * 1000 end
+    if bw_regs then bat_w = -decode_f32_ws_at(bw_regs, 1) * 1000 end
 
     -- Battery SoC: input 6016, float32, percent → 0-1 fraction
-    local ok_soc, soc_regs = pcall(host.modbus_read, 6016, 2, "input")
+    local soc_regs = probe_read(6016, 2, "input")
     local bat_soc = nil
-    if ok_soc and soc_regs then bat_soc = decode_f32_ws_at(soc_regs, 1) / 100 end
+    if soc_regs then bat_soc = decode_f32_ws_at(soc_regs, 1) / 100 end
 
-    -- Battery energy: discharge at 6064, charge at 6068, float32, kWh (8 regs)
-    local ok_be, be_regs = pcall(host.modbus_read, 6064, 8, "input")
+    -- Battery energy: discharge at 6064, charge at 6068, float32, kWh (8 regs).
+    -- Read as input registers; driver_command writes holding 6064 for the power
+    -- setpoint, which is a different function code and a separate path.
+    local be_regs = probe_read(6064, 8, "input")
     local bat_discharge_wh, bat_charge_wh = 0, 0
-    if ok_be and be_regs then
+    if be_regs then
         bat_discharge_wh = decode_f32_ws_at(be_regs, 1) * 1000   -- 6064-6065
         bat_charge_wh    = decode_f32_ws_at(be_regs, 5) * 1000   -- 6068-6069
     end

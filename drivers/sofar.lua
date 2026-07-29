@@ -26,7 +26,7 @@ DRIVER = {
   id           = "sofar",
   name         = "Sofar hybrid inverter",
   manufacturer = "Sofar Solar",
-  version      = "1.0.0",
+  version      = "2.1.1",
   protocols    = { "modbus" },
   capabilities = { "meter", "pv", "battery" },
   description  = "Sofar Solar HYD-ES / HYD-EP hybrid inverters via Modbus TCP.",
@@ -42,6 +42,37 @@ DRIVER = {
 }
 
 PROTOCOL = "modbus"
+
+----------------------------------------------------------------------------
+-- Absent-register guard
+----------------------------------------------------------------------------
+-- The host counts every failed modbus_read against the poll whether or not
+-- Lua caught it. So a register this driver can live without must stop being
+-- read once the device has made clear it will not answer — otherwise the
+-- poll keeps failing, the stale-telemetry watchdog marks the device offline,
+-- and the site reports nothing at all instead of one field less.
+--
+-- Three strikes rather than one: a single miss is more often a slow link
+-- than a missing register. A restart re-probes.
+local GIVE_UP_AFTER = 3
+local read_failures = {}
+
+local function probe_read(addr, count, kind)
+    if (read_failures[addr] or 0) >= GIVE_UP_AFTER then return nil end
+    local ok, regs = pcall(host.modbus_read, addr, count, kind)
+    if ok and regs and regs[1] ~= nil then
+        read_failures[addr] = nil
+        return regs
+    end
+    local failures = (read_failures[addr] or 0) + 1
+    read_failures[addr] = failures
+    if failures == GIVE_UP_AFTER then
+        host.log("info", string.format(
+            "Sofar: register %d did not answer %d times; leaving it alone " ..
+            "until restart", addr, GIVE_UP_AFTER))
+    end
+    return nil
+end
 
 ----------------------------------------------------------------------------
 -- Initialization
@@ -60,39 +91,39 @@ function driver_poll()
     -- ---- PV ----
 
     -- PV1 V/A: 1412-1413 (0x0584-0x0585). U16 × 0.1 V, U16 × 0.01 A.
-    local ok_pv1, pv1_regs = pcall(host.modbus_read, 1412, 2, "holding")
+    local pv1_regs = probe_read(1412, 2, "holding")
     local mppt1_v, mppt1_a = 0, 0
-    if ok_pv1 and pv1_regs then
+    if pv1_regs then
         mppt1_v = pv1_regs[1] * 0.1
         mppt1_a = pv1_regs[2] * 0.01
     end
 
     -- PV total power: 1414 (0x0586). U16, 10 W resolution.
-    local ok_pvw, pvw_regs = pcall(host.modbus_read, 1414, 1, "holding")
+    local pvw_regs = probe_read(1414, 1, "holding")
     local pv_w = 0
-    if ok_pvw and pvw_regs then
+    if pvw_regs then
         pv_w = pvw_regs[1] * 10
     end
 
     -- PV2 V/A: 1415-1416 (0x0587-0x0588). U16 × 0.1 V, U16 × 0.01 A.
-    local ok_pv2, pv2_regs = pcall(host.modbus_read, 1415, 2, "holding")
+    local pv2_regs = probe_read(1415, 2, "holding")
     local mppt2_v, mppt2_a = 0, 0
-    if ok_pv2 and pv2_regs then
+    if pv2_regs then
         mppt2_v = pv2_regs[1] * 0.1
         mppt2_a = pv2_regs[2] * 0.01
     end
 
     -- Grid frequency: 524 (0x020C). U16 × 0.01 Hz.
-    local ok_hz, hz_regs = pcall(host.modbus_read, 524, 1, "holding")
+    local hz_regs = probe_read(524, 1, "holding")
     local hz = 0
-    if ok_hz and hz_regs then
+    if hz_regs then
         hz = hz_regs[1] * 0.01
     end
 
     -- PV lifetime yield: 1668-1669 (0x0684-0x0685). U32 BE × 0.1 kWh.
-    local ok_pvgen, pvgen_regs = pcall(host.modbus_read, 1668, 2, "holding")
+    local pvgen_regs = probe_read(1668, 2, "holding")
     local pv_gen_wh = 0
-    if ok_pvgen and pvgen_regs then
+    if pvgen_regs then
         pv_gen_wh = host.decode_u32_be(pvgen_regs[1], pvgen_regs[2]) * 0.1 * 1000
     end
 
@@ -114,38 +145,38 @@ function driver_poll()
     -- ---- Battery ----
 
     -- Battery voltage: 1540 (0x0604). U16 × 0.1 V.
-    local ok_bv, bv_regs = pcall(host.modbus_read, 1540, 1, "holding")
+    local bv_regs = probe_read(1540, 1, "holding")
     local bat_v = 0
-    if ok_bv and bv_regs then
+    if bv_regs then
         bat_v = bv_regs[1] * 0.1
     end
 
     -- Battery current: 1541 (0x0605). I16 × 0.01 A.
-    local ok_ba, ba_regs = pcall(host.modbus_read, 1541, 1, "holding")
+    local ba_regs = probe_read(1541, 1, "holding")
     local bat_a = 0
-    if ok_ba and ba_regs then
+    if ba_regs then
         bat_a = host.decode_i16(ba_regs[1]) * 0.01
     end
 
     -- Battery power: 1542 (0x0606). I16, 10 W resolution.
     -- Sofar sign: positive = charge, negative = discharge (matches site convention).
-    local ok_bw, bw_regs = pcall(host.modbus_read, 1542, 1, "holding")
+    local bw_regs = probe_read(1542, 1, "holding")
     local bat_w = 0
-    if ok_bw and bw_regs then
+    if bw_regs then
         bat_w = host.decode_i16(bw_regs[1]) * 10
     end
 
     -- Battery temperature: 1543 (0x0607). I16, °C.
-    local ok_btemp, btemp_regs = pcall(host.modbus_read, 1543, 1, "holding")
+    local btemp_regs = probe_read(1543, 1, "holding")
     local bat_temp = 0
-    if ok_btemp and btemp_regs then
+    if btemp_regs then
         bat_temp = host.decode_i16(btemp_regs[1])
     end
 
     -- Battery SoC: 1544 (0x0608). U16 percent → 0..1 fraction.
-    local ok_bsoc, bsoc_regs = pcall(host.modbus_read, 1544, 1, "holding")
+    local bsoc_regs = probe_read(1544, 1, "holding")
     local bat_soc = 0
-    if ok_bsoc and bsoc_regs then
+    if bsoc_regs then
         bat_soc = bsoc_regs[1] / 100
     end
 
@@ -164,18 +195,18 @@ function driver_poll()
 
     -- Grid total power: 530 (0x0212). I16, 10 W resolution.
     -- Sofar sign: positive = import (matches site convention).
-    local ok_mw, mw_regs = pcall(host.modbus_read, 530, 1, "holding")
+    local mw_regs = probe_read(530, 1, "holding")
     local meter_w = 0
-    if ok_mw and mw_regs then
+    if mw_regs then
         meter_w = host.decode_i16(mw_regs[1]) * 10
     end
 
     -- Per-phase V/A interleaved: 518-523 (0x0206-0x020B).
     --   518 L1_v, 519 L1_a, 520 L2_v, 521 L2_a, 522 L3_v, 523 L3_a
     --   voltages U16 × 0.1 V, currents U16 × 0.01 A.
-    local ok_phase, phase_regs = pcall(host.modbus_read, 518, 6, "holding")
+    local phase_regs = probe_read(518, 6, "holding")
     local l1_v, l1_a, l2_v, l2_a, l3_v, l3_a = 0, 0, 0, 0, 0, 0
-    if ok_phase and phase_regs then
+    if phase_regs then
         l1_v = phase_regs[1] * 0.1
         l1_a = phase_regs[2] * 0.01
         l2_v = phase_regs[3] * 0.1
@@ -185,16 +216,16 @@ function driver_poll()
     end
 
     -- Import energy: 1672-1673 (0x0688-0x0689). U32 BE × 0.1 kWh.
-    local ok_imp, imp_regs = pcall(host.modbus_read, 1672, 2, "holding")
+    local imp_regs = probe_read(1672, 2, "holding")
     local import_wh = 0
-    if ok_imp and imp_regs then
+    if imp_regs then
         import_wh = host.decode_u32_be(imp_regs[1], imp_regs[2]) * 0.1 * 1000
     end
 
     -- Export energy: 1674-1675 (0x068A-0x068B). U32 BE × 0.1 kWh.
-    local ok_exp, exp_regs = pcall(host.modbus_read, 1674, 2, "holding")
+    local exp_regs = probe_read(1674, 2, "holding")
     local export_wh = 0
-    if ok_exp and exp_regs then
+    if exp_regs then
         export_wh = host.decode_u32_be(exp_regs[1], exp_regs[2]) * 0.1 * 1000
     end
 

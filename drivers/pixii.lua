@@ -29,7 +29,7 @@ DRIVER = {
   id           = "pixii",
   name         = "Pixii PowerShaper",
   manufacturer = "Pixii",
-  version      = "2.0.0",
+  version      = "2.1.3",
   protocols    = { "modbus" },
   capabilities = { "battery", "meter" },
   description  = "Pixii PowerShaper commercial battery storage via Modbus TCP.",
@@ -89,10 +89,49 @@ local function scale(v, sf)
     return v * (10 ^ sf)
 end
 
--- Read a single i16-typed scale factor register, returning 0 on error.
+-- Registers this device has stopped answering.
+--
+-- The host counts every failed host.modbus_read against the poll whether or
+-- not this driver caught the error — "driver_poll: N of M modbus reads
+-- failed". So a register retried on every poll costs a failed poll on every
+-- poll, and the stale-telemetry watchdog takes the driver offline. The site
+-- then reports nothing at all, which is worse than reporting one field less.
+-- PowerShaper firmware below CPU 2.0.23 answers Modbus exception 2 on 40288
+-- (meter_energy_sf), which is how this was found in the field.
+--
+-- Three attempts absorb a transient blip; after that we stop asking. A
+-- restart re-probes, so firmware that gains the register is picked up.
+--
+-- This replaces a scale-factor-only cache that gave up after one failure.
+-- Every read goes through here now: the scale factors were the fourteen
+-- registers that fix covered, and the value reads below are the twenty-three
+-- it left behind.
+local GIVE_UP_AFTER = 3
+local read_failures = {}
+
+local function probe_read(addr, count, kind)
+    if (read_failures[addr] or 0) >= GIVE_UP_AFTER then return nil end
+    local ok, regs = pcall(host.modbus_read, addr, count, kind)
+    if ok and regs and regs[1] ~= nil then
+        read_failures[addr] = nil
+        return regs
+    end
+    local failures = (read_failures[addr] or 0) + 1
+    read_failures[addr] = failures
+    if failures == GIVE_UP_AFTER then
+        host.log("info", string.format(
+            "Pixii: register %d did not answer %d times; leaving it alone " ..
+            "until restart", addr, GIVE_UP_AFTER))
+    end
+    return nil
+end
+
+-- Read a single i16-typed scale factor register. SF=0 (x1 scaling) is the
+-- right fallback when the register is absent, and matches units where it
+-- exists but reads zero.
 local function read_sf(addr)
-    local ok, regs = pcall(host.modbus_read, addr, 1, "holding")
-    if ok and regs then return host.decode_i16(regs[1]) end
+    local regs = probe_read(addr, 1, "holding")
+    if regs then return host.decode_i16(regs[1]) end
     return 0
 end
 
@@ -117,22 +156,22 @@ local function config_bool(config, key)
 end
 
 local function read_u16(addr)
-    local ok, regs = pcall(host.modbus_read, addr, 1, "holding")
-    if ok and regs and regs[1] ~= nil then return regs[1] end
+    local regs = probe_read(addr, 1, "holding")
+    if regs then return regs[1] end
     return nil
 end
 
 local function read_u32_be(addr)
-    local ok, regs = pcall(host.modbus_read, addr, 2, "holding")
-    if ok and regs and regs[1] ~= nil and regs[2] ~= nil then
+    local regs = probe_read(addr, 2, "holding")
+    if regs and regs[2] ~= nil then
         return host.decode_u32_be(regs[1], regs[2])
     end
     return nil
 end
 
 local function read_i32_be(addr)
-    local ok, regs = pcall(host.modbus_read, addr, 2, "holding")
-    if ok and regs and regs[1] ~= nil and regs[2] ~= nil then
+    local regs = probe_read(addr, 2, "holding")
+    if regs and regs[2] ~= nil then
         return host.decode_i32_be(regs[1], regs[2])
     end
     return nil
@@ -247,16 +286,16 @@ end
 --   false → answered Modbus but it's a non-Pixii device
 --   nil    → couldn't read (wrong unit id, not Modbus, timeout)
 function driver_fingerprint()
-    local ok, sig = pcall(host.modbus_read, 40000, 2, "holding")
-    if not ok or sig == nil or sig[1] == nil or sig[2] == nil then
+    local sig = probe_read(40000, 2, "holding")
+    if sig == nil or sig[2] == nil then
         return nil
     end
     -- SunSpec identifier "SunS" = 0x5375, 0x6E53.
     if sig[1] ~= 0x5375 or sig[2] ~= 0x6E53 then
         return false
     end
-    local mok, mfg_regs = pcall(host.modbus_read, 40004, 16, "holding")
-    if not mok or mfg_regs == nil then
+    local mfg_regs = probe_read(40004, 16, "holding")
+    if mfg_regs == nil then
         return nil
     end
     local mfg = decode_ascii(mfg_regs, 16)
@@ -264,8 +303,8 @@ function driver_fingerprint()
         return false -- SunSpec, but a different vendor
     end
     local serial = ""
-    local sok, sn_regs = pcall(host.modbus_read, 40052, 16, "holding")
-    if sok and sn_regs ~= nil then
+    local sn_regs = probe_read(40052, 16, "holding")
+    if sn_regs ~= nil then
         serial = decode_ascii(sn_regs, 16)
     end
     return true, { make = "Pixii", serial = serial, confidence = 0.95 }
@@ -286,8 +325,8 @@ function driver_init(config)
     end
 
     -- Verify SunSpec signature at 40000 ("SunS") as a sanity check.
-    local ok, sig = pcall(host.modbus_read, 40000, 2, "holding")
-    if ok and sig then
+    local sig = probe_read(40000, 2, "holding")
+    if sig then
         local want = "SunS"
         local got = decode_ascii(sig, 2)
         if got ~= want then
@@ -312,7 +351,7 @@ function driver_poll()
     -- Read serial number once from SunSpec Common Model (offset 52 from
     -- the common block → absolute 40052, 16 regs ASCII).
     if not sn_read then
-        local ok, sn_regs = pcall(host.modbus_read, 40052, 16, "holding")
+        local sn_regs = probe_read(40052, 16, "holding")
         if ok and sn_regs then
             local sn = decode_ascii(sn_regs, 16)
             if string.len(sn) > 0 then
@@ -341,33 +380,33 @@ function driver_poll()
     -- ---- Battery Values ----
 
     -- AC power (inverter): 40083, I16  (diagnostic only; bat_w below is DC)
-    local ok_acw, acw_regs = pcall(host.modbus_read, 40083, 1, "holding")
+    local acw_regs = probe_read(40083, 1, "holding")
     local ac_w = 0
-    if ok_acw and acw_regs then
+    if acw_regs then
         ac_w = scale(host.decode_i16(acw_regs[1]), ac_w_sf)
     end
 
     -- Inverter frequency: 40085, U16
-    local ok_hz, hz_regs = pcall(host.modbus_read, 40085, 1, "holding")
+    local hz_regs = probe_read(40085, 1, "holding")
     local inv_hz = 0
-    if ok_hz and hz_regs then
+    if hz_regs then
         inv_hz = scale(hz_regs[1], hz_sf)
     end
 
     -- Inverter temperature: 40102, I16 (°C)
-    local ok_temp, temp_regs = pcall(host.modbus_read, 40102, 1, "holding")
+    local temp_regs = probe_read(40102, 1, "holding")
     local temp_c = 0
-    if ok_temp and temp_regs then
+    if temp_regs then
         temp_c = scale(host.decode_i16(temp_regs[1]), temp_sf)
     end
 
     -- Battery SoC: 40132, U16 (percent → fraction 0..1).
     -- If Pixii returns a sentinel or otherwise impossible value, omit SoC
     -- from the emit rather than invalidating the whole battery reading.
-    local ok_soc, soc_regs = pcall(host.modbus_read, REG_BATTERY_SOC, 1, "holding")
+    local soc_regs = probe_read(REG_BATTERY_SOC, 1, "holding")
     local bat_soc = nil
     local bat_soc_pct = nil
-    if ok_soc and soc_regs and soc_regs[1] ~= nil then
+    if soc_regs and soc_regs[1] ~= nil then
         bat_soc_pct = scale(soc_regs[1], soc_sf)
         local candidate = bat_soc_pct / 100
         if candidate >= 0 and candidate <= 1 then
@@ -385,30 +424,30 @@ function driver_poll()
     end
 
     -- Battery voltage: 40155, I16
-    local ok_bv, bv_regs = pcall(host.modbus_read, 40155, 1, "holding")
+    local bv_regs = probe_read(40155, 1, "holding")
     local bat_v = 0
-    if ok_bv and bv_regs then
+    if bv_regs then
         bat_v = scale(host.decode_i16(bv_regs[1]), bat_v_sf)
     end
 
     -- Battery current: 40165, I16
-    local ok_ba, ba_regs = pcall(host.modbus_read, 40165, 1, "holding")
+    local ba_regs = probe_read(40165, 1, "holding")
     local bat_a = 0
-    if ok_ba and ba_regs then
+    if ba_regs then
         bat_a = scale(host.decode_i16(ba_regs[1]), bat_a_sf)
     end
 
     -- Battery DC power: 40168, I16  (SunSpec: positive = charge, so site-conv)
-    local ok_bw, bw_regs = pcall(host.modbus_read, 40168, 1, "holding")
+    local bw_regs = probe_read(40168, 1, "holding")
     local bat_w = 0
-    if ok_bw and bw_regs then
+    if bw_regs then
         bat_w = scale(host.decode_i16(bw_regs[1]), bat_w_sf)
     end
 
     -- Cabinet charge/discharge energy: 39958-39961, two I32 BE pairs, kWh
-    local ok_cab, cab_regs = pcall(host.modbus_read, 39958, 4, "holding")
+    local cab_regs = probe_read(39958, 4, "holding")
     local bat_charge_wh, bat_discharge_wh = 0, 0
-    if ok_cab and cab_regs then
+    if cab_regs then
         bat_charge_wh    = host.decode_i32_be(cab_regs[1], cab_regs[2]) * 1000
         bat_discharge_wh = host.decode_i32_be(cab_regs[3], cab_regs[4]) * 1000
     end
@@ -455,41 +494,41 @@ function driver_poll()
     -- so signed amps here do NOT weaken the per-phase fuse guard —
     -- the guard fires on magnitude regardless of direction, exactly
     -- as before.
-    local ok_la, la_regs = pcall(host.modbus_read, 40237, 3, "holding")
+    local la_regs = probe_read(40237, 3, "holding")
     local l1_a_mag, l2_a_mag, l3_a_mag = 0, 0, 0
-    if ok_la and la_regs then
+    if la_regs then
         l1_a_mag = math.abs(scale(host.decode_i16(la_regs[1]), meter_a_sf))
         l2_a_mag = math.abs(scale(host.decode_i16(la_regs[2]), meter_a_sf))
         l3_a_mag = math.abs(scale(host.decode_i16(la_regs[3]), meter_a_sf))
     end
 
     -- Per-phase voltage: 40242-40244, I16 each
-    local ok_lv, lv_regs = pcall(host.modbus_read, 40242, 3, "holding")
+    local lv_regs = probe_read(40242, 3, "holding")
     local l1_v, l2_v, l3_v = 0, 0, 0
-    if ok_lv and lv_regs then
+    if lv_regs then
         l1_v = scale(host.decode_i16(lv_regs[1]), meter_v_sf)
         l2_v = scale(host.decode_i16(lv_regs[2]), meter_v_sf)
         l3_v = scale(host.decode_i16(lv_regs[3]), meter_v_sf)
     end
 
     -- Meter frequency: 40250, U16
-    local ok_mhz, mhz_regs = pcall(host.modbus_read, 40250, 1, "holding")
+    local mhz_regs = probe_read(40250, 1, "holding")
     local meter_hz = 0
-    if ok_mhz and mhz_regs then
+    if mhz_regs then
         meter_hz = scale(mhz_regs[1], meter_hz_sf)
     end
 
     -- Total meter power: 40252, I16
-    local ok_mw, mw_regs = pcall(host.modbus_read, 40252, 1, "holding")
+    local mw_regs = probe_read(40252, 1, "holding")
     local meter_w = 0
-    if ok_mw and mw_regs then
+    if mw_regs then
         meter_w = scale(host.decode_i16(mw_regs[1]), meter_w_sf)
     end
 
     -- Per-phase meter power: 40253-40255, I16 each
-    local ok_lpw, lpw_regs = pcall(host.modbus_read, 40253, 3, "holding")
+    local lpw_regs = probe_read(40253, 3, "holding")
     local l1_w, l2_w, l3_w = 0, 0, 0
-    if ok_lpw and lpw_regs then
+    if lpw_regs then
         l1_w = scale(host.decode_i16(lpw_regs[1]), meter_w_sf)
         l2_w = scale(host.decode_i16(lpw_regs[2]), meter_w_sf)
         l3_w = scale(host.decode_i16(lpw_regs[3]), meter_w_sf)
@@ -508,15 +547,15 @@ function driver_poll()
     local function i16_present(reg)
         return reg ~= 0x8000
     end
-    local ok_va, va_regs = pcall(host.modbus_read, 40257, 1, "holding")
+    local va_regs = probe_read(40257, 1, "holding")
     local meter_va, meter_va_ok = 0, false
-    if ok_va and va_regs and i16_present(va_regs[1]) then
+    if va_regs and i16_present(va_regs[1]) then
         meter_va = scale(host.decode_i16(va_regs[1]), meter_va_sf)
         meter_va_ok = true
     end
-    local ok_var, var_regs = pcall(host.modbus_read, 40262, 1, "holding")
+    local var_regs = probe_read(40262, 1, "holding")
     local meter_var, meter_var_ok = 0, false
-    if ok_var and var_regs and i16_present(var_regs[1]) then
+    if var_regs and i16_present(var_regs[1]) then
         meter_var = scale(host.decode_i16(var_regs[1]), meter_var_sf)
         meter_var_ok = true
     end
@@ -537,16 +576,16 @@ function driver_poll()
     local l3_a = signed_a(l3_a_mag, l3_w)
 
     -- Export energy: 40272-40275, U32 BE (two regs consumed for the value)
-    local ok_exp, exp_regs = pcall(host.modbus_read, 40272, 4, "holding")
+    local exp_regs = probe_read(40272, 4, "holding")
     local export_wh = 0
-    if ok_exp and exp_regs then
+    if exp_regs then
         export_wh = scale(host.decode_u32_be(exp_regs[1], exp_regs[2]), meter_energy_sf)
     end
 
     -- Import energy: 40280-40283, U32 BE
-    local ok_imp, imp_regs = pcall(host.modbus_read, 40280, 4, "holding")
+    local imp_regs = probe_read(40280, 4, "holding")
     local import_wh = 0
-    if ok_imp and imp_regs then
+    if imp_regs then
         import_wh = scale(host.decode_u32_be(imp_regs[1], imp_regs[2]), meter_energy_sf)
     end
 

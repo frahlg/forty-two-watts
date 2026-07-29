@@ -13,7 +13,7 @@ DRIVER = {
   id           = "sma",
   name         = "SMA hybrid inverter",
   manufacturer = "SMA",
-  version      = "1.0.0",
+  version      = "2.1.1",
   protocols    = { "modbus" },
   capabilities = { "meter", "pv", "battery" },
   description  = "SMA Sunny Tripower / Sunny Boy Storage via Modbus TCP (SunSpec).",
@@ -61,6 +61,36 @@ local function u64_valid(h1, h2, h3, h4)
     return not (h1 == 65535 and h2 == 65535 and h3 == 65535 and h4 == 65535)
 end
 
+-- Registers this device has stopped answering.
+--
+-- The host counts every failed host.modbus_read against the poll whether or
+-- not this driver caught the error — "driver_poll: N of M modbus reads
+-- failed". So a register retried on every poll costs a failed poll on every
+-- poll, and the stale-telemetry watchdog takes the driver offline. The site
+-- then reports nothing at all, which is worse than reporting one field less.
+--
+-- Three attempts absorb a transient blip; after that we stop asking. A
+-- restart re-probes, so firmware that gains the register is picked up.
+local GIVE_UP_AFTER = 3
+local read_failures = {}
+
+local function probe_read(addr, count, kind)
+    if (read_failures[addr] or 0) >= GIVE_UP_AFTER then return nil end
+    local ok, regs = pcall(host.modbus_read, addr, count, kind)
+    if ok and regs and regs[1] ~= nil then
+        read_failures[addr] = nil
+        return regs
+    end
+    local failures = (read_failures[addr] or 0) + 1
+    read_failures[addr] = failures
+    if failures == GIVE_UP_AFTER then
+        host.log("info", string.format(
+            "SMA: register %d did not answer %d times; leaving it alone " ..
+            "until restart", addr, GIVE_UP_AFTER))
+    end
+    return nil
+end
+
 local sn_read = false
 
 ----------------------------------------------------------------------------
@@ -73,8 +103,8 @@ function driver_init(config)
     -- SunSpec common model serial number: 30057-30058 (U32 BE).
     -- Best-effort; older SMA firmware can report 0 here — we fall back
     -- to make:endpoint identity in that case.
-    local ok, sn_regs = pcall(host.modbus_read, 30057, 2, "input")
-    if ok and sn_regs then
+    local sn_regs = probe_read(30057, 2, "input")
+    if sn_regs then
         local sn = host.decode_u32_be(sn_regs[1], sn_regs[2])
         if u32_valid(sn) and sn > 0 then
             host.set_sn(tostring(sn))
@@ -87,8 +117,8 @@ function driver_poll()
     -- Opportunistically retry SN if init couldn't read it (e.g. the
     -- inverter was still booting).
     if not sn_read then
-        local ok, sn_regs = pcall(host.modbus_read, 30057, 2, "input")
-        if ok and sn_regs then
+        local sn_regs = probe_read(30057, 2, "input")
+        if sn_regs then
             local sn = host.decode_u32_be(sn_regs[1], sn_regs[2])
             if u32_valid(sn) and sn > 0 then
                 host.set_sn(tostring(sn))
@@ -100,64 +130,64 @@ function driver_poll()
     ------------------------------------------------------------------ PV --
 
     -- PV power: 30775-30776, I32 BE, watts
-    local ok_pvw, pvw_regs = pcall(host.modbus_read, 30775, 2, "input")
+    local pvw_regs = probe_read(30775, 2, "input")
     local pv_w = 0
-    if ok_pvw and pvw_regs then
+    if pvw_regs then
         local v = host.decode_i32_be(pvw_regs[1], pvw_regs[2])
         if i32_valid(v) then pv_w = v end
     end
 
     -- MPPT1 current: 30769-30770, I32 BE × 0.001 A
-    local ok_m1a, m1a_regs = pcall(host.modbus_read, 30769, 2, "input")
+    local m1a_regs = probe_read(30769, 2, "input")
     local mppt1_a = 0
-    if ok_m1a and m1a_regs then
+    if m1a_regs then
         local v = host.decode_i32_be(m1a_regs[1], m1a_regs[2])
         if i32_valid(v) then mppt1_a = v * 0.001 end
     end
 
     -- MPPT1 voltage: 30771-30772, I32 BE × 0.01 V
-    local ok_m1v, m1v_regs = pcall(host.modbus_read, 30771, 2, "input")
+    local m1v_regs = probe_read(30771, 2, "input")
     local mppt1_v = 0
-    if ok_m1v and m1v_regs then
+    if m1v_regs then
         local v = host.decode_i32_be(m1v_regs[1], m1v_regs[2])
         if i32_valid(v) then mppt1_v = v * 0.01 end
     end
 
     -- MPPT2 current: 30957-30958, I32 BE × 0.001 A
-    local ok_m2a, m2a_regs = pcall(host.modbus_read, 30957, 2, "input")
+    local m2a_regs = probe_read(30957, 2, "input")
     local mppt2_a = 0
-    if ok_m2a and m2a_regs then
+    if m2a_regs then
         local v = host.decode_i32_be(m2a_regs[1], m2a_regs[2])
         if i32_valid(v) then mppt2_a = v * 0.001 end
     end
 
     -- MPPT2 voltage: 30959-30960, I32 BE × 0.01 V
-    local ok_m2v, m2v_regs = pcall(host.modbus_read, 30959, 2, "input")
+    local m2v_regs = probe_read(30959, 2, "input")
     local mppt2_v = 0
-    if ok_m2v and m2v_regs then
+    if m2v_regs then
         local v = host.decode_i32_be(m2v_regs[1], m2v_regs[2])
         if i32_valid(v) then mppt2_v = v * 0.01 end
     end
 
     -- PV lifetime generation: 30513-30516, U64 BE, Wh
-    local ok_pvgen, pvgen_regs = pcall(host.modbus_read, 30513, 4, "input")
+    local pvgen_regs = probe_read(30513, 4, "input")
     local pv_gen_wh = 0
-    if ok_pvgen and pvgen_regs and u64_valid(pvgen_regs[1], pvgen_regs[2], pvgen_regs[3], pvgen_regs[4]) then
+    if pvgen_regs and u64_valid(pvgen_regs[1], pvgen_regs[2], pvgen_regs[3], pvgen_regs[4]) then
         pv_gen_wh = decode_u64_be(pvgen_regs[1], pvgen_regs[2], pvgen_regs[3], pvgen_regs[4])
     end
 
     -- Inverter heatsink temp: 30953-30954, I32 BE × 0.1 C
-    local ok_itemp, itemp_regs = pcall(host.modbus_read, 30953, 2, "input")
+    local itemp_regs = probe_read(30953, 2, "input")
     local inv_temp = 0
-    if ok_itemp and itemp_regs then
+    if itemp_regs then
         local v = host.decode_i32_be(itemp_regs[1], itemp_regs[2])
         if i32_valid(v) then inv_temp = v * 0.1 end
     end
 
     -- Rated power: 31085-31086, U32 BE, watts
-    local ok_rated, rated_regs = pcall(host.modbus_read, 31085, 2, "input")
+    local rated_regs = probe_read(31085, 2, "input")
     local rated_w = 0
-    if ok_rated and rated_regs then
+    if rated_regs then
         local v = host.decode_u32_be(rated_regs[1], rated_regs[2])
         if u32_valid(v) then rated_w = v end
     end
@@ -181,33 +211,33 @@ function driver_poll()
     ------------------------------------------------------------- Battery --
 
     -- Battery current: 30843-30844, I32 BE × 0.001 A (+ = charging)
-    local ok_ba, ba_regs = pcall(host.modbus_read, 30843, 2, "input")
+    local ba_regs = probe_read(30843, 2, "input")
     local bat_a = 0
-    if ok_ba and ba_regs then
+    if ba_regs then
         local v = host.decode_i32_be(ba_regs[1], ba_regs[2])
         if i32_valid(v) then bat_a = v * 0.001 end
     end
 
     -- Battery SoC: 30845-30846, U32 BE, percent → fraction
-    local ok_bsoc, bsoc_regs = pcall(host.modbus_read, 30845, 2, "input")
+    local bsoc_regs = probe_read(30845, 2, "input")
     local bat_soc = 0
-    if ok_bsoc and bsoc_regs then
+    if bsoc_regs then
         local v = host.decode_u32_be(bsoc_regs[1], bsoc_regs[2])
         if u32_valid(v) then bat_soc = v / 100 end
     end
 
     -- Battery temperature: 30849-30850, I32 BE × 0.1 C
-    local ok_btemp, btemp_regs = pcall(host.modbus_read, 30849, 2, "input")
+    local btemp_regs = probe_read(30849, 2, "input")
     local bat_temp = 0
-    if ok_btemp and btemp_regs then
+    if btemp_regs then
         local v = host.decode_i32_be(btemp_regs[1], btemp_regs[2])
         if i32_valid(v) then bat_temp = v * 0.1 end
     end
 
     -- Battery voltage: 30851-30852, U32 BE × 0.01 V
-    local ok_bv, bv_regs = pcall(host.modbus_read, 30851, 2, "input")
+    local bv_regs = probe_read(30851, 2, "input")
     local bat_v = 0
-    if ok_bv and bv_regs then
+    if bv_regs then
         local v = host.decode_u32_be(bv_regs[1], bv_regs[2])
         if u32_valid(v) then bat_v = v * 0.01 end
     end
@@ -217,16 +247,16 @@ function driver_poll()
     local bat_w = bat_v * bat_a
 
     -- Battery charge energy: 31397-31400, U64 BE, Wh
-    local ok_bchg, bchg_regs = pcall(host.modbus_read, 31397, 4, "input")
+    local bchg_regs = probe_read(31397, 4, "input")
     local bat_charge_wh = 0
-    if ok_bchg and bchg_regs and u64_valid(bchg_regs[1], bchg_regs[2], bchg_regs[3], bchg_regs[4]) then
+    if bchg_regs and u64_valid(bchg_regs[1], bchg_regs[2], bchg_regs[3], bchg_regs[4]) then
         bat_charge_wh = decode_u64_be(bchg_regs[1], bchg_regs[2], bchg_regs[3], bchg_regs[4])
     end
 
     -- Battery discharge energy: 31401-31404, U64 BE, Wh
-    local ok_bdis, bdis_regs = pcall(host.modbus_read, 31401, 4, "input")
+    local bdis_regs = probe_read(31401, 4, "input")
     local bat_discharge_wh = 0
-    if ok_bdis and bdis_regs and u64_valid(bdis_regs[1], bdis_regs[2], bdis_regs[3], bdis_regs[4]) then
+    if bdis_regs and u64_valid(bdis_regs[1], bdis_regs[2], bdis_regs[3], bdis_regs[4]) then
         bat_discharge_wh = decode_u64_be(bdis_regs[1], bdis_regs[2], bdis_regs[3], bdis_regs[4])
     end
 
@@ -246,17 +276,17 @@ function driver_poll()
     --------------------------------------------------------------- Meter --
 
     -- Meter total power: 30885-30886, I32 BE, watts (signed: + = import, - = export)
-    local ok_mw, mw_regs = pcall(host.modbus_read, 30885, 2, "input")
+    local mw_regs = probe_read(30885, 2, "input")
     local meter_w = 0
-    if ok_mw and mw_regs then
+    if mw_regs then
         local v = host.decode_i32_be(mw_regs[1], mw_regs[2])
         if i32_valid(v) then meter_w = v end
     end
 
     -- Per-phase meter power: 30887-30892, I32 BE pairs, watts (signed)
-    local ok_mpw, mpw_regs = pcall(host.modbus_read, 30887, 6, "input")
+    local mpw_regs = probe_read(30887, 6, "input")
     local l1_w, l2_w, l3_w = 0, 0, 0
-    if ok_mpw and mpw_regs then
+    if mpw_regs then
         local v1 = host.decode_i32_be(mpw_regs[1], mpw_regs[2])
         local v2 = host.decode_i32_be(mpw_regs[3], mpw_regs[4])
         local v3 = host.decode_i32_be(mpw_regs[5], mpw_regs[6])
@@ -266,17 +296,17 @@ function driver_poll()
     end
 
     -- Grid frequency: 30901-30902, U32 BE × 0.01 Hz
-    local ok_hz, hz_regs = pcall(host.modbus_read, 30901, 2, "input")
+    local hz_regs = probe_read(30901, 2, "input")
     local hz = 0
-    if ok_hz and hz_regs then
+    if hz_regs then
         local v = host.decode_u32_be(hz_regs[1], hz_regs[2])
         if u32_valid(v) then hz = v * 0.01 end
     end
 
     -- Per-phase voltage: 30903-30908, U32 BE × 0.01 V pairs
-    local ok_lv, lv_regs = pcall(host.modbus_read, 30903, 6, "input")
+    local lv_regs = probe_read(30903, 6, "input")
     local l1_v, l2_v, l3_v = 0, 0, 0
-    if ok_lv and lv_regs then
+    if lv_regs then
         local v1 = host.decode_u32_be(lv_regs[1], lv_regs[2])
         local v2 = host.decode_u32_be(lv_regs[3], lv_regs[4])
         local v3 = host.decode_u32_be(lv_regs[5], lv_regs[6])
@@ -286,9 +316,9 @@ function driver_poll()
     end
 
     -- Per-phase current: 30909-30914, U32 BE × 0.001 A pairs
-    local ok_la, la_regs = pcall(host.modbus_read, 30909, 6, "input")
+    local la_regs = probe_read(30909, 6, "input")
     local l1_a, l2_a, l3_a = 0, 0, 0
-    if ok_la and la_regs then
+    if la_regs then
         local v1 = host.decode_u32_be(la_regs[1], la_regs[2])
         local v2 = host.decode_u32_be(la_regs[3], la_regs[4])
         local v3 = host.decode_u32_be(la_regs[5], la_regs[6])
@@ -298,17 +328,17 @@ function driver_poll()
     end
 
     -- Import energy: 30581-30582, U32 BE, Wh
-    local ok_imp, imp_regs = pcall(host.modbus_read, 30581, 2, "input")
+    local imp_regs = probe_read(30581, 2, "input")
     local import_wh = 0
-    if ok_imp and imp_regs then
+    if imp_regs then
         local v = host.decode_u32_be(imp_regs[1], imp_regs[2])
         if u32_valid(v) then import_wh = v end
     end
 
     -- Export energy: 30583-30584, U32 BE, Wh
-    local ok_exp, exp_regs = pcall(host.modbus_read, 30583, 2, "input")
+    local exp_regs = probe_read(30583, 2, "input")
     local export_wh = 0
-    if ok_exp and exp_regs then
+    if exp_regs then
         local v = host.decode_u32_be(exp_regs[1], exp_regs[2])
         if u32_valid(v) then export_wh = v end
     end

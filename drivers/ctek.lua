@@ -71,7 +71,7 @@ DRIVER = {
   id           = "ctek-chargestorm",
   name         = "CTEK Chargestorm (API v1)",
   manufacturer = "CTEK",
-  version      = "0.2.0",
+  version      = "0.3.1",
   protocols    = { "modbus" },
   capabilities = { "ev" },
   description  = "CTEK Chargestorm Connected 2/3 via Modbus/TCP Automation API v1 (CSOS ≥ 4.9.3). Full telemetry + current-limit control.",
@@ -120,6 +120,36 @@ local sn_read = false
 -- Helpers
 ----------------------------------------------------------------------------
 
+-- Reading a register the charger does not have costs a failed read on every
+-- poll forever, and the host counts those against the poll whether or not Lua
+-- caught the error. Enough of them and the site is marked offline and reports
+-- nothing at all, which is worse than reporting one field less. So stop asking
+-- once a register has proved it is not there. Three tries, because one failure
+-- proves nothing -- the link may just have been slow.
+--
+-- Only driver_poll routes through this. The two reads in driver_init run once
+-- each and cost nothing per poll, and the control path (driver_command) only
+-- writes, so nothing here can veto a later command.
+local GIVE_UP_AFTER = 3
+local read_failures = {}
+
+local function probe_read(addr, count, kind)
+    if (read_failures[addr] or 0) >= GIVE_UP_AFTER then return nil end
+    local ok, regs = pcall(host.modbus_read, addr, count, kind)
+    if ok and regs and regs[1] ~= nil then
+        read_failures[addr] = nil
+        return regs
+    end
+    local failures = (read_failures[addr] or 0) + 1
+    read_failures[addr] = failures
+    if failures == GIVE_UP_AFTER then
+        host.log("info", string.format(
+            "CTEK: register %d did not answer %d times; leaving it alone " ..
+            "until restart", addr, GIVE_UP_AFTER))
+    end
+    return nil
+end
+
 local function clamp_amps(a)
     if a == nil then return 0 end
     a = math.floor(a + 0.5)
@@ -161,6 +191,9 @@ local function write_setpoint(amps)
     return true
 end
 
+-- Deliberately not bounded: this runs once, from driver_init, so it can never
+-- cost more than a single failed read. Sharing a failure budget with the
+-- poll-time read of the same register would only spend that budget early.
 local function read_setpoint()
     local ok, regs = pcall(host.modbus_read, REG_CHARGE_LIMIT, 1, "holding")
     if not ok or not regs or not regs[1] then return nil end
@@ -190,6 +223,7 @@ function driver_init(config)
     -- Sanity-check the CCU is serving API v1 on this unit. A mismatch
     -- here means the operator enabled v2 instead — suggest the v2
     -- driver rather than silently reading back garbage.
+    -- Deliberately not bounded: one read at startup, never repeated.
     local ok, api_regs = pcall(host.modbus_read, REG_API_VERSION, 2, "holding")
     if ok and api_regs and api_regs[1] then
         local api_ver    = api_regs[1]
@@ -215,8 +249,8 @@ function driver_poll()
     -- battery/other models keyed on device_id stay stable across driver
     -- renames.
     if not sn_read then
-        local ok_sn, sn_regs = pcall(host.modbus_read, REG_SERIAL_BASE, 6, "holding")
-        if ok_sn and sn_regs then
+        local sn_regs = probe_read(REG_SERIAL_BASE, 6, "holding")
+        if sn_regs then
             local sn = decode_ascii(sn_regs, 6)
             if #sn > 0 then
                 host.set_sn(sn)
@@ -228,12 +262,12 @@ function driver_poll()
     -- Telemetry block: 9 registers in one transaction so the energy
     -- counter, per-phase current + voltage, and total power all come
     -- from a consistent snapshot.
-    local ok_tel, tel = pcall(host.modbus_read, REG_TELEMETRY, 9, "holding")
+    local tel = probe_read(REG_TELEMETRY, 9, "holding")
     local ev_w     = 0
     local i_l1, i_l2, i_l3 = 0, 0, 0
     local v_l1, v_l2, v_l3 = 0, 0, 0
     local lifetime_wh = 0
-    if ok_tel and tel then
+    if tel then
         lifetime_wh = host.decode_u32_be(tel[1], tel[2])
         i_l1        = (tel[3] or 0) / 1000
         i_l2        = (tel[4] or 0) / 1000
@@ -253,8 +287,8 @@ function driver_poll()
     -- charging / connected conservatively from the current + power
     -- readings so the dispatch clamp has something to key off.
     local limit, max_assign = last_set_a, max_a
-    local ok_ctl, ctl = pcall(host.modbus_read, REG_CHARGE_LIMIT, 2, "holding")
-    if ok_ctl and ctl then
+    local ctl = probe_read(REG_CHARGE_LIMIT, 2, "holding")
+    if ctl then
         limit       = ctl[1] or last_set_a
         max_assign  = ctl[2] or max_a
         last_set_a  = limit

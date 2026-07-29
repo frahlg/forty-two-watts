@@ -19,7 +19,7 @@ DRIVER = {
   id           = "solaredge",
   name         = "SolarEdge inverter + meter",
   manufacturer = "SolarEdge",
-  version      = "1.1.0",
+  version      = "2.1.1",
   protocols    = { "modbus" },
   capabilities = { "meter", "pv", "pv-curtail" },
   description  = "SolarEdge HD-Wave / StorEdge via Modbus TCP (SunSpec) with PV active-power-limit curtail.",
@@ -146,12 +146,43 @@ local function scale(value, sf)
     return value * pow10(sf)
 end
 
+-- A register the inverter never answers costs a failed read on every poll for
+-- as long as the driver keeps asking. The host counts those failures against
+-- the poll whether or not the pcall caught them, so a driver that keeps
+-- reporting telemetry while permanently failing one read gets the whole site
+-- marked offline. Give a register three chances, then leave it alone until
+-- restart. Three rather than one: a single failure is not proof, the link may
+-- just have been slow.
+--
+-- Poll-path reads only. driver_fingerprint has its own unbounded reads on
+-- purpose (see the note there), and the curtail path writes rather than reads,
+-- so nothing here can veto a command.
+local GIVE_UP_AFTER = 3
+local read_failures = {}
+
+local function probe_read(addr, count, kind)
+    if (read_failures[addr] or 0) >= GIVE_UP_AFTER then return nil end
+    local ok, regs = pcall(host.modbus_read, addr, count, kind)
+    if ok and regs and regs[1] ~= nil then
+        read_failures[addr] = nil
+        return regs
+    end
+    local failures = (read_failures[addr] or 0) + 1
+    read_failures[addr] = failures
+    if failures == GIVE_UP_AFTER then
+        host.log("info", string.format(
+            "SolarEdge: register %d did not answer %d times; leaving it alone " ..
+            "until restart", addr, GIVE_UP_AFTER))
+    end
+    return nil
+end
+
 -- Read a single register and return it as an i16 (signed) scale factor.
 -- Returns 0 on read failure so downstream scaling becomes a no-op (the
 -- caller will get raw register values until the next retry).
 local function read_sf(addr)
-    local ok, regs = pcall(host.modbus_read, addr, 1, "input")
-    if ok and regs then
+    local regs = probe_read(addr, 1, "input")
+    if regs then
         return host.decode_i16(regs[1])
     end
     return 0
@@ -201,6 +232,11 @@ end
 --   false → responded, but it's a non-SolarEdge device (no SunSpec marker,
 --           or a SunSpec marker from another vendor)
 --   nil    → couldn't read (wrong unit id, not Modbus, timeout) → inconclusive
+--
+-- These reads deliberately do NOT go through probe_read. Nothing here runs
+-- from driver_poll, so a failure costs no failed poll; and this is the probe
+-- that decides whether the device is a SolarEdge at all. Bounding it would let
+-- three transient timeouts make the device permanently undetectable.
 function driver_fingerprint()
     -- SunSpec identifier "SunS" lives at 40000-40001 (0x5375, 0x6E53).
     local ok, sid = pcall(host.modbus_read, 40000, 2, "input")
@@ -248,8 +284,8 @@ end
 function driver_poll()
     -- ---- Serial number (SunSpec common block, one-shot) ----
     if not sn_read then
-        local ok_sn, sn_regs = pcall(host.modbus_read, 40052, 16, "input")
-        if ok_sn and sn_regs then
+        local sn_regs = probe_read(40052, 16, "input")
+        if sn_regs then
             local sn = decode_ascii(sn_regs, 16)
             if #sn > 0 then
                 host.set_sn(sn)
@@ -291,45 +327,45 @@ function driver_poll()
     -- ---- Inverter AC ----
 
     -- AC power: 40083, I16
-    local ok_acw, acw_regs = pcall(host.modbus_read, 40083, 1, "input")
+    local acw_regs = probe_read(40083, 1, "input")
     local ac_w = 0
-    if ok_acw and acw_regs then
+    if acw_regs then
         ac_w = scale(host.decode_i16(acw_regs[1]), sf.ac_power)
     end
 
     -- Frequency: 40085, U16
-    local ok_hz, hz_regs = pcall(host.modbus_read, 40085, 1, "input")
+    local hz_regs = probe_read(40085, 1, "input")
     local hz = 0
-    if ok_hz and hz_regs then
+    if hz_regs then
         hz = scale(hz_regs[1], sf.hz)
     end
 
     -- Lifetime energy: 40093-40094, U32 BE (Wh once scaled)
-    local ok_le, le_regs = pcall(host.modbus_read, 40093, 2, "input")
+    local le_regs = probe_read(40093, 2, "input")
     local lifetime_wh = 0
-    if ok_le and le_regs then
+    if le_regs then
         lifetime_wh = scale(host.decode_u32_be(le_regs[1], le_regs[2]), sf.energy)
     end
 
     -- Heat-sink temperature: 40103, I16
-    local ok_temp, temp_regs = pcall(host.modbus_read, 40103, 1, "input")
+    local temp_regs = probe_read(40103, 1, "input")
     local temp_c = 0
-    if ok_temp and temp_regs then
+    if temp_regs then
         temp_c = scale(host.decode_i16(temp_regs[1]), sf.temp)
     end
 
     -- MPPT1 A/V: 40140-40141, U16 each
-    local ok_m1, m1_regs = pcall(host.modbus_read, 40140, 2, "input")
+    local m1_regs = probe_read(40140, 2, "input")
     local mppt1_a, mppt1_v = 0, 0
-    if ok_m1 and m1_regs then
+    if m1_regs then
         mppt1_a = scale(m1_regs[1], sf.mppt_a)
         mppt1_v = scale(m1_regs[2], sf.mppt_v)
     end
 
     -- MPPT2 A/V: 40160-40161, U16 each
-    local ok_m2, m2_regs = pcall(host.modbus_read, 40160, 2, "input")
+    local m2_regs = probe_read(40160, 2, "input")
     local mppt2_a, mppt2_v = 0, 0
-    if ok_m2 and m2_regs then
+    if m2_regs then
         mppt2_a = scale(m2_regs[1], sf.mppt_a)
         mppt2_v = scale(m2_regs[2], sf.mppt_v)
     end
@@ -354,50 +390,50 @@ function driver_poll()
     -- ---- Meter ----
 
     -- Total W: 40100, I16
-    local ok_mw, mw_regs = pcall(host.modbus_read, 40100, 1, "input")
+    local mw_regs = probe_read(40100, 1, "input")
     local meter_w = 0
-    if ok_mw and mw_regs then
+    if mw_regs then
         meter_w = scale(host.decode_i16(mw_regs[1]), sf.meter_w)
     end
 
     -- Per-phase current: 40191-40193, I16 each
-    local ok_la, la_regs = pcall(host.modbus_read, 40191, 3, "input")
+    local la_regs = probe_read(40191, 3, "input")
     local l1_a, l2_a, l3_a = 0, 0, 0
-    if ok_la and la_regs then
+    if la_regs then
         l1_a = scale(host.decode_i16(la_regs[1]), sf.meter_a)
         l2_a = scale(host.decode_i16(la_regs[2]), sf.meter_a)
         l3_a = scale(host.decode_i16(la_regs[3]), sf.meter_a)
     end
 
     -- Per-phase voltage: 40196-40198, I16 each
-    local ok_lv, lv_regs = pcall(host.modbus_read, 40196, 3, "input")
+    local lv_regs = probe_read(40196, 3, "input")
     local l1_v, l2_v, l3_v = 0, 0, 0
-    if ok_lv and lv_regs then
+    if lv_regs then
         l1_v = scale(host.decode_i16(lv_regs[1]), sf.meter_v)
         l2_v = scale(host.decode_i16(lv_regs[2]), sf.meter_v)
         l3_v = scale(host.decode_i16(lv_regs[3]), sf.meter_v)
     end
 
     -- Per-phase power: 40207-40209, I16 each
-    local ok_lw, lw_regs = pcall(host.modbus_read, 40207, 3, "input")
+    local lw_regs = probe_read(40207, 3, "input")
     local l1_w, l2_w, l3_w = 0, 0, 0
-    if ok_lw and lw_regs then
+    if lw_regs then
         l1_w = scale(host.decode_i16(lw_regs[1]), sf.phase_w)
         l2_w = scale(host.decode_i16(lw_regs[2]), sf.phase_w)
         l3_w = scale(host.decode_i16(lw_regs[3]), sf.phase_w)
     end
 
     -- Export energy: 40226-40227, U32 BE
-    local ok_exp, exp_regs = pcall(host.modbus_read, 40226, 2, "input")
+    local exp_regs = probe_read(40226, 2, "input")
     local export_wh = 0
-    if ok_exp and exp_regs then
+    if exp_regs then
         export_wh = scale(host.decode_u32_be(exp_regs[1], exp_regs[2]), sf.meter_energy)
     end
 
     -- Import energy: 40234-40235, U32 BE
-    local ok_imp, imp_regs = pcall(host.modbus_read, 40234, 2, "input")
+    local imp_regs = probe_read(40234, 2, "input")
     local import_wh = 0
-    if ok_imp and imp_regs then
+    if imp_regs then
         import_wh = scale(host.decode_u32_be(imp_regs[1], imp_regs[2]), sf.meter_energy)
     end
 
