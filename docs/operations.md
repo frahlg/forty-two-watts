@@ -70,14 +70,15 @@ changing ownership or deleting any SQLite sidecar files.
 
 ## Configuration
 
-`config.example.yaml` and `go/internal/config` define the current schema.
+[`config.example.yaml`](../config.example.yaml) and
+[`go/internal/config`](../go/internal/config) define the current schema.
 Edits are validated before application. A rejected hot reload leaves the
 previous live configuration intact.
 
 Driver set and most control values reload live. Listener addresses, state
 paths and some integration transports are startup bindings; restart after
 changing them. When unsure, inspect the restart classification in
-`go/internal/config/restart_required.go`.
+[`go/internal/config/restart_required.go`](../go/internal/config/restart_required.go).
 
 ## LAN and API access
 
@@ -181,7 +182,8 @@ driver configuration.
 
 ### Configuration rejected
 
-Read the validation error, compare with `config.example.yaml`, fix the file and
+Read the validation error, compare with
+[`config.example.yaml`](../config.example.yaml), fix the file and
 save again. Do not delete `state.db` to resolve a YAML error.
 
 ### Port already in use
@@ -196,7 +198,8 @@ Stop the conflicting service or change the configured API port, then restart.
 
 `make build-arm64` and `make build-amd64` produce static Core and `ftw-backup`
 binaries.
-`deploy/ftw.service` is the reference systemd unit. A conventional layout is:
+[`deploy/ftw.service`](../deploy/ftw.service) is the reference systemd unit. A
+conventional layout is:
 
 ```text
 /opt/ftw/                 binary, web, bundled drivers, optional optimizer

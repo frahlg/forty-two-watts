@@ -86,7 +86,8 @@ the driver is a bug.
 
 ## Host capabilities
 
-`go/internal/drivers/lua.go` is the complete, current host API. It exposes
+[`go/internal/drivers/lua.go`](../go/internal/drivers/lua.go) is the complete,
+current host API. It exposes
 telemetry, diagnostic metrics, identity, time/JSON helpers and capability-gated
 MQTT, Modbus, HTTP, WebSocket and raw TCP operations.
 
@@ -141,7 +142,7 @@ instead of hand-rolling the byte loop.
    before enabling automatic dispatch.
 7. Add configuration example only when the integration needs non-obvious
    operator input.
-8. Add Go-hosted Lua tests beside `go/internal/drivers`.
+8. Add Go-hosted Lua tests beside [`go/internal/drivers`](../go/internal/drivers).
 
 Useful checks:
 

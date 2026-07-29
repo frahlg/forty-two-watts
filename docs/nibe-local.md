@@ -130,7 +130,8 @@ thermal/load models consume `hp_power_w` etc. as twins.
 ## Testing
 
 A live integration test exercises the driver against a real pump
-(`go/internal/drivers/nibe_local_test.go`, `TestNibeLocalLive`), skipped unless
+([`go/internal/drivers/nibe_local_test.go`](../go/internal/drivers/nibe_local_test.go),
+`TestNibeLocalLive`), skipped unless
 `NIBE_LIVE=1`:
 
 ```bash
