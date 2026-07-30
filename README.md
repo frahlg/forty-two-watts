@@ -98,11 +98,14 @@ public relay.
 
 The official Home Assistant app repository is
 [`srcfl/home-assistant-addons`](https://github.com/srcfl/home-assistant-addons).
-It has no published beta or stable app yet. The bootstrap version is not for
-normal or production use.
+Its first beta,
+[`ftw-v0.1.0-beta.1`](https://github.com/srcfl/home-assistant-addons/releases/tag/ftw-v0.1.0-beta.1),
+is published. There is no stable app yet — Home Assistant OS and Supervisor
+qualification has to finish first — so treat it as a beta rather than a
+production install.
 
-After the first beta is published, open **Settings → Apps → App store →
-Repositories** in Home Assistant and add:
+Open **Settings → Apps → App store → Repositories** in Home Assistant and
+add:
 
 ```text
 https://github.com/srcfl/home-assistant-addons
