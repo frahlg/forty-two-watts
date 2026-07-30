@@ -34,6 +34,7 @@
 //	host.json_encode(t)             -- Lua table → JSON string
 //	host.http_get(url, headers)     -- HTTP GET, returns (body, nil) or (nil, err)
 //	host.http_post(url, body, headers) -- HTTP POST, returns (body, nil) or (nil, err)
+//	host.http_patch(url, body, headers) -- HTTP PATCH (write); needs capabilities.http.allow_write
 //	host.ws_open(url, headers)      -- open WebSocket; (true, nil) or (nil, err)
 //	host.ws_send(text)              -- send one text frame; (true, nil) or (nil, err)
 //	host.ws_messages()              -- drain inbound frames; "" entry = EOF
@@ -1072,6 +1073,8 @@ func registerHost(L *lua.LState, env *HostEnv) {
 	// ---- HTTP capability ----
 	// host.http_get(url, headers?) → (body, nil) or (nil, error_string)
 	// host.http_post(url, body, headers?) → (body, nil) or (nil, error_string)
+	// host.http_patch(url, body, headers?) → (body, nil) or (nil, error_string);
+	//   the mutating verb, gated by capabilities.http.allow_write (default off)
 	// headers is an optional Lua table {["Content-Type"]="application/json", ...}
 	rawTLSPin := strings.TrimSpace(env.HTTPTLSPinSHA256)
 	tlsPin := normalizeHexFingerprint(rawTLSPin)
@@ -1152,6 +1155,13 @@ func registerHost(L *lua.LState, env *HostEnv) {
 		CheckRedirect: func(req *net_http.Request, via []*net_http.Request) error {
 			if len(via) >= 10 {
 				return fmt.Errorf("stopped after 10 redirects")
+			}
+			// A redirected PATCH is unsafe: Go re-issues 301/302/303 as a
+			// body-less GET, so the device write silently never lands while the
+			// call still reports success. Refuse it — a write must reach the
+			// host it was checked against, or fail loudly.
+			if len(via) > 0 && via[0].Method == "PATCH" {
+				return fmt.Errorf("redirect not followed for PATCH (a redirected write cannot be verified)")
 			}
 			if ok, reason := hostAllowed(req.URL.String()); !ok {
 				return fmt.Errorf("redirect blocked: %s", reason)
@@ -1267,6 +1277,67 @@ func registerHost(L *lua.LState, env *HostEnv) {
 		}
 		payload := L.CheckString(2)
 		req, err := net_http.NewRequest("POST", url, strings.NewReader(payload))
+		if err != nil {
+			L.Push(lua.LNil)
+			L.Push(lua.LString(err.Error()))
+			return 2
+		}
+		req.Header.Set("Content-Type", "application/json")
+		applyHeaders(req, L, 3)
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			L.Push(lua.LNil)
+			L.Push(lua.LString(err.Error()))
+			return 2
+		}
+		defer resp.Body.Close()
+		body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		if err != nil {
+			L.Push(lua.LNil)
+			L.Push(lua.LString(err.Error()))
+			return 2
+		}
+		if resp.StatusCode >= 400 {
+			L.Push(lua.LNil)
+			L.Push(lua.LString(fmt.Sprintf("HTTP %d: %s", resp.StatusCode, string(body))))
+			return 2
+		}
+		env.recordWriteEvidence("write_ack")
+		L.Push(lua.LString(string(body)))
+		return 1
+	}))
+
+	// host.http_patch(url, body, headers?) → (body, nil) or (nil, error_string).
+	// The mutating verb REST device APIs use for state-changing writes (a NIBE
+	// heat pump's Solar PV surplus feed, srcfl/ftw#537). Unlike http_post it is
+	// gated by an explicit capabilities.http.allow_write beyond the plain HTTP
+	// grant, so granting HTTP for telemetry never implicitly grants the ability
+	// to mutate a device. Same allowlist, TLS pinning and 1MB response cap as
+	// the other verbs.
+	host.RawSetString("http_patch", L.NewFunction(func(L *lua.LState) int {
+		if !env.HTTP {
+			L.Push(lua.LNil)
+			L.Push(lua.LString("http: capability not granted"))
+			return 2
+		}
+		if !env.HTTPAllowWrite {
+			L.Push(lua.LNil)
+			L.Push(lua.LString("http: write not granted (set capabilities.http.allow_write)"))
+			return 2
+		}
+		if err := env.allowWrite("http.patch"); err != nil {
+			L.Push(lua.LNil)
+			L.Push(lua.LString(err.Error()))
+			return 2
+		}
+		url := L.CheckString(1)
+		if ok, reason := hostAllowed(url); !ok {
+			L.Push(lua.LNil)
+			L.Push(lua.LString("http: " + reason))
+			return 2
+		}
+		payload := L.CheckString(2)
+		req, err := net_http.NewRequest("PATCH", url, strings.NewReader(payload))
 		if err != nil {
 			L.Push(lua.LNil)
 			L.Push(lua.LString(err.Error()))

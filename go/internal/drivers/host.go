@@ -95,7 +95,14 @@ type HostEnv struct {
 	// verification (unchanged default for all existing HTTP drivers).
 	// Populated from driver config `capabilities.http.tls_pin_sha256`.
 	HTTPTLSPinSHA256 string
-	WS               WSCap // nil → ws_* calls return ErrNoCapability
+	// HTTPAllowWrite gates host.http_patch, and only http_patch —
+	// http_get stays a read and http_post stays under the plain HTTP
+	// capability (existing drivers POST to query-style APIs). http_patch
+	// returns an error string unless this is set, so granting HTTP for
+	// telemetry never implicitly grants device mutation. Populated from
+	// driver config `capabilities.http.allow_write`.
+	HTTPAllowWrite bool
+	WS             WSCap // nil → ws_* calls return ErrNoCapability
 	// WSAllowedHosts mirrors HTTPAllowedHosts but for ws://+wss:// URLs
 	// passed to host.ws_open. Same matching semantics; empty = any host.
 	WSAllowedHosts []string
@@ -382,6 +389,11 @@ func (h *HostEnv) WithSerial(s SerialCap) *HostEnv { h.Serial = s; return h }
 
 // WithHTTP enables the HTTP capability.
 func (h *HostEnv) WithHTTP() *HostEnv { h.HTTP = true; return h }
+
+// WithHTTPAllowWrite grants the mutating HTTP verb host.http_patch. Scoped
+// to http_patch only; http_get/http_post are unaffected. See
+// HostEnv.HTTPAllowWrite.
+func (h *HostEnv) WithHTTPAllowWrite() *HostEnv { h.HTTPAllowWrite = true; return h }
 
 // WithHTTPAllowedHosts installs an allowlist. An empty / nil slice
 // means "any host" (backward compatible). Matched against URL host.

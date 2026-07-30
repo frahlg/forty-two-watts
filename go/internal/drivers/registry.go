@@ -231,6 +231,9 @@ func (r *Registry) Add(ctx context.Context, cfg config.Driver) error {
 		if pin := strings.TrimSpace(cfg.Capabilities.HTTP.TLSPinSHA256); pin != "" {
 			env.WithHTTPTLSPin(pin)
 		}
+		if cfg.Capabilities.HTTP.AllowWrite {
+			env.WithHTTPAllowWrite()
+		}
 	}
 	if cfg.Capabilities.WebSocket != nil {
 		env.WithWS(NewGorillaWS(cfg.Name))
