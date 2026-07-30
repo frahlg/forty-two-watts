@@ -26,7 +26,8 @@ type Registry struct {
 	MQTTFactory func(name string, c *config.MQTTConfig) (MQTTCap, error)
 	// ModbusFactory creates a Modbus capability.
 	ModbusFactory func(name string, c *config.ModbusConfig) (ModbusCap, error)
-	// ARPLookup resolves a hostname/IP to a MAC for L2-stable identity.
+	// ARPLookup resolves an on-LAN IPv4 literal to a MAC for L2-stable
+	// identity; hostnames and off-segment addresses yield ("", false).
 	// Optional — when nil, devices fall back to endpoint-hash IDs.
 	ARPLookup func(host string) (mac string, ok bool)
 	// SecretPersister, when set, durably stores a driver secret (keyed by
@@ -189,6 +190,19 @@ func (r *Registry) Add(ctx context.Context, cfg config.Driver) error {
 		}
 		if pin := strings.TrimSpace(cfg.Capabilities.HTTP.TLSPinSHA256); pin != "" {
 			env.WithHTTPTLSPin(pin)
+		}
+		// A LAN HTTP device often has no serial until it answers, and the
+		// HTTP branch sets no endpoint — so without this it has no stable
+		// identity at all and its persistent state is orphaned on a DHCP
+		// lease change. Probe only the driver's OWN address, never the
+		// merged allowlist: that list also names vendor cloud endpoints,
+		// which must not be identity candidates.
+		if r.ARPLookup != nil {
+			if host := httpDeviceHost(cfg.Config); host != "" {
+				if mac, ok := r.ARPLookup(host); ok {
+					env.SetMAC(mac)
+				}
+			}
 		}
 	}
 	if cfg.Capabilities.WebSocket != nil {
@@ -636,6 +650,29 @@ func mergeAllowedHosts(explicit []string, drvCfg map[string]any) []string {
 		}
 	}
 	return out
+}
+
+// httpDeviceHost returns the address of the device an HTTP driver talks
+// to, taken from its own config block: the `host` key, else the host part
+// of `url`. Any port is stripped — ARP keys on the L3 address alone.
+// Returns "" for a driver with neither (a cloud driver whose base URL
+// lives in the Lua source, not in config).
+func httpDeviceHost(drvCfg map[string]any) string {
+	if drvCfg == nil {
+		return ""
+	}
+	if v, ok := drvCfg["host"].(string); ok {
+		if h := strings.TrimSpace(v); h != "" {
+			host, _, _ := splitHostPortLower(h)
+			return host
+		}
+	}
+	if v, ok := drvCfg["url"].(string); ok {
+		if u, err := url.Parse(strings.TrimSpace(v)); err == nil && u.Hostname() != "" {
+			return strings.ToLower(u.Hostname())
+		}
+	}
+	return ""
 }
 
 func findDriver(list []config.Driver, name string) (config.Driver, bool) {
