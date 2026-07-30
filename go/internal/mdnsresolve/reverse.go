@@ -1,20 +1,19 @@
-package scanner
+package mdnsresolve
 
 import (
 	"context"
 	"fmt"
 	"net"
 	"strings"
-	"time"
 
 	"golang.org/x/net/dns/dnsmessage"
 )
 
-var mdnsAddr = &net.UDPAddr{IP: net.IPv4(224, 0, 0, 251), Port: 5353}
-
-// reverseMDNS sends a reverse PTR query with the QU bit set so devices reply
-// directly to our ephemeral socket instead of requiring a bind to port 5353.
-func reverseMDNS(ctx context.Context, ip string) string {
+// ReverseLookup asks the device at ip to name itself, so a discovered device
+// can be shown and stored by its self-broadcast ".local" name rather than a
+// DHCP-assigned address. Returns "" when nothing answers — callers treat a
+// missing name as ordinary, not as an error.
+func ReverseLookup(ctx context.Context, ip string) string {
 	v4 := net.ParseIP(ip).To4()
 	if v4 == nil {
 		return ""
@@ -25,35 +24,19 @@ func reverseMDNS(ctx context.Context, ip string) string {
 		return ""
 	}
 	msg := dnsmessage.Message{Questions: []dnsmessage.Question{{
-		Name: name, Type: dnsmessage.TypePTR, Class: dnsmessage.Class(0x8001),
+		Name: name, Type: dnsmessage.TypePTR, Class: classQU,
 	}}}
 	packed, err := msg.Pack()
 	if err != nil {
 		return ""
 	}
-	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero})
-	if err != nil {
-		return ""
-	}
-	defer conn.Close()
-	deadline := time.Now().Add(900 * time.Millisecond)
-	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
-		deadline = d
-	}
-	_ = conn.SetDeadline(deadline)
-	if _, err := conn.WriteToUDP(packed, mdnsAddr); err != nil {
-		return ""
-	}
-	buf := make([]byte, 1500)
-	for {
-		n, _, err := conn.ReadFromUDP(buf)
-		if err != nil {
-			return ""
-		}
-		if host := parsePTRAnswer(buf[:n], qname); host != "" {
-			return host
-		}
-	}
+
+	var host string
+	_ = exchange(ctx, packed, func(packet []byte) bool {
+		host = parsePTRAnswer(packet, qname)
+		return host != ""
+	})
+	return host
 }
 
 func parsePTRAnswer(packet []byte, qname string) string {

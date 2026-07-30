@@ -15,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/srcfl/ftw/go/internal/mdnsresolve"
 )
 
 // FoundDevice is one open port discovered on the local network.
@@ -129,7 +131,7 @@ func resolveHostnames(ctx context.Context, devices []FoundDevice) {
 			}
 			if name == "" && ctx.Err() == nil {
 				mdnsCtx, cancel := context.WithTimeout(ctx, 900*time.Millisecond)
-				name = reverseMDNS(mdnsCtx, ip)
+				name = mdnsresolve.ReverseLookup(mdnsCtx, ip)
 				cancel()
 			}
 			if name != "" {
