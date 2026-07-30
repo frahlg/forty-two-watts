@@ -1,5 +1,61 @@
 # Changelog
 
+## 1.14.0
+
+### Minor Changes
+
+- a342532: Lua host: `host.http_patch(url, body, headers)` — the verb REST device APIs
+  use for state-changing writes, added for the NIBE Solar PV surplus feed
+  (srcfl/ftw#537). It is gated by a new, explicit `capabilities.http.allow_write`
+  beyond the plain `capabilities.http` grant, so granting HTTP for telemetry
+  never implicitly grants the ability to mutate a device. Scope is exactly
+  PATCH: `http_get` stays a read and `http_post` stays under the plain grant
+  unchanged (existing drivers POST to query-style APIs), so no existing HTTP
+  driver changes behaviour. Without the grant a driver gets an error string and
+  the request never leaves the host.
+
+  The verb shares the allowlist, TLS-pinning, 1 MB response cap and managed-write
+  accounting of the other verbs, and — unlike `http_post` — refuses to follow
+  redirects: Go re-issues a redirected `PATCH` (301/302/303) as a body-less GET,
+  which would otherwise report success for a device write that never landed.
+
+### Patch Changes
+
+- 9d6c1b6: Give the header's status corner three distinct marks.
+
+  A waiting update and a degraded optimizer both rendered as the same pulsing
+  amber mark, so a field tester read the optimizer warning as an update icon.
+  An update now draws a blue download-to-drive icon and a degraded optimizer
+  an orange warning triangle, each fading gently; when neither is pending the
+  slot shows a steady green dot. Silhouette, colour and motion all differ, so
+  the marks stay apart without relying on colour alone.
+
+  An update and a degraded optimizer pending at once now show both marks —
+  previously the warning suppressed the update entirely. The separate
+  connection dot moves into the same slot, and a lost connection replaces the
+  other marks rather than sitting beside readings we may no longer be able to
+  refresh.
+
+- aeb61fd: Move the bundled-driver pin to device-drivers main. A gateway booting offline no longer runs Pixii, SolarEdge legacy or Sungrow with the poll-counter flap on an absent optional register.
+- 828eccb: Move the bundled-driver pin to device-drivers@76c968bd. A gateway booting
+  offline no longer retries the Sungrow EMS control block on an inverter that
+  has already refused it — an SG string inverter logged a failed
+  self-consumption reset once per watchdog tick for the life of the session.
+  Sungrow is the only bundled driver the move changes (1.5.6 → 1.5.7).
+- 4827627: Require a SemVer bump from any bundled driver whose bytes change between the old pin and the new one, asked of the pinned snapshots rather than of this repository's Git history.
+- 2ec7f2d: `make drivers` fetches the bundled snapshot from the pinned device-drivers commit, and CI proves a build works from the pin alone.
+- a1acf67: Driver source is no longer committed here. `drivers/*.lua` is gitignored and fetched from the pinned device-drivers commit with `make drivers`.
+- cbbabae: Clearer optimizer status when the `ftw-optimizer` sidecar is unavailable. The
+  containerized core ships no Python, so the `auto`/`process` transport can never
+  start the bundled `python3` worker there. Instead of surfacing a bare
+  `start optimizer "python3": exec: "python3": executable file not found in $PATH`
+  — which reads as a missing core dependency and hides the real remedy — core now
+  reports that the optimizer worker is unavailable and points operators at the
+  `ftw-optimizer` sidecar, while continuing to plan safely on the built-in Go
+  planner. Native/all-in-one builds that set `FTW_OPTIMIZER_PYTHON` are unchanged.
+- 28b1870: The Sungrow zero-power test confirms the battery before commanding, matching the driver's refusal to write EMS registers a string inverter does not implement.
+- 3fa16c4: Watch for a stale bundled-driver pin. A daily job compares `drivers/` against device-drivers `main` and opens one tracking issue when a bundled driver has changed upstream.
+
 ## 1.13.5
 
 ### Patch Changes
