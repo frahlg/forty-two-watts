@@ -10,6 +10,7 @@ requires-python = ">=3.11"
 dependencies = [
   "cvxpy==1.9.2",
   "highspy==1.15.1",
+  "scipy==1.18.0",
 ]
 
 [project.optional-dependencies]
@@ -20,6 +21,8 @@ ftw-optimizer = "ftw_optimizer.worker:main"
 ftw-optimizer-healthcheck = "ftw_optimizer.healthcheck:main"
 ftw-optimizer-replay = "ftw_optimizer.replay:main"
 ftw-optimizer-backtest = "ftw_optimizer.backtest:main"
+ftw-optimizer-calibrate-thermal = "ftw_optimizer.thermal_twin:calibration_main"
+ftw-optimizer-thermal-backtest = "ftw_optimizer.thermal_backtest:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["ftw_optimizer"]

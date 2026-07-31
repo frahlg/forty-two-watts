@@ -1,0 +1,88 @@
+{
+  "schema_version": 1,
+  "kind": "ftw.home_thermal_spec",
+  "site_id": "home",
+  "primary_zone_id": "main",
+  "zones": [
+    {
+      "id": "main",
+      "floor_area_m2": 145,
+      "volume_m3": 360,
+      "comfort": {
+        "minimum_temperature_c": 19,
+        "maximum_temperature_c": 23
+      }
+    }
+  ],
+  "heating": {
+    "source": "air_water_heat_pump",
+    "emitters": "radiators",
+    "maximum_electric_power_w": 8000,
+    "buffer_tank_l": 200,
+    "hot_water_tank_l": 180,
+    "cop_curve": {
+      "reference_temperature_c": 7,
+      "cop_at_reference": 3.4,
+      "slope_per_c": 0.05,
+      "minimum_cop": 1.5,
+      "maximum_cop": 5.5
+    }
+  },
+  "sensors": {
+    "indoor_temperature": {
+      "driver": "heat-pump",
+      "metric": "hp_indoor_temp_c"
+    },
+    "outdoor_temperature": {
+      "driver": "heat-pump",
+      "metric": "hp_outdoor_temp_c"
+    },
+    "heat_pump_power": {
+      "driver": "heat-pump",
+      "metric": "hp_power_w"
+    },
+    "supply_temperature": {
+      "driver": "heat-pump",
+      "metric": "hp_supply_temp_c"
+    },
+    "return_temperature": {
+      "driver": "heat-pump",
+      "metric": "hp_return_temp_c"
+    },
+    "hot_water_temperature": {
+      "driver": "heat-pump",
+      "metric": "hp_hw_top_temp_c"
+    }
+  },
+  "priors": {
+    "heat_loss_w_per_k": [
+      5,
+      5000
+    ],
+    "total_capacity_wh_per_k": [
+      200,
+      1000000
+    ],
+    "mass_coupling_w_per_k": [
+      5,
+      10000
+    ],
+    "air_capacity_fraction": [
+      0.01,
+      0.6
+    ],
+    "disturbance_heat_w": [
+      -20000,
+      20000
+    ]
+  },
+  "model_selection": {
+    "candidates": [
+      "ftw-1r1c-v1",
+      "ftw-2r2c-v1"
+    ],
+    "train_fraction": 0.75,
+    "minimum_rollout_improvement_c": 0.05,
+    "minimum_relative_improvement": 0.1
+  }
+}

@@ -10,6 +10,9 @@ import numpy as np
 
 from . import SCHEMA_VERSION
 from .protocol import ProtocolError, finite_number, positive_number, require_dict, require_list
+from .home_spec import TWO_R_TWO_C_MODEL_TYPE
+from .thermal_family import two_r2c_transition_coefficients
+from .thermal_twin import thermal_transition_coefficients
 
 
 OPTIMAL_STATUSES = {cp.OPTIMAL, cp.OPTIMAL_INACCURATE, cp.USER_LIMIT}
@@ -36,7 +39,7 @@ class FlexVars:
 class ThermalVars:
     spec: dict[str, Any]
     power: cp.Expression
-    temperature: cp.Variable
+    temperature: cp.Expression
     lower_slack: cp.Variable
     upper_slack: cp.Variable
 
@@ -460,17 +463,45 @@ def solve(payload: dict[str, Any]) -> dict[str, Any]:
             power_var = cp.Variable(n, nonneg=True, name=f"thermal_{i}_power")
             constraints.append(power_var <= positive_number(spec.get("max_power_w"), f"thermal_loads[{i}].max_power_w"))
             power = power_var
-        gain = positive_number(spec.get("gain_c_per_kwh"), f"thermal_loads[{i}].gain_c_per_kwh")
-        loss = max(0.0, finite_number(spec.get("loss_per_hour", 0), f"thermal_loads[{i}].loss_per_hour"))
-        temp = cp.Variable(n + 1, name=f"thermal_{i}_temp")
         lower_slack = cp.Variable(n + 1, nonneg=True, name=f"thermal_{i}_lower_slack")
         upper_slack = cp.Variable(n + 1, nonneg=True, name=f"thermal_{i}_upper_slack")
-        constraints.append(temp[0] == initial)
-        for t in range(n):
-            constraints.append(
-                temp[t + 1]
-                == temp[t] + gain * power[t] * dt_h[t] / 1000.0 - loss * (temp[t] - outside[t]) * dt_h[t]
+        if spec.get("model_type") == TWO_R_TWO_C_MODEL_TYPE:
+            dynamics_2r2c = two_r2c_transition_coefficients(
+                spec,
+                dt_h,
+                outside,
             )
+            state = cp.Variable((n + 1, 2), name=f"thermal_{i}_state")
+            initial_mass = finite_number(
+                spec.get("initial_mass_temp_c", initial),
+                f"thermal_loads[{i}].initial_mass_temp_c",
+            )
+            constraints += [
+                state[0, 0] == initial,
+                state[0, 1] == initial_mass,
+            ]
+            for t in range(n):
+                constraints.append(
+                    state[t + 1, :]
+                    == cp.Constant(dynamics_2r2c.state[t]) @ state[t, :]
+                    + dynamics_2r2c.outside[t] * outside[t]
+                    + dynamics_2r2c.power[t] * power[t]
+                    + dynamics_2r2c.offset[t]
+                )
+            temp = state[:, 0]
+        else:
+            dynamics = thermal_transition_coefficients(spec, dt_h, outside)
+            state_1r1c = cp.Variable(n + 1, name=f"thermal_{i}_temp")
+            constraints.append(state_1r1c[0] == initial)
+            for t in range(n):
+                constraints.append(
+                    state_1r1c[t + 1]
+                    == dynamics.state[t] * state_1r1c[t]
+                    + dynamics.outside[t] * outside[t]
+                    + dynamics.power[t] * power[t]
+                    + dynamics.offset[t]
+                )
+            temp = state_1r1c
         constraints += [temp + lower_slack >= min_temp, temp - upper_slack <= max_temp]
         service_slack += cp.sum(lower_slack + upper_slack) / ((max_temp - min_temp) * (n + 1))
         total_thermal += power

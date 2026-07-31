@@ -1,0 +1,21 @@
+installPackage(Modelica, "4.1.0+maint.om", exactMatch = true);
+getErrorString();
+loadModel(Modelica, {"4.1.0"});
+getErrorString();
+loadFile("FTW/package.mo");
+getErrorString();
+setCommandLineOptions("--fmiFlags=s:cvode --fmuRuntimeDepends=modelica");
+getErrorString();
+fmuPath := buildModelFMU(
+  FTW.HomeThermalTwin,
+  version = "2.0",
+  fmuType = "cs");
+getErrorString();
+twoNodeFmuPath := buildModelFMU(
+  FTW.TwoNodeHomeThermalTwin,
+  version = "2.0",
+  fmuType = "cs");
+getErrorString();
+if fmuPath == "" or twoNodeFmuPath == "" then
+  exit(1);
+end if;

@@ -66,6 +66,12 @@ release-notes.md
 optimizer/.venv/
 optimizer/.pytest_cache/
 optimizer/**/__pycache__/
+/optimizer/modelica/*.fmu
+/optimizer/modelica/*.log
+/optimizer/modelica/*.libs
+/optimizer/modelica/*.makefile
+/optimizer/modelica/*_external_functions.json
+/optimizer/modelica/*_info.json
 
 # TLS material — never commit.
 *.pem

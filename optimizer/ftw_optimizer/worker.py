@@ -29,7 +29,14 @@ from .protocol import ProtocolError, error_response, parse_request
 # the window stop using this optimizer at once.
 MIN_PROTOCOL_VERSION = 1
 PROTOCOL_VERSION = 1
-FEATURES = ["champion", "recourse", "multistage", "commercial_constraints_v1"]
+FEATURES = [
+    "champion",
+    "recourse",
+    "multistage",
+    "commercial_constraints_v1",
+    "thermal_twin_1r1c_v1",
+    "thermal_twin_2r2c_v1",
+]
 SOLVE_LOCK = threading.Lock()
 
 
