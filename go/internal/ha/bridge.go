@@ -12,8 +12,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"net"
-	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -24,7 +22,6 @@ import (
 
 	"github.com/srcfl/ftw/go/internal/config"
 	"github.com/srcfl/ftw/go/internal/control"
-	"github.com/srcfl/ftw/go/internal/mdnsresolve"
 	"github.com/srcfl/ftw/go/internal/telemetry"
 )
 
@@ -252,13 +249,6 @@ func (b *Bridge) connectAndStart(cfg *config.HomeAssistant, driverNames []string
 
 	opts := paho.NewClientOptions().
 		AddBroker(fmt.Sprintf("tcp://%s:%d", cfg.Broker, cfg.Port)).
-		// A Home Assistant broker is very often reached as homeassistant.local,
-		// which the stdlib resolver cannot answer. See internal/mqtt for why a
-		// TCP-only replacement is complete here.
-		SetCustomOpenConnectionFn(func(uri *url.URL, o paho.ClientOptions) (net.Conn, error) {
-			d := mdnsresolve.Dialer{Dialer: net.Dialer{Timeout: o.ConnectTimeout}}
-			return d.Dial("tcp", uri.Host)
-		}).
 		SetClientID("forty-two-watts-ha").
 		SetAutoReconnect(true).
 		SetConnectRetry(true).

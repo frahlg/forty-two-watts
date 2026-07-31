@@ -63,11 +63,13 @@ FROM debian:trixie-slim
 #                    so it must be installed explicitly; dropping it would make
 #                    every self-update fail its health gate and roll back.
 # libnss-mdns      — resolves ".local" for glibc programs in the image (getent,
-#                    curl, any future cgo build). It needs a reachable
-#                    avahi-daemon socket; see docs/operations.md. The FTW binary
-#                    itself does not rely on this — it resolves ".local" in Go
-#                    via internal/mdnsresolve, which works with CGO_ENABLED=0
-#                    where NSS by definition cannot.
+#                    curl, wget), so in-container debugging agrees with the
+#                    host. apt wires mdns4_minimal into /etc/nsswitch.conf on
+#                    install. At run time it forwards to avahi-daemon over
+#                    /run/avahi-daemon/socket, which must be bind-mounted; see
+#                    docs/operations.md. It does nothing for the FTW binary
+#                    itself, which is CGO_ENABLED=0 and therefore never consults
+#                    NSS — see the note on the builder stage above.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         ca-certificates tzdata wget libnss-mdns && \

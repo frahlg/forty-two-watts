@@ -180,28 +180,30 @@ Verify the broker address from the same network namespace as core, then inspect
 broker and driver logs. Device credentials and topic mappings belong to the
 driver configuration.
 
-### A device `.local` name does not resolve
+### `.local` names inside the container
 
-FTW resolves `.local` names itself over multicast DNS, so this works on any
-base image and any libc. It does need multicast to reach the LAN, which the
-Linux Compose topology provides through `network_mode: host`. Under
-`docker-compose.macos.yml` the container is bridged and multicast does not
-reach the LAN, so configure devices by IP there. The log line to look for is
-`mDNS resolution failed`.
+The image ships `libnss-mdns`, so ordinary glibc tools inside the container —
+`getent hosts zap.local`, `curl`, `wget` — resolve `.local` the way they do on
+the host. `apt` wires `mdns4_minimal [NOTFOUND=return]` into
+`/etc/nsswitch.conf` when the package is installed; nothing else is needed at
+build time.
 
-The image also ships `libnss-mdns`, which lets ordinary glibc tools inside the
-container (`getent hosts zap.local`, `curl`) resolve `.local`. That path needs a
-reachable avahi socket, which is not shared by host networking — mount it
-explicitly if you want it for debugging:
+At run time that path talks to `avahi-daemon` over a Unix socket, and a socket
+is not shared by host networking the way a port is. Mount it explicitly:
 
 ```yaml
     volumes:
       - /run/avahi-daemon/socket:/run/avahi-daemon/socket:ro
 ```
 
-Only add this on a host that actually runs `avahi-daemon`; without it Docker
-creates a directory at that path. The FTW process does not use this path, so
-omitting the mount changes nothing about device connectivity.
+Only add this on a host that actually runs `avahi-daemon` — the Raspberry Pi
+image does. Without the daemon Docker creates a *directory* at that path, which
+resolves nothing and is harmless but confusing; `ls -l` there is the quickest
+way to tell the two apart.
+
+This makes the container's own tooling agree with the host. Whether the FTW
+process itself resolves a device's `.local` name is a separate question,
+answered by `internal/mdnsresolve`.
 
 ### Configuration rejected
 
