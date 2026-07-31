@@ -39,7 +39,8 @@ rule. See [docs/architecture.md](docs/architecture.md).
 - local web UI, SQLite history and Parquet rolloff;
 - Home Assistant MQTT discovery;
 - CalDAV planning intents and published schedules;
-- hot-reloadable, independently released Lua drivers.
+- hot-reloadable, independently released Lua drivers;
+- a built-in OCPP 1.6J server, so OCPP chargers connect with no driver at all.
 
 The local catalog is generated from `DRIVER` metadata. The public
 [`srcfl/device-drivers`](https://github.com/srcfl/device-drivers) repo is the
@@ -177,6 +178,10 @@ driver, which can update or roll back without a new FTW core release. Device
 Support may consume the same public source later for other products or a higher
 support level.
 
+EV chargers that speak OCPP are the exception: they need no driver. FTW runs an
+OCPP 1.6J Central System, so the charger connects to FTW and registers itself.
+See [docs/ocpp.md](docs/ocpp.md).
+
 ## Releases
 
 There are two channels:
@@ -201,6 +206,7 @@ metadata are the detailed reference.
 - [Full backup and safe restore](docs/backup-and-restore.md)
 - [Writing a driver](docs/writing-a-driver.md)
 - [Device driver catalog](https://srcfl.github.io/device-drivers/) — every supported device and the evidence behind it
+- [OCPP chargers (no driver needed)](docs/ocpp.md)
 - [Self-update and release channels](docs/self-update.md)
 - [Home Assistant](docs/ha-integration.md)
 - [CalDAV](docs/caldav-integration.md)
