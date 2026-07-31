@@ -37,6 +37,11 @@ below the nominal sum.
 Data ownership is unchanged: the process still runs as the bare numeric uid 100
 / gid 101, and gid 101 is still what grants access to the optimizer's socket.
 
+The optimizer is versioned independently and moves to 1.4.0, because its image
+is a materially different artifact once the base changes. Its release workflow
+verifies that a published image's revision label matches the commit it claims,
+so the new base could not have shipped under the old version number at all.
+
 The base is pinned to the `trixie` codename rather than a `stable` alias so a
 major-version jump can never arrive silently on a rebuild. A new scheduled
 `debian base currency` workflow watches for a newer Debian stable and opens a
