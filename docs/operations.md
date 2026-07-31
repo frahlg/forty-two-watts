@@ -180,6 +180,29 @@ Verify the broker address from the same network namespace as core, then inspect
 broker and driver logs. Device credentials and topic mappings belong to the
 driver configuration.
 
+### A device `.local` name does not resolve
+
+FTW resolves `.local` names itself over multicast DNS, so this works on any
+base image and any libc. It does need multicast to reach the LAN, which the
+Linux Compose topology provides through `network_mode: host`. Under
+`docker-compose.macos.yml` the container is bridged and multicast does not
+reach the LAN, so configure devices by IP there. The log line to look for is
+`mDNS resolution failed`.
+
+The image also ships `libnss-mdns`, which lets ordinary glibc tools inside the
+container (`getent hosts zap.local`, `curl`) resolve `.local`. That path needs a
+reachable avahi socket, which is not shared by host networking — mount it
+explicitly if you want it for debugging:
+
+```yaml
+    volumes:
+      - /run/avahi-daemon/socket:/run/avahi-daemon/socket:ro
+```
+
+Only add this on a host that actually runs `avahi-daemon`; without it Docker
+creates a directory at that path. The FTW process does not use this path, so
+omitting the mount changes nothing about device connectivity.
+
 ### Configuration rejected
 
 Read the validation error, compare with

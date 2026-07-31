@@ -25,6 +25,14 @@ import (
 	"syscall"
 	"time"
 
+	// Embed the zoneinfo database as a fallback. The image's system tree still
+	// wins whenever it is present; this exists so time.Local can never silently
+	// degrade to UTC and mis-time price and plan windows if a base image ships
+	// without tzdata. The failure it guards against is invisible — production
+	// code reads time.Local, and the tzdata tests skip rather than fail — so the
+	// ~450 KB is worth it.
+	_ "time/tzdata"
+
 	"github.com/srcfl/ftw/go/internal/api"
 	"github.com/srcfl/ftw/go/internal/arp"
 	"github.com/srcfl/ftw/go/internal/battery"
