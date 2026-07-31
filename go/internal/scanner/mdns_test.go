@@ -1,4 +1,4 @@
-package mdnsresolve
+package scanner
 
 import (
 	"testing"

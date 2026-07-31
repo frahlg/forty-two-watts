@@ -15,12 +15,13 @@ What the move buys: glibc, so the image can run ordinary prebuilt vendor
 binaries, which musl cannot; a full userland, which makes `docker exec`
 debugging on a live site practical; and `libnss-mdns` wired into
 `/etc/nsswitch.conf`, so `.local` names resolve for glibc tools inside the
-container when an avahi socket is mounted.
+container — `getent hosts zap.local`, `curl`, `wget` — once an avahi socket is
+mounted. Alpine has no NSS plugin mechanism at all, so none of that was
+available before.
 
-The FTW process does not depend on that last part — it resolves `.local` in Go
-via `internal/mdnsresolve`, which works regardless of base or libc, because a
-`CGO_ENABLED=0` binary bypasses NSS entirely. The binary stays fully static and
-still cross-compiles on the build platform.
+That covers tools in the image, not the FTW process itself: the binary is built
+`CGO_ENABLED=0` and so never consults NSS. It stays fully static and still
+cross-compiles on the build platform.
 
 `wget` is now installed explicitly and asserted by the container boundary test.
 It is contractual rather than incidental: `ftw-updater` `docker exec`s it inside

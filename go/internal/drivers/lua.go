@@ -69,8 +69,6 @@ import (
 	"time"
 
 	lua "github.com/yuin/gopher-lua"
-
-	"github.com/srcfl/ftw/go/internal/mdnsresolve"
 )
 
 // LuaDriver wraps a running Lua VM bound to a HostEnv.
@@ -1152,16 +1150,8 @@ func registerHost(L *lua.LState, env *HostEnv) {
 		return false, fmt.Sprintf("host %q (port %s) not in allowed_hosts", host, port)
 	}
 
-	// Drivers routinely address a device by its ".local" name, which the
-	// stdlib resolver cannot answer. Clone the default transport so proxying,
-	// HTTP/2 and connection pooling are all unchanged — only the dial step
-	// differs, and only for ".local" hosts.
-	transport := net_http.DefaultTransport.(*net_http.Transport).Clone()
-	transport.DialContext = mdnsresolve.DialContext
-
 	httpClient := &net_http.Client{
-		Timeout:   15 * time.Second,
-		Transport: transport,
+		Timeout: 15 * time.Second,
 		CheckRedirect: func(req *net_http.Request, via []*net_http.Request) error {
 			if len(via) >= 10 {
 				return fmt.Errorf("stopped after 10 redirects")
@@ -1190,10 +1180,7 @@ func registerHost(L *lua.LState, env *HostEnv) {
 	// CA. Drivers WITHOUT a pin keep Go's default transport untouched, so
 	// nothing about existing HTTP drivers changes.
 	if pin := tlsPin; pin != "" {
-		// Clone the transport built above so the pinned client keeps the same
-		// mDNS-aware dialer — a pinned device is usually a local appliance
-		// addressed by its ".local" name, which is exactly the case that needs it.
-		tr := transport.Clone()
+		tr := net_http.DefaultTransport.(*net_http.Transport).Clone()
 		tr.TLSClientConfig = &tls.Config{
 			// We replace chain/hostname verification with our own exact
 			// fingerprint check below, so the stdlib check must be off.
