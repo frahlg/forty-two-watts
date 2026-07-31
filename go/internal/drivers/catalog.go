@@ -62,6 +62,10 @@ type CatalogEntry struct {
 	VerificationNotes  string   `json:"verification_notes,omitempty"`
 	TestedModels       []string `json:"tested_models,omitempty"` // e.g. ["Home", "Charge"]
 
+	// Controls are the operator-facing commands the driver declares. Empty
+	// for every driver that only reports. See catalog_controls.go.
+	Controls []CatalogControl `json:"controls,omitempty"`
+
 	// ConfigSecrets lists driver-specific config keys that the Settings
 	// UI / setup wizard should render as password inputs and store
 	// under config.<key>. Used for things like Auth-Tokens that the
@@ -198,6 +202,7 @@ func parseCatalogEntry(path string) (CatalogEntry, error) {
 	e.VerificationNotes = pickString(block, "verification_notes")
 	e.TestedModels = pickList(block, "tested_models")
 	e.ConfigSecrets = pickList(block, "config_secrets")
+	e.Controls = pickControls(block)
 	return e, nil
 }
 

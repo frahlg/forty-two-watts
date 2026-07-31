@@ -34,6 +34,10 @@ type driverDetailResp struct {
 	Readings []readingDTO               `json:"readings"`
 	Metrics  []telemetry.MetricSnapshot `json:"metrics"`
 	Identity driverIdentityDTO          `json:"identity"`
+	// Controls are what this driver says an operator may command. Absent
+	// for every driver that only reports. Nothing sends them yet — this is
+	// the description, not the path.
+	Controls []drivers.CatalogControl `json:"controls,omitempty"`
 }
 
 type readingDTO struct {
@@ -101,7 +105,47 @@ func (s *Server) handleDriverDetail(w http.ResponseWriter, r *http.Request) {
 			resp.Identity = driverIdentityDTO{Make: make, SN: sn, MAC: mac, Endpoint: ep}
 		}
 	}
+	resp.Controls = s.driverControls(name)
 	writeJSON(w, 200, resp)
+}
+
+// driverControls returns the controls the configured driver `name` declares.
+//
+// The lookup goes name → configured lua path → catalog entry. A driver that
+// is configured but whose file no longer parses returns nothing, which is the
+// same answer as a driver that declares nothing. That is deliberate: a parse
+// failure belongs in the catalog endpoint, where an operator is looking at
+// driver files, not here.
+func (s *Server) driverControls(name string) []drivers.CatalogControl {
+	if s.deps.Cfg == nil {
+		return nil
+	}
+	lua := ""
+	if s.deps.CfgMu != nil {
+		s.deps.CfgMu.RLock()
+	}
+	for _, d := range s.deps.Cfg.Drivers {
+		if d.Name == name {
+			lua = d.Lua
+			break
+		}
+	}
+	if s.deps.CfgMu != nil {
+		s.deps.CfgMu.RUnlock()
+	}
+	if lua == "" {
+		return nil
+	}
+
+	dir := s.deps.DriverDir
+	if dir == "" {
+		dir = filepath.Join(filepath.Dir(s.deps.ConfigPath), "drivers")
+	}
+	entries, err := drivers.LoadCatalogMulti(s.deps.UserDriverDir, s.managedDriverDir(), dir)
+	if err != nil {
+		return nil
+	}
+	return drivers.ControlsForDriver(entries, lua)
 }
 
 // POST /api/drivers/test — start one short-lived driver instance from the
