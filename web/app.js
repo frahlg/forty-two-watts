@@ -16,6 +16,15 @@
     return w / 1000;
   }
   function isFlowIdle(kw) { return Math.abs(kw) <= flowIdleKw(); }
+  // Prices arrive as minor units per kWh; what to call them depends on the
+  // configured currency. window.FTWUnits is set when
+  // components/price-units.js loads — same read-at-use-time pattern as
+  // flowIdleKw above, with öre as the no-modules fallback.
+  function fmtPricePerKwh(minorPerKwh) {
+    const u = typeof window !== "undefined" && window.FTWUnits;
+    if (!u) return minorPerKwh.toFixed(0) + " öre/kWh";
+    return u.formatPricePerKwh(minorPerKwh, u.activeCurrency());
+  }
   const CHART_POINTS = 360;          // up to 30 min of points (server pushes every ~5s)
   const CHART_RANGE_MS = {           // visible time window per range option
     "5m": 5 * 60 * 1000,
@@ -1720,7 +1729,7 @@
       { name: "Battery",   val: a.battery_w, color: "#f59e0b", showSign: true },
       { name: "Grid",      val: a.grid_w,    color: "#ef4444", showSign: true },
       { name: "SoC",       val: a.soc_pct + "%", color: "#60a5fa", literal: true },
-      { name: "Price",     val: a.price_ore.toFixed(0) + " öre/kWh", color: "#fbbf24", literal: true },
+      { name: "Price",     val: fmtPricePerKwh(a.price_ore), color: "#fbbf24", literal: true },
     ];
 
     var lineHeight = 16;

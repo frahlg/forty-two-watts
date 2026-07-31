@@ -761,6 +761,8 @@
         provider: priceProv,
         zone: zone
       };
+      var cur = currencyForZone(zone);
+      if (cur) cfg.price.currency = cur;
     }
 
     // EV Charger — shape the block to match the provider's transport
@@ -809,6 +811,62 @@
     return d.innerHTML;
   }
 
+  // --- Price zones ---
+  //
+  // The country and zone lists come from /api/prices/zones — the same
+  // table the price fetchers use — so the wizard can't offer a zone the
+  // providers don't know. A failed request leaves the Swedish options in
+  // setup.html standing.
+  var priceZones = [];
+
+  function loadPriceZones() {
+    fetch('/api/prices/zones')
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        if (!j || !Array.isArray(j.zones) || !j.zones.length) return;
+        priceZones = j.zones;
+        var countryEl = document.getElementById('price-country');
+        countryEl.innerHTML = '';
+        var seen = {};
+        priceZones.forEach(function (z) {
+          if (seen[z.country]) return;
+          seen[z.country] = true;
+          var o = document.createElement('option');
+          o.value = z.country;
+          o.textContent = z.country;
+          if (z.country === 'Sweden') o.selected = true;
+          countryEl.appendChild(o);
+        });
+        countryEl.addEventListener('change', fillZonesForCountry);
+        fillZonesForCountry();
+      })
+      .catch(function () { /* the Swedish fallback list stays */ });
+  }
+
+  function fillZonesForCountry() {
+    var country = document.getElementById('price-country').value;
+    var zoneEl = document.getElementById('price-zone');
+    zoneEl.innerHTML = '';
+    priceZones.filter(function (z) { return z.country === country; })
+      .forEach(function (z, i) {
+        var sub = z.name && z.name.indexOf(' — ') > 0 ? z.name.split(' — ')[1] : '';
+        var o = document.createElement('option');
+        o.value = z.code;
+        o.textContent = sub ? z.code + ' · ' + sub : z.code;
+        if (i === 0 || z.code === 'SE3') o.selected = true;
+        zoneEl.appendChild(o);
+      });
+  }
+
+  // The currency the picked zone bills in, so a Belgian install doesn't
+  // start out priced in Swedish öre.
+  function currencyForZone(code) {
+    for (var i = 0; i < priceZones.length; i++) {
+      if (priceZones[i].code === code) return priceZones[i].currency;
+    }
+    return '';
+  }
+
   // --- Init ---
   // Honor a `?step=N` deep-link (the dashboard links to /setup?step=3 from
   // its "no devices" prompt). Clamp into the valid 1..TOTAL_STEPS range so a
@@ -830,5 +888,6 @@
   }
 
   renderDots();
+  loadPriceZones();
   goStep(initialStep());
 })();
