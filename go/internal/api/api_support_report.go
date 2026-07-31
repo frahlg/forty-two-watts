@@ -44,8 +44,14 @@ import (
 // pushing a 48 h horizon into the file.
 const reportPlanWindow = 3 * time.Hour
 
-// reportLogLines caps the warning/error tail. Enough for one incident.
-const reportLogLines = 120
+// reportLogGroups caps the log tail, counted in DISTINCT messages rather
+// than lines. Repeats collapse into one entry with a count, so a loop
+// warning every tick can no longer crowd out a one-off error.
+const reportLogGroups = 40
+
+// logRepeatThreshold is the repeat count at which a warning stops being
+// noise in the log and becomes a finding in its own right.
+const logRepeatThreshold = 10
 
 // loadmodelWarmBucketsForTrust is the point past which the weekly load
 // pattern is filled in enough that its predictions carry the plan. Below
@@ -273,7 +279,7 @@ func writeRightNow(
 
 	if len(targets) > 0 {
 		b.WriteString("Commands sent to each device on the last control tick:\n\n")
-		b.WriteString("| Device | Target | Limited by safety |\n|---|---|---|\n")
+		b.WriteString("| Device | Target | Held below request |\n|---|---|---|\n")
 		for _, t := range targets {
 			clamped := "no"
 			if t.Clamped {
@@ -281,7 +287,15 @@ func writeRightNow(
 			}
 			fmt.Fprintf(b, "| %s | %s | %s |\n", t.Driver, fmtReportW(t.TargetW), clamped)
 		}
-		b.WriteString("\n")
+		// This column covers per-device limits only — state of charge,
+		// rated power, the fuse guard. The site-meter clamp that caps the
+		// fleet total before this split happens upstream of these targets
+		// and cannot show up here, so "no" on every row is not the same as
+		// "nothing was limited". Say so rather than let the table imply it.
+		b.WriteString("\nThis column covers per-device limits: charge level, " +
+			"rated power, fuse guard. A limit applied to the site total " +
+			"before it was split across devices does not appear here — check " +
+			"the log for clamp messages.\n\n")
 	}
 
 	st := ctrl.SlotDeliveryStats
@@ -468,37 +482,86 @@ func (s *Server) writeComponentSection(b *strings.Builder, ctx context.Context, 
 	b.WriteString("\n")
 }
 
+// logGroup collapses repeats of the same message. A control loop that
+// warns every tick produced 49 identical lines in the first real report,
+// which would have pushed a single unique ERROR clean out of the window.
+// Grouping on (level, driver, message) — not on the attribute tail, which
+// carries per-tick numbers — keeps one line per distinct problem.
+type logGroup struct {
+	Level  string
+	Driver string
+	Msg    string
+	Attrs  string // from the most recent occurrence
+	Count  int
+	First  time.Time
+	Last   time.Time
+}
+
+// groupLogs returns distinct warnings and errors, most-recent last.
+func groupLogs(entries []telemetry.LogEntry) []logGroup {
+	type key struct{ level, driver, msg string }
+	index := map[key]int{}
+	var groups []logGroup
+	for _, e := range entries {
+		lvl := strings.ToUpper(e.Level)
+		if lvl != "WARN" && lvl != "WARNING" && lvl != "ERROR" {
+			continue
+		}
+		k := key{lvl, e.Driver, e.Msg}
+		if i, ok := index[k]; ok {
+			groups[i].Count++
+			groups[i].Attrs = e.Attrs
+			if e.TS.After(groups[i].Last) {
+				groups[i].Last = e.TS
+			}
+			continue
+		}
+		index[k] = len(groups)
+		groups = append(groups, logGroup{
+			Level: lvl, Driver: e.Driver, Msg: e.Msg, Attrs: e.Attrs,
+			Count: 1, First: e.TS, Last: e.TS,
+		})
+	}
+	sort.SliceStable(groups, func(i, j int) bool {
+		return groups[i].Last.Before(groups[j].Last)
+	})
+	return groups
+}
+
 func (s *Server) writeLogSection(b *strings.Builder) {
 	b.WriteString("## Recent warnings and errors\n\n")
 	if s.deps.LogRing == nil {
 		b.WriteString("Log buffer is not configured.\n\n")
 		return
 	}
-	entries := s.deps.LogRing.RecentGlobal(0)
-	kept := make([]telemetry.LogEntry, 0, reportLogLines)
-	for i := len(entries) - 1; i >= 0 && len(kept) < reportLogLines; i-- {
-		lvl := strings.ToUpper(entries[i].Level)
-		if lvl == "WARN" || lvl == "WARNING" || lvl == "ERROR" {
-			kept = append(kept, entries[i])
-		}
-	}
-	if len(kept) == 0 {
+	groups := groupLogs(s.deps.LogRing.RecentGlobal(0))
+	if len(groups) == 0 {
 		b.WriteString("None in the buffer.\n\n")
 		return
 	}
+	b.WriteString("Repeats are collapsed; `×N` is how many times the same " +
+		"message appeared. The attribute tail comes from the most recent one.\n\n")
+	if len(groups) > reportLogGroups {
+		fmt.Fprintf(b, "Showing the %d most recent of %d distinct messages.\n\n",
+			reportLogGroups, len(groups))
+		groups = groups[len(groups)-reportLogGroups:]
+	}
 	b.WriteString("```\n")
-	// kept is newest-first from the scan above; print oldest-first so the
-	// tail reads like a log.
-	for i := len(kept) - 1; i >= 0; i-- {
-		e := kept[i]
-		fmt.Fprintf(b, "%s %s ", e.TS.Format("15:04:05"), e.Level)
-		if e.Driver != "" {
-			fmt.Fprintf(b, "[%s] ", e.Driver)
+	for _, g := range groups {
+		fmt.Fprintf(b, "%s %s ", g.Last.Format("15:04:05"), g.Level)
+		if g.Driver != "" {
+			fmt.Fprintf(b, "[%s] ", g.Driver)
 		}
-		b.WriteString(e.Msg)
-		if e.Attrs != "" {
+		b.WriteString(g.Msg)
+		if g.Count > 1 {
+			fmt.Fprintf(b, " ×%d", g.Count)
+			if span := g.Last.Sub(g.First); span > time.Second {
+				fmt.Fprintf(b, " over %s", fmtReportAge(span))
+			}
+		}
+		if g.Attrs != "" {
 			b.WriteByte(' ')
-			b.WriteString(truncateReport(e.Attrs, 200))
+			b.WriteString(truncateReport(g.Attrs, 200))
 		}
 		b.WriteByte('\n')
 	}
@@ -594,6 +657,34 @@ func (s *Server) collectFindings(
 			fmt.Sprintf("These devices are being held below the requested "+
 				"power: %s. Safety limits always win over the plan.",
 				strings.Join(clamped, ", "))})
+	}
+
+	// A message repeating every control tick is the loudest signal in the
+	// log and the easiest to scroll past. The first real report carried 49
+	// copies of one clamp warning while Findings said nothing at all.
+	// Reported generically, by count, so this does not rot the moment
+	// someone rewords a log line.
+	if s.deps.LogRing != nil {
+		var worst logGroup
+		for _, g := range groupLogs(s.deps.LogRing.RecentGlobal(0)) {
+			if g.Count > worst.Count {
+				worst = g
+			}
+		}
+		if worst.Count >= logRepeatThreshold {
+			sev := sevWarning
+			if worst.Level == "ERROR" {
+				sev = sevProblem
+			}
+			detail := fmt.Sprintf("%q has been logged %d times",
+				worst.Msg, worst.Count)
+			if span := worst.Last.Sub(worst.First); span > time.Second {
+				detail += " in " + fmtReportAge(span)
+			}
+			detail += ". Something is retrying or being limited on every " +
+				"control cycle; the full line is in the log section below."
+			out = append(out, finding{sev, "A message is repeating", detail})
+		}
 	}
 
 	var offline, faulted []string

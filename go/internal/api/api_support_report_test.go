@@ -1,6 +1,7 @@
 package api
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -256,6 +257,124 @@ func TestFindingsAreSortedBySeverity(t *testing.T) {
 	ni := strings.Index(out, "a note")
 	if !(pi < wi && wi < ni) {
 		t.Errorf("findings out of order:\n%s", out)
+	}
+}
+
+// A control loop warning every tick produced 49 identical lines in the
+// first real report. Grouping is what keeps a single unique error from
+// being pushed out of the window by that noise.
+func TestLogGroupsCollapseRepeats(t *testing.T) {
+	base := time.Now().Add(-2 * time.Minute)
+	var entries []telemetry.LogEntry
+	for i := 0; i < 49; i++ {
+		entries = append(entries, telemetry.LogEntry{
+			TS:    base.Add(time.Duration(i) * 2 * time.Second),
+			Level: "WARN",
+			Msg:   "dispatch: meter clamp reduced battery target",
+			// The attribute tail differs every tick; grouping must ignore it.
+			Attrs: fmt.Sprintf("requested_total_w=%d", 9000+i),
+		})
+	}
+	entries = append(entries, telemetry.LogEntry{
+		TS: base.Add(100 * time.Second), Level: "ERROR",
+		Msg: "the one that matters", Driver: "ferroamp",
+	})
+
+	groups := groupLogs(entries)
+	if len(groups) != 2 {
+		t.Fatalf("got %d groups, want 2: %+v", len(groups), groups)
+	}
+	var clamp, unique *logGroup
+	for i := range groups {
+		if groups[i].Level == "ERROR" {
+			unique = &groups[i]
+		} else {
+			clamp = &groups[i]
+		}
+	}
+	if clamp == nil || clamp.Count != 49 {
+		t.Fatalf("clamp group = %+v, want count 49", clamp)
+	}
+	if clamp.Attrs != "requested_total_w=9048" {
+		t.Errorf("attrs should come from the newest occurrence, got %q", clamp.Attrs)
+	}
+	if unique == nil {
+		t.Fatal("the unique error was dropped")
+	}
+}
+
+func TestLogSectionSurvivesNoisyNeighbour(t *testing.T) {
+	// Far more distinct messages than the cap, plus one loud repeater.
+	var entries []telemetry.LogEntry
+	base := time.Now().Add(-time.Hour)
+	for i := 0; i < reportLogGroups+20; i++ {
+		entries = append(entries, telemetry.LogEntry{
+			TS: base.Add(time.Duration(i) * time.Minute), Level: "WARN",
+			Msg: fmt.Sprintf("distinct message %d", i),
+		})
+	}
+	groups := groupLogs(entries)
+	if len(groups) != reportLogGroups+20 {
+		t.Fatalf("got %d groups, want %d", len(groups), reportLogGroups+20)
+	}
+	// Newest last, so trimming to the cap keeps the most recent.
+	if !groups[len(groups)-1].Last.After(groups[0].Last) {
+		t.Error("groups should be ordered oldest-first")
+	}
+}
+
+// 49 clamp warnings with a Findings section reading only "no planning
+// strategy is running" is the failure this guards.
+func TestRepeatedWarningBecomesAFinding(t *testing.T) {
+	st := control.NewState(0, 50, "meter")
+	tel := telemetry.NewStore()
+	tel.DriverHealthMut("meter").RecordSuccess()
+	ring := telemetry.NewLogRing()
+	for i := 0; i < 20; i++ {
+		ring.Append(telemetry.LogEntry{
+			TS: time.Now(), Level: "WARN",
+			Msg: "dispatch: meter clamp reduced battery target",
+		})
+	}
+	srv := New(&Deps{Ctrl: st, CtrlMu: &sync.Mutex{}, Tel: tel, LogRing: ring})
+
+	findings := srv.collectFindings(*st,
+		liveSnapshot{HaveGrid: true, LoadW: 1000, PredictedLd: 1000},
+		nil, nil, nil, nil, time.Now())
+
+	var got *finding
+	for i := range findings {
+		if strings.Contains(findings[i].Title, "repeating") {
+			got = &findings[i]
+		}
+	}
+	if got == nil {
+		t.Fatalf("a warning repeated 20 times produced no finding: %+v", findings)
+	}
+	if !strings.Contains(got.Detail, "20 times") {
+		t.Errorf("detail should carry the count, got %q", got.Detail)
+	}
+	if !strings.Contains(got.Detail, "meter clamp") {
+		t.Errorf("detail should name the message, got %q", got.Detail)
+	}
+}
+
+// "Held below request: no" on every row must not read as "nothing limited
+// anything" — the site-meter clamp caps the fleet total upstream of these
+// per-device numbers and cannot appear in the column.
+func TestDispatchTableDisclaimsSiteLevelClamps(t *testing.T) {
+	st := control.NewState(0, 50, "meter")
+	var b strings.Builder
+	writeRightNow(&b, *st, liveSnapshot{HaveGrid: true},
+		nil,
+		[]control.DispatchTarget{{Driver: "ferroamp", TargetW: 6400, Clamped: false}},
+		time.Now())
+	out := b.String()
+	if !strings.Contains(out, "per-device limits") {
+		t.Errorf("dispatch table lacks its scope caveat:\n%s", out)
+	}
+	if !strings.Contains(out, "site total") {
+		t.Errorf("dispatch table should point at site-level clamps:\n%s", out)
 	}
 }
 
