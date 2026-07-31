@@ -268,6 +268,7 @@ func (s *Server) routes() {
 	s.handle("GET  /api/drivers/{name}/logs", s.handleDriverLogs)
 	s.handle("GET  /api/logs", s.handleGlobalLogs)
 	s.handle("GET  /api/support/dump", s.handleSupportDump)
+	s.handle("GET  /api/support/report", s.handleSupportReport)
 	s.handle("POST /api/drivers/{name}/restart", s.handleDriverRestart)
 	s.handle("POST /api/drivers/{name}/disable", s.handleDriverDisable)
 	s.handle("POST /api/drivers/{name}/enable", s.handleDriverEnable)

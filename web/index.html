@@ -569,6 +569,16 @@
           <span class="legend-item bat-only" title="Slot where the plan discharges the battery"><span class="legend-color" style="background:#8b5cf6"></span> Discharge</span>
           <span class="legend-item bat-only" title="State of charge — battery fill %, 0–100"><span class="legend-color" style="background:#60a5fa"></span> SoC</span>
         </div>
+        <!-- The escape hatch for "why is it doing that?". Downloads one
+             Markdown file holding the live state, the active plan slot,
+             forecast-versus-reality and any automated findings — enough
+             for someone else to answer without a screenshot round-trip. -->
+        <div class="plan-help-request">
+          <button type="button" id="plan-help-report" class="btn-link">
+            Something looks wrong? Download a help report
+          </button>
+          <small>One file describing what FTW is doing and why. Share it when asking for help.</small>
+        </div>
       </section>
     </section>
 

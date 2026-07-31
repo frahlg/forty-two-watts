@@ -1015,6 +1015,45 @@ import { derivePlanBrief } from "./plan-brief.js";
         else helpModal.setAttribute('open', '');
       });
     }
+    const reportBtn = document.getElementById('plan-help-report');
+    if (reportBtn) reportBtn.addEventListener('click', downloadHelpReport);
+  }
+
+  // Pulls GET /api/support/report and saves it. Kept here rather than in
+  // the driver Diagnose modal because the question it answers ("why is it
+  // doing that?") is asked while looking at the plan, not at a device.
+  function downloadHelpReport() {
+    const btn = document.getElementById('plan-help-report');
+    if (!btn || btn.disabled) return;
+    const original = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'Building report…';
+    const restore = function (text) {
+      btn.textContent = text;
+      setTimeout(function () {
+        btn.disabled = false;
+        btn.textContent = original;
+      }, 4000);
+    };
+    apiFetch('/api/support/report')
+      .then(function (resp) {
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        return resp.blob().then(function (blob) {
+          const stamp = new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '');
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = 'ftw-help-' + stamp + '.md';
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          setTimeout(function () { URL.revokeObjectURL(url); }, 30000);
+          restore('Downloaded');
+        });
+      })
+      .catch(function (err) {
+        restore('Failed: ' + (err && err.message ? err.message : String(err)));
+      });
   }
 
   if (document.readyState === 'loading') {
