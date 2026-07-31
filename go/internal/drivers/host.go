@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	net_url "net/url"
 	"sync"
 	"time"
 
@@ -266,6 +267,33 @@ func (h *HostEnv) endWriteScope() (int, []string) {
 	h.writeEvidence = nil
 	h.mu.Unlock()
 	return writes, evidence
+}
+
+// allowAuthPost reports whether this POST is the sign-in the signed package
+// declared, and so may proceed outside the write phases.
+//
+// A read-only driver that reads a vendor cloud cannot read anything until it
+// has exchanged a token, and it exchanges one from init or poll -- the phases
+// allowWrite refuses, for good reason, since nothing there can carry a command
+// lease. Authenticating is a precondition for reading rather than a write to
+// the device, so it is admitted here instead, confined to the single path the
+// signed manifest names and only for a driver published read-only. It does not
+// consume the write budget: a token refresh is driven by expiry, not by a
+// caller, and spending the budget on it would leave the driver unable to read
+// once its token aged out.
+func (h *HostEnv) allowAuthPost(rawURL string) bool {
+	if h.RuntimePolicy == nil || !h.RuntimePolicy.ReadOnly {
+		return false
+	}
+	declared := h.RuntimePolicy.AuthPostPath
+	if declared == "" || !h.RuntimePolicy.allows("http.post") {
+		return false
+	}
+	parsed, err := net_url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	return parsed.Path == declared
 }
 
 func (h *HostEnv) allowWrite(permission string) error {

@@ -1270,10 +1270,15 @@ func registerHost(L *lua.LState, env *HostEnv) {
 			L.Push(lua.LString("http: capability not granted"))
 			return 2
 		}
-		if err := env.allowWrite("http.post"); err != nil {
-			L.Push(lua.LNil)
-			L.Push(lua.LString(err.Error()))
-			return 2
+		// A read-only driver signing in at the path its signed manifest
+		// declares is reading, not writing, so it skips the write phase and
+		// budget. Every other POST goes through allowWrite unchanged.
+		if !env.allowAuthPost(L.CheckString(1)) {
+			if err := env.allowWrite("http.post"); err != nil {
+				L.Push(lua.LNil)
+				L.Push(lua.LString(err.Error()))
+				return 2
+			}
 		}
 		url := L.CheckString(1)
 		if ok, reason := hostAllowed(url); !ok {

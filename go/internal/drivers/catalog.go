@@ -38,6 +38,10 @@ type CatalogEntry struct {
 	Description        string         `json:"description,omitempty"`
 	Homepage           string         `json:"homepage,omitempty"`
 	ConnectionDefaults map[string]any `json:"connection_defaults,omitempty"`
+	// AuthPostPath is the URL path a read-only driver signs in at. A driver
+	// that reads a vendor cloud has to POST for a token before it can read,
+	// and that POST is not actuation. Only meaningful with ReadOnly.
+	AuthPostPath string `json:"auth_post_path,omitempty"`
 	// ReadOnly means the driver never accepts dispatch commands. The catalog
 	// UI uses it to avoid presenting battery capacity as a control opt-in and
 	// to enable battery_telemetry_only for gateway-style drivers.
