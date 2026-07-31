@@ -254,6 +254,28 @@ func (m *Model) Update(t time.Time, actualLoadW, tempC float64) (updated bool) {
 	if actualLoadW < 0 {
 		return false
 	}
+
+	// Physical bound — the only sample filter this model needs, and the
+	// first thing it does. A house cannot draw more than its main fuse
+	// passes, so a reading above it is a fault and must touch nothing:
+	// not the buckets, not MAE, and not the heating coefficient. Running
+	// it after the heating fit let one cold-weather meter fault move
+	// HeatingW_per_degC while Update still reported no update applied,
+	// and repeated faults could walk the coefficient to its ceiling.
+	//
+	// A household's real load is strongly multimodal: a few hundred watts
+	// of baseline for most of the day, then 11 kW when the sauna, oven and
+	// car overlap. Both are true readings. Nothing about a residual's size
+	// distinguishes "unusual but real" from "wrong", which is why this is
+	// the only rejection left — see the git history for the MAE band that
+	// used to sit below, and what it cost.
+	//
+	// Short-term noise is handled a layer down: telemetry runs a Kalman
+	// filter per signal and this model reads the smoothed values.
+	if m.MaxPlausibleW > 0 && actualLoadW > m.MaxPlausibleW {
+		return false
+	}
+
 	idx := HourOfWeek(t)
 	b := &m.Bucket[idx]
 	predicted := m.Predict(t, tempC)
@@ -285,27 +307,6 @@ func (m *Model) Update(t time.Time, actualLoadW, tempC float64) (updated bool) {
 		if m.HeatingW_per_degC > HeatingCoefMaxW {
 			m.HeatingW_per_degC = HeatingCoefMaxW
 		}
-	}
-
-	// Physical bound — the only sample filter this model needs.
-	//
-	// A household's real load is strongly multimodal: a few hundred watts
-	// of baseline for most of the day, then 11 kW when the sauna, oven and
-	// car overlap. Both are true readings. Nothing about a residual's size
-	// distinguishes "unusual but real" from "wrong", so the only defensible
-	// rejection is the one physics licenses: a house cannot draw more than
-	// its main fuse passes.
-	//
-	// Short-term noise is already handled a layer down — telemetry runs a
-	// Kalman filter per signal, and this model reads the smoothed values.
-	// Filtering again here, against a band derived from what the model has
-	// already learned, rejected the upper half of the real distribution: an
-	// hour of 400 W overnight load produced a 570 W band, after which a
-	// week at 5 kW was rejected in full and the prediction never moved off
-	// 1794 W. That is not a corner case; a band fitted to the quiet hours
-	// always excludes the busy ones.
-	if m.MaxPlausibleW > 0 && actualLoadW > m.MaxPlausibleW {
-		return false
 	}
 
 	// Bucket update: exact running mean for the first 10 samples (crisp
