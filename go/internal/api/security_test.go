@@ -82,7 +82,7 @@ func TestSecureMutationsTreatsEveryUnsafeHTTPMethodAsMutation(t *testing.T) {
 	}
 }
 
-func TestSecureMutationsGuardsSemanticallyActiveReads(t *testing.T) {
+func TestSecureMutationsGuardsProtectedReads(t *testing.T) {
 	guarded := []struct {
 		name   string
 		method string
@@ -95,6 +95,12 @@ func TestSecureMutationsGuardsSemanticallyActiveReads(t *testing.T) {
 		{name: "OAuth start", method: http.MethodGet, path: "/api/oauth/myuplink/start"},
 		{name: "OAuth start via HEAD", method: http.MethodHead, path: "/api/oauth/myuplink/start"},
 		{name: "OAuth callback via HEAD", method: http.MethodHead, path: "/api/oauth/myuplink/callback"},
+		{name: "backup list", method: http.MethodGet, path: "/api/backups"},
+		{name: "backup list via HEAD", method: http.MethodHead, path: "/api/backups"},
+		{name: "backup download", method: http.MethodGet, path: "/api/backups/ftw-full-backup-20260731T120000Z.ftwbak"},
+		{name: "backup download via HEAD", method: http.MethodHead, path: "/api/backups/ftw-full-backup-20260731T120000Z.ftwbak"},
+		{name: "CalDAV credentials", method: http.MethodGet, path: "/api/caldav/credentials"},
+		{name: "CalDAV credentials via HEAD", method: http.MethodHead, path: "/api/caldav/credentials"},
 	}
 
 	for _, tc := range guarded {
@@ -149,26 +155,35 @@ func TestSecureMutationsLeavesOrdinaryReadsAndOAuthCallbackCompatible(t *testing
 	}
 }
 
-func TestSecureMutationsRequiresRemoteTokenForSemanticallyActiveRead(t *testing.T) {
+func TestSecureMutationsRequiresRemoteTokenForProtectedReads(t *testing.T) {
 	policy := MutationPolicy{RequireTokenForRemote: true, Token: testMutationToken}
-	request := func(auth string) *httptest.ResponseRecorder {
-		req := httptest.NewRequest(http.MethodGet, "https://ftw.example.com/api/scan", nil)
-		req.RemoteAddr = "192.168.1.10:43210"
-		req.Header.Set("Origin", "https://ftw.example.com")
-		req.Header.Set("Sec-Fetch-Site", "same-origin")
-		if auth != "" {
-			req.Header.Set("Authorization", auth)
-		}
-		rr := httptest.NewRecorder()
-		SecureMutations(statusHandler(http.StatusNoContent), policy).ServeHTTP(rr, req)
-		return rr
-	}
+	for _, path := range []string{
+		"/api/scan",
+		"/api/backups",
+		"/api/backups/ftw-full-backup-20260731T120000Z.ftwbak",
+		"/api/caldav/credentials",
+	} {
+		t.Run(path, func(t *testing.T) {
+			request := func(auth string) *httptest.ResponseRecorder {
+				req := httptest.NewRequest(http.MethodGet, "https://ftw.example.com"+path, nil)
+				req.RemoteAddr = "192.168.1.10:43210"
+				req.Header.Set("Origin", "https://ftw.example.com")
+				req.Header.Set("Sec-Fetch-Site", "same-origin")
+				if auth != "" {
+					req.Header.Set("Authorization", auth)
+				}
+				rr := httptest.NewRecorder()
+				SecureMutations(statusHandler(http.StatusNoContent), policy).ServeHTTP(rr, req)
+				return rr
+			}
 
-	if rr := request(""); rr.Code != http.StatusUnauthorized {
-		t.Fatalf("missing token status = %d, want 401", rr.Code)
-	}
-	if rr := request("Bearer " + testMutationToken); rr.Code != http.StatusNoContent {
-		t.Fatalf("valid token status = %d, want 204 (body=%s)", rr.Code, rr.Body.String())
+			if rr := request(""); rr.Code != http.StatusUnauthorized {
+				t.Fatalf("missing token status = %d, want 401", rr.Code)
+			}
+			if rr := request("Bearer " + testMutationToken); rr.Code != http.StatusNoContent {
+				t.Fatalf("valid token status = %d, want 204 (body=%s)", rr.Code, rr.Body.String())
+			}
+		})
 	}
 }
 
