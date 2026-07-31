@@ -38,14 +38,20 @@ RUN cd go && \
     go build -trimpath -ldflags="-s -w -X main.Version=${VERSION}" \
     -o /out/ftw-backup ./cmd/ftw-backup
 # --- Runtime ---------------------------------------------------------------
-# Debian bookworm-slim, matching Dockerfile.optimizer's python:3.12-slim-bookworm
-# and Dockerfile.updater. One rootfs blob is pulled once and shared by all three
-# images, so the extra bytes over alpine are paid a single time per host rather
-# than per image — and there is one libc and one security stream to track.
+# Debian trixie-slim — current Debian stable (13), and the same suite as
+# Dockerfile.updater and Dockerfile.optimizer's python:3.12-slim-trixie. One
+# rootfs blob is pulled once and shared by all three images, so the extra bytes
+# over alpine are paid a single time per host rather than per image, and there
+# is one libc and one security stream to track. It also matches the Raspberry Pi
+# OS release the SD image is built from (deploy/pi-gen/config: RELEASE=trixie).
+#
+# Pinned to the codename, not `stable-slim`: a suite alias would silently jump
+# major versions on some future rebuild. The `debian base currency` workflow
+# watches for a new stable and files an issue, so the bump stays deliberate.
 #
 # glibc also means the image can run ordinary prebuilt vendor binaries, which
 # musl cannot, and ships a full userland for on-site debugging.
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 # ca-certificates  — HTTPS integrations.
 # tzdata           — timezone-aware price/plan windows. Without a zoneinfo tree
