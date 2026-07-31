@@ -63,6 +63,29 @@ const HeatingMinDeltaT = 3.0
 // home. Clamp prevents one anomalous sample from blowing up the fit.
 const HeatingCoefMaxW = 1500.0
 
+// implausibleLoadFactor bounds a single sample against the site's rated
+// power. Above this the reading is a fault, not consumption. Same factor
+// Predict clamps its output with, so training and prediction agree on
+// what counts as physically possible.
+const implausibleLoadFactor = 3.0
+
+// outlierArmSamples is how much history the outlier filter needs before
+// it starts rejecting anything. The old threshold of 50 armed the filter
+// after 51 minutes at the 60 s sample cadence — calibrating a whole
+// house's plausible-residual band on one arbitrary hour, usually a quiet
+// one, because that is when a restart is least disruptive. A day of
+// samples spans at least one full night-and-day cycle, so MAE reflects
+// the range the house actually moves through.
+const outlierArmSamples = 24 * 60
+
+// outlierLevelShiftRun is how many consecutive same-direction rejections
+// mean "the level moved" rather than "a spike". At the 60 s cadence this
+// is ten minutes of the model being wrong the same way before it concedes
+// and starts learning again. Short enough that a genuine shift is picked
+// up within the hour, long enough that an oven or a car starting to
+// charge is still filtered as the transient it is.
+const outlierLevelShiftRun = 10
+
 // Profile selects which learned occupancy profile is used for training
 // and prediction.
 type Profile string
@@ -104,6 +127,12 @@ type Model struct {
 	MAE               float64         `json:"mae"`
 	Alpha             float64         `json:"alpha"` // EMA coefficient for bucket updates
 	PriorScale        float64         `json:"prior_scale,omitempty"`
+
+	// RejectRun counts consecutive same-direction outlier rejections.
+	// It is the model's only way to notice that it is not filtering noise
+	// but refusing reality — see the outlier filter in Update.
+	RejectRun         int  `json:"reject_run,omitempty"`
+	RejectRunPositive bool `json:"reject_run_positive,omitempty"`
 }
 
 // typicalPrior returns an approximate W load for a given hour-of-week
@@ -273,11 +302,58 @@ func (m *Model) Update(t time.Time, actualLoadW, tempC float64) (updated bool) {
 		}
 	}
 
+	// Hard sanity bound, always on. A residual this far above the site's
+	// rated draw is a measurement fault, not a household. It is deliberately
+	// absolute — derived from configured hardware, never from what the model
+	// has learned — so unlike the MAE band below it cannot be talked down by
+	// a model that has mislearned, and it protects the first day before the
+	// soft filter arms. Mirrors the ceiling Predict already applies.
+	if m.PeakW > 0 && actualLoadW > implausibleLoadFactor*m.PeakW {
+		return false
+	}
+
 	// Outlier filter: once we have some history, reject 10× MAE residuals.
-	if m.Samples > 50 {
+	//
+	// Two guards keep this from locking the model out of a load level it
+	// has not seen before. A rejected sample updates neither MAE nor
+	// Samples, so without them the band can never grow in response to
+	// being persistently wrong, and a model calibrated on one quiet hour
+	// rejects the real house forever. Measured before the fix: an hour of
+	// 400 W overnight load gave MAE 57 W and a 570 W band; a subsequent
+	// week at 5 kW was rejected in full, 100% of samples, and the
+	// prediction never moved off 1794 W.
+	if m.Samples > outlierArmSamples {
 		band := math.Max(m.MAE*10, 200)
 		if math.Abs(err) > band {
-			return false
+			// A run of same-direction rejections is not noise — it is the
+			// house telling us the level moved. Spikes are short and
+			// alternate in sign; a real shift is sustained. Let the run
+			// through so the band can re-fit, and keep the filter's actual
+			// job (rejecting the isolated spike) intact.
+			sameDirection := (err > 0) == (m.RejectRunPositive)
+			if m.RejectRun > 0 && sameDirection {
+				m.RejectRun++
+			} else {
+				m.RejectRun = 1
+				m.RejectRunPositive = err > 0
+			}
+			if m.RejectRun < outlierLevelShiftRun {
+				return false
+			}
+			// The run is long enough to be real. Widening the band by
+			// exactly enough to admit this residual is what lets the model
+			// re-fit: simply accepting the one sample and resetting the run
+			// leaves the band untouched, so the next nine are rejected too
+			// and the model crawls in at one sample in ten. Measured that
+			// way, a day at a new 3 kW level only reached 1650 W.
+			//
+			// max() means the band never shrinks here, and the ordinary EMA
+			// below takes over from this point — so the widening is a floor
+			// set by observation, not a permanent loosening.
+			m.MAE = math.Max(m.MAE, math.Abs(err)/10)
+			m.RejectRun = 0
+		} else {
+			m.RejectRun = 0
 		}
 	}
 

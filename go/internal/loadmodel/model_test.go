@@ -329,3 +329,85 @@ func TestHeatingFitWaitsForBucketTrust(t *testing.T) {
 		t.Errorf("untrusted bucket must not drive heating fit, coef = %.0f", m.HeatingW_per_degC)
 	}
 }
+
+// A model calibrated on one quiet hour used to reject the real house
+// forever: a rejected sample updates neither MAE nor Samples, so the band
+// could never grow in response to being persistently wrong. Measured
+// before the fix — an hour at 400 W gave a 570 W band, and a subsequent
+// week at 5 kW was rejected in full, with the prediction stuck at 1794 W.
+func TestSustainedLevelShiftIsLearned(t *testing.T) {
+	m := NewModel(10000)
+	start := time.Date(2026, 7, 1, 2, 0, 0, 0, time.UTC)
+
+	// Two quiet days, enough to arm the outlier filter on a narrow band.
+	n := 0
+	for ; n < 2*24*60; n++ {
+		m.Update(start.Add(time.Duration(n)*time.Minute), 400, HeatingReferenceC)
+	}
+	if band := math.Max(m.MAE*10, 200); band > 600 {
+		t.Fatalf("expected a narrow band after quiet training, got %.0f", band)
+	}
+
+	// The house moves to 3 kW and stays there for three days.
+	trainedFrom := n
+	for i := 0; i < 3*24*60; i++ {
+		m.Update(start.Add(time.Duration(n)*time.Minute), 3000, HeatingReferenceC)
+		n++
+	}
+
+	// Every hour-of-week bucket the run covered must have followed.
+	for i := trainedFrom; i < n; i += 60 {
+		got := m.Predict(start.Add(time.Duration(i)*time.Minute), HeatingReferenceC)
+		if math.Abs(got-3000) > 300 {
+			t.Fatalf("bucket at minute %d predicts %.0f W, want ~3000 W", i, got)
+		}
+	}
+}
+
+// The level-shift concession must not cost us the filter's actual job.
+func TestShortSpikeIsStillRejected(t *testing.T) {
+	m := NewModel(10000)
+	start := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+	n := 0
+	for ; n < 2*24*60; n++ {
+		m.Update(start.Add(time.Duration(n)*time.Minute), 400, HeatingReferenceC)
+	}
+
+	accepted := 0
+	for i := 0; i < outlierLevelShiftRun-1; i++ {
+		if m.Update(start.Add(time.Duration(n)*time.Minute), 6000, HeatingReferenceC) {
+			accepted++
+		}
+		n++
+	}
+	if accepted != 0 {
+		t.Errorf("a spike shorter than the level-shift run was accepted %d times", accepted)
+	}
+
+	// Returning to normal must reset the run, so two separate spikes never
+	// add up to a level shift.
+	m.Update(start.Add(time.Duration(n)*time.Minute), 400, HeatingReferenceC)
+	n++
+	if m.RejectRun != 0 {
+		t.Errorf("reject run = %d after a normal sample, want 0", m.RejectRun)
+	}
+}
+
+// The hard bound is absolute and derived from configured hardware, so it
+// holds from the very first sample — before the MAE band arms — and cannot
+// be widened by a mislearned model.
+func TestImplausibleLoadRejectedBeforeFilterArms(t *testing.T) {
+	m := NewModel(4000)
+	t0 := time.Date(2026, 1, 5, 12, 0, 0, 0, time.UTC)
+	if m.Update(t0, 50000, HeatingReferenceC) {
+		t.Error("50 kW on a 4 kW site should never be accepted")
+	}
+	if m.Samples != 0 {
+		t.Errorf("rejected sample must not count, samples = %d", m.Samples)
+	}
+	// Just under the bound still trains — the guard is for faults, not for
+	// houses that occasionally draw hard.
+	if !m.Update(t0, 3*4000-1, HeatingReferenceC) {
+		t.Error("a load just under the bound should be accepted")
+	}
+}
