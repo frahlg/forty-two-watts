@@ -347,20 +347,26 @@ class FtwPriceChart extends FtwElement {
       margin-top: 16px;
       overflow: visible;
     }
-    /* Bars sit above or below the average line; the side already says
-       dear or cheap, so colour is reinforcement and the strip still reads
-       in greyscale. */
+    /* Bars rise from zero like the full chart's, so both views teach one
+       reading: height is price. The dotted line is the average ahead — a
+       bar's top is read against it, and colour only reinforces what the
+       geometry already says, so the strip survives greyscale. */
     .compact-profile rect { opacity: 0.85; }
-    .compact-profile rect.is-dear  { fill: var(--red-e); }
-    .compact-profile rect.is-cheap { fill: var(--green-e); }
-    .compact-profile rect.is-flat  { fill: var(--fg-muted); }
+    .compact-profile rect.is-dear     { fill: var(--red-e); }
+    .compact-profile rect.is-cheap    { fill: var(--green-e); }
+    .compact-profile rect.is-flat     { fill: var(--fg-muted); }
+    .compact-profile rect.is-negative { fill: var(--yellow); }
     .compact-profile rect.is-current {
       fill: var(--accent-e);
       opacity: 1;
     }
+    /* Dotted like the full chart's mean line — one visual word for
+       "average" across both views. */
     .compact-profile line {
       stroke: var(--fg-muted);
       stroke-width: 1.5;
+      stroke-linecap: round;
+      stroke-dasharray: 0.01 6;
       opacity: 0.9;
     }
     .compact-profile-note {
@@ -743,18 +749,17 @@ class FtwPriceChart extends FtwElement {
     const unit = unitFor(this._currency);
     const mean = roundOre(toDisplay(strip.mean, this._currency));
     const bars = strip.bars.map((b) => {
-      const cls = [b.side === "up" ? "is-dear" : b.side === "down" ? "is-cheap" : "is-flat",
-                   b.current ? "is-current" : ""].filter(Boolean).join(" ");
+      const cls = [`is-${b.tone}`, b.current ? "is-current" : ""].filter(Boolean).join(" ");
       return `<rect class="${cls}" x="${b.x.toFixed(2)}" y="${b.y.toFixed(2)}"
                     width="${b.w.toFixed(2)}" height="${b.h.toFixed(2)}" />`;
     }).join("");
     return `
       <svg class="compact-profile" viewBox="0 0 ${strip.W} ${strip.H}" preserveAspectRatio="none"
-           role="img" aria-label="Price against today's average of ${mean} ${unit.label} per kWh. Bars above the line are dearer, below are cheaper.">
+           role="img" aria-label="Upcoming prices as bars from zero, like the full chart. The dotted line marks the average ahead, ${mean} ${unit.label} per kWh.">
         ${bars}
-        <line x1="0" x2="${strip.W}" y1="${strip.midY.toFixed(2)}" y2="${strip.midY.toFixed(2)}" />
+        <line x1="0" x2="${strip.W}" y1="${strip.meanY.toFixed(2)}" y2="${strip.meanY.toFixed(2)}" />
       </svg>
-      <div class="compact-profile-note">vs the average ahead, ${mean} ${unit.label}</div>
+      <div class="compact-profile-note">dotted line: average ahead, ${mean} ${unit.label}</div>
     `;
   }
 
