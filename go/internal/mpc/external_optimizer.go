@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/srcfl/ftw/go/internal/optimizercontract"
+	"github.com/srcfl/ftw/go/internal/thermal"
 )
 
 const externalOptimizerSchemaVersion = 1
@@ -192,14 +193,14 @@ func NewExternalOptimizer(cfg ExternalOptimizerConfig) (*ExternalOptimizer, erro
 }
 
 type externalRequest struct {
-	SchemaVersion int                `json:"schema_version"`
-	RequestID     string             `json:"request_id"`
-	Settings      externalSettings   `json:"settings"`
-	Slots         []externalSlot     `json:"slots"`
-	Storages      []externalStorage  `json:"storages"`
-	FlexLoads     []externalFlexLoad `json:"flex_loads"`
-	ThermalLoads  []map[string]any   `json:"thermal_loads"`
-	Scenarios     []map[string]any   `json:"scenarios,omitempty"`
+	SchemaVersion int                     `json:"schema_version"`
+	RequestID     string                  `json:"request_id"`
+	Settings      externalSettings        `json:"settings"`
+	Slots         []externalSlot          `json:"slots"`
+	Storages      []externalStorage       `json:"storages"`
+	FlexLoads     []externalFlexLoad      `json:"flex_loads"`
+	ThermalLoads  []thermal.OptimizerLoad `json:"thermal_loads"`
+	Scenarios     []map[string]any        `json:"scenarios,omitempty"`
 }
 
 type externalSettings struct {
@@ -301,19 +302,20 @@ type externalPlan struct {
 }
 
 type externalAction struct {
-	SlotStartMs   int64              `json:"slot_start_ms"`
-	SlotLenMin    int                `json:"slot_len_min"`
-	BatteryW      float64            `json:"battery_w"`
-	GridW         float64            `json:"grid_w"`
-	SoCPct        float64            `json:"soc_pct"`
-	CostOre       float64            `json:"cost_ore"`
-	PVLimitW      float64            `json:"pv_limit_w"`
-	StoragePowerW map[string]float64 `json:"storage_power_w"`
-	StorageEnergy map[string]float64 `json:"storage_energy_wh"`
-	FlexPowerW    map[string]float64 `json:"flex_power_w"`
-	FlexEnergyWh  map[string]float64 `json:"flex_energy_wh"`
-	ThermalPowerW map[string]float64 `json:"thermal_power_w"`
-	ThermalState  map[string]float64 `json:"thermal_state"`
+	SlotStartMs      int64              `json:"slot_start_ms"`
+	SlotLenMin       int                `json:"slot_len_min"`
+	BatteryW         float64            `json:"battery_w"`
+	GridW            float64            `json:"grid_w"`
+	SoCPct           float64            `json:"soc_pct"`
+	CostOre          float64            `json:"cost_ore"`
+	PVLimitW         float64            `json:"pv_limit_w"`
+	StoragePowerW    map[string]float64 `json:"storage_power_w"`
+	StorageEnergy    map[string]float64 `json:"storage_energy_wh"`
+	FlexPowerW       map[string]float64 `json:"flex_power_w"`
+	FlexEnergyWh     map[string]float64 `json:"flex_energy_wh"`
+	ThermalPowerW    map[string]float64 `json:"thermal_power_w"`
+	ThermalState     map[string]float64 `json:"thermal_state"`
+	ThermalMassState map[string]float64 `json:"thermal_mass_state"`
 }
 
 func (o *ExternalOptimizer) Optimize(ctx context.Context, slots []Slot, p Params) (Plan, error) {
@@ -419,7 +421,7 @@ func (o *ExternalOptimizer) buildRequest(slots []Slot, p Params) externalRequest
 		Slots:        make([]externalSlot, len(slots)),
 		Storages:     []externalStorage{},
 		FlexLoads:    []externalFlexLoad{},
-		ThermalLoads: []map[string]any{},
+		ThermalLoads: append([]thermal.OptimizerLoad{}, p.ThermalLoads...),
 	}
 	for i, slot := range slots {
 		req.Slots[i] = externalSlot{
@@ -519,15 +521,22 @@ func (r externalResponse) toPlan(slots []Slot, p Params) Plan {
 			break
 		}
 		slot := slots[i]
+		plannedLoadW := slot.LoadW
+		for _, powerW := range candidate.ThermalPowerW {
+			plannedLoadW += powerW
+		}
 		action := Action{
 			SlotStartMs: slot.StartMs, SlotLenMin: slot.LenMin,
 			PriceOre: slot.PriceOre, SpotOre: slot.SpotOre,
-			PVW: slot.PVW, LoadW: slot.LoadW, Confidence: slot.Confidence,
+			PVW: slot.PVW, LoadW: plannedLoadW, Confidence: slot.Confidence,
 			BatteryW: candidate.BatteryW, GridW: candidate.GridW,
 			SoCPct: candidate.SoCPct, CostOre: candidate.CostOre,
-			PVLimitW:        candidate.PVLimitW,
-			StoragePowerW:   candidate.StoragePowerW,
-			StorageEnergyWh: candidate.StorageEnergy,
+			PVLimitW:          candidate.PVLimitW,
+			StoragePowerW:     candidate.StoragePowerW,
+			StorageEnergyWh:   candidate.StorageEnergy,
+			ThermalPowerW:     candidate.ThermalPowerW,
+			ThermalStateC:     candidate.ThermalState,
+			ThermalMassStateC: candidate.ThermalMassState,
 		}
 		activeLoadpoints := p.activeLoadpoints()
 		if len(activeLoadpoints) > 0 {
@@ -587,6 +596,26 @@ func ValidatePlan(slots []Slot, p Params, plan *Plan) error {
 	evSoC := make(map[string]float64, len(activeLoadpoints))
 	for _, lp := range activeLoadpoints {
 		evSoC[lp.ID] = lp.InitialSoCPct
+	}
+	thermalState := make(map[string]thermal.ModelState, len(p.ThermalLoads))
+	thermalLoads := make(map[string]thermal.OptimizerLoad, len(p.ThermalLoads))
+	thermalLowerRecovery := make(map[string]float64, len(p.ThermalLoads))
+	thermalUpperRecovery := make(map[string]float64, len(p.ThermalLoads))
+	for _, load := range p.ThermalLoads {
+		if err := load.Validate(len(slots)); err != nil {
+			return err
+		}
+		if _, exists := thermalLoads[load.ID]; exists {
+			return fmt.Errorf("duplicate thermal optimizer load %q", load.ID)
+		}
+		mass := load.InitialTempC
+		if load.InitialMassTempC != nil {
+			mass = *load.InitialMassTempC
+		}
+		thermalLoads[load.ID] = load
+		thermalState[load.ID] = thermal.ModelState{AirC: load.InitialTempC, MassC: mass}
+		thermalLowerRecovery[load.ID] = math.Max(0, load.MinTempC-load.InitialTempC)
+		thermalUpperRecovery[load.ID] = math.Max(0, load.InitialTempC-load.MaxTempC)
 	}
 	totalCost := 0.0
 	for i, slot := range slots {
@@ -679,6 +708,54 @@ func ValidatePlan(slots []Slot, p Params, plan *Plan) error {
 			}
 			totalLoadpointW += powerW
 		}
+		totalThermalW := 0.0
+		if len(a.ThermalPowerW) != len(thermalLoads) || len(a.ThermalStateC) != len(thermalLoads) {
+			return fmt.Errorf("slot %d thermal output count does not match configured loads", i)
+		}
+		expectedMassStates := 0
+		for _, load := range thermalLoads {
+			if load.ModelType == thermal.ModelType2R2C {
+				expectedMassStates++
+			}
+		}
+		if len(a.ThermalMassStateC) != expectedMassStates {
+			return fmt.Errorf("slot %d thermal mass-state count does not match 2R2C loads", i)
+		}
+		for id, load := range thermalLoads {
+			powerW, powerOK := a.ThermalPowerW[id]
+			reportedAirC, airOK := a.ThermalStateC[id]
+			if !powerOK || !airOK || math.IsNaN(powerW) || math.IsInf(powerW, 0) || math.IsNaN(reportedAirC) || math.IsInf(reportedAirC, 0) {
+				return fmt.Errorf("slot %d thermal load %s output is missing or non-finite", i, id)
+			}
+			next, err := load.NextState(i, thermalState[id], powerW, dtH)
+			if err != nil {
+				return fmt.Errorf("slot %d thermal load %s: %w", i, id, err)
+			}
+			if math.Abs(reportedAirC-next.AirC) > 0.002 {
+				return fmt.Errorf("slot %d thermal load %s air state %.6f inconsistent with replay %.6f", i, id, reportedAirC, next.AirC)
+			}
+			if load.ModelType == thermal.ModelType2R2C {
+				reportedMassC, ok := a.ThermalMassStateC[id]
+				if !ok || math.IsNaN(reportedMassC) || math.IsInf(reportedMassC, 0) || math.Abs(reportedMassC-next.MassC) > 0.002 {
+					return fmt.Errorf("slot %d thermal load %s mass state is missing or inconsistent", i, id)
+				}
+			} else if _, ok := a.ThermalMassStateC[id]; ok {
+				return fmt.Errorf("slot %d has mass state for 1R1C thermal load %s", i, id)
+			}
+			// Comfort slack in the Python objective must not become an
+			// unchecked physical trajectory. A state that starts outside the
+			// band may recover, but no later slot may worsen either violation.
+			const temperatureToleranceC = 0.02
+			lowerRecovery := math.Max(0, load.MinTempC-next.AirC)
+			upperRecovery := math.Max(0, next.AirC-load.MaxTempC)
+			if lowerRecovery > thermalLowerRecovery[id]+temperatureToleranceC || upperRecovery > thermalUpperRecovery[id]+temperatureToleranceC {
+				return fmt.Errorf("slot %d thermal load %s worsens temperature-bound recovery", i, id)
+			}
+			thermalLowerRecovery[id] = math.Min(thermalLowerRecovery[id], lowerRecovery)
+			thermalUpperRecovery[id] = math.Min(thermalUpperRecovery[id], upperRecovery)
+			thermalState[id] = next
+			totalThermalW += powerW
+		}
 		effectivePVW := slot.PVW
 		if a.PVLimitW > 0 {
 			if a.PVLimitW > -slot.PVW+2 {
@@ -707,11 +784,11 @@ func ValidatePlan(slots []Slot, p Params, plan *Plan) error {
 				}
 			}
 		}
-		wantGridW := slot.LoadW + effectivePVW + a.BatteryW + totalLoadpointW
+		wantGridW := slot.LoadW + effectivePVW + a.BatteryW + totalLoadpointW + totalThermalW
 		if math.Abs(a.GridW-wantGridW) > 2 {
 			return fmt.Errorf("slot %d grid balance %.3f, want %.3f", i, a.GridW, wantGridW)
 		}
-		baseGridW := slot.LoadW + effectivePVW + totalLoadpointW
+		baseGridW := slot.LoadW + effectivePVW + totalLoadpointW + totalThermalW
 		if !modeAllows(p.Mode, baseGridW, a.GridW, a.BatteryW) {
 			return fmt.Errorf("slot %d violates mode %s: baseline_grid_w=%.9f grid_w=%.9f battery_w=%.9f",
 				i, p.Mode, baseGridW, a.GridW, a.BatteryW)

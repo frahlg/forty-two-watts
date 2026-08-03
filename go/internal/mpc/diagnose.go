@@ -21,6 +21,10 @@ type DiagnosticSlot struct {
 	Confidence float64 `json:"confidence"` // 1.0 = day-ahead, 0.6 = forecast
 	PVW        float64 `json:"pv_w"`       // site-signed (≤ 0 when producing)
 	LoadW      float64 `json:"load_w"`
+	// NativeLoadW is present when LoadW also contains an optimizer-planned
+	// thermal load. It keeps the split visible without breaking the existing
+	// total-load field used by the planner inspector.
+	NativeLoadW *float64 `json:"native_load_w,omitempty"`
 
 	// Outputs
 	BatteryW float64 `json:"battery_w"`
@@ -46,6 +50,9 @@ type DiagnosticSlot struct {
 	LoadpointSoCPctByID map[string]float64 `json:"loadpoint_soc_pct_by_id,omitempty"`
 	StoragePowerW       map[string]float64 `json:"storage_power_w,omitempty"`
 	StorageEnergyWh     map[string]float64 `json:"storage_energy_wh,omitempty"`
+	ThermalPowerW       map[string]float64 `json:"thermal_power_w,omitempty"`
+	ThermalStateC       map[string]float64 `json:"thermal_state_c,omitempty"`
+	ThermalMassStateC   map[string]float64 `json:"thermal_mass_state_c,omitempty"`
 }
 
 // DiagnosticParams is a JSON-friendly subset of the Params struct —
@@ -77,21 +84,23 @@ type DiagnosticParams struct {
 // Diagnostic is the full post-mortem of the most recent Optimize call.
 // Returned by Service.Diagnose for the /api/mpc/diagnose endpoint.
 type Diagnostic struct {
-	ComputedAtMs       int64             `json:"computed_at_ms"`
-	Zone               string            `json:"zone"`
-	Horizon            int               `json:"horizon_slots"`
-	TotalCostOre       float64           `json:"total_cost_ore"`
-	Solver             *SolverInfo       `json:"solver,omitempty"`
-	DPShadow           *ShadowPlan       `json:"dp_shadow,omitempty"`
-	DPEvaluationShadow *ShadowPlan       `json:"dp_evaluation_shadow,omitempty"`
-	RecourseShadow     *ShadowPlan       `json:"recourse_shadow,omitempty"`
-	ShadowEvaluation   *ShadowEvaluation `json:"shadow_evaluation,omitempty"`
-	OptimizerInput     json.RawMessage   `json:"optimizer_input,omitempty"`
-	Params             DiagnosticParams  `json:"params"`
-	Slots              []DiagnosticSlot  `json:"slots"`
-	LoadpointID        string            `json:"loadpoint_id,omitempty"`
-	LastReplanAtMs     int64             `json:"last_replan_at_ms"`
-	LastReason         string            `json:"last_reason"`
+	ComputedAtMs          int64             `json:"computed_at_ms"`
+	Zone                  string            `json:"zone"`
+	Horizon               int               `json:"horizon_slots"`
+	TotalCostOre          float64           `json:"total_cost_ore"`
+	Solver                *SolverInfo       `json:"solver,omitempty"`
+	DPShadow              *ShadowPlan       `json:"dp_shadow,omitempty"`
+	DPEvaluationShadow    *ShadowPlan       `json:"dp_evaluation_shadow,omitempty"`
+	RecourseShadow        *ShadowPlan       `json:"recourse_shadow,omitempty"`
+	ShadowEvaluation      *ShadowEvaluation `json:"shadow_evaluation,omitempty"`
+	ThermalProposal       *ThermalProposal  `json:"thermal_proposal,omitempty"`
+	OptimizerInput        json.RawMessage   `json:"optimizer_input,omitempty"`
+	ThermalOptimizerInput json.RawMessage   `json:"thermal_optimizer_input,omitempty"`
+	Params                DiagnosticParams  `json:"params"`
+	Slots                 []DiagnosticSlot  `json:"slots"`
+	LoadpointID           string            `json:"loadpoint_id,omitempty"`
+	LastReplanAtMs        int64             `json:"last_replan_at_ms"`
+	LastReason            string            `json:"last_reason"`
 }
 
 // Diagnose returns the inputs + outputs of the most recent Optimize
@@ -135,6 +144,13 @@ func buildDiagnostic(plan *Plan, slots []Slot, p Params, zone string,
 	for i := 0; i < n; i++ {
 		slot := slots[i]
 		action := plan.Actions[i]
+		loadW := slot.LoadW
+		var nativeLoadW *float64
+		if len(action.ThermalPowerW) > 0 {
+			loadW = action.LoadW
+			native := slot.LoadW
+			nativeLoadW = &native
+		}
 		out[i] = DiagnosticSlot{
 			Idx:                 i,
 			SlotStartMs:         slot.StartMs,
@@ -144,7 +160,8 @@ func buildDiagnostic(plan *Plan, slots []Slot, p Params, zone string,
 			SpotOre:             slot.SpotOre,
 			Confidence:          slot.Confidence,
 			PVW:                 slot.PVW,
-			LoadW:               slot.LoadW,
+			LoadW:               loadW,
+			NativeLoadW:         nativeLoadW,
 			BatteryW:            action.BatteryW,
 			GridW:               action.GridW,
 			SoCPct:              action.SoCPct,
@@ -158,13 +175,16 @@ func buildDiagnostic(plan *Plan, slots []Slot, p Params, zone string,
 			LoadpointSoCPctByID: action.LoadpointSoCPctByID,
 			StoragePowerW:       action.StoragePowerW,
 			StorageEnergyWh:     action.StorageEnergyWh,
+			ThermalPowerW:       action.ThermalPowerW,
+			ThermalStateC:       action.ThermalStateC,
+			ThermalMassStateC:   action.ThermalMassStateC,
 		}
 	}
 	loadpointID := ""
 	if p.Loadpoint != nil {
 		loadpointID = p.Loadpoint.ID
 	}
-	return &Diagnostic{
+	result := &Diagnostic{
 		ComputedAtMs:       plan.GeneratedAtMs,
 		Zone:               zone,
 		Horizon:            plan.HorizonSlots,
@@ -174,6 +194,7 @@ func buildDiagnostic(plan *Plan, slots []Slot, p Params, zone string,
 		DPEvaluationShadow: plan.DPEvaluationShadow,
 		RecourseShadow:     plan.RecourseShadow,
 		ShadowEvaluation:   plan.ShadowEvaluation,
+		ThermalProposal:    cloneThermalProposal(plan.ThermalProposal),
 		OptimizerInput:     append(json.RawMessage(nil), plan.OptimizerInput...),
 		Params: DiagnosticParams{
 			Mode:                       p.Mode,
@@ -201,78 +222,38 @@ func buildDiagnostic(plan *Plan, slots []Slot, p Params, zone string,
 		LastReplanAtMs: replanAtMs,
 		LastReason:     reason,
 	}
+	if plan.ThermalProposal != nil {
+		result.ThermalOptimizerInput = append(json.RawMessage(nil), plan.ThermalProposal.OptimizerInput...)
+	}
+	return result
 }
 
-// RestoreDiagnostic promotes a persisted diagnostic snapshot back into
-// the active in-memory plan cache. Diagnostics are already the exact
-// plan+slot JSON the UI uses for time travel; restoring them avoids a
-// restart/update gap where Diagnose can show a valid plan from SQLite
-// while dispatch sees nil and falls into missing-plan behaviour until
-// the next successful replan.
-func (s *Service) RestoreDiagnostic(d *Diagnostic, now time.Time, reason string) bool {
-	if s == nil || d == nil || len(d.Slots) == 0 {
-		return false
+func cloneThermalProposal(input *ThermalProposal) *ThermalProposal {
+	if input == nil {
+		return nil
 	}
-	if now.IsZero() {
-		now = time.Now()
-	}
-	plan, slots, params, replanAt, ok := planFromDiagnostic(d)
-	if !ok {
-		return false
-	}
-	if now.Sub(time.UnixMilli(plan.GeneratedAtMs)) > MaxPlanAge {
-		return false
-	}
-	nowMs := now.UnixMilli()
-	inWindow := false
-	for _, a := range plan.Actions {
-		endMs := a.SlotStartMs + int64(a.SlotLenMin)*60*1000
-		if nowMs >= a.SlotStartMs && nowMs < endMs {
-			inWindow = true
-			break
-		}
-	}
-	if !inWindow {
-		return false
-	}
-	if d.LoadpointID == "" {
-		for _, a := range plan.Actions {
-			if a.LoadpointW > 0 {
-				return false
-			}
-		}
-	}
-	if reason == "" {
-		reason = "restored_diagnostic"
-	}
+	out := *input
+	out.Actions = append([]Action(nil), input.Actions...)
+	out.OptimizerInput = append(json.RawMessage(nil), input.OptimizerInput...)
+	return &out
+}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.Defaults.Mode != "" && params.Mode != "" && params.Mode != s.Defaults.Mode {
-		return false
-	}
-	// Merge fields that exist in the current binary's Defaults but
-	// could be missing-or-zero in a persisted snapshot written by an
-	// older binary. Without this merge, a deploy that adds a new Params
-	// field lets the restored snapshot's zero overwrite the operator's
-	// intended default until the next successful replan rebuilds params
-	// from s.Defaults.
-	if params.PVChargeBonusOreKwh == 0 && s.Defaults.PVChargeBonusOreKwh > 0 {
-		params.PVChargeBonusOreKwh = s.Defaults.PVChargeBonusOreKwh
-	}
-	s.last = plan
-	s.lastSlots = slots
-	s.lastParams = params
-	s.lastLoadpointID = d.LoadpointID
-	s.lastReplanAt = replanAt
-	s.lastReason = reason
-	if s.EnableRecourseShadow && d.ShadowEvaluation != nil {
-		if s.shadowEvaluator == nil {
-			s.shadowEvaluator = newStatefulShadowEvaluator()
+// RestoreDiagnostic deliberately never promotes persisted output to live
+// dispatch. A diagnostic lacks a complete, current hardware/config snapshot,
+// so Core cannot prove that its battery, grid, EV, or PV limits still apply.
+// Startup keeps autonomous device defaults until a fresh plan passes the full
+// current validation path. Persisted diagnostics remain available for review.
+func (s *Service) RestoreDiagnostic(_ *Diagnostic, _ time.Time, _ string) bool {
+	return false
+}
+
+func hasThermalActions(actions []Action) bool {
+	for _, action := range actions {
+		if len(action.ThermalPowerW) > 0 || len(action.ThermalStateC) > 0 || len(action.ThermalMassStateC) > 0 {
+			return true
 		}
-		s.shadowEvaluator.Restore(d.ShadowEvaluation)
 	}
-	return true
+	return false
 }
 
 func planFromDiagnostic(d *Diagnostic) (*Plan, []Slot, Params, time.Time, bool) {
@@ -321,13 +302,17 @@ func planFromDiagnostic(d *Diagnostic) (*Plan, []Slot, Params, time.Time, bool) 
 		if lenMin <= 0 {
 			continue
 		}
+		nativeLoadW := ds.LoadW
+		if ds.NativeLoadW != nil {
+			nativeLoadW = *ds.NativeLoadW
+		}
 		slots = append(slots, Slot{
 			StartMs:    ds.SlotStartMs,
 			LenMin:     lenMin,
 			PriceOre:   ds.PriceOre,
 			SpotOre:    ds.SpotOre,
 			PVW:        ds.PVW,
-			LoadW:      ds.LoadW,
+			LoadW:      nativeLoadW,
 			Confidence: ds.Confidence,
 		})
 		actions = append(actions, Action{
@@ -351,6 +336,9 @@ func planFromDiagnostic(d *Diagnostic) (*Plan, []Slot, Params, time.Time, bool) 
 			LoadpointSoCPctByID: ds.LoadpointSoCPctByID,
 			StoragePowerW:       ds.StoragePowerW,
 			StorageEnergyWh:     ds.StorageEnergyWh,
+			ThermalPowerW:       ds.ThermalPowerW,
+			ThermalStateC:       ds.ThermalStateC,
+			ThermalMassStateC:   ds.ThermalMassStateC,
 		})
 	}
 	if len(actions) == 0 {
@@ -373,7 +361,11 @@ func planFromDiagnostic(d *Diagnostic) (*Plan, []Slot, Params, time.Time, bool) 
 		DPEvaluationShadow: d.DPEvaluationShadow,
 		RecourseShadow:     d.RecourseShadow,
 		ShadowEvaluation:   d.ShadowEvaluation,
+		ThermalProposal:    cloneThermalProposal(d.ThermalProposal),
 		OptimizerInput:     append(json.RawMessage(nil), d.OptimizerInput...),
+	}
+	if plan.ThermalProposal != nil {
+		plan.ThermalProposal.OptimizerInput = append(json.RawMessage(nil), d.ThermalOptimizerInput...)
 	}
 	return plan, slots, params, time.UnixMilli(replanAtMs), true
 }

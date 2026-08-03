@@ -2,7 +2,9 @@ package mpc
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"math"
 	"sort"
@@ -11,6 +13,7 @@ import (
 
 	"github.com/srcfl/ftw/go/internal/state"
 	"github.com/srcfl/ftw/go/internal/telemetry"
+	"github.com/srcfl/ftw/go/internal/thermal"
 )
 
 // PVPredictor lets the MPC plug in a learned PV predictor (the digital
@@ -36,6 +39,10 @@ type PVResidualCorrector func(now, tTarget time.Time, basePrediction float64) fl
 // LoadPredictor plugs in a learned load predictor. Implemented by
 // *loadmodel.Service.Predict. Leave nil to fall back to Service.BaseLoad.
 type LoadPredictor func(t time.Time) float64
+
+// ThermalLoadProbe turns current validated thermal telemetry plus the outdoor
+// forecast into optimizer loads. An error keeps the whole-house load path.
+type ThermalLoadProbe func(now time.Time, slots []thermal.ForecastSlot) ([]thermal.OptimizerLoad, error)
 
 // PricePredictor fills in spot price for future slots that the day-ahead
 // source hasn't published yet. Implemented by
@@ -79,11 +86,20 @@ type Service struct {
 	PV                PVPredictor         // optional — overrides stored pv_w_estimated
 	PVResidualCorrect PVResidualCorrector // optional — additive short-horizon bias on top of PV
 	Load              LoadPredictor       // optional — overrides flat BaseLoad
+	// LoadWithoutThermal predicts native house demand after the heat-pump
+	// component has been removed. Service uses it only for a thermal shadow
+	// solve, so stale model data cannot erase heating from the active plan.
+	LoadWithoutThermal LoadPredictor
+	Thermal            ThermalLoadProbe // optional input for the diagnostic thermal shadow
 	// Optimizer is the primary mathematical planning engine. Nil selects the
 	// legacy in-process Go DP explicitly. When non-nil, any engine/process/
 	// validation failure falls back to the DP for this replan and is recorded
 	// in Plan.Solver.
 	Optimizer PlanOptimizer
+	// ThermalOptimizer is a separate worker used only for diagnostic thermal
+	// proposals. It must not share a process or socket with Optimizer: a slow
+	// shadow solve must never hold the active planner's request queue.
+	ThermalOptimizer PlanOptimizer
 	// EnableRecourseShadow runs a storage-only stochastic recourse challenger
 	// after each successful champion solve. It shares the primary worker and is
 	// diagnostic-only: no challenger action is ever read by SlotDirectiveAt.
@@ -200,6 +216,12 @@ type Service struct {
 
 	Defaults     Params
 	BatteryFleet []BatteryFleetMember
+
+	// replanMu keeps one planning snapshot in flight. replanGeneration lets a
+	// newer request cancel and supersede an older one before it can publish.
+	replanMu         sync.Mutex
+	replanGeneration uint64
+	replanCancel     context.CancelFunc
 
 	mu              sync.RWMutex
 	last            *Plan
@@ -332,6 +354,19 @@ func (s *Service) Latest() *Plan {
 // single missed replan doesn't flip us into fallback.
 const MaxPlanAge = 30 * time.Minute
 
+const planFutureGrace = 30 * time.Second
+
+func planFreshAt(generatedAtMs int64, now time.Time) bool {
+	if generatedAtMs <= 0 {
+		return false
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	age := now.Sub(time.UnixMilli(generatedAtMs))
+	return age >= -planFutureGrace && age <= MaxPlanAge
+}
+
 // SlotDirective is the plan's per-slot instruction to the EMS under the
 // energy-allocation contract. The plan
 // allocates total battery energy (Wh, site-signed) for the slot; the
@@ -385,6 +420,13 @@ type SlotDirective struct {
 	// LoadpointSoCTargetPct is the plan's EV SoC at SlotEnd per
 	// loadpoint. Used by the per-loadpoint divergence check.
 	LoadpointSoCTargetPct map[string]float64
+
+	// Thermal fields are reserved for a later guarded controller. The thermal
+	// shadow is kept on Plan.ThermalProposal and never copied into this live
+	// directive.
+	ThermalEnergyWh   map[string]float64
+	ThermalStateC     map[string]float64
+	ThermalMassStateC map[string]float64
 }
 
 // SlotDirectiveAt returns the energy-allocation directive for the slot
@@ -410,7 +452,7 @@ func (s *Service) SlotDirectiveAt(now time.Time) (SlotDirective, bool) {
 	if p == nil {
 		return SlotDirective{}, false
 	}
-	if time.Since(time.UnixMilli(p.GeneratedAtMs)) > MaxPlanAge {
+	if !planFreshAt(p.GeneratedAtMs, now) {
 		return SlotDirective{}, false
 	}
 	nowMs := now.UnixMilli()
@@ -532,7 +574,7 @@ func (s *Service) SlotAt(now time.Time) (string, float64, bool) {
 	if p == nil {
 		return "", 0, false
 	}
-	if time.Since(time.UnixMilli(p.GeneratedAtMs)) > MaxPlanAge {
+	if !planFreshAt(p.GeneratedAtMs, now) {
 		return "", 0, false
 	}
 	nowMs := now.UnixMilli()
@@ -588,7 +630,7 @@ func (s *Service) SetMode(ctx context.Context, mode Mode) {
 	s.mu.Lock()
 	s.Defaults.Mode = mode
 	s.mu.Unlock()
-	s.replan(ctx)
+	s.replan(ctx, "mode-changed")
 }
 
 // Start runs the planner in a goroutine. Does an initial plan immediately.
@@ -604,8 +646,16 @@ func (s *Service) Stop() {
 	if s == nil {
 		return
 	}
+	s.mu.Lock()
+	if s.replanCancel != nil {
+		s.replanCancel()
+	}
+	s.mu.Unlock()
 	close(s.stop)
 	<-s.done
+	if s.ThermalOptimizer != nil {
+		_ = s.ThermalOptimizer.Close()
+	}
 	if s.Optimizer != nil {
 		_ = s.Optimizer.Close()
 	}
@@ -613,8 +663,7 @@ func (s *Service) Stop() {
 
 func (s *Service) loop(ctx context.Context) {
 	defer close(s.done)
-	s.lastReason = "scheduled"
-	s.replan(ctx)
+	s.replan(ctx, "scheduled")
 	t := time.NewTicker(s.Interval)
 	defer t.Stop()
 	var reactiveTick <-chan time.Time
@@ -630,8 +679,7 @@ func (s *Service) loop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			s.lastReason = "scheduled"
-			s.replan(ctx)
+			s.replan(ctx, "scheduled")
 		case <-reactiveTick:
 			s.observeShadow(time.Now())
 			s.checkDivergence(ctx)
@@ -753,13 +801,12 @@ func (s *Service) checkDivergence(ctx context.Context) {
 		"pv_err_wh", pvInt, "loadint_wh", loadInt,
 		"pv_w_now", pvW, "plan_pv_w", slot.PVW,
 		"load_w_now", loadW, "plan_load_w", slot.LoadW)
-	s.lastReason = reason
 	// Reset integrals after triggering so we don't immediately re-fire.
 	s.mu.Lock()
 	s.pvErrIntWh = 0
 	s.loadErrIntWh = 0
 	s.mu.Unlock()
-	s.replan(ctx)
+	s.replan(ctx, reason)
 }
 
 // snapshotPredictions samples the PV + load twins at the build-time slot
@@ -895,15 +942,12 @@ func (s *Service) checkTwinDrift(ctx context.Context) {
 	if reason == "" {
 		return
 	}
-	s.mu.Lock()
-	s.lastReason = reason
-	s.mu.Unlock()
-	s.replan(ctx)
+	s.replan(ctx, reason)
 }
 
 // Replan recomputes the plan once using current prices + forecast + SoC.
 // Exposed for tests and API triggers.
-func (s *Service) Replan(ctx context.Context) *Plan { return s.replan(ctx) }
+func (s *Service) Replan(ctx context.Context) *Plan { return s.replan(ctx, "manual") }
 
 // ReplanWithReason is Replan with an explicit reason string that lands
 // in slog + the diagnose snapshot. Use it when an external event (API
@@ -913,15 +957,58 @@ func (s *Service) Replan(ctx context.Context) *Plan { return s.replan(ctx) }
 // 12:34?". Reasons should be short kebab-style, e.g.
 // "surplus_only_disabled", "target_soc_changed", "mode_changed".
 func (s *Service) ReplanWithReason(ctx context.Context, reason string) *Plan {
-	if reason != "" {
-		s.mu.Lock()
-		s.lastReason = reason
-		s.mu.Unlock()
+	if reason == "" {
+		reason = "manual"
 	}
-	return s.replan(ctx)
+	return s.replan(ctx, reason)
 }
 
-func (s *Service) replan(ctx context.Context) *Plan {
+func (s *Service) replan(parent context.Context, reason string) *Plan {
+	if parent == nil {
+		parent = context.Background()
+	}
+	if reason == "" {
+		reason = "manual"
+	}
+
+	// Register before waiting for the single-flight lock. A newer request
+	// cancels the running solve and invalidates its generation, so an old mode,
+	// SoC snapshot, or hardware limit can never publish after a newer request.
+	s.mu.Lock()
+	s.replanGeneration++
+	generation := s.replanGeneration
+	if s.replanCancel != nil {
+		s.replanCancel()
+	}
+	ctx, cancel := context.WithCancel(parent)
+	s.replanCancel = cancel
+	// Keep the trigger visible even when data loading fails before a new plan
+	// can publish. Reactive diagnostics rely on this attempt-level reason.
+	s.lastReason = reason
+	s.mu.Unlock()
+
+	s.replanMu.Lock()
+	replanLocked := true
+	defer func() {
+		if replanLocked {
+			s.replanMu.Unlock()
+		}
+	}()
+	defer func() {
+		cancel()
+		s.mu.Lock()
+		if s.replanGeneration == generation {
+			s.replanCancel = nil
+		}
+		s.mu.Unlock()
+	}()
+	s.mu.RLock()
+	current := s.replanGeneration == generation
+	s.mu.RUnlock()
+	if !current || ctx.Err() != nil {
+		return nil
+	}
+
 	now := time.Now()
 	untilMs := now.Add(s.Horizon).UnixMilli()
 	sinceMs := now.UnixMilli() - 15*60*1000 // small margin — slot starting ≤15min ago still in-flight
@@ -1000,6 +1087,25 @@ func (s *Service) replan(ctx context.Context) *Plan {
 	p.PVForecastSafetyK = s.PVForecastSafetyK
 	if s.PVUncertaintyW != nil {
 		p.PVUncertaintyW = math.Max(0, s.PVUncertaintyW())
+	}
+
+	// Prepare a joint thermal/storage proposal only when the promoted model,
+	// live indoor sensor, full weather horizon, and native-load predictor pass
+	// together. The active optimizer still receives the whole-house load until
+	// a guarded heat-pump adapter can execute the thermal schedule.
+	thermalShadowReady := false
+	var thermalProposalSlots []Slot
+	var thermalProposalLoads []thermal.OptimizerLoad
+	p.ThermalLoads = nil
+	if s.ThermalOptimizer != nil && s.Thermal != nil {
+		proposalSlots, loads, thermalErr := prepareThermalPlanning(now, slots, s.LoadWithoutThermal, s.Thermal)
+		if thermalErr != nil {
+			slog.Warn("mpc: thermal shadow unavailable", "err", thermalErr)
+		} else if len(loads) > 0 {
+			thermalProposalSlots = proposalSlots
+			thermalProposalLoads = loads
+			thermalShadowReady = true
+		}
 	}
 
 	// Default terminal valuation. Mode-dependent because self-consumption
@@ -1091,6 +1197,8 @@ func (s *Service) replan(ctx context.Context) *Plan {
 		"soc_start", p.InitialSoCPct,
 		"loadpoint_active", p.Loadpoint != nil,
 		"loadpoint_id", loadpointID,
+		"thermal_shadow_ready", thermalShadowReady,
+		"thermal_loads", len(thermalProposalLoads),
 	)
 	var plan Plan
 	if s.Optimizer == nil {
@@ -1103,6 +1211,12 @@ func (s *Service) replan(ctx context.Context) *Plan {
 	} else {
 		candidate, err := s.Optimizer.Optimize(ctx, slots, p)
 		if err == nil {
+			err = ValidatePlan(slots, p, &candidate)
+		}
+		if err == nil {
+			// PlanOptimizer implementations cannot inject their own shadow. Only
+			// the separately prepared and replayed solve below may populate it.
+			candidate.ThermalProposal = nil
 			dpEvaluation := Optimize(slots, p)
 			dpEvaluation.Solver = &SolverInfo{
 				Engine: "go-dp", Backend: "bellman", Status: "optimal-grid",
@@ -1237,18 +1351,56 @@ func (s *Service) replan(ctx context.Context) *Plan {
 	pp := s.snapshotPredictions(slots, forecasts)
 
 	s.mu.Lock()
-	s.last = &plan
+	if s.replanGeneration != generation || ctx.Err() != nil {
+		s.mu.Unlock()
+		return nil
+	}
+	// Keep the published snapshot distinct from the local return value. Shadow
+	// work may later add diagnostic data to the local plan; published plan
+	// objects stay immutable after readers receive their pointer.
+	publishedPlan := plan
+	s.last = &publishedPlan
 	s.lastSlots = slots
 	s.lastParams = p
 	s.lastLoadpointID = loadpointID
 	s.lastReplanAt = time.Now()
 	s.plannedPredictions = pp
-	reason := s.lastReason
-	if reason == "" {
-		reason = "manual"
-	}
+	s.lastReason = reason
 	replanAtMs := s.lastReplanAt.UnixMilli()
 	s.mu.Unlock()
+
+	// The active plan no longer depends on any shadow work. Let a newer active
+	// replan start now, even if the thermal worker is slow or does not stop
+	// promptly after context cancellation.
+	s.replanMu.Unlock()
+	replanLocked = false
+
+	// The active plan is now visible to dispatch. Run the optional thermal
+	// proposal afterward on its own worker, then attach it only if this plan is
+	// still the newest generation.
+	if thermalShadowReady {
+		thermalParams := p
+		thermalParams.ThermalLoads = thermalProposalLoads
+		thermalPlan, thermalErr := s.ThermalOptimizer.Optimize(ctx, thermalProposalSlots, thermalParams)
+		if thermalErr == nil {
+			thermalErr = ValidatePlan(thermalProposalSlots, thermalParams, &thermalPlan)
+		}
+		if thermalErr != nil {
+			if ctx.Err() == nil {
+				slog.Warn("mpc: thermal shadow solve failed", "err", thermalErr)
+			}
+		} else {
+			proposal := newThermalProposal(thermalPlan, p.Mode)
+			s.mu.Lock()
+			if s.replanGeneration == generation && s.last != nil && s.last.GeneratedAtMs == plan.GeneratedAtMs {
+				plan.ThermalProposal = proposal
+				updated := *s.last
+				updated.ThermalProposal = cloneThermalProposal(proposal)
+				s.last = &updated
+			}
+			s.mu.Unlock()
+		}
+	}
 	// Horizon statistics — surfaced in logs so operators can
 	// reconstruct "what did the DP know?" without pulling the full
 	// Diagnostic JSON. Captures the three factors most likely to
@@ -1354,6 +1506,26 @@ func (s *Service) observeShadow(now time.Time) {
 		s.last = &updated
 	}
 	s.mu.Unlock()
+}
+
+func newThermalProposal(plan Plan, mode Mode) *ThermalProposal {
+	actions := append([]Action(nil), plan.Actions...)
+	for index := range actions {
+		emsMode, _, _ := actionToSlot(actions[index], mode)
+		actions[index].EMSMode = emsMode
+	}
+	return &ThermalProposal{
+		GeneratedAtMs: plan.GeneratedAtMs,
+		HorizonSlots:  plan.HorizonSlots,
+		TotalCostOre:  plan.TotalCostOre,
+		ForecastBasis: "native-load forecast plus promoted thermal model; diagnostic only",
+		Actions:       actions,
+		Solver:        plan.Solver,
+		OptimizerInput: append(
+			json.RawMessage(nil),
+			plan.OptimizerInput...,
+		),
+	}
 }
 
 func compareDPShadow(active, shadow Plan) *ShadowPlan {
@@ -1508,17 +1680,60 @@ func buildSlots(prices []state.PricePoint, forecasts []state.ForecastPoint, base
 		if pr.Source == "forecast" {
 			conf = 0.6
 		}
+		var outdoorTempC *float64
+		if value, ok := lookupTemperature(forecasts, pr.SlotTsMs); ok {
+			outdoorTempC = &value
+		}
 		out = append(out, Slot{
-			StartMs:    pr.SlotTsMs,
-			LenMin:     slotLen,
-			PriceOre:   pr.TotalOreKwh,
-			SpotOre:    pr.SpotOreKwh,
-			PVW:        -math.Abs(pvW),
-			LoadW:      loadW,
-			Confidence: conf,
+			StartMs:      pr.SlotTsMs,
+			LenMin:       slotLen,
+			PriceOre:     pr.TotalOreKwh,
+			SpotOre:      pr.SpotOreKwh,
+			PVW:          -math.Abs(pvW),
+			LoadW:        loadW,
+			OutdoorTempC: outdoorTempC,
+			Confidence:   conf,
 		})
 	}
 	return out
+}
+
+func prepareThermalPlanning(now time.Time, slots []Slot, nativeLoad LoadPredictor, probe ThermalLoadProbe) ([]Slot, []thermal.OptimizerLoad, error) {
+	if nativeLoad == nil {
+		return nil, nil, errors.New("thermal model has no native-load predictor")
+	}
+	// The room state is measured at now, not at the start of an in-flight
+	// price slot. Begin at the next full slot; Runtime bridges the short gap
+	// from live power and temperature telemetry.
+	proposalSlots := make([]Slot, 0, len(slots))
+	for _, slot := range slots {
+		if time.UnixMilli(slot.StartMs).Before(now) {
+			continue
+		}
+		value := nativeLoad(time.UnixMilli(slot.StartMs).UTC())
+		if !finiteFloat(value) || value < 0 {
+			return nil, nil, fmt.Errorf("native load prediction is invalid at slot %d", len(proposalSlots))
+		}
+		copy := slot
+		copy.LoadW = value
+		proposalSlots = append(proposalSlots, copy)
+	}
+	if len(proposalSlots) == 0 {
+		return nil, nil, errors.New("thermal horizon has no complete future slot")
+	}
+	thermalSlots := make([]thermal.ForecastSlot, len(proposalSlots))
+	for index, slot := range proposalSlots {
+		thermalSlots[index] = thermal.ForecastSlot{
+			Start:        time.UnixMilli(slot.StartMs),
+			Duration:     time.Duration(slot.LenMin) * time.Minute,
+			OutdoorTempC: slot.OutdoorTempC,
+		}
+	}
+	loads, err := probe(now, thermalSlots)
+	if err != nil || len(loads) == 0 {
+		return proposalSlots, loads, err
+	}
+	return proposalSlots, loads, nil
 }
 
 // applyPVDownside reduces each slot's planned PV generation by k·σ (the recent
@@ -1766,6 +1981,33 @@ func lookupCloud(forecasts []state.ForecastPoint, ts int64) float64 {
 		return *last.CloudCoverPct
 	}
 	return 50
+}
+
+// lookupTemperature returns only an outdoor forecast row that covers ts. A
+// thermal model needs real horizon coverage, not a stale value copied across
+// a gap or beyond the last row.
+func lookupTemperature(forecasts []state.ForecastPoint, ts int64) (float64, bool) {
+	for _, forecast := range forecasts {
+		slotLen := forecast.SlotLenMin
+		if slotLen <= 0 {
+			slotLen = 60
+		}
+		end := forecast.SlotTsMs + int64(slotLen)*60*1000
+		if ts >= forecast.SlotTsMs && ts < end {
+			if forecast.TempC == nil || !finiteFloat(*forecast.TempC) {
+				return 0, false
+			}
+			return *forecast.TempC, true
+		}
+		if ts < forecast.SlotTsMs {
+			return 0, false
+		}
+	}
+	return 0, false
+}
+
+func finiteFloat(value float64) bool {
+	return !math.IsNaN(value) && !math.IsInf(value, 0)
 }
 
 // lookupPV finds the forecast row whose slot covers ts and returns its PV

@@ -76,6 +76,10 @@ func TestSlotDirectiveCarriesLoadpointEnergyWh(t *testing.T) {
 	}
 	// Query inside the charged slot.
 	queryAt := time.UnixMilli(plan.Actions[chargedSlotIdx].SlotStartMs).Add(1 * time.Minute)
+	if queryAt.Before(now) {
+		queryAt = now
+	}
+	plan.GeneratedAtMs = queryAt.UnixMilli()
 	d, ok := svc.SlotDirectiveAt(queryAt)
 	if !ok {
 		t.Fatal("SlotDirectiveAt returned ok=false")
@@ -113,7 +117,7 @@ func TestSlotDirectiveEmptyWhenNoLoadpoint(t *testing.T) {
 		ChargeEfficiency: 0.95, DischargeEfficiency: 0.95,
 	})
 	svc := &Service{last: &plan, lastLoadpointID: ""}
-	d, ok := svc.SlotDirectiveAt(start.Add(1 * time.Minute))
+	d, ok := svc.SlotDirectiveAt(now)
 	if !ok {
 		t.Fatal("SlotDirectiveAt ok=false")
 	}

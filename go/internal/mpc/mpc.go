@@ -41,6 +41,7 @@ import (
 	"time"
 
 	"github.com/srcfl/ftw/go/internal/gridcost"
+	"github.com/srcfl/ftw/go/internal/thermal"
 )
 
 // Mode selects how aggressively the planner uses the battery.
@@ -105,6 +106,9 @@ type Slot struct {
 	SpotOre  float64 // raw spot öre/kWh — used for EXPORT revenue (before bonus/fee)
 	PVW      float64 // negative (site sign). 0 if no forecast.
 	LoadW    float64 // positive (site sign). Defaults to a flat baseline.
+	// OutdoorTempC carries the weather input used by a thermal model. Nil
+	// keeps the existing whole-house load path.
+	OutdoorTempC *float64
 
 	// Confidence in [0, 1]. 1.0 = real day-ahead price; < 1.0 = ML-
 	// forecasted price where we're less sure of both level and shape.
@@ -219,6 +223,10 @@ type Params struct {
 	// fallback still receives downside-adjusted slots directly from Service.
 	PVUncertaintyW    float64
 	PVForecastSafetyK float64
+
+	// ThermalLoads are advisory, model-backed loads for the mathematical
+	// optimizer. The Go DP ignores them and always receives whole-house load.
+	ThermalLoads []thermal.OptimizerLoad
 }
 
 // StorageAssetSpec is one independently constrained home battery in the
@@ -299,6 +307,13 @@ type Action struct {
 	// SoCPct remain the stable aggregate dispatch/API contract.
 	StoragePowerW   map[string]float64 `json:"storage_power_w,omitempty"`
 	StorageEnergyWh map[string]float64 `json:"storage_energy_wh,omitempty"`
+
+	// Thermal values remain optimizer proposals. A separate guarded thermal
+	// controller may consume them later; battery dispatch never sends them to
+	// a heat-pump driver.
+	ThermalPowerW     map[string]float64 `json:"thermal_power_w,omitempty"`
+	ThermalStateC     map[string]float64 `json:"thermal_state_c,omitempty"`
+	ThermalMassStateC map[string]float64 `json:"thermal_mass_state_c,omitempty"`
 }
 
 // Baselines are counter-factual dispatch costs over the same horizon,
@@ -338,9 +353,25 @@ type Plan struct {
 	DPEvaluationShadow *ShadowPlan       `json:"dp_evaluation_shadow,omitempty"`
 	RecourseShadow     *ShadowPlan       `json:"recourse_shadow,omitempty"`
 	ShadowEvaluation   *ShadowEvaluation `json:"shadow_evaluation,omitempty"`
+	ThermalProposal    *ThermalProposal  `json:"thermal_proposal,omitempty"`
 	// OptimizerInput is the exact versioned request used by an external
 	// optimizer. It is omitted from the live plan API and copied into the
 	// persisted Diagnostic for deterministic replay.
+	OptimizerInput json.RawMessage `json:"-"`
+}
+
+// ThermalProposal is a fully validated joint thermal/storage plan kept for
+// review only. The active plan continues to use the whole-house load until a
+// guarded heat-pump adapter can execute the thermal schedule.
+type ThermalProposal struct {
+	GeneratedAtMs int64       `json:"generated_at_ms"`
+	HorizonSlots  int         `json:"horizon_slots"`
+	TotalCostOre  float64     `json:"total_cost_ore"`
+	ForecastBasis string      `json:"forecast_basis"`
+	Actions       []Action    `json:"actions"`
+	Solver        *SolverInfo `json:"solver,omitempty"`
+	// OptimizerInput is persisted through Diagnostic but omitted from the
+	// live plan API, like Plan.OptimizerInput.
 	OptimizerInput json.RawMessage `json:"-"`
 }
 

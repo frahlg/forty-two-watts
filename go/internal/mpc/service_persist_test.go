@@ -14,10 +14,35 @@ import (
 type testPrimaryOptimizer struct{}
 
 func (testPrimaryOptimizer) Optimize(_ context.Context, slots []Slot, p Params) (Plan, error) {
-	plan := Optimize(slots, p)
+	plan := exactIdleOptimizerPlan(slots, p)
 	plan.Solver = &SolverInfo{Engine: "cvxpy", Backend: "highs", Status: "optimal", SolveMs: 12}
 	plan.OptimizerInput = json.RawMessage(`{"schema_version":1}`)
 	return plan, nil
+}
+
+// exactIdleOptimizerPlan is a small continuous-solver stand-in. The Go DP
+// rounds SoC to its state grid, so its output is not suitable for tests that
+// exercise the strict external-plan replay boundary.
+func exactIdleOptimizerPlan(slots []Slot, p Params) Plan {
+	plan := Plan{
+		GeneratedAtMs: time.Now().UnixMilli(), Mode: p.Mode,
+		HorizonSlots: len(slots), CapacityWh: p.CapacityWh,
+		InitialSoCPct: p.InitialSoCPct,
+		Actions:       make([]Action, 0, len(slots)),
+	}
+	for _, slot := range slots {
+		gridW := slot.LoadW + slot.PVW
+		costOre := SlotGridCostOre(slot, gridW*float64(slot.LenMin)/60/1_000, p)
+		plan.TotalCostOre += costOre
+		plan.Actions = append(plan.Actions, Action{
+			SlotStartMs: slot.StartMs, SlotLenMin: slot.LenMin,
+			PriceOre: slot.PriceOre, SpotOre: slot.SpotOre,
+			PVW: slot.PVW, LoadW: slot.LoadW, Confidence: slot.Confidence,
+			GridW: gridW, SoCPct: p.InitialSoCPct, CostOre: costOre,
+			Reason: "idle",
+		})
+	}
+	return plan
 }
 
 func (testPrimaryOptimizer) Close() error { return nil }

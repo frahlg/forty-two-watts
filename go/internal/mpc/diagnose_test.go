@@ -1,6 +1,7 @@
 package mpc
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 )
@@ -107,6 +108,60 @@ func TestDiagnoseJoinsSlotsAndActions(t *testing.T) {
 	}
 }
 
+func TestDiagnosticPreservesThermalProposalAcrossRestore(t *testing.T) {
+	start := time.Date(2026, 7, 31, 12, 0, 0, 0, time.UTC).UnixMilli()
+	slots := []Slot{{StartMs: start, LenMin: 15, PriceOre: 100, LoadW: 1_400, Confidence: 1}}
+	plan := &Plan{
+		GeneratedAtMs: start, Mode: ModeArbitrage, HorizonSlots: 1,
+		Actions: []Action{{
+			SlotStartMs: start, SlotLenMin: 15, PriceOre: 100,
+			LoadW: 1_400, GridW: 1_400,
+		}},
+		ThermalProposal: &ThermalProposal{
+			GeneratedAtMs: start,
+			HorizonSlots:  1,
+			Actions: []Action{{
+				SlotStartMs: start, SlotLenMin: 15, PriceOre: 100,
+				LoadW: 1_400, GridW: 1_400,
+				ThermalPowerW:     map[string]float64{"main": 1_000},
+				ThermalStateC:     map[string]float64{"main": 20.5},
+				ThermalMassStateC: map[string]float64{"main": 20.1},
+			}},
+			OptimizerInput: json.RawMessage(`{"schema_version":1,"thermal":true}`),
+		},
+	}
+	diagnostic := buildDiagnostic(plan, slots, Params{Mode: ModeArbitrage}, "SE3", start, "test")
+	row := diagnostic.Slots[0]
+	if row.LoadW != 1_400 || row.NativeLoadW != nil || len(row.ThermalPowerW) != 0 {
+		t.Fatalf("active diagnostic row contains thermal shadow data: %+v", row)
+	}
+	if diagnostic.ThermalProposal == nil ||
+		diagnostic.ThermalProposal.Actions[0].ThermalPowerW["main"] != 1_000 ||
+		string(diagnostic.ThermalOptimizerInput) != `{"schema_version":1,"thermal":true}` {
+		t.Fatalf("thermal proposal was not preserved: %+v", diagnostic.ThermalProposal)
+	}
+	restoredPlan, restoredSlots, _, _, ok := planFromDiagnostic(diagnostic)
+	if !ok {
+		t.Fatal("thermal diagnostic could not be restored")
+	}
+	if restoredSlots[0].LoadW != 1_400 || len(restoredPlan.Actions[0].ThermalPowerW) != 0 ||
+		restoredPlan.ThermalProposal == nil ||
+		restoredPlan.ThermalProposal.Actions[0].ThermalStateC["main"] != 20.5 ||
+		restoredPlan.ThermalProposal.Actions[0].ThermalMassStateC["main"] != 20.1 ||
+		string(restoredPlan.ThermalProposal.OptimizerInput) != `{"schema_version":1,"thermal":true}` {
+		t.Fatalf("restored thermal plan = %+v, slots = %+v", restoredPlan.Actions[0], restoredSlots)
+	}
+
+	legacy := *diagnostic
+	legacy.Slots = append([]DiagnosticSlot(nil), diagnostic.Slots...)
+	legacy.Slots[0].ThermalPowerW = map[string]float64{"main": 1_000}
+	legacy.Slots[0].ThermalStateC = map[string]float64{"main": 20.5}
+	service := &Service{Defaults: Params{Mode: ModeArbitrage}}
+	if service.RestoreDiagnostic(&legacy, time.UnixMilli(start).Add(5*time.Minute), "test") {
+		t.Fatal("legacy active thermal plan was restored into live dispatch")
+	}
+}
+
 // TestDiagnoseHandlesLengthMismatch guards against a panic if slots
 // and actions ever get out of sync (shouldn't happen in practice —
 // Optimize returns len(actions) == len(slots) — but we round-trip
@@ -134,7 +189,7 @@ func TestDiagnoseHandlesLengthMismatch(t *testing.T) {
 	}
 }
 
-func TestRestoreDiagnosticRehydratesActivePlan(t *testing.T) {
+func TestRestoreDiagnosticNeverRehydratesActivePlan(t *testing.T) {
 	now := time.Now()
 	start := now.Add(-5 * time.Minute).Truncate(time.Minute)
 	d := &Diagnostic{
@@ -200,48 +255,15 @@ func TestRestoreDiagnosticRehydratesActivePlan(t *testing.T) {
 		Zone:     "SE4",
 		Defaults: Params{Mode: ModeSelfConsumption},
 	}
-	if ok := svc.RestoreDiagnostic(d, now, "restored_diagnostic"); !ok {
-		t.Fatal("RestoreDiagnostic returned false")
+	if ok := svc.RestoreDiagnostic(d, now, "restored_diagnostic"); ok {
+		t.Fatal("persisted diagnostic was promoted to live dispatch")
 	}
-	latest := svc.Latest()
-	if latest == nil {
-		t.Fatal("Latest returned nil after restore")
-	}
-	if latest.GeneratedAtMs != d.ComputedAtMs {
-		t.Fatalf("GeneratedAtMs = %d, want %d", latest.GeneratedAtMs, d.ComputedAtMs)
-	}
-	dir, ok := svc.SlotDirectiveAt(now)
-	if !ok {
-		t.Fatal("SlotDirectiveAt returned ok=false after restore")
-	}
-	if dir.BatteryEnergyWh != 0 {
-		t.Fatalf("BatteryEnergyWh = %v, want 0", dir.BatteryEnergyWh)
-	}
-	if dir.GridW != -3600 {
-		t.Fatalf("GridW = %v, want -3600", dir.GridW)
-	}
-	if dir.PVLimitW != 4100 {
-		t.Fatalf("PVLimitW = %v, want 4100", dir.PVLimitW)
-	}
-	at, reason := svc.LastReplanInfo()
-	if reason != "restored_diagnostic" {
-		t.Fatalf("reason = %q, want restored_diagnostic", reason)
-	}
-	if at.UnixMilli() != d.LastReplanAtMs {
-		t.Fatalf("lastReplanAt = %d, want %d", at.UnixMilli(), d.LastReplanAtMs)
-	}
-	diag := svc.Diagnose()
-	if diag == nil || len(diag.Slots) != 2 {
-		t.Fatalf("Diagnose after restore = %+v, want 2 slots", diag)
+	if svc.Latest() != nil {
+		t.Fatal("rejected diagnostic populated the live plan")
 	}
 }
 
-// RestoreDiagnostic must merge fields that are zero-in-snapshot but
-// non-zero-in-Defaults with the current Defaults value, so a deploy that adds
-// a new Params field doesn't let an older snapshot's zero overwrite the
-// operator's intended default until the next replan. Exercised here with
-// PVChargeBonusOreKwh.
-func TestRestoreDiagnosticMergesNewerDefaultsForMissingFields(t *testing.T) {
+func TestRestoreDiagnosticRejectsSnapshotWithMissingNewFields(t *testing.T) {
 	now := time.Now()
 	start := now.Add(-5 * time.Minute).Truncate(time.Minute)
 	// Snapshot WITHOUT PVChargeBonusOreKwh (simulates an older binary).
@@ -281,22 +303,15 @@ func TestRestoreDiagnosticMergesNewerDefaultsForMissingFields(t *testing.T) {
 			PVChargeBonusOreKwh: 30,
 		},
 	}
-	if ok := svc.RestoreDiagnostic(d, now, "restored_diagnostic"); !ok {
-		t.Fatal("RestoreDiagnostic returned false")
+	if ok := svc.RestoreDiagnostic(d, now, "restored_diagnostic"); ok {
+		t.Fatal("older persisted defaults were promoted to live dispatch")
 	}
-	diag := svc.Diagnose()
-	if diag == nil {
-		t.Fatal("Diagnose returned nil after restore")
-	}
-	if diag.Params.PVChargeBonusOreKwh != 30 {
-		t.Errorf("PVChargeBonusOreKwh after restore = %v, want 30 (merged from Defaults; snapshot had 0)", diag.Params.PVChargeBonusOreKwh)
+	if svc.Latest() != nil {
+		t.Fatal("snapshot with missing fields populated the live plan")
 	}
 }
 
-// If the snapshot DOES have an explicit value (operator persisted a
-// non-zero choice), restore must preserve it — not overwrite with
-// Defaults. Only zero-in-snapshot fields get the merge.
-func TestRestoreDiagnosticPreservesExplicitSnapshotValues(t *testing.T) {
+func TestRestoreDiagnosticRejectsSnapshotWithExplicitValues(t *testing.T) {
 	now := time.Now()
 	start := now.Add(-5 * time.Minute).Truncate(time.Minute)
 	d := &Diagnostic{
@@ -334,12 +349,11 @@ func TestRestoreDiagnosticPreservesExplicitSnapshotValues(t *testing.T) {
 			PVChargeBonusOreKwh: 30, // Defaults would say 30 but snapshot has 15
 		},
 	}
-	if ok := svc.RestoreDiagnostic(d, now, "restored_diagnostic"); !ok {
-		t.Fatal("RestoreDiagnostic returned false")
+	if ok := svc.RestoreDiagnostic(d, now, "restored_diagnostic"); ok {
+		t.Fatal("persisted snapshot values were promoted to live dispatch")
 	}
-	diag := svc.Diagnose()
-	if diag.Params.PVChargeBonusOreKwh != 15 {
-		t.Errorf("PVChargeBonusOreKwh = %v, want 15 (snapshot value must win over Defaults)", diag.Params.PVChargeBonusOreKwh)
+	if svc.Latest() != nil {
+		t.Fatal("snapshot with explicit fields populated the live plan")
 	}
 }
 

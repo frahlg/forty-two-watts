@@ -2,7 +2,9 @@ package mpc
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -11,6 +13,7 @@ import (
 	"time"
 
 	"github.com/srcfl/ftw/go/internal/optimizercontract"
+	"github.com/srcfl/ftw/go/internal/thermal"
 )
 
 type externalOptimizerTransportStub struct {
@@ -131,6 +134,107 @@ func TestValidatePlanRejectsBrokenGridBalance(t *testing.T) {
 	plan.Actions[0].GridW += 100
 	if err := ValidatePlan(slots, p, &plan); err == nil {
 		t.Fatal("ValidatePlan accepted broken grid balance")
+	}
+}
+
+func thermalValidationFixture(t *testing.T) ([]Slot, Params, Plan) {
+	t.Helper()
+	capacity := 12_000.0
+	load := thermal.OptimizerLoad{
+		ID: "main", ModelType: thermal.ModelType1R1C,
+		SourceRevision: strings.Repeat("a", 64),
+		InitialTempC:   20, MinTempC: 19, MaxTempC: 23,
+		OutsideTempC: []float64{0}, MaxPowerW: 4_000,
+		HeatLossWPerK: 180, ThermalCapacityWhPerK: &capacity,
+		COP: []float64{3.05}, DisturbanceHeatW: []float64{350},
+	}
+	slots := []Slot{{StartMs: 1, LenMin: 60, PriceOre: 100, SpotOre: 50, Confidence: 1, LoadW: 500}}
+	params := Params{
+		Mode: ModeArbitrage, CapacityWh: 10_000,
+		SoCMinPct: 10, SoCMaxPct: 95, InitialSoCPct: 50,
+		MaxChargeW: 5_000, MaxDischargeW: 5_000,
+		ChargeEfficiency: 1, DischargeEfficiency: 1,
+		ThermalLoads: []thermal.OptimizerLoad{load},
+	}
+	next, err := load.NextState(0, thermal.ModelState{AirC: 20, MassC: 20}, 1_200, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := Plan{Mode: params.Mode, HorizonSlots: 1, CapacityWh: params.CapacityWh, InitialSoCPct: 50,
+		TotalCostOre: 170, Actions: []Action{{
+			SlotStartMs: 1, SlotLenMin: 60, BatteryW: 0, GridW: 1_700,
+			SoCPct: 50, CostOre: 170,
+			ThermalPowerW: map[string]float64{"main": 1_200},
+			ThermalStateC: map[string]float64{"main": next.AirC},
+		}}}
+	return slots, params, plan
+}
+
+func TestValidatePlanReplaysThermalTrajectoryAndGridBalance(t *testing.T) {
+	slots, params, plan := thermalValidationFixture(t)
+	if err := ValidatePlan(slots, params, &plan); err != nil {
+		t.Fatalf("ValidatePlan: %v", err)
+	}
+
+	plan.Actions[0].ThermalStateC["main"] += 0.1
+	if err := ValidatePlan(slots, params, &plan); err == nil || !strings.Contains(err.Error(), "air state") {
+		t.Fatalf("tampered thermal state error = %v", err)
+	}
+}
+
+func TestValidatePlanRejectsWorseningComfortViolation(t *testing.T) {
+	capacity := 12_000.0
+	load := thermal.OptimizerLoad{
+		ID: "main", ModelType: thermal.ModelType1R1C,
+		SourceRevision: strings.Repeat("a", 64),
+		InitialTempC:   18, MinTempC: 19, MaxTempC: 23,
+		OutsideTempC: []float64{0}, MaxPowerW: 4_000,
+		HeatLossWPerK: 180, ThermalCapacityWhPerK: &capacity,
+		COP: []float64{3}, DisturbanceHeatW: []float64{0},
+	}
+	slots := []Slot{{StartMs: 1, LenMin: 60, PriceOre: 100, SpotOre: 50, Confidence: 1, LoadW: 500}}
+	params := Params{
+		Mode: ModeArbitrage, CapacityWh: 10_000,
+		SoCMinPct: 10, SoCMaxPct: 95, InitialSoCPct: 50,
+		MaxChargeW: 5_000, MaxDischargeW: 5_000,
+		ChargeEfficiency: 1, DischargeEfficiency: 1,
+		ThermalLoads: []thermal.OptimizerLoad{load},
+	}
+	next, err := load.NextState(0, thermal.ModelState{AirC: 18, MassC: 18}, 0, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := Plan{TotalCostOre: 50, Actions: []Action{{
+		SlotStartMs: 1, SlotLenMin: 60, GridW: 500, SoCPct: 50, CostOre: 50,
+		ThermalPowerW: map[string]float64{"main": 0},
+		ThermalStateC: map[string]float64{"main": next.AirC},
+	}}}
+	if err := ValidatePlan(slots, params, &plan); err == nil || !strings.Contains(err.Error(), "temperature-bound recovery") {
+		t.Fatalf("ValidatePlan error = %v, want comfort recovery rejection", err)
+	}
+}
+
+func TestExternalRequestCarriesTypedThermalLoad(t *testing.T) {
+	slots, params, _ := thermalValidationFixture(t)
+	request := (&ExternalOptimizer{}).buildRequest(slots, params)
+	if len(request.ThermalLoads) != 1 || request.ThermalLoads[0].ID != "main" {
+		t.Fatalf("thermal loads = %+v", request.ThermalLoads)
+	}
+}
+
+func TestExternalRequestEncodesEmptyThermalLoadsAsArray(t *testing.T) {
+	slots, params := externalTestFixture()
+	request := (&ExternalOptimizer{}).buildRequest(slots, params)
+	payload, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &document); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(document["thermal_loads"]); got != "[]" {
+		t.Fatalf("thermal_loads = %s, want []", got)
 	}
 }
 
@@ -336,6 +440,64 @@ func TestExternalOptimizerEndToEnd(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("real optimizer worker remained running after idle timeout")
+}
+
+func TestExternalOptimizerThermalContractEndToEnd(t *testing.T) {
+	python := os.Getenv("FTW_TEST_OPTIMIZER_PYTHON")
+	if python == "" {
+		t.Skip("FTW_TEST_OPTIMIZER_PYTHON not set")
+	}
+	_, file, _, _ := runtime.Caller(0)
+	optimizer, err := NewExternalOptimizer(ExternalOptimizerConfig{
+		Command:     []string{python, "-m", "ftw_optimizer.worker"},
+		ModuleDir:   filepath.Clean(filepath.Join(filepath.Dir(file), "..", "..", "..", "optimizer")),
+		Solver:      "HIGHS",
+		Formulation: "relaxed",
+		Timeout:     10 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer optimizer.Close()
+
+	slots, params, _ := thermalValidationFixture(t)
+	initialMass := 19.8
+	massCoupling, airCapacity, massCapacity := 900.0, 1_200.0, 14_000.0
+	params.ThermalLoads = append(params.ThermalLoads, thermal.OptimizerLoad{
+		ID: "mass", ModelType: thermal.ModelType2R2C,
+		SourceRevision: strings.Repeat("b", 64),
+		InitialTempC:   20, InitialMassTempC: &initialMass,
+		MinTempC: 19, MaxTempC: 23,
+		OutsideTempC: []float64{0}, MaxPowerW: 4_000,
+		HeatLossWPerK: 160, MassCouplingWPerK: &massCoupling,
+		AirCapacityWhPerK: &airCapacity, MassCapacityWhPerK: &massCapacity,
+		COP: []float64{3.05}, DisturbanceHeatW: []float64{250},
+	})
+	plan, err := optimizer.Optimize(context.Background(), slots, params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Actions) != 1 {
+		t.Fatalf("actions = %d, want 1", len(plan.Actions))
+	}
+	action := plan.Actions[0]
+	powerW, ok := action.ThermalPowerW["main"]
+	if !ok {
+		t.Fatalf("thermal power missing: %+v", action)
+	}
+	if _, ok := action.ThermalStateC["main"]; !ok {
+		t.Fatalf("thermal state missing: %+v", action)
+	}
+	massPowerW, ok := action.ThermalPowerW["mass"]
+	if !ok {
+		t.Fatalf("two-node thermal power missing: %+v", action)
+	}
+	if _, ok := action.ThermalMassStateC["mass"]; !ok {
+		t.Fatalf("two-node mass state missing: %+v", action)
+	}
+	if math.Abs(action.LoadW-(slots[0].LoadW+powerW+massPowerW)) > 1e-6 {
+		t.Fatalf("planned load = %.3f, want native + thermal %.3f", action.LoadW, slots[0].LoadW+powerW+massPowerW)
+	}
 }
 
 func TestExternalOptimizerPlansMultipleLoadpoints(t *testing.T) {

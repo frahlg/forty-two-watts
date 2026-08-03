@@ -76,7 +76,7 @@ test: optimizer/.venv/.installed drivers-present
 	wait $$go_pid || status=1; \
 	exit $$status
 	cd go && FTW_TEST_OPTIMIZER_PYTHON=$(OPTIMIZER_PYTHON) go test ./internal/mpc \
-		-run 'TestExternalOptimizer(EndToEnd|PlansMultipleLoadpoints|PlansAndValidatesMultipleStorages)$$'
+		-run 'TestExternalOptimizer(EndToEnd|ThermalContractEndToEnd|PlansMultipleLoadpoints|PlansAndValidatesMultipleStorages)$$'
 
 optimizer-install:
 	$(PYTHON) -m venv optimizer/.venv
