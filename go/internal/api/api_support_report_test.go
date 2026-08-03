@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/srcfl/ftw/go/internal/control"
+	"github.com/srcfl/ftw/go/internal/loadmodel"
 	"github.com/srcfl/ftw/go/internal/mpc"
 	"github.com/srcfl/ftw/go/internal/telemetry"
 )
@@ -120,18 +121,33 @@ func TestForecastMiss(t *testing.T) {
 		want              bool
 	}{
 		{"the 383 W case", 383, 7900, true},
+		// Both of these scored just under the old 0.6 relative-error
+		// threshold and stayed silent in a real report. They are the
+		// reason the measure is a ratio now.
+		{"active slot planned 1.47 kW, house drawing 3.65 kW", 1470, 3650, true},
+		{"model says 1.74 kW, house drawing 3.65 kW", 1740, 3650, true},
+		{"solar planned 11.7 kW, actual 7.4 kW", 11720, 7400, true},
 		{"close enough", 2000, 2200, false},
 		{"exact", 1000, 1000, false},
 		// A quiet house: 200 W of absolute error must not fire just
 		// because the ratio looks bad against a small denominator.
 		{"small absolute error on a quiet house", 100, 300, false},
 		{"forecast far too high", 8000, 400, true},
+		{"forecast of nothing against real load", 0, 3000, true},
+		{"forecast of nothing against nothing much", 0, 200, false},
+		{"just under the ratio", 1000, 1400, false},
+		{"just over the ratio", 1000, 1500, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := forecastMiss(tc.predicted, tc.actual); got != tc.want {
 				t.Errorf("forecastMiss(%v, %v) = %v, want %v",
 					tc.predicted, tc.actual, got, tc.want)
+			}
+			// The check must not care which way round it is asked.
+			if got := forecastMiss(tc.actual, tc.predicted); got != tc.want {
+				t.Errorf("forecastMiss(%v, %v) = %v, want %v (asymmetric)",
+					tc.actual, tc.predicted, got, tc.want)
 			}
 		})
 	}
@@ -379,3 +395,39 @@ func TestDispatchTableDisclaimsSiteLevelClamps(t *testing.T) {
 }
 
 func ptrTime(t time.Time) *time.Time { return &t }
+
+// A fresh install predicting badly is the model working, not a fault.
+// Shouting PROBLEM at it while the next line says "still learning"
+// contradicts itself and teaches the reader to skim the section.
+func TestForecastMissIsANoteWhileTheModelIsStillLearning(t *testing.T) {
+	st := control.NewState(0, 50, "meter")
+	tel := telemetry.NewStore()
+	tel.DriverHealthMut("meter").RecordSuccess()
+	// A load model with no trained buckets — the day-one state.
+	lm := loadmodel.NewService(nil, tel, "meter", 4000, 17250)
+	srv := New(&Deps{Ctrl: st, CtrlMu: &sync.Mutex{}, Tel: tel, LoadModel: lm})
+
+	findings := srv.collectFindings(*st,
+		liveSnapshot{HaveGrid: true, LoadW: 3650, PredictedLd: 1470},
+		nil, nil, nil, nil, time.Now())
+
+	var got *finding
+	for i := range findings {
+		if strings.Contains(findings[i].Title, "load forecast") {
+			got = &findings[i]
+		}
+	}
+	if got == nil {
+		t.Fatalf("the miss should still be reported; got %+v", findings)
+	}
+	if got.Severity != sevNote {
+		t.Errorf("severity = %q, want %q while the model is untrained",
+			got.Severity, sevNote)
+	}
+	if !strings.Contains(got.Detail, "not finished learning") {
+		t.Errorf("detail should explain why it is only a note, got %q", got.Detail)
+	}
+	if strings.Contains(got.Detail, "reset") && !strings.Contains(got.Detail, "start that clock again") {
+		t.Error("a reset must not be recommended to someone whose model is still filling in")
+	}
+}

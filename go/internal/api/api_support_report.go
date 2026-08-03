@@ -53,6 +53,16 @@ const reportLogGroups = 40
 // noise in the log and becomes a finding in its own right.
 const logRepeatThreshold = 10
 
+// forecastMissRatio is how many times apart forecast and reality have to be
+// before it is worth saying so. 1.5× is past anything cloud movement or a
+// single appliance explains, and comfortably below the 2–20× misses seen in
+// the reports that motivated this check.
+const forecastMissRatio = 1.5
+
+// forecastMissFloorW is the level below which both figures are too small for
+// the comparison to mean anything.
+const forecastMissFloorW = 500
+
 // loadmodelWarmBucketsForTrust is the point past which the weekly load
 // pattern is filled in enough that its predictions carry the plan. Below
 // it the planner is guessing, which is worth saying out loud before
@@ -407,11 +417,15 @@ func writeForecastSection(b *strings.Builder, s *Server, snap liveSnapshot, acti
 			stats.Samples, fmtReportW(stats.MAEW), stats.Quality,
 			stats.BucketsWarm, stats.BucketsTotal, stats.HeatingWPerDegC,
 			s.deps.LoadModel.Profile())
-		b.WriteString("The load model learns from `grid − solar − battery − EV`. " +
-			"It discards any sample where that arithmetic comes out negative, " +
-			"so on a site with large solar the surviving daytime samples skew " +
-			"low. A model that reports a small average error while the table " +
-			"above shows a large gap has learned the wrong house.\n\n")
+		b.WriteString("The load model learns from `grid − solar − battery − EV`, " +
+			"one sample a minute, into 168 hourly buckets. It predicts the " +
+			"average for an hour, so a single sharp draw — oven, sauna, a car " +
+			"starting to charge — will read as a large gap in the table above " +
+			"without meaning the model is wrong.\n\n")
+		b.WriteString("What does mean it is wrong: a small average error " +
+			"alongside a gap that persists across the surrounding plan slots. " +
+			"That combination says the model is confident about a house it has " +
+			"not actually learned, and every slot was sized against it.\n\n")
 	} else {
 		b.WriteString("Load model is not running: the planner is using a flat " +
 			"base load for every slot.\n\n")
@@ -614,20 +628,34 @@ func (s *Server) collectFindings(
 
 	// The load-forecast check. This is the one that would have closed the
 	// 383 W thread in a single message.
+	//
+	// Severity depends on whether the model has had a chance yet. On a
+	// fresh install a gap is the model doing its job, not a fault, and a
+	// report that shouts PROBLEM at it while also saying "still learning"
+	// two lines down contradicts itself and teaches the reader to skim.
+	forecastSeverity := sevProblem
+	learningNote := " Resetting the load model (Settings, or POST " +
+		"/api/loadmodel/reset) makes it relearn from scratch."
+	if s.deps.LoadModel != nil &&
+		loadModelStatsFrom(s.deps.LoadModel.Model()).BucketsWarm < loadmodelWarmBucketsForTrust {
+		forecastSeverity = sevNote
+		learningNote = " The model has not finished learning this house yet, " +
+			"so expect this to close on its own over the first weeks. A reset " +
+			"would only start that clock again."
+	}
 	if forecastMiss(snap.PredictedLd, snap.LoadW) {
-		out = append(out, finding{sevProblem, "The load forecast is far from reality",
+		out = append(out, finding{forecastSeverity, "The load forecast is far from reality",
 			fmt.Sprintf("The model predicts %s for right now; the house is "+
 				"drawing %s. The planner sized this slot against the forecast, "+
 				"so its charge and discharge decisions are built on the wrong "+
-				"house. Resetting the load model (Settings, or POST "+
-				"/api/loadmodel/reset) makes it relearn.",
-				fmtReportW(snap.PredictedLd), fmtReportW(snap.LoadW))})
+				"house.%s",
+				fmtReportW(snap.PredictedLd), fmtReportW(snap.LoadW), learningNote)})
 	} else if activeSlot != nil && forecastMiss(activeSlot.LoadW, snap.LoadW) {
-		out = append(out, finding{sevProblem, "The active slot assumed a different house",
+		out = append(out, finding{forecastSeverity, "The active slot assumed a different house",
 			fmt.Sprintf("This slot was planned for a load of %s; actual load is "+
 				"%s. Expect the live setpoint to diverge from the plan, and "+
-				"expect frequent replans.",
-				fmtReportW(activeSlot.LoadW), fmtReportW(snap.LoadW))})
+				"expect frequent replans.%s",
+				fmtReportW(activeSlot.LoadW), fmtReportW(snap.LoadW), learningNote)})
 	}
 
 	if activeSlot != nil && forecastMiss(math.Abs(activeSlot.PVW), math.Abs(snap.PVW)) {
@@ -748,11 +776,29 @@ func (s *Server) collectFindings(
 }
 
 // forecastMiss reports whether a forecast is wrong enough to change decisions.
-// The 500 W floor keeps small absolute errors on a quiet house from firing;
-// the 60 % band is wide enough that ordinary forecast noise stays quiet.
+//
+// Stated as a ratio between the two figures, not as a relative error. The
+// first version divided the difference by the larger value, which saturates
+// at 1.0 and so cannot express "two and a half times wrong" at all: a plan
+// built for 1.47 kW against a house drawing 3.65 kW scored 0.597 and stayed
+// below a 0.6 threshold, as did a solar forecast of 11.7 kW against 7.4 kW
+// actual. Both were exactly the misses this check exists to catch. A ratio
+// has no ceiling, so the number keeps growing with the mistake.
 func forecastMiss(predicted, actual float64) bool {
-	base := math.Max(math.Abs(actual), 500)
-	return math.Abs(predicted-actual)/base > 0.6
+	p, a := math.Abs(predicted), math.Abs(actual)
+	// Both small: at these levels the absolute error decides nothing, and
+	// the ratio is dominated by noise. 200 W against 600 W is arithmetically
+	// a 3× miss and operationally irrelevant.
+	if p < forecastMissFloorW && a < forecastMissFloorW {
+		return false
+	}
+	lo, hi := math.Min(p, a), math.Max(p, a)
+	if lo < 1 {
+		// One side is essentially zero — any real load on the other side
+		// is a miss, and the ratio would be meaningless or infinite.
+		return hi >= forecastMissFloorW
+	}
+	return hi/lo >= forecastMissRatio
 }
 
 // ---- helpers ----
