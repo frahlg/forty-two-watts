@@ -27,6 +27,7 @@ import (
 	"github.com/srcfl/ftw/go/internal/battery"
 	"github.com/srcfl/ftw/go/internal/calendar"
 	"github.com/srcfl/ftw/go/internal/config"
+	"github.com/srcfl/ftw/go/internal/configreload"
 	"github.com/srcfl/ftw/go/internal/control"
 	"github.com/srcfl/ftw/go/internal/driverrepo"
 	"github.com/srcfl/ftw/go/internal/drivers"
@@ -88,6 +89,14 @@ type Deps struct {
 	SelfTune          *selftune.Coordinator
 	DtS               float64                                   // control interval seconds (for model τ / age displays)
 	SaveConfig        func(path string, c *config.Config) error // injection for testability
+	// ConfigApplier is main.go's config-applied callback — the same
+	// closure the configreload watcher runs (registry reload with SoC
+	// bounds, capacities, inverter groups, fuse and mpc/loadmodel
+	// site-meter sync). Injected so POST /api/config applies a saved
+	// config exactly like a file edit would. Nil (tests, minimal
+	// embeddings) still applies control-level fields via
+	// configreload.Apply; only the callback's extras are skipped.
+	ConfigApplier configreload.Applier
 	WebDir            string                                    // static assets root (default "web")
 	ColdDir           string                                    // cold-storage root for parquet rolloff; empty disables cold fallback
 	DataDir           string                                    // complete persistent-data root used by portable backups
@@ -1272,23 +1281,18 @@ func (s *Server) handlePostConfig(w http.ResponseWriter, r *http.Request) {
 			slog.Warn("failed to persist ev_charger_password", "err", err)
 		}
 	}
-	// Apply control-level changes immediately (file watcher will also pick
-	// this up but we're snappier).
-	s.deps.CtrlMu.Lock()
-	s.deps.Ctrl.SetGridTarget(newCfg.Site.GridTargetW)
-	s.deps.Ctrl.GridToleranceW = newCfg.Site.GridToleranceW
-	s.deps.Ctrl.SlewRateW = newCfg.Site.SlewRateW
-	s.deps.Ctrl.MinDispatchIntervalS = newCfg.Site.MinDispatchIntervalS
-	s.deps.Ctrl.PVSurplusAbsorbSoCCapPct = newCfg.Site.PVSurplusAbsorbSoCCapPct
-	s.deps.Ctrl.PVSurplusAbsorbThresholdW = newCfg.Site.PVSurplusAbsorbThresholdW
-	s.deps.CtrlMu.Unlock()
-	if s.deps.Registry != nil {
+	// One apply path, shared with the file watcher. Hand-applying a
+	// subset here and swapping the shared pointer is what #760 was: the
+	// watcher then diffed new against new, so everything this handler
+	// didn't copy — starting with the site-meter designation — never
+	// reached the running controller until a restart.
+	configreload.Apply(s.deps.CfgMu, s.deps.Cfg, s.deps.CtrlMu, s.deps.Ctrl,
+		&newCfg, s.deps.ConfigApplier)
+	if s.deps.ConfigApplier == nil && s.deps.Registry != nil {
+		// Minimal embeddings without main.go's callback still need the
+		// new driver set running.
 		s.deps.Registry.Reload(r.Context(), newCfg.Drivers, newCfg.Site.TroubleshootingMode)
 	}
-	// Update shared cfg pointer
-	s.deps.CfgMu.Lock()
-	*s.deps.Cfg = newCfg
-	s.deps.CfgMu.Unlock()
 	slog.Info("config updated via API", "restart_required", len(restartReasons) > 0)
 	writeJSON(w, 200, map[string]any{
 		"status":           "ok",
