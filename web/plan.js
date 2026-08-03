@@ -1028,9 +1028,15 @@ import { setActiveCurrency, toDisplay, unitFor } from "./components/price-units.
     if (reportBtn) reportBtn.addEventListener('click', downloadHelpReport);
   }
 
-  // Pulls GET /api/support/report and saves it. Kept here rather than in
-  // the driver Diagnose modal because the question it answers ("why is it
-  // doing that?") is asked while looking at the plan, not at a device.
+  // Pulls GET /api/support/dump and saves it. That archive leads with
+  // 00-help-report.md — the readable answer to "why is it doing that?" —
+  // and carries the logs, config and telemetry behind it. One button and
+  // one file, because a user asking for help should not have to work out
+  // which of two downloads we wanted. The bare report is still at
+  // /api/support/report for anyone who wants only the text.
+  //
+  // Lives here rather than in the driver Diagnose modal because the
+  // question is asked while looking at the plan, not at a device.
   function downloadHelpReport() {
     const btn = document.getElementById('plan-help-report');
     if (!btn || btn.disabled) return;
@@ -1044,7 +1050,7 @@ import { setActiveCurrency, toDisplay, unitFor } from "./components/price-units.
         btn.textContent = original;
       }, 4000);
     };
-    apiFetch('/api/support/report')
+    apiFetch('/api/support/dump')
       .then(function (resp) {
         if (!resp.ok) throw new Error('HTTP ' + resp.status);
         return resp.blob().then(function (blob) {
@@ -1052,7 +1058,7 @@ import { setActiveCurrency, toDisplay, unitFor } from "./components/price-units.
           const url = URL.createObjectURL(blob);
           const a = document.createElement('a');
           a.href = url;
-          a.download = 'ftw-help-' + stamp + '.md';
+          a.download = 'ftw-help-' + stamp + '.zip';
           document.body.appendChild(a);
           a.click();
           a.remove();

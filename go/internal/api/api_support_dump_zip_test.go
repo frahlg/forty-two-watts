@@ -56,7 +56,29 @@ func TestSupportDumpIsAReadableZip(t *testing.T) {
 		rc.Close()
 	}
 	joined := strings.Join(names, " ")
-	for _, want := range []string{"manifest.json", "drivers.json", "logs/global.log"} {
+	// The report is the point of the archive for most recipients, so it
+	// has to be in there and has to sort first.
+	if len(zr.File) == 0 || !strings.HasSuffix(zr.File[0].Name, "00-help-report.md") {
+		t.Errorf("first entry is %q, want the help report", names[0])
+	}
+	var reportBody string
+	for _, f := range zr.File {
+		if strings.HasSuffix(f.Name, "00-help-report.md") {
+			rc, _ := f.Open()
+			buf := new(bytes.Buffer)
+			_, _ = buf.ReadFrom(rc)
+			rc.Close()
+			reportBody = buf.String()
+		}
+	}
+	if !strings.Contains(reportBody, "# FTW help report") {
+		t.Error("the embedded report is not a help report")
+	}
+	if !strings.Contains(reportBody, "## Findings") {
+		t.Error("the embedded report is missing Findings")
+	}
+
+	for _, want := range []string{"00-help-report.md", "manifest.json", "drivers.json", "logs/global.log"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("archive is missing %s; has %v", want, names)
 		}

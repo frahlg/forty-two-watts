@@ -356,8 +356,13 @@ func (s *Server) handleSupportDump(w http.ResponseWriter, r *http.Request) {
 		_, _ = f.Write(body)
 	}
 
-	// Manifest first so a curious recipient can `tar -xOzf … manifest.json`
-	// and see what they've got without unpacking the whole bundle.
+	// The help report goes in first and is named to sort first, because it
+	// is the only file in here most recipients need to read. Everything
+	// below it is what you reach for when the report does not settle the
+	// question. Shipping them together means the person asking for help
+	// sends one file and never has to pick the right one.
+	addFile("00-help-report.md", []byte(s.buildSupportReport(r.Context(), time.Now())))
+
 	manifest := map[string]any{
 		"generated_at": now.Format(time.RFC3339),
 		"version":      s.deps.Version,
@@ -365,7 +370,9 @@ func (s *Server) handleSupportDump(w http.ResponseWriter, r *http.Request) {
 		"goos":         runtime.GOOS,
 		"goarch":       runtime.GOARCH,
 		"hostname":     hostnameOrEmpty(),
+		"read_first":   "00-help-report.md",
 		"contents": []string{
+			"00-help-report.md",
 			"config.redacted.yaml",
 			"drivers.json",
 			"logs/global.log",
