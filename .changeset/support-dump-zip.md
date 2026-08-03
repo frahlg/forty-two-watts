@@ -17,3 +17,11 @@ second tool. Around 10 kB on a two-driver install.
 
 `GET /api/support/report` still returns the bare Markdown for anyone who wants
 only the text.
+
+The report also now carries the slot's energy books — what the plan asked for,
+what the batteries actually moved, and what the energy-allocation path thinks
+it delivered — plus a finding when a slot is a quarter of the way through and
+delivery is under half the rate the plan needs. That is the shape of the
+reports that keep arriving: a plan card reading "charge 4.5 kW, now", a live
+target of 0 W, and nothing in between to show whether the plan reached
+dispatch at all.
