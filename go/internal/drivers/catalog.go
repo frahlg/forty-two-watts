@@ -269,7 +269,14 @@ func normalizeVerificationStatus(s string) string {
 	}
 }
 
-var driverBlockRe = regexp.MustCompile(`(?s)DRIVER\s*=\s*\{(.*?)\n\}`)
+// Anchored to the start of a line, like driverAliasRe below. Without that,
+// `-- DRIVER = { ... }` in a comment or the same text inside a string
+// literal matches, and since the last match now wins, a commented-out
+// example placed after the real block would be read as the driver's
+// identity — enough to drop a valid driver out of the catalog or have an
+// install refused. Every bundled driver declares DRIVER at column 0, so
+// the anchor costs nothing real. Codex P2 on PR #754.
+var driverBlockRe = regexp.MustCompile(`(?ms)^[ \t]*DRIVER\s*=\s*\{(.*?)\n\}`)
 
 // Signed artifacts do not write the table inline. tools/ftw_repository.py
 // builds it as a local and assigns it twice -- once up front and once after

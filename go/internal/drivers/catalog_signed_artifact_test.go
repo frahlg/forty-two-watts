@@ -3,6 +3,7 @@ package drivers
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -176,5 +177,44 @@ DRIVER = missing_table
 	if e.ID != "" || e.Version != "" {
 		t.Fatalf("id/version = %q@%q, want empty — a dangling alias must not "+
 			"borrow another table's identity", e.ID, e.Version)
+	}
+}
+
+// Lua never executes a commented-out assignment, so neither should the
+// parser read one. With the last match winning, an example block left in a
+// comment below the real one would otherwise become the driver's identity —
+// dropping it from the catalog, or having its install refused against a
+// manifest it never claimed. Codex P2 on PR #754.
+func TestParseCatalogFileIgnoresCommentedDriverBlock(t *testing.T) {
+	src := `DRIVER = {
+    id = "real",
+    name = "Real Driver",
+    version = "1.2.3",
+}
+
+-- Example for driver authors:
+-- DRIVER = {
+--     id = "example",
+--     name = "Example",
+--     version = "9.9.9",
+-- }
+
+function driver_init() end
+`
+	got := extractDriverBlock(src)
+	if !strings.Contains(got, `id = "real"`) {
+		t.Fatalf("parser did not read the executed block, got:\n%s", got)
+	}
+	if strings.Contains(got, "9.9.9") {
+		t.Errorf("parser read a commented-out block:\n%s", got)
+	}
+}
+
+// The same applies to an indented block: Lua runs it, so the parser has to
+// see it. Anchoring must not become "column 0 only".
+func TestParseCatalogFileReadsIndentedDriverBlock(t *testing.T) {
+	src := "  DRIVER = {\n    id = \"indented\",\n    version = \"1.0.0\",\n}\n"
+	if got := extractDriverBlock(src); !strings.Contains(got, `id = "indented"`) {
+		t.Errorf("indented block not read, got:\n%s", got)
 	}
 }
