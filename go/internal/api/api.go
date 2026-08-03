@@ -268,6 +268,7 @@ func (s *Server) routes() {
 	s.handle("GET  /api/drivers/{name}/logs", s.handleDriverLogs)
 	s.handle("GET  /api/logs", s.handleGlobalLogs)
 	s.handle("GET  /api/support/dump", s.handleSupportDump)
+	s.handle("GET  /api/support/report", s.handleSupportReport)
 	s.handle("POST /api/drivers/{name}/restart", s.handleDriverRestart)
 	s.handle("POST /api/drivers/{name}/disable", s.handleDriverDisable)
 	s.handle("POST /api/drivers/{name}/enable", s.handleDriverEnable)
@@ -306,6 +307,7 @@ func (s *Server) routes() {
 	s.handle("GET  /api/energy/history.csv", s.handleEnergyHistoryCSV)
 	s.handle("GET  /api/savings/daily", s.handleSavingsDaily)
 	s.handle("GET  /api/prices", s.handlePrices)
+	s.handle("GET  /api/prices/zones", s.handlePriceZones)
 	s.handle("GET  /api/forecast", s.handleForecast)
 	s.handle("GET  /api/mpc/plan", s.handleMPCPlan)
 	s.handle("POST /api/mpc/replan", s.handleMPCReplan)
@@ -1988,10 +1990,32 @@ func (s *Server) handlePrices(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{
-		"zone":    s.deps.Prices.Zone,
-		"items":   rows,
-		"enabled": true,
+		"zone":     s.deps.Prices.Zone,
+		"currency": s.deps.Prices.Currency,
+		"items":    rows,
+		"enabled":  true,
 	})
+}
+
+// ---- /api/prices/zones ----
+//
+// The bidding zones a household can pick, with the currency each one is
+// billed in. Served from the same table the fetchers use, so the picker
+// can't offer a zone the providers don't know.
+//
+// Response: {"zones": [{code, country, currency, name}]}
+func (s *Server) handlePriceZones(w http.ResponseWriter, _ *http.Request) {
+	all := prices.Zones()
+	items := make([]map[string]string, 0, len(all))
+	for _, z := range all {
+		items = append(items, map[string]string{
+			"code":     z.Code,
+			"country":  z.Country,
+			"currency": z.Currency,
+			"name":     z.Name(),
+		})
+	}
+	writeJSON(w, 200, map[string]any{"zones": items})
 }
 
 // ---- /api/forecast ----

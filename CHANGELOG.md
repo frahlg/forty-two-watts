@@ -1,5 +1,215 @@
 # Changelog
 
+## 1.15.2
+
+### Patch Changes
+
+- de94bae: A Modbus device that answers but refuses a register no longer costs the whole
+  poll. Only a failure to reach the device does.
+
+  The rule was `attempts == successes`: one register missing out of twenty threw
+  away every reading in that poll, including the ones that arrived. That made a
+  driver's own tolerance count for nothing — `sungrow.lua` marks 19 of its 20
+  reads optional precisely so a partial read still reports — and it made the
+  driver permanently useless on a string inverter, which has no battery
+  registers and refuses them on every poll for as long as it is installed.
+
+  A device replying "illegal data address" is stronger proof of life than a
+  register that read cleanly: it replied. So a poll is now current when
+  something was read and nothing failed at the transport. Reads skipped because
+  a reconnect backoff was already running are counted separately too — they are
+  downstream of one transport failure, not fresh evidence of several, which is
+  why a single dropped packet used to report as "8 of 20 modbus reads failed"
+  when seven of those eight never reached the wire.
+
+  The guarantee that matters is unchanged: an unreachable device still fails
+  every poll, so a stale site meter still stops dispatch. Poll errors now say
+  which of the two happened.
+
+- c7fe6c9: Driver installs: the metadata check now reads the identity a signed artifact
+  was signed under, so a wrapped FTW-native source installs again.
+
+  A signed artifact assigns DRIVER three times when it wraps a source that
+  declares its own table: the generator's alias first, the source's inline
+  block, and the alias again at the end — reasserted exactly so the source
+  cannot overwrite the identity it was signed under. Lua runs the last
+  assignment, but the catalog parser preferred the inline block whenever one
+  existed. A v1.15.0 install refused the myuplink 1.1.1 beta with "driver
+  metadata id/version myuplink@1.0.0, want myuplink@1.1.1": the manifest and
+  the wrapper both said 1.1.1; the stale inline block said 1.0.0. The sungrow
+  artifact fails the same way on id — inline sungrow-shx against catalog
+  sungrow — so no wrapped FTW-native source could install from the repository
+  at all.
+
+  The parser now takes the assignment that appears last, as the VM would. A
+  trailing alias that names no parseable table still parses as empty rather
+  than borrowing an earlier table's identity, and an inline block written after
+  the trailing alias is reported as-is, so the installer refuses the override
+  against the manifest.
+
+## 1.15.1
+
+### Patch Changes
+
+- ca4822b: Help report: the forecast check now compares forecast and reality as a ratio,
+  and the load-model note no longer repeats an explanation that turned out to be
+  wrong.
+
+  A live report from a v1.15.0 install showed a plan slot sized for 1.47 kW
+  against a house drawing 3.65 kW — two and a half times out — and Findings said
+  nothing. The old measure divided the difference by the larger figure, which
+  saturates at 1.0 and therefore cannot express "twice wrong" at all: that case
+  scored 0.597 against a 0.6 threshold. A solar forecast of 11.7 kW against
+  7.4 kW actual scored 0.584 and was missed the same way. Both are exactly what
+  the check exists to catch. It is now `max/min ≥ 1.5`, which has no ceiling, on
+  figures above a 500 W floor.
+
+  The load-model paragraph claimed that discarding negative samples makes a
+  large-solar site's model skew low. Discarding the lower tail biases the
+  surviving mean _high_, so the explanation was backwards. It now describes what
+  the model actually does — one sample a minute into 168 hourly buckets — and
+  what a real problem looks like: a small average error next to a gap that
+  persists across several plan slots.
+
+  A forecast gap on an install whose model has not finished learning is now a
+  note rather than a problem, and says so, instead of contradicting the "still
+  learning" line two rows below it and suggesting a reset that would only
+  restart the clock.
+
+- ca4822b: Overview: the Market now price strip draws its bars from zero, like the
+  full chart.
+
+  It used to draw each slot's distance from the mean — the cheapest
+  mornings drew the tallest bars, hanging below the line — which read
+  backwards next to the full chart one tap away. Height now means price.
+  The average ahead stays visible as a dotted line at its own height, the
+  same mark the full chart uses for it; a negative-price slot hangs below
+  zero in yellow the same way; and a flat day draws level bars instead of
+  stretching a small wobble to full height.
+
+- 8b59603: One button, one file when asking for help. The plan card's "Something looks
+  wrong?" button now downloads `ftw-help-<stamp>.zip` — the help report as
+  `00-help-report.md`, sorted first, with the redacted config, driver health,
+  recent logs and an hour of telemetry behind it.
+
+  Before this there were two downloads and the user had to guess which one we
+  wanted: the report from the plan card, the log bundle from a driver's Diagnose
+  modal. They would send one and we would ask for the other.
+
+  The archive is a zip rather than a `.tar.gz` because its whole purpose is to be
+  handed to somebody else, and Windows and every chat client open a zip without a
+  second tool. Around 10 kB on a two-driver install.
+
+  `GET /api/support/report` still returns the bare Markdown for anyone who wants
+  only the text.
+
+  The report also now carries the slot's energy books — what the plan asked for,
+  what the batteries actually moved, and what the energy-allocation path thinks
+  it delivered — plus a finding when a slot is a quarter of the way through and
+  delivery is under half the rate the plan needs. That is the shape of the
+  reports that keep arriving: a plan card reading "charge 4.5 kW, now", a live
+  target of 0 W, and nothing in between to show whether the plan reached
+  dispatch at all.
+
+## 1.15.0
+
+### Minor Changes
+
+- 54d6530: Prices: pick any of the 46 European bidding zones the price API publishes,
+  and be billed in the currency of the country you picked.
+
+  The zone picker offered twelve Nordic codes typed into two `<select>`
+  elements and the Go side knew twelve EIC codes, so a household in Belgium,
+  the Netherlands or Spain could not choose its own zone even though the
+  Sourceful API has served every ENTSO-E area all along. Both lists now come
+  from one table, `go/internal/prices/zones.go`, generated from that API's
+  `/areas` endpoint and served to the UI at `GET /api/prices/zones`. The
+  picker asks for a country first and a zone second, because everyone knows
+  they live in Italy and nobody knows their area code is `IT-CENTRE-NORTH`.
+
+  Currency stops being Swedish by assumption. It defaults to the currency of
+  the chosen zone, and the price API — which converts to EUR and SEK and
+  quietly answers anything else with EUR — is only asked for those two;
+  every other currency is converted here from EUR with the ECB rates the
+  service already caches. Where no rate is available the fetch fails rather
+  than storing a number that is wrong by an exchange rate, which is a number
+  the planner would spend money on. The old 11.5 SEK/EUR fallback is gone for
+  the same reason.
+
+  Two related faults fixed on the way. The direct ENTSO-E provider assumed
+  every day-ahead document is priced in EUR; Poland and Hungary among others
+  publish in their own currency, so it now reads `currency_Unit.name` and
+  converts from that. Its EIC code for Germany was the country code rather
+  than the DE-LU bidding zone, and NO5 was missing outright.
+
+  Prices are stored as minor units per kWh with no currency attached, so
+  changing the currency clears the price cache — otherwise cost history would
+  add öre to cent. The next fetch refills today and tomorrow. Every price
+  label in the UI now follows the configured currency: öre, cent, øre, grosz,
+  Rappen, or the major unit where the minor one is out of circulation
+  (4.30 Kč/kWh, not 430 haléř).
+
+  Existing installs are untouched: no zone means SE3, no currency means SEK,
+  and a Swedish install still asks the API for SEK exactly as before.
+
+- 4212dbb: Help report: `GET /api/support/report` returns a single Markdown file
+  describing what FTW is doing and why, reachable from a "Something looks
+  wrong?" button under the plan chart and from any driver's Diagnose modal.
+  It exists because answering "why is it discharging when the plan says
+  charge?" currently takes a screenshot round-trip per question — one thread
+  needed nine of them to establish that a load forecast said 383 W while the
+  house was drawing 7.9 kW.
+
+  The file opens with `Findings`: automated checks written in the order a
+  person would run them — stale plan, fallback solver, offline or faulted
+  devices, active safety limits, and a forecast-versus-reality comparison for
+  both load and solar. Under that come the live site state, the plan slot
+  covering _this moment_ (stated before anything about the next one, since
+  confusing the two is what sends these threads sideways), the surrounding
+  slots with the solver's reasoning, forecast accuracy, driver health,
+  component versions, and the recent warning and error log.
+
+  It is one file rather than a bundle because people paste it into a chat and
+  ask for help there; a tarball of JSON does not survive that. The plan window
+  is trimmed to a few hours either side of now and logs to warnings and errors,
+  which keeps it small enough to upload and to read in full.
+
+  `/api/support/dump` is unchanged and remains the deep bundle for cases the
+  report cannot close.
+
+### Patch Changes
+
+- 41e59ef: Load model: replace the MAE-band outlier filter with a physical ceiling
+  taken from the main fuse. The band rejected the upper half of the real
+  load distribution, and could lock the model out of a level it had not seen
+  before, permanently.
+
+  A rejected sample updates neither `MAE` nor `Samples`, so the band
+  `max(MAE × 10, 200)` never grew in response to being persistently wrong.
+  Measured on a clean model: an hour at 400 W left MAE at 57 W and the band
+  at 570 W; a following week at 5 kW was rejected in full, 100% of samples,
+  and the prediction never moved off 1794 W.
+
+  The band was the wrong instrument, not merely mistuned. Household load is
+  multimodal — a few hundred watts of baseline, then 11 kW when the sauna,
+  oven and car overlap — and nothing about a residual's size separates
+  "unusual but real" from "wrong". A band fitted to the quiet hours always
+  excludes the busy ones. Short-term measurement noise is already handled a
+  layer down, by the Kalman filter in telemetry whose smoothed output this
+  model reads, so the second filter was both harmful and redundant.
+
+  What remains is the rejection physics licenses: a house cannot draw more
+  than its main fuse passes. The ceiling is `fuse capacity × 1.25`, passed in
+  from configuration and never derived from what the model has learned, so it
+  holds from the first sample and cannot be talked down by a model that has
+  mislearned. With no fuse configured the check disables itself rather than
+  inventing a limit.
+
+  A sustained shift to a new load level is now learned directly. A one-minute
+  spike still trains — it is real consumption — and the bucket EMA damps it
+  to a tenth of the gap, which is what keeps an hour from being defined by
+  its loudest minute.
+
 ## 1.14.0
 
 ### Minor Changes

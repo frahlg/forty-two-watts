@@ -218,12 +218,18 @@ func (d *LuaDriver) Poll(ctx context.Context) (time.Duration, error) {
 	}
 	ret := d.L.Get(-1)
 	d.L.Pop(1)
-	attempts, successes, emitErr := d.Env.endPollEvidence(true)
+	_, _, emitErr := d.Env.endPollEvidence(true)
 	if emitErr != nil {
 		return 0, emitErr
 	}
-	if d.Env.requiresFreshModbusRead && attempts > successes {
-		return 0, fmt.Errorf("driver_poll: %d of %d modbus reads failed", attempts-successes, attempts)
+	// A poll that read nothing has nothing to report and nothing to fault:
+	// a driver may skip its reads during warmup, or hold off while a
+	// command is in flight. Its telemetry is already withheld by
+	// endPollEvidence; raising an error here would mark the driver failed
+	// for staying quiet on purpose.
+	if ev := d.Env.lastPollEvidence; d.Env.requiresFreshModbusRead &&
+		ev.Attempts > 0 && !ev.fresh() {
+		return 0, fmt.Errorf("driver_poll: %s", ev.describe())
 	}
 	// Driver may return an int number of milliseconds.
 	if n, ok := ret.(lua.LNumber); ok && n > 0 {
@@ -900,20 +906,20 @@ func registerHost(L *lua.LState, env *HostEnv) {
 		count := L.CheckInt(2)
 		kindS := L.CheckString(3)
 		if !env.permissionAllowed("modbus.read") {
-			env.recordPollModbusRead(false)
+			env.recordPollModbusRead(errors.New("modbus.read: permission not granted"))
 			L.Push(lua.LNil)
 			L.Push(lua.LString("modbus.read: permission not granted by signed package"))
 			return 2
 		}
 		if env.Modbus == nil {
-			env.recordPollModbusRead(false)
+			env.recordPollModbusRead(ErrNoCapability)
 			L.Push(lua.LNil)
 			L.Push(lua.LString("no modbus capability"))
 			return 2
 		}
 		kind, ok := modbusKindFromString(kindS)
 		if !ok {
-			env.recordPollModbusRead(false)
+			env.recordPollModbusRead(errors.New("unknown modbus kind: " + kindS))
 			L.Push(lua.LNil)
 			L.Push(lua.LString("unknown modbus kind: " + kindS))
 			return 2

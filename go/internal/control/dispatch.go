@@ -648,6 +648,52 @@ func (s *State) GetBatteryManualHold(now time.Time) (BatteryManualHold, bool) {
 	return s.ManualHold, true
 }
 
+// SlotEnergySnapshot is the per-slot energy accounting, exposed for
+// diagnostics. Both accumulators are here because they answer different
+// questions and can disagree — which is itself the interesting signal.
+//
+// ActualWh updates on every dispatch tick regardless of which path ran,
+// so it is the honest record of what the fleet moved. EnergyPathWh is
+// what the energy-allocation path believes it delivered, and only moves
+// while that path is executing. A slot with a real PlannedWh, an
+// EnergyPathWh of zero and an ActualWh going nowhere means the plan is
+// not reaching the hardware — a case a support report otherwise cannot
+// distinguish from "the plan asked for nothing".
+type SlotEnergySnapshot struct {
+	HasSlot bool
+	// PlannedWh is the plan's BatteryEnergyWh for the slot in flight.
+	// Site-signed: positive charges.
+	PlannedWh float64
+	// ActualWh is what the fleet has moved since the slot began, counted
+	// on every tick and every path.
+	ActualWh float64
+	// EnergyPathWh is the energy path's own delivered count. Zero when
+	// that path has not run this slot.
+	EnergyPathWh float64
+	SlotStart    time.Time
+	SlotEnd      time.Time
+}
+
+// SlotEnergy returns the current slot's energy accounting. Caller must
+// hold the outer ctrlMu.
+func (s *State) SlotEnergy() SlotEnergySnapshot {
+	out := SlotEnergySnapshot{
+		PlannedWh:    s.slotActualPlannedWh,
+		ActualWh:     s.slotActualWh,
+		EnergyPathWh: s.slotDelivered,
+		SlotStart:    s.slotActualSlotStart,
+		SlotEnd:      s.currentDirective.SlotEnd,
+	}
+	// The path-agnostic accumulator carries the authoritative slot start;
+	// the energy path's directive carries the end. Either being unset
+	// means no slot is in flight yet.
+	out.HasSlot = !out.SlotStart.IsZero()
+	if out.SlotEnd.IsZero() && !s.currentDirective.SlotStart.IsZero() {
+		out.SlotEnd = s.currentDirective.SlotStart
+	}
+	return out
+}
+
 // PVManualHold is an operator-installed PV curtail override. See
 // State.ManualPVHold for invariants.
 //

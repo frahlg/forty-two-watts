@@ -1442,6 +1442,30 @@ body.ftw-app .plan-help {
 }
 body.ftw-app .plan-actions { gap: 10px; display: flex; align-items: center; }
 
+/* The "why is it doing that?" escape hatch, below the chart because
+   that's where the question forms. Understated: it should be findable
+   when something looks wrong, not compete with the plan itself. */
+body.ftw-app .plan-help-request {
+  margin: 10px 0 2px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+body.ftw-app .plan-help-request button { padding-left: 0; }
+body.ftw-app .plan-help-request button[disabled] {
+  opacity: 0.6;
+  cursor: default;
+  text-decoration: none;
+}
+body.ftw-app .plan-help-request small {
+  display: block;
+  font-family: var(--sans);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--fg-muted);
+  margin-top: 2px;
+  max-width: 68ch;
+}
+
 body.ftw-app .more-actions {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));

@@ -7,8 +7,7 @@
 package api
 
 import (
-	"archive/tar"
-	"compress/gzip"
+	"archive/zip"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -318,11 +317,17 @@ func (s *Server) handleGlobalLogs(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// GET /api/support/dump — gzipped tarball with everything a developer
-// needs to triage a support incident: redacted config, full driver
-// health JSON, recent global + per-driver logs, last 1 h of TS samples
-// per (driver, metric), and a manifest. SQLite is NOT included; the
-// dump is intended to be small enough to email or paste-link.
+// GET /api/support/dump — zip archive with everything a developer needs
+// to triage a support incident: redacted config, full driver health JSON,
+// recent global + per-driver logs, last 1 h of TS samples per
+// (driver, metric), and a manifest. SQLite is NOT included; the dump is
+// intended to be small enough to attach to a chat message — measured at
+// ~6 kB on a two-driver install.
+//
+// Zip rather than tar.gz because this file's whole purpose is to be
+// handed to somebody else. Windows and every chat client open a zip
+// without a second tool; a .tar.gz asks the person you need help from to
+// go find one first.
 func (s *Server) handleSupportDump(w http.ResponseWriter, r *http.Request) {
 	if s.deps.LogRing == nil {
 		writeJSON(w, 503, map[string]string{"error": "log ring not configured"})
@@ -330,28 +335,34 @@ func (s *Server) handleSupportDump(w http.ResponseWriter, r *http.Request) {
 	}
 	now := time.Now().UTC()
 	stamp := now.Format("20060102-150405")
-	w.Header().Set("Content-Type", "application/gzip")
-	w.Header().Set("Content-Disposition", `attachment; filename="ftw-support-`+stamp+`.tar.gz"`)
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", `attachment; filename="ftw-support-`+stamp+`.zip"`)
 	w.Header().Set("Cache-Control", "no-store")
 
-	gz := gzip.NewWriter(w)
-	defer gz.Close()
-	tw := tar.NewWriter(gz)
-	defer tw.Close()
+	zw := zip.NewWriter(w)
+	defer zw.Close()
 
 	addFile := func(name string, body []byte) {
-		hdr := &tar.Header{
-			Name:    "ftw-support-" + stamp + "/" + name,
-			Mode:    0o644,
-			Size:    int64(len(body)),
-			ModTime: now,
+		hdr := &zip.FileHeader{
+			Name:     "ftw-support-" + stamp + "/" + name,
+			Method:   zip.Deflate,
+			Modified: now,
 		}
-		_ = tw.WriteHeader(hdr)
-		_, _ = tw.Write(body)
+		hdr.SetMode(0o644)
+		f, err := zw.CreateHeader(hdr)
+		if err != nil {
+			return
+		}
+		_, _ = f.Write(body)
 	}
 
-	// Manifest first so a curious recipient can `tar -xOzf … manifest.json`
-	// and see what they've got without unpacking the whole bundle.
+	// The help report goes in first and is named to sort first, because it
+	// is the only file in here most recipients need to read. Everything
+	// below it is what you reach for when the report does not settle the
+	// question. Shipping them together means the person asking for help
+	// sends one file and never has to pick the right one.
+	addFile("00-help-report.md", []byte(s.buildSupportReport(r.Context(), time.Now())))
+
 	manifest := map[string]any{
 		"generated_at": now.Format(time.RFC3339),
 		"version":      s.deps.Version,
@@ -359,7 +370,9 @@ func (s *Server) handleSupportDump(w http.ResponseWriter, r *http.Request) {
 		"goos":         runtime.GOOS,
 		"goarch":       runtime.GOARCH,
 		"hostname":     hostnameOrEmpty(),
+		"read_first":   "00-help-report.md",
 		"contents": []string{
+			"00-help-report.md",
 			"config.redacted.yaml",
 			"drivers.json",
 			"logs/global.log",

@@ -1030,7 +1030,15 @@ func main() {
 	if loadPeakW <= 0 {
 		loadPeakW = 5000
 	}
-	loadSvc = loadmodel.NewService(st, tel, cfg.SiteMeterDriver(), loadPeakW)
+	// Training ceiling: the main fuse is the one hard limit on what a house
+	// can actually draw, so a sample above it is a measurement fault rather
+	// than an unusual hour. Passed separately from loadPeakW — that one is a
+	// tunable proxy for "typical peak", this one is physics, and deriving
+	// the second from the first would silently move a safety bound whenever
+	// somebody retuned the proxy. Zero when no fuse is configured, which
+	// disables the check rather than inventing a limit.
+	loadMaxPlausibleW := cfg.Fuse.MaxPowerW() * loadmodel.PlausibleLoadHeadroom
+	loadSvc = loadmodel.NewService(st, tel, cfg.SiteMeterDriver(), loadPeakW, loadMaxPlausibleW)
 	// SeedHeatingCoef — operator config is a cold-start prior. Once the
 	// load model has accumulated samples in production, its
 	// telemetry-fit HeatingW_per_degC survives restart and the config
