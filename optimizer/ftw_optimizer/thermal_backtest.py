@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import sys
@@ -24,8 +25,31 @@ from .thermal_twin import (
 
 
 THERMAL_DATASET_KIND = "ftw.thermal_observations"
-THERMAL_DATASET_SCHEMA_VERSION = 1
+THERMAL_DATASET_SCHEMA_VERSION = 2
+SERIES_API_RESAMPLING_RECIPE = "series-bucket-average-v1"
+SERIES_API_PROMOTION_BLOCKER = (
+    "the current series API does not preserve boundary temperature and "
+    "time-weighted power semantics"
+)
 FetchJSON = Callable[[str, float], dict[str, Any]]
+
+
+def _dataset_digest(dataset: dict[str, Any]) -> str:
+    content = {
+        "schema_version": dataset.get("schema_version"),
+        "kind": dataset.get("kind"),
+        "home_spec_revision": dataset.get("home_spec_revision"),
+        "step_s": dataset.get("step_s"),
+        "resampling_recipe": dataset.get("resampling_recipe"),
+        "observations": dataset.get("observations"),
+    }
+    encoded = json.dumps(
+        content,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _safe_source(api_base: str) -> str:
@@ -227,7 +251,7 @@ def export_thermal_dataset(
     }
     missing = sorted(set(required) - set(home_spec.sensors))
     if missing:
-        return {
+        result = {
             "schema_version": THERMAL_DATASET_SCHEMA_VERSION,
             "kind": THERMAL_DATASET_KIND,
             "home_spec_revision": home_spec.revision,
@@ -235,6 +259,7 @@ def export_thermal_dataset(
             "since_ms": since_ms,
             "until_ms": until_ms,
             "step_s": step_s,
+            "resampling_recipe": SERIES_API_RESAMPLING_RECIPE,
             "ready": False,
             "coverage": {
                 "total_buckets": math.ceil(
@@ -252,6 +277,11 @@ def export_thermal_dataset(
             ],
             "observations": [],
         }
+        result["dataset_sha256"] = _dataset_digest(result)
+        result["promotion_blocking_reasons"] = [
+            SERIES_API_PROMOTION_BLOCKER
+        ]
+        return result
     step_ms = step_s * 1_000
     buckets: dict[str, dict[int, float]] = {}
     raw_counts: dict[str, int] = {}
@@ -302,7 +332,7 @@ def export_thermal_dataset(
             f"longest complete run covers {duration_h:.1f} hours; "
             "72 hours are required for promotion"
         )
-    return {
+    result = {
         "schema_version": THERMAL_DATASET_SCHEMA_VERSION,
         "kind": THERMAL_DATASET_KIND,
         "home_spec_revision": home_spec.revision,
@@ -310,6 +340,7 @@ def export_thermal_dataset(
         "since_ms": since_ms,
         "until_ms": until_ms,
         "step_s": step_s,
+        "resampling_recipe": SERIES_API_RESAMPLING_RECIPE,
         "ready": not blocking_reasons,
         "coverage": {
             "total_buckets": math.ceil(
@@ -326,6 +357,9 @@ def export_thermal_dataset(
         "blocking_reasons": blocking_reasons,
         "observations": observations,
     }
+    result["dataset_sha256"] = _dataset_digest(result)
+    result["promotion_blocking_reasons"] = [SERIES_API_PROMOTION_BLOCKER]
+    return result
 
 
 def observations_from_dataset(
@@ -345,6 +379,18 @@ def observations_from_dataset(
         raise CalibrationError(
             "thermal dataset was exported for a different home spec"
         )
+    recipe = dataset.get("resampling_recipe")
+    if not isinstance(recipe, str) or not recipe:
+        raise CalibrationError("thermal dataset resampling_recipe is missing")
+    digest = dataset.get("dataset_sha256")
+    if digest is not None and digest != _dataset_digest(dataset):
+        raise CalibrationError("thermal dataset digest does not match its contents")
+    try:
+        declared_step_s = float(dataset.get("step_s"))
+    except (TypeError, ValueError) as exc:
+        raise CalibrationError("thermal dataset step_s must be a number") from exc
+    if not math.isfinite(declared_step_s) or declared_step_s <= 0:
+        raise CalibrationError("thermal dataset step_s must be positive")
     rows = dataset.get("observations")
     if not isinstance(rows, list):
         raise CalibrationError(
@@ -387,6 +433,18 @@ def observations_from_dataset(
             f"at least {MIN_TRANSITIONS + 1} are required"
             + suffix
         )
+    for index in range(len(observations) - 1):
+        actual_step_s = (
+            observations[index + 1].timestamp_s
+            - observations[index].timestamp_s
+        )
+        if abs(actual_step_s - declared_step_s) > max(
+            1.0,
+            declared_step_s * 0.02,
+        ):
+            raise CalibrationError(
+                "thermal dataset timestamps do not match step_s"
+            )
     return observations
 
 
@@ -396,9 +454,13 @@ def run_thermal_backtest(
     home_spec: HomeSpec,
     source: str = "heat_pump_submeter",
 ) -> FamilyCalibrationResult:
+    observations = observations_from_dataset(dataset, home_spec=home_spec)
+    digest = _dataset_digest(dataset)
     return calibrate_model_family(
-        observations_from_dataset(dataset, home_spec=home_spec),
+        observations,
         home_spec=home_spec,
+        dataset_sha256=digest,
+        resampling_recipe=str(dataset["resampling_recipe"]),
         source=source,
     )
 

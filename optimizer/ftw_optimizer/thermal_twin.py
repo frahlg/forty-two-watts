@@ -14,13 +14,20 @@ from typing import Any, Iterable, Sequence
 
 import numpy as np
 
+from .fingerprint import FingerprintWriter
 from .protocol import ProtocolError, finite_number, positive_number, require_dict, require_list
 
 
 ARTIFACT_KIND = "ftw.thermal_twin"
-ARTIFACT_SCHEMA_VERSION = 1
+ARTIFACT_SCHEMA_VERSION = 2
 MODEL_TYPE = "ftw-1r1c-v1"
 MIN_TRANSITIONS = 48
+CALIBRATOR_VERSION = "ftw-thermal-calibrator-v2"
+PROMOTION_POLICY_VERSION = "ftw-thermal-promotion-v2"
+APPROVED_RESAMPLING_RECIPES = {
+    "aligned-boundary-zoh-v2",
+    "synthetic-ground-truth-v2",
+}
 
 
 class CalibrationError(ValueError):
@@ -49,6 +56,36 @@ def _non_negative(value: Any, field: str) -> float:
     if result < 0:
         raise CalibrationError(f"{field} must be >= 0")
     return result
+
+
+def _optional_sha256(value: Any, field: str) -> str:
+    if value == "":
+        return ""
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise CalibrationError(f"{field} must be an empty string or lowercase SHA-256")
+    return value
+
+
+def _artifact_string(
+    value: Any,
+    field: str,
+    *,
+    allow_empty: bool = False,
+) -> str:
+    if not isinstance(value, str) or (not allow_empty and not value):
+        qualifier = "a string" if allow_empty else "a non-empty string"
+        raise CalibrationError(f"{field} must be {qualifier}")
+    return value
+
+
+def _artifact_bool(value: Any, field: str) -> bool:
+    if not isinstance(value, bool):
+        raise CalibrationError(f"{field} must be a boolean")
+    return value
 
 
 @dataclass(frozen=True)
@@ -126,6 +163,10 @@ class COPCurve:
 @dataclass(frozen=True)
 class CalibrationEvidence:
     source: str
+    dataset_sha256: str
+    resampling_recipe: str
+    calibrator_version: str
+    promotion_policy_version: str
     sample_count: int
     transition_count: int
     start_timestamp_s: float
@@ -137,10 +178,40 @@ class CalibrationEvidence:
     one_step_rmse_c: float
     rollout_rmse_c: float
     persistence_rmse_c: float
+    solver_converged: bool
+    parameter_bounds_hit: bool
+    observed_outdoor_min_c: float
+    observed_outdoor_max_c: float
+    observed_power_min_w: float
+    observed_power_max_w: float
     promotable: bool
     promotion_reasons: tuple[str, ...]
 
     def __post_init__(self) -> None:
+        _optional_sha256(self.dataset_sha256, "calibration.dataset_sha256")
+        for field, value in (
+            ("source", self.source),
+            ("resampling_recipe", self.resampling_recipe),
+            ("calibrator_version", self.calibrator_version),
+            ("promotion_policy_version", self.promotion_policy_version),
+        ):
+            if not isinstance(value, str):
+                raise CalibrationError(f"calibration.{field} must be a string")
+        if self.sample_count != self.transition_count + 1:
+            raise CalibrationError(
+                "calibration.sample_count must equal transition_count + 1"
+            )
+        if (
+            self.train_transition_count + self.validation_transition_count
+            != self.transition_count
+        ):
+            raise CalibrationError(
+                "calibration train and validation counts must cover transitions"
+            )
+        if self.end_timestamp_s <= self.start_timestamp_s:
+            raise CalibrationError(
+                "calibration end_timestamp_s must be after start_timestamp_s"
+            )
         for field, value in (
             ("standardized_condition_number", self.standardized_condition_number),
             ("one_step_rmse_c", self.one_step_rmse_c),
@@ -149,6 +220,21 @@ class CalibrationEvidence:
         ):
             if not math.isfinite(value) or value < 0:
                 raise CalibrationError(f"calibration.{field} must be finite and >= 0")
+        for field, value in (
+            ("observed_outdoor_min_c", self.observed_outdoor_min_c),
+            ("observed_outdoor_max_c", self.observed_outdoor_max_c),
+            ("observed_power_min_w", self.observed_power_min_w),
+            ("observed_power_max_w", self.observed_power_max_w),
+        ):
+            if not math.isfinite(value):
+                raise CalibrationError(f"calibration.{field} must be finite")
+        if self.observed_outdoor_min_c > self.observed_outdoor_max_c:
+            raise CalibrationError("calibration observed outdoor range is reversed")
+        if (
+            self.observed_power_min_w < 0
+            or self.observed_power_min_w > self.observed_power_max_w
+        ):
+            raise CalibrationError("calibration observed power range is invalid")
         if self.promotable and self.promotion_reasons:
             raise CalibrationError(
                 "a promotable calibration cannot have promotion_reasons"
@@ -157,6 +243,10 @@ class CalibrationEvidence:
     def to_dict(self) -> dict[str, Any]:
         return {
             "source": self.source,
+            "dataset_sha256": self.dataset_sha256,
+            "resampling_recipe": self.resampling_recipe,
+            "calibrator_version": self.calibrator_version,
+            "promotion_policy_version": self.promotion_policy_version,
             "sample_count": int(self.sample_count),
             "transition_count": int(self.transition_count),
             "start_timestamp_s": float(self.start_timestamp_s),
@@ -170,6 +260,12 @@ class CalibrationEvidence:
             "one_step_rmse_c": float(self.one_step_rmse_c),
             "rollout_rmse_c": float(self.rollout_rmse_c),
             "persistence_rmse_c": float(self.persistence_rmse_c),
+            "solver_converged": self.solver_converged,
+            "parameter_bounds_hit": self.parameter_bounds_hit,
+            "observed_outdoor_min_c": float(self.observed_outdoor_min_c),
+            "observed_outdoor_max_c": float(self.observed_outdoor_max_c),
+            "observed_power_min_w": float(self.observed_power_min_w),
+            "observed_power_max_w": float(self.observed_power_max_w),
             "promotable": self.promotable,
             "promotion_reasons": list(self.promotion_reasons),
         }
@@ -203,6 +299,25 @@ class CalibrationEvidence:
             raise CalibrationError("calibration.source must be a non-empty string")
         return cls(
             source=source,
+            dataset_sha256=_optional_sha256(
+                value.get("dataset_sha256"),
+                "calibration.dataset_sha256",
+            ),
+            resampling_recipe=_artifact_string(
+                value.get("resampling_recipe"),
+                "calibration.resampling_recipe",
+                allow_empty=True,
+            ),
+            calibrator_version=_artifact_string(
+                value.get("calibrator_version"),
+                "calibration.calibrator_version",
+                allow_empty=True,
+            ),
+            promotion_policy_version=_artifact_string(
+                value.get("promotion_policy_version"),
+                "calibration.promotion_policy_version",
+                allow_empty=True,
+            ),
             sample_count=counts["sample_count"],
             transition_count=counts["transition_count"],
             start_timestamp_s=_finite(
@@ -232,13 +347,134 @@ class CalibrationEvidence:
                 value.get("persistence_rmse_c"),
                 "calibration.persistence_rmse_c",
             ),
+            solver_converged=_artifact_bool(
+                value.get("solver_converged"),
+                "calibration.solver_converged",
+            ),
+            parameter_bounds_hit=_artifact_bool(
+                value.get("parameter_bounds_hit"),
+                "calibration.parameter_bounds_hit",
+            ),
+            observed_outdoor_min_c=_finite(
+                value.get("observed_outdoor_min_c"),
+                "calibration.observed_outdoor_min_c",
+            ),
+            observed_outdoor_max_c=_finite(
+                value.get("observed_outdoor_max_c"),
+                "calibration.observed_outdoor_max_c",
+            ),
+            observed_power_min_w=_non_negative(
+                value.get("observed_power_min_w"),
+                "calibration.observed_power_min_w",
+            ),
+            observed_power_max_w=_non_negative(
+                value.get("observed_power_max_w"),
+                "calibration.observed_power_max_w",
+            ),
             promotable=promotable,
             promotion_reasons=tuple(reasons),
         )
 
 
+def promotion_policy_reasons(
+    evidence: CalibrationEvidence,
+    model_type: str,
+) -> tuple[str, ...]:
+    reasons: list[str] = []
+    if evidence.source not in {
+        "heat_pump_submeter",
+        "validated_component_balance",
+    }:
+        reasons.append("calibration source is not approved")
+    if not evidence.dataset_sha256:
+        reasons.append("dataset digest is missing")
+    if evidence.resampling_recipe not in APPROVED_RESAMPLING_RECIPES:
+        reasons.append("resampling recipe is not approved")
+    if evidence.calibrator_version != CALIBRATOR_VERSION:
+        reasons.append("calibrator version is not approved")
+    if evidence.promotion_policy_version != PROMOTION_POLICY_VERSION:
+        reasons.append("promotion policy version is not approved")
+    if evidence.sample_count != evidence.transition_count + 1:
+        reasons.append("sample and transition counts are inconsistent")
+    if (
+        evidence.train_transition_count
+        + evidence.validation_transition_count
+        != evidence.transition_count
+    ):
+        reasons.append("calibration split counts are inconsistent")
+    if evidence.train_transition_count < 32:
+        reasons.append("fewer than 32 training transitions")
+    if evidence.validation_transition_count < 8:
+        reasons.append("fewer than eight validation transitions")
+    duration_s = evidence.end_timestamp_s - evidence.start_timestamp_s
+    if duration_s < 72 * 3_600:
+        reasons.append("less than 72 hours of evidence")
+    expected_duration_s = evidence.transition_count * evidence.step_s
+    if abs(duration_s - expected_duration_s) > max(
+        1.0,
+        expected_duration_s * 0.02,
+    ):
+        reasons.append("calibration timestamps and step are inconsistent")
+    condition_limit = 100.0 if model_type == MODEL_TYPE else 1_000_000.0
+    if evidence.standardized_condition_number > condition_limit:
+        reasons.append("calibration condition number exceeds policy")
+    if evidence.one_step_rmse_c > 0.5:
+        reasons.append("one-step validation RMSE exceeds 0.5 C")
+    if evidence.rollout_rmse_c > 1.0:
+        reasons.append("rollout validation RMSE exceeds 1.0 C")
+    if evidence.one_step_rmse_c >= evidence.persistence_rmse_c:
+        reasons.append(
+            "one-step validation does not beat temperature persistence"
+        )
+    if not evidence.solver_converged:
+        reasons.append("calibration solver did not converge")
+    if evidence.parameter_bounds_hit:
+        reasons.append("a fitted parameter reached its search bound")
+    return tuple(dict.fromkeys(reasons))
+
+
+def _fingerprint_calibration(
+    writer: FingerprintWriter,
+    evidence: CalibrationEvidence,
+) -> None:
+    writer.string(evidence.source)
+    writer.string(evidence.dataset_sha256)
+    writer.string(evidence.resampling_recipe)
+    writer.string(evidence.calibrator_version)
+    writer.string(evidence.promotion_policy_version)
+    writer.integer(evidence.sample_count)
+    writer.integer(evidence.transition_count)
+    writer.floating(evidence.start_timestamp_s)
+    writer.floating(evidence.end_timestamp_s)
+    writer.floating(evidence.step_s)
+    writer.integer(evidence.train_transition_count)
+    writer.integer(evidence.validation_transition_count)
+    writer.floating(evidence.standardized_condition_number)
+    writer.floating(evidence.one_step_rmse_c)
+    writer.floating(evidence.rollout_rmse_c)
+    writer.floating(evidence.persistence_rmse_c)
+    writer.boolean(evidence.solver_converged)
+    writer.boolean(evidence.parameter_bounds_hit)
+    writer.floating(evidence.observed_outdoor_min_c)
+    writer.floating(evidence.observed_outdoor_max_c)
+    writer.floating(evidence.observed_power_min_w)
+    writer.floating(evidence.observed_power_max_w)
+    writer.boolean(evidence.promotable)
+    writer.strings(evidence.promotion_reasons)
+
+
+def _fingerprint_cop(writer: FingerprintWriter, curve: COPCurve) -> None:
+    writer.floating(curve.reference_temperature_c)
+    writer.floating(curve.cop_at_reference)
+    writer.floating(curve.slope_per_c)
+    writer.floating(curve.minimum_cop)
+    writer.floating(curve.maximum_cop)
+
+
 @dataclass(frozen=True)
 class ThermalTwinArtifact:
+    site_id: str
+    home_spec_revision: str
     model_id: str
     heat_loss_w_per_k: float
     thermal_capacity_wh_per_k: float
@@ -247,50 +483,45 @@ class ThermalTwinArtifact:
     calibration: CalibrationEvidence
 
     def __post_init__(self) -> None:
+        if not isinstance(self.site_id, str) or not self.site_id:
+            raise CalibrationError("site_id must be non-empty")
+        _optional_sha256(self.home_spec_revision, "home_spec_revision")
+        if not self.home_spec_revision:
+            raise CalibrationError("home_spec_revision must be non-empty")
         if not isinstance(self.model_id, str) or not self.model_id:
             raise CalibrationError("model_id must be non-empty")
-        if not math.isfinite(self.heat_loss_w_per_k) or self.heat_loss_w_per_k <= 0:
-            raise CalibrationError("heat_loss_w_per_k must be finite and > 0")
+        if not 5.0 <= self.heat_loss_w_per_k <= 5_000.0:
+            raise CalibrationError("heat_loss_w_per_k must be within 5..5000")
         if (
-            not math.isfinite(self.thermal_capacity_wh_per_k)
-            or self.thermal_capacity_wh_per_k <= 0
+            not 200.0 <= self.thermal_capacity_wh_per_k <= 1_000_000.0
         ):
             raise CalibrationError(
-                "thermal_capacity_wh_per_k must be finite and > 0"
+                "thermal_capacity_wh_per_k must be within 200..1000000"
             )
-        if not math.isfinite(self.disturbance_heat_w):
-            raise CalibrationError("disturbance_heat_w must be finite")
+        if not math.isfinite(self.disturbance_heat_w) or abs(self.disturbance_heat_w) > 20_000:
+            raise CalibrationError("disturbance_heat_w must be within -20000..20000")
 
     @property
     def revision(self) -> str:
-        content = {
-            "model_id": self.model_id,
-            "physics": {
-                "heat_loss_w_per_k": float(self.heat_loss_w_per_k),
-                "thermal_capacity_wh_per_k": float(
-                    self.thermal_capacity_wh_per_k
-                ),
-                "cop_curve": {
-                    field: float(value)
-                    for field, value in self.cop_curve.to_dict().items()
-                },
-            },
-            "residual": {"constant_heat_w": float(self.disturbance_heat_w)},
-            "calibration": self.calibration.to_dict(),
-        }
-        encoded = json.dumps(
-            content,
-            allow_nan=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode()
-        return hashlib.sha256(encoded).hexdigest()
+        writer = FingerprintWriter("ftw.thermal_twin.v2")
+        writer.string(self.site_id)
+        writer.string(self.home_spec_revision)
+        writer.string(MODEL_TYPE)
+        writer.string(self.model_id)
+        writer.floating(self.heat_loss_w_per_k)
+        writer.floating(self.thermal_capacity_wh_per_k)
+        _fingerprint_cop(writer, self.cop_curve)
+        writer.floating(self.disturbance_heat_w)
+        _fingerprint_calibration(writer, self.calibration)
+        return writer.hexdigest()
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "schema_version": ARTIFACT_SCHEMA_VERSION,
             "kind": ARTIFACT_KIND,
             "model_type": MODEL_TYPE,
+            "site_id": self.site_id,
+            "home_spec_revision": self.home_spec_revision,
             "model_id": self.model_id,
             "revision": self.revision,
             "physics": {
@@ -313,8 +544,16 @@ class ThermalTwinArtifact:
         allowed_steps_w: Sequence[float] | None = None,
         allow_unpromotable: bool = False,
     ) -> dict[str, Any]:
-        if not self.calibration.promotable and not allow_unpromotable:
-            reasons = ", ".join(self.calibration.promotion_reasons)
+        policy_reasons = promotion_policy_reasons(
+            self.calibration,
+            MODEL_TYPE,
+        )
+        if (
+            not self.calibration.promotable or policy_reasons
+        ) and not allow_unpromotable:
+            reasons = ", ".join(
+                self.calibration.promotion_reasons + policy_reasons
+            )
             raise CalibrationError(
                 "thermal artifact is not promotable"
                 + (f": {reasons}" if reasons else "")
@@ -325,6 +564,14 @@ class ThermalTwinArtifact:
         ]
         if not outside:
             raise CalibrationError("outside_temperature_c must not be empty")
+        if any(
+            value < self.calibration.observed_outdoor_min_c
+            or value > self.calibration.observed_outdoor_max_c
+            for value in outside
+        ):
+            raise CalibrationError(
+                "outside_temperature_c exceeds the calibrated operating range"
+            )
         initial = _finite(initial_temperature_c, "initial_temperature_c")
         minimum = _finite(minimum_temperature_c, "minimum_temperature_c")
         maximum = _finite(maximum_temperature_c, "maximum_temperature_c")
@@ -332,10 +579,10 @@ class ThermalTwinArtifact:
             raise CalibrationError(
                 "minimum_temperature_c must be below maximum_temperature_c"
             )
-        if not minimum <= initial <= maximum:
-            raise CalibrationError(
-                "initial_temperature_c must lie within the comfort bounds"
-            )
+        max_power = _positive(
+            max_electric_power_w,
+            "max_electric_power_w",
+        )
         result: dict[str, Any] = {
             "id": self.model_id,
             "model_type": MODEL_TYPE,
@@ -344,10 +591,7 @@ class ThermalTwinArtifact:
             "min_temp_c": minimum,
             "max_temp_c": maximum,
             "outside_temp_c": outside,
-            "max_power_w": _positive(
-                max_electric_power_w,
-                "max_electric_power_w",
-            ),
+            "max_power_w": max_power,
             "heat_loss_w_per_k": self.heat_loss_w_per_k,
             "thermal_capacity_wh_per_k": self.thermal_capacity_wh_per_k,
             "cop": [self.cop_curve.at(value) for value in outside],
@@ -363,6 +607,10 @@ class ThermalTwinArtifact:
             if not steps or steps[0] < 0 or 0.0 not in steps:
                 raise CalibrationError(
                     "allowed_steps_w must contain 0 and no negative value"
+                )
+            if steps[-1] > max_power:
+                raise CalibrationError(
+                    "allowed_steps_w must not exceed max_electric_power_w"
                 )
             result["allowed_steps_w"] = steps
         return result
@@ -385,6 +633,11 @@ class ThermalTwinArtifact:
         physics = _artifact_dict(value.get("physics"), "physics")
         residual = _artifact_dict(value.get("residual"), "residual")
         artifact = cls(
+            site_id=_artifact_string(value.get("site_id"), "artifact.site_id"),
+            home_spec_revision=_optional_sha256(
+                value.get("home_spec_revision"),
+                "artifact.home_spec_revision",
+            ),
             model_id=model_id,
             heat_loss_w_per_k=_positive(
                 physics.get("heat_loss_w_per_k"),
@@ -696,11 +949,21 @@ def _rmse(actual: np.ndarray, predicted: np.ndarray) -> float:
 def calibrate_thermal_twin(
     observations: Iterable[ThermalObservation],
     *,
+    site_id: str,
+    home_spec_revision: str,
+    dataset_sha256: str,
+    resampling_recipe: str,
     model_id: str,
     cop_curve: COPCurve,
     train_fraction: float = 0.75,
     source: str = "heat_pump_submeter",
 ) -> ThermalTwinArtifact:
+    _artifact_string(site_id, "site_id")
+    if not _optional_sha256(home_spec_revision, "home_spec_revision"):
+        raise CalibrationError("home_spec_revision must be non-empty")
+    if not _optional_sha256(dataset_sha256, "dataset_sha256"):
+        raise CalibrationError("dataset_sha256 must be non-empty")
+    _artifact_string(resampling_recipe, "resampling_recipe")
     values = list(observations)
     if len(values) - 1 < MIN_TRANSITIONS:
         raise CalibrationError(
@@ -807,6 +1070,10 @@ def calibrate_thermal_twin(
 
     provisional_evidence = CalibrationEvidence(
         source=source,
+        dataset_sha256=dataset_sha256,
+        resampling_recipe=resampling_recipe,
+        calibrator_version=CALIBRATOR_VERSION,
+        promotion_policy_version=PROMOTION_POLICY_VERSION,
         sample_count=len(values),
         transition_count=transition_count,
         start_timestamp_s=float(timestamps[0]),
@@ -818,10 +1085,18 @@ def calibrate_thermal_twin(
         one_step_rmse_c=0.0,
         rollout_rmse_c=0.0,
         persistence_rmse_c=0.0,
+        solver_converged=True,
+        parameter_bounds_hit=False,
+        observed_outdoor_min_c=float(np.min(outdoor)),
+        observed_outdoor_max_c=float(np.max(outdoor)),
+        observed_power_min_w=float(np.min(electric)),
+        observed_power_max_w=float(np.max(electric)),
         promotable=False,
         promotion_reasons=(),
     )
     provisional = ThermalTwinArtifact(
+        site_id=site_id,
+        home_spec_revision=home_spec_revision,
         model_id=model_id,
         heat_loss_w_per_k=heat_loss_w_per_k,
         thermal_capacity_wh_per_k=thermal_capacity_wh_per_k,
@@ -861,6 +1136,8 @@ def calibrate_thermal_twin(
         indoor[train_count:-1],
     )
     promotion_reasons: list[str] = []
+    if resampling_recipe not in APPROVED_RESAMPLING_RECIPES:
+        promotion_reasons.append("resampling recipe is not approved")
     duration_h = (timestamps[-1] - timestamps[0]) / 3600.0
     if duration_h < 72:
         promotion_reasons.append("less than 72 hours of evidence")
@@ -874,6 +1151,7 @@ def calibrate_thermal_twin(
         promotion_reasons.append(
             "one-step validation does not beat temperature persistence"
         )
+    parameter_bounds_hit = False
     for index, (lower, upper) in enumerate(parameter_bounds):
         if math.isclose(parameters[index], lower, rel_tol=0, abs_tol=1e-8) or math.isclose(
             parameters[index],
@@ -881,10 +1159,15 @@ def calibrate_thermal_twin(
             rel_tol=0,
             abs_tol=1e-8,
         ):
+            parameter_bounds_hit = True
             promotion_reasons.append("a fitted parameter reached its search bound")
             break
     evidence = CalibrationEvidence(
         source=source,
+        dataset_sha256=dataset_sha256,
+        resampling_recipe=resampling_recipe,
+        calibrator_version=CALIBRATOR_VERSION,
+        promotion_policy_version=PROMOTION_POLICY_VERSION,
         sample_count=len(values),
         transition_count=transition_count,
         start_timestamp_s=float(timestamps[0]),
@@ -896,10 +1179,18 @@ def calibrate_thermal_twin(
         one_step_rmse_c=one_step_rmse,
         rollout_rmse_c=rollout_rmse,
         persistence_rmse_c=persistence_rmse,
+        solver_converged=True,
+        parameter_bounds_hit=parameter_bounds_hit,
+        observed_outdoor_min_c=float(np.min(outdoor)),
+        observed_outdoor_max_c=float(np.max(outdoor)),
+        observed_power_min_w=float(np.min(electric)),
+        observed_power_max_w=float(np.max(electric)),
         promotable=not promotion_reasons,
         promotion_reasons=tuple(promotion_reasons),
     )
     return ThermalTwinArtifact(
+        site_id=site_id,
+        home_spec_revision=home_spec_revision,
         model_id=model_id,
         heat_loss_w_per_k=heat_loss_w_per_k,
         thermal_capacity_wh_per_k=thermal_capacity_wh_per_k,
@@ -1003,6 +1294,10 @@ def calibration_main(argv: Sequence[str] | None = None) -> None:
         description="Calibrate an FTW 1R1C thermal twin from regular telemetry"
     )
     parser.add_argument("csv", help="telemetry CSV")
+    parser.add_argument("--site-id", required=True)
+    parser.add_argument("--home-spec-revision", required=True)
+    parser.add_argument("--dataset-sha256", required=True)
+    parser.add_argument("--resampling-recipe", required=True)
     parser.add_argument("--model-id", required=True)
     parser.add_argument("--output", default="-", help="artifact JSON path or -")
     parser.add_argument("--cop-reference-temp-c", type=float, default=7.0)
@@ -1020,6 +1315,10 @@ def calibration_main(argv: Sequence[str] | None = None) -> None:
     try:
         artifact = calibrate_thermal_twin(
             load_observations_csv(args.csv),
+            site_id=args.site_id,
+            home_spec_revision=args.home_spec_revision,
+            dataset_sha256=args.dataset_sha256,
+            resampling_recipe=args.resampling_recipe,
             model_id=args.model_id,
             cop_curve=COPCurve(
                 reference_temperature_c=args.cop_reference_temp_c,

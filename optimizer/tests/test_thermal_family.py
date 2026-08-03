@@ -13,7 +13,14 @@ from ftw_optimizer.home_spec import (
     TWO_R_TWO_C_MODEL_TYPE,
     HomeSpec,
 )
-from ftw_optimizer.thermal_backtest import export_thermal_dataset
+from ftw_optimizer.thermal_backtest import (
+    SERIES_API_RESAMPLING_RECIPE,
+    THERMAL_DATASET_KIND,
+    THERMAL_DATASET_SCHEMA_VERSION,
+    export_thermal_dataset,
+    observations_from_dataset,
+    run_thermal_backtest,
+)
 from ftw_optimizer.thermal_family import (
     TwoR2CArtifact,
     artifact_from_dict,
@@ -34,7 +41,11 @@ from ftw_optimizer.worker import handle, handshake
 
 def calibration_evidence() -> CalibrationEvidence:
     return CalibrationEvidence(
-        source="synthetic-ground-truth",
+        source="heat_pump_submeter",
+        dataset_sha256="a" * 64,
+        resampling_recipe="synthetic-ground-truth-v2",
+        calibrator_version="ftw-thermal-calibrator-v2",
+        promotion_policy_version="ftw-thermal-promotion-v2",
         sample_count=673,
         transition_count=672,
         start_timestamp_s=0,
@@ -46,6 +57,12 @@ def calibration_evidence() -> CalibrationEvidence:
         one_step_rmse_c=0,
         rollout_rmse_c=0,
         persistence_rmse_c=0.1,
+        solver_converged=True,
+        parameter_bounds_hit=False,
+        observed_outdoor_min_c=-20,
+        observed_outdoor_max_c=20,
+        observed_power_min_w=0,
+        observed_power_max_w=4_000,
         promotable=True,
         promotion_reasons=(),
     )
@@ -123,7 +140,10 @@ def home_spec(
 
 
 def two_r2c_artifact() -> TwoR2CArtifact:
+    spec = home_spec()
     return TwoR2CArtifact(
+        site_id=spec.site_id,
+        home_spec_revision=spec.revision,
         model_id="main",
         heat_loss_w_per_k=160,
         mass_coupling_w_per_k=900,
@@ -215,6 +235,8 @@ def test_model_family_selects_two_r2c_for_two_time_scales() -> None:
     result = calibrate_model_family(
         observations_from_two_r2c(),
         home_spec=home_spec(),
+        dataset_sha256="a" * 64,
+        resampling_recipe="synthetic-ground-truth-v2",
         source="heat_pump_submeter",
     )
     summaries = {
@@ -238,6 +260,8 @@ def test_model_family_selects_two_r2c_for_two_time_scales() -> None:
 def test_model_family_keeps_one_r1c_when_complexity_adds_no_value() -> None:
     spec = home_spec()
     expected = ThermalTwinArtifact(
+        site_id=spec.site_id,
+        home_spec_revision=spec.revision,
         model_id="main",
         heat_loss_w_per_k=160,
         thermal_capacity_wh_per_k=15_200,
@@ -270,6 +294,8 @@ def test_model_family_keeps_one_r1c_when_complexity_adds_no_value() -> None:
     result = calibrate_model_family(
         observations,
         home_spec=spec,
+        dataset_sha256="a" * 64,
+        resampling_recipe="synthetic-ground-truth-v2",
     )
 
     assert result.report.champion_model_type == MODEL_TYPE
@@ -327,6 +353,10 @@ def test_two_r2c_runs_in_shared_optimizer() -> None:
         for action in response["plan"]["actions"]
     ]
     assert min(temperatures) >= 19 - 1e-5
+    assert all(
+        "main" in action["thermal_mass_state"]
+        for action in response["plan"]["actions"]
+    )
     assert "thermal_twin_2r2c_v1" in handshake(
         {"type": "handshake"}
     )["features"]
@@ -381,6 +411,14 @@ def test_exporter_chunks_and_aligns_ftw_series() -> None:
     assert dataset["coverage"]["longest_contiguous_samples"] == 96
     assert len(dataset["observations"]) == 96
     assert len(calls) == 6
+    assert dataset["resampling_recipe"] == SERIES_API_RESAMPLING_RECIPE
+    assert dataset["promotion_blocking_reasons"]
+    assert len(dataset["dataset_sha256"]) == 64
+
+    tampered = json.loads(json.dumps(dataset))
+    tampered["observations"][0]["indoor_temp_c"] += 1
+    with pytest.raises(CalibrationError, match="digest"):
+        observations_from_dataset(tampered, home_spec=spec)
 
 
 def test_exporter_reports_missing_heat_pump_power_mapping() -> None:
@@ -420,6 +458,35 @@ def test_exporter_accepts_null_points_and_redacts_url_credentials() -> None:
     assert any(
         "heat_pump_power has no samples" in reason
         for reason in dataset["blocking_reasons"]
+    )
+
+
+def test_series_api_dataset_can_backtest_but_cannot_promote() -> None:
+    spec = home_spec()
+    observations = observations_from_two_r2c()
+    dataset = {
+        "schema_version": THERMAL_DATASET_SCHEMA_VERSION,
+        "kind": THERMAL_DATASET_KIND,
+        "home_spec_revision": spec.revision,
+        "step_s": 900,
+        "resampling_recipe": SERIES_API_RESAMPLING_RECIPE,
+        "observations": [
+            {
+                "timestamp_s": value.timestamp_s,
+                "indoor_temp_c": value.indoor_temperature_c,
+                "outdoor_temp_c": value.outdoor_temperature_c,
+                "heat_pump_power_w": value.heat_pump_power_w,
+            }
+            for value in observations
+        ],
+    }
+    result = run_thermal_backtest(dataset=dataset, home_spec=spec)
+    assert result.report.champion_model_type is None
+    assert result.report.candidates
+    assert all(not candidate.promotable for candidate in result.report.candidates)
+    assert any(
+        "resampling recipe is not approved" in candidate.reasons
+        for candidate in result.report.candidates
     )
 
 

@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import hashlib
-import json
 import math
 from dataclasses import dataclass
 from typing import Any, Iterable, Sequence
@@ -10,6 +8,7 @@ import numpy as np
 from scipy.linalg import expm
 from scipy.optimize import least_squares
 
+from .fingerprint import FingerprintWriter
 from .home_spec import (
     TWO_R_TWO_C_MODEL_TYPE,
     HomeSpec,
@@ -22,21 +21,29 @@ from .protocol import (
     require_dict,
 )
 from .thermal_twin import (
+    APPROVED_RESAMPLING_RECIPES,
     ARTIFACT_KIND,
     ARTIFACT_SCHEMA_VERSION,
+    CALIBRATOR_VERSION,
     MIN_TRANSITIONS,
     MODEL_TYPE,
+    PROMOTION_POLICY_VERSION,
     COPCurve,
     CalibrationError,
     CalibrationEvidence,
     ThermalObservation,
     ThermalTwinArtifact,
+    _fingerprint_calibration,
+    _fingerprint_cop,
     calibrate_thermal_twin,
+    promotion_policy_reasons,
 )
 
 
 @dataclass(frozen=True)
 class TwoR2CArtifact:
+    site_id: str
+    home_spec_revision: str
     model_id: str
     heat_loss_w_per_k: float
     mass_coupling_w_per_k: float
@@ -47,31 +54,69 @@ class TwoR2CArtifact:
     calibration: CalibrationEvidence
 
     def __post_init__(self) -> None:
+        if not isinstance(self.site_id, str) or not self.site_id:
+            raise CalibrationError("site_id must be non-empty")
+        if (
+            not isinstance(self.home_spec_revision, str)
+            or len(self.home_spec_revision) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in self.home_spec_revision
+            )
+        ):
+            raise CalibrationError(
+                "home_spec_revision must be lowercase SHA-256"
+            )
         if not isinstance(self.model_id, str) or not self.model_id:
             raise CalibrationError("model_id must be non-empty")
-        for field, value in (
-            ("heat_loss_w_per_k", self.heat_loss_w_per_k),
-            ("mass_coupling_w_per_k", self.mass_coupling_w_per_k),
-            ("air_capacity_wh_per_k", self.air_capacity_wh_per_k),
-            ("mass_capacity_wh_per_k", self.mass_capacity_wh_per_k),
+        for field, value, minimum, maximum in (
+            ("heat_loss_w_per_k", self.heat_loss_w_per_k, 5, 5_000),
+            (
+                "mass_coupling_w_per_k",
+                self.mass_coupling_w_per_k,
+                5,
+                10_000,
+            ),
+            ("air_capacity_wh_per_k", self.air_capacity_wh_per_k, 1, 600_000),
+            (
+                "mass_capacity_wh_per_k",
+                self.mass_capacity_wh_per_k,
+                1,
+                1_000_000,
+            ),
         ):
-            if not math.isfinite(value) or value <= 0:
-                raise CalibrationError(f"{field} must be finite and > 0")
-        if not math.isfinite(self.disturbance_heat_w):
-            raise CalibrationError("disturbance_heat_w must be finite")
+            if not minimum <= value <= maximum:
+                raise CalibrationError(
+                    f"{field} must be within {minimum}..{maximum}"
+                )
+        if (
+            not math.isfinite(self.disturbance_heat_w)
+            or abs(self.disturbance_heat_w) > 20_000
+        ):
+            raise CalibrationError(
+                "disturbance_heat_w must be within -20000..20000"
+            )
 
     @property
     def revision(self) -> str:
-        encoded = json.dumps(
-            self._content(),
-            allow_nan=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode()
-        return hashlib.sha256(encoded).hexdigest()
+        writer = FingerprintWriter("ftw.thermal_twin.v2")
+        writer.string(self.site_id)
+        writer.string(self.home_spec_revision)
+        writer.string(TWO_R_TWO_C_MODEL_TYPE)
+        writer.string(self.model_id)
+        writer.floating(self.heat_loss_w_per_k)
+        writer.floating(self.mass_coupling_w_per_k)
+        writer.floating(self.air_capacity_wh_per_k)
+        writer.floating(self.mass_capacity_wh_per_k)
+        _fingerprint_cop(writer, self.cop_curve)
+        writer.floating(self.disturbance_heat_w)
+        _fingerprint_calibration(writer, self.calibration)
+        return writer.hexdigest()
 
     def _content(self) -> dict[str, Any]:
         return {
+            "site_id": self.site_id,
+            "home_spec_revision": self.home_spec_revision,
             "model_id": self.model_id,
             "physics": {
                 "heat_loss_w_per_k": float(self.heat_loss_w_per_k),
@@ -129,6 +174,11 @@ class TwoR2CArtifact:
                 "artifact physics and residual must be objects"
             )
         artifact = cls(
+            site_id=_artifact_string(raw.get("site_id"), "site_id"),
+            home_spec_revision=_artifact_sha256(
+                raw.get("home_spec_revision"),
+                "home_spec_revision",
+            ),
             model_id=_artifact_string(raw.get("model_id"), "model_id"),
             heat_loss_w_per_k=_artifact_positive(
                 physics.get("heat_loss_w_per_k"),
@@ -173,8 +223,16 @@ class TwoR2CArtifact:
         allowed_steps_w: Sequence[float] | None = None,
         allow_unpromotable: bool = False,
     ) -> dict[str, Any]:
-        if not self.calibration.promotable and not allow_unpromotable:
-            reasons = ", ".join(self.calibration.promotion_reasons)
+        policy_reasons = promotion_policy_reasons(
+            self.calibration,
+            TWO_R_TWO_C_MODEL_TYPE,
+        )
+        if (
+            not self.calibration.promotable or policy_reasons
+        ) and not allow_unpromotable:
+            reasons = ", ".join(
+                self.calibration.promotion_reasons + policy_reasons
+            )
             raise CalibrationError(
                 "thermal artifact is not promotable"
                 + (f": {reasons}" if reasons else "")
@@ -189,6 +247,14 @@ class TwoR2CArtifact:
         if not outside:
             raise CalibrationError(
                 "outside_temperature_c must not be empty"
+            )
+        if any(
+            value < self.calibration.observed_outdoor_min_c
+            or value > self.calibration.observed_outdoor_max_c
+            for value in outside
+        ):
+            raise CalibrationError(
+                "outside_temperature_c exceeds the calibrated operating range"
             )
         initial = _artifact_finite(
             initial_temperature_c,
@@ -215,10 +281,10 @@ class TwoR2CArtifact:
                 "minimum_temperature_c must be below "
                 "maximum_temperature_c"
             )
-        if not minimum <= initial <= maximum:
-            raise CalibrationError(
-                "initial_temperature_c must lie within the comfort bounds"
-            )
+        max_power = _artifact_positive(
+            max_electric_power_w,
+            "max_electric_power_w",
+        )
         result: dict[str, Any] = {
             "id": self.model_id,
             "model_type": TWO_R_TWO_C_MODEL_TYPE,
@@ -228,10 +294,7 @@ class TwoR2CArtifact:
             "min_temp_c": minimum,
             "max_temp_c": maximum,
             "outside_temp_c": outside,
-            "max_power_w": _artifact_positive(
-                max_electric_power_w,
-                "max_electric_power_w",
-            ),
+            "max_power_w": max_power,
             "heat_loss_w_per_k": self.heat_loss_w_per_k,
             "mass_coupling_w_per_k": self.mass_coupling_w_per_k,
             "air_capacity_wh_per_k": self.air_capacity_wh_per_k,
@@ -252,6 +315,10 @@ class TwoR2CArtifact:
             if not steps or steps[0] < 0 or 0.0 not in steps:
                 raise CalibrationError(
                     "allowed_steps_w must contain 0 and no negative value"
+                )
+            if steps[-1] > max_power:
+                raise CalibrationError(
+                    "allowed_steps_w must not exceed max_electric_power_w"
                 )
             result["allowed_steps_w"] = steps
         return result
@@ -354,6 +421,15 @@ def _artifact_string(value: Any, field: str) -> str:
     if not isinstance(value, str) or not value:
         raise CalibrationError(f"{field} must be non-empty")
     return value
+
+
+def _artifact_sha256(value: Any, field: str) -> str:
+    result = _artifact_string(value, field)
+    if len(result) != 64 or any(
+        character not in "0123456789abcdef" for character in result
+    ):
+        raise CalibrationError(f"{field} must be lowercase SHA-256")
+    return result
 
 
 def artifact_from_dict(raw: Any) -> ThermalArtifact:
@@ -791,6 +867,10 @@ def _rmse(actual: np.ndarray, predicted: np.ndarray) -> float:
 def calibrate_two_r2c(
     observations: Iterable[ThermalObservation],
     *,
+    site_id: str,
+    home_spec_revision: str,
+    dataset_sha256: str,
+    resampling_recipe: str,
     model_id: str,
     cop_curve: COPCurve,
     priors: ThermalPriors,
@@ -819,6 +899,10 @@ def calibrate_two_r2c(
         try:
             initializer = calibrate_thermal_twin(
                 values,
+                site_id=site_id,
+                home_spec_revision=home_spec_revision,
+                dataset_sha256=dataset_sha256,
+                resampling_recipe=resampling_recipe,
                 model_id=model_id,
                 cop_curve=cop_curve,
                 train_fraction=train_fraction,
@@ -975,6 +1059,8 @@ def calibrate_two_r2c(
         step_h=step_h,
     )
     provisional = TwoR2CArtifact(
+        site_id=site_id,
+        home_spec_revision=home_spec_revision,
         model_id=model_id,
         heat_loss_w_per_k=heat_loss,
         mass_coupling_w_per_k=coupling,
@@ -984,6 +1070,10 @@ def calibrate_two_r2c(
         disturbance_heat_w=disturbance,
         calibration=CalibrationEvidence(
             source=source,
+            dataset_sha256=dataset_sha256,
+            resampling_recipe=resampling_recipe,
+            calibrator_version=CALIBRATOR_VERSION,
+            promotion_policy_version=PROMOTION_POLICY_VERSION,
             sample_count=len(values),
             transition_count=len(values) - 1,
             start_timestamp_s=float(timestamps[0]),
@@ -995,6 +1085,14 @@ def calibrate_two_r2c(
             one_step_rmse_c=0.0,
             rollout_rmse_c=0.0,
             persistence_rmse_c=0.0,
+            solver_converged=bool(best_result.success),
+            parameter_bounds_hit=bool(
+                np.any(np.asarray(best_result.active_mask) != 0)
+            ),
+            observed_outdoor_min_c=float(np.min(outdoor)),
+            observed_outdoor_max_c=float(np.max(outdoor)),
+            observed_power_min_w=float(np.min(electric)),
+            observed_power_max_w=float(np.max(electric)),
             promotable=False,
             promotion_reasons=(),
         ),
@@ -1055,6 +1153,8 @@ def calibrate_two_r2c(
         else float(singular_values[0] / singular_values[-1])
     )
     promotion_reasons: list[str] = []
+    if resampling_recipe not in APPROVED_RESAMPLING_RECIPES:
+        promotion_reasons.append("resampling recipe is not approved")
     duration_h = (timestamps[-1] - timestamps[0]) / 3_600.0
     if duration_h < 72:
         promotion_reasons.append("less than 72 hours of evidence")
@@ -1082,6 +1182,10 @@ def calibrate_two_r2c(
         )
     evidence = CalibrationEvidence(
         source=source,
+        dataset_sha256=dataset_sha256,
+        resampling_recipe=resampling_recipe,
+        calibrator_version=CALIBRATOR_VERSION,
+        promotion_policy_version=PROMOTION_POLICY_VERSION,
         sample_count=len(values),
         transition_count=len(values) - 1,
         start_timestamp_s=float(timestamps[0]),
@@ -1095,10 +1199,20 @@ def calibrate_two_r2c(
         one_step_rmse_c=one_step_rmse,
         rollout_rmse_c=rollout_rmse,
         persistence_rmse_c=persistence_rmse,
+        solver_converged=bool(best_result.success),
+        parameter_bounds_hit=bool(
+            np.any(np.asarray(best_result.active_mask) != 0)
+        ),
+        observed_outdoor_min_c=float(np.min(outdoor)),
+        observed_outdoor_max_c=float(np.max(outdoor)),
+        observed_power_min_w=float(np.min(electric)),
+        observed_power_max_w=float(np.max(electric)),
         promotable=not promotion_reasons,
         promotion_reasons=tuple(promotion_reasons),
     )
     return TwoR2CArtifact(
+        site_id=site_id,
+        home_spec_revision=home_spec_revision,
         model_id=model_id,
         heat_loss_w_per_k=heat_loss,
         mass_coupling_w_per_k=coupling,
@@ -1114,6 +1228,8 @@ def calibrate_model_family(
     observations: Iterable[ThermalObservation],
     *,
     home_spec: HomeSpec,
+    dataset_sha256: str,
+    resampling_recipe: str,
     source: str = "heat_pump_submeter",
 ) -> FamilyCalibrationResult:
     values = list(observations)
@@ -1128,6 +1244,10 @@ def calibrate_model_family(
         try:
             initializer = calibrate_thermal_twin(
                 values,
+                site_id=home_spec.site_id,
+                home_spec_revision=home_spec.revision,
+                dataset_sha256=dataset_sha256,
+                resampling_recipe=resampling_recipe,
                 model_id=home_spec.primary_zone_id,
                 cop_curve=home_spec.heating.cop_curve,
                 train_fraction=home_spec.model_selection.train_fraction,
@@ -1155,6 +1275,10 @@ def calibrate_model_family(
         try:
             artifact = calibrate_two_r2c(
                 values,
+                site_id=home_spec.site_id,
+                home_spec_revision=home_spec.revision,
+                dataset_sha256=dataset_sha256,
+                resampling_recipe=resampling_recipe,
                 model_id=home_spec.primary_zone_id,
                 cop_curve=home_spec.heating.cop_curve,
                 priors=home_spec.priors,
@@ -1266,15 +1390,20 @@ def _candidate_summary(
     artifact: ThermalArtifact,
 ) -> CandidateSummary:
     evidence = artifact.calibration
+    policy_reasons = promotion_policy_reasons(evidence, model_type)
+    reasons = tuple(
+        dict.fromkeys(evidence.promotion_reasons + policy_reasons)
+    )
+    promotable = evidence.promotable and not policy_reasons
     return CandidateSummary(
         model_type=model_type,
         complexity=complexity,
-        status="eligible" if evidence.promotable else "rejected",
-        promotable=evidence.promotable,
+        status="eligible" if promotable else "rejected",
+        promotable=promotable,
         one_step_rmse_c=evidence.one_step_rmse_c,
         rollout_rmse_c=evidence.rollout_rmse_c,
         persistence_rmse_c=evidence.persistence_rmse_c,
-        reasons=evidence.promotion_reasons,
+        reasons=reasons,
         revision=artifact.revision,
     )
 

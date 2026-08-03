@@ -1,17 +1,17 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .fingerprint import FingerprintWriter
 from .thermal_twin import COPCurve, CalibrationError, MODEL_TYPE
 
 
 HOME_SPEC_KIND = "ftw.home_thermal_spec"
-HOME_SPEC_SCHEMA_VERSION = 1
+HOME_SPEC_SCHEMA_VERSION = 2
 TWO_R_TWO_C_MODEL_TYPE = "ftw-2r2c-v1"
 SUPPORTED_MODEL_TYPES = (MODEL_TYPE, TWO_R_TWO_C_MODEL_TYPE)
 
@@ -473,13 +473,50 @@ class HomeSpec:
 
     @property
     def revision(self) -> str:
-        encoded = json.dumps(
-            self.to_dict(include_revision=False),
-            allow_nan=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode()
-        return hashlib.sha256(encoded).hexdigest()
+        writer = FingerprintWriter("ftw.home_thermal_spec.v2")
+        writer.string(self.site_id)
+        writer.string(self.primary_zone_id)
+        writer.integer(len(self.zones))
+        for zone in self.zones:
+            writer.string(zone.zone_id)
+            writer.optional_float(zone.floor_area_m2)
+            writer.optional_float(zone.volume_m3)
+            writer.floating(zone.minimum_temperature_c)
+            writer.floating(zone.maximum_temperature_c)
+        writer.string(self.heating.source)
+        writer.string(self.heating.emitters)
+        writer.floating(self.heating.maximum_electric_power_w)
+        writer.optional_float(self.heating.buffer_tank_l)
+        writer.optional_float(self.heating.hot_water_tank_l)
+        for value in self.heating.cop_curve.to_dict().values():
+            writer.floating(value)
+        sensor_names = sorted(self.sensors)
+        writer.integer(len(sensor_names))
+        for name in sensor_names:
+            sensor = self.sensors[name]
+            writer.string(name)
+            writer.string(sensor.driver)
+            writer.string(sensor.metric)
+            writer.floating(sensor.scale)
+            writer.floating(sensor.offset)
+        for parameter_range in (
+            self.priors.heat_loss_w_per_k,
+            self.priors.total_capacity_wh_per_k,
+            self.priors.mass_coupling_w_per_k,
+            self.priors.air_capacity_fraction,
+            self.priors.disturbance_heat_w,
+        ):
+            writer.floating(parameter_range.minimum)
+            writer.floating(parameter_range.maximum)
+        writer.strings(self.model_selection.candidates)
+        writer.floating(self.model_selection.train_fraction)
+        writer.floating(
+            self.model_selection.minimum_rollout_improvement_c
+        )
+        writer.floating(
+            self.model_selection.minimum_relative_improvement
+        )
+        return writer.hexdigest()
 
     def to_dict(self, *, include_revision: bool = True) -> dict[str, Any]:
         result: dict[str, Any] = {

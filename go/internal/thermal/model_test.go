@@ -1,6 +1,9 @@
 package thermal
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
 
 func ptr(v float64) *float64 { return &v }
 
@@ -138,5 +141,44 @@ func TestDecideIntentCoolingUsesInverseTemperatureHeadroom(t *testing.T) {
 	}
 	if intent.ShedHeadroomC != 2 {
 		t.Fatalf("shed headroom = %.1f, want 2.0", intent.ShedHeadroomC)
+	}
+}
+
+func TestDecideIntentStaysNeutralOnInvalidSensorOrBand(t *testing.T) {
+	price := MarginalPrice{ImportOreKWh: -50}
+	for name, input := range map[string]DecisionInput{
+		"nan sensor": {
+			Kind: AssetSpaceHeat, SpaceTempC: ptr(math.NaN()),
+			SpaceBand: TemperatureBand{MinC: 19, NormalC: 21, MaxC: 23},
+			Price:     price, CheapBelowOreKWh: ptr(0),
+		},
+		"inverted band": {
+			Kind: AssetSpaceHeat, SpaceTempC: ptr(21),
+			SpaceBand: TemperatureBand{MinC: 23, NormalC: 21, MaxC: 19},
+			Price:     price, CheapBelowOreKWh: ptr(0),
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			intent := DecideIntent(input)
+			if intent.Kind != IntentNeutral || intent.Reason == "neutral" {
+				t.Fatalf("intent = %+v, want explained neutral", intent)
+			}
+		})
+	}
+}
+
+func TestDecideIntentStaysNeutralWhenModelRejectsObservation(t *testing.T) {
+	space := 18.5
+	intent := DecideIntent(DecisionInput{
+		Kind:       AssetSpaceHeat,
+		SpaceTempC: &space,
+		SpaceBand:  TemperatureBand{MinC: 19, NormalC: 21, MaxC: 23},
+		SpaceAssessment: &TransitionAssessment{
+			Reasonable: false,
+			Reason:     "observed indoor temperature is outside the calibrated prediction band",
+		},
+	})
+	if intent.Kind != IntentNeutral {
+		t.Fatalf("intent = %+v, want neutral", intent)
 	}
 }

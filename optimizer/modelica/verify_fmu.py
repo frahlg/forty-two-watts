@@ -5,8 +5,8 @@ import sys
 from pathlib import Path
 
 import numpy as np
-from fmpy import simulate_fmu
-from fmpy.validation import validate_fmu
+
+from fmu_package import FMUPackageError, validate_fmu_package
 
 
 def matrix_exponential(matrix: np.ndarray, duration_h: float) -> np.ndarray:
@@ -17,6 +17,16 @@ def matrix_exponential(matrix: np.ndarray, duration_h: float) -> np.ndarray:
 
 
 def verify(path: Path) -> None:
+    try:
+        validate_fmu_package(path)
+    except FMUPackageError as exc:
+        raise SystemExit(f"{path}: {exc}") from exc
+
+    # Keep FMPy optional for package-only tests and import it only after the
+    # archive has passed the checks that protect its extractor and loader.
+    from fmpy import simulate_fmu
+    from fmpy.validation import validate_fmu
+
     problems = validate_fmu(path)
     if problems:
         raise SystemExit("\n".join(problems))

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -17,13 +18,18 @@ from ftw_optimizer.thermal_twin import (
     load_observations_csv,
     simulate_thermal_twin,
     site_grid_power_w,
+    promotion_policy_reasons,
 )
 from ftw_optimizer.worker import handle, handshake
 
 
 def evidence(*, promotable: bool = True) -> CalibrationEvidence:
     return CalibrationEvidence(
-        source="synthetic-ground-truth",
+        source="heat_pump_submeter",
+        dataset_sha256="a" * 64,
+        resampling_recipe="synthetic-ground-truth-v2",
+        calibrator_version="ftw-thermal-calibrator-v2",
+        promotion_policy_version="ftw-thermal-promotion-v2",
         sample_count=673,
         transition_count=672,
         start_timestamp_s=0,
@@ -35,6 +41,12 @@ def evidence(*, promotable: bool = True) -> CalibrationEvidence:
         one_step_rmse_c=0,
         rollout_rmse_c=0,
         persistence_rmse_c=0.1,
+        solver_converged=True,
+        parameter_bounds_hit=False,
+        observed_outdoor_min_c=-20,
+        observed_outdoor_max_c=20,
+        observed_power_min_w=0,
+        observed_power_max_w=4_000,
         promotable=promotable,
         promotion_reasons=() if promotable else ("test only",),
     )
@@ -42,6 +54,8 @@ def evidence(*, promotable: bool = True) -> CalibrationEvidence:
 
 def artifact() -> ThermalTwinArtifact:
     return ThermalTwinArtifact(
+        site_id="home",
+        home_spec_revision="b" * 64,
         model_id="home-zone",
         heat_loss_w_per_k=180,
         thermal_capacity_wh_per_k=12_000,
@@ -87,8 +101,32 @@ def test_artifact_round_trip_is_content_addressed(tmp_path: Path) -> None:
         load_artifact(path)
 
 
+def test_typed_revision_handles_unicode_and_html_characters() -> None:
+    value = replace(
+        artifact(),
+        site_id="hem-å<&",
+        model_id="zon-å<&",
+    )
+    assert value.revision == (
+        "1e05dfec3d201f6c7c2442bfd763956716cd0a420a35f625ac57fe8610267eb0"
+    )
+
+
+def test_consumer_recomputes_promotion_policy() -> None:
+    forged = replace(
+        evidence(),
+        resampling_recipe="series-bucket-average-v1",
+    )
+    assert "resampling recipe is not approved" in promotion_policy_reasons(
+        forged,
+        "ftw-1r1c-v1",
+    )
+
+
 def test_optimizer_rejects_artifact_that_failed_promotion() -> None:
     rejected = ThermalTwinArtifact(
+        site_id="home",
+        home_spec_revision="b" * 64,
         model_id="home-zone",
         heat_loss_w_per_k=180,
         thermal_capacity_wh_per_k=12_000,
@@ -110,6 +148,29 @@ def test_optimizer_rejects_artifact_that_failed_promotion() -> None:
         **load_args,
         allow_unpromotable=True,
     )["source_revision"] == rejected.revision
+
+
+def test_optimizer_load_accepts_initial_temperature_outside_comfort() -> None:
+    load = artifact().optimizer_load(
+        initial_temperature_c=18,
+        minimum_temperature_c=19,
+        maximum_temperature_c=22,
+        outside_temperature_c=[0],
+        max_electric_power_w=4_000,
+    )
+    assert load["initial_temp_c"] == 18
+
+
+def test_optimizer_load_rejects_step_above_maximum_power() -> None:
+    with pytest.raises(CalibrationError, match="must not exceed"):
+        artifact().optimizer_load(
+            initial_temperature_c=20,
+            minimum_temperature_c=19,
+            maximum_temperature_c=22,
+            outside_temperature_c=[0],
+            max_electric_power_w=4_000,
+            allowed_steps_w=[0, 5_000],
+        )
 
 
 def test_calibration_recovers_synthetic_physics_and_holds_out_time() -> None:
@@ -150,6 +211,10 @@ def test_calibration_recovers_synthetic_physics_and_holds_out_time() -> None:
 
     fitted = calibrate_thermal_twin(
         observations,
+        site_id="home",
+        home_spec_revision="b" * 64,
+        dataset_sha256="a" * 64,
+        resampling_recipe="synthetic-ground-truth-v2",
         model_id="home-zone",
         cop_curve=expected.cop_curve,
         train_fraction=0.7,
@@ -197,6 +262,10 @@ def test_calibration_rejects_unexcited_data() -> None:
     with pytest.raises(CalibrationError, match="too little excitation"):
         calibrate_thermal_twin(
             observations,
+            site_id="home",
+            home_spec_revision="b" * 64,
+            dataset_sha256="a" * 64,
+            resampling_recipe="synthetic-ground-truth-v2",
             model_id="flat-data",
             cop_curve=artifact().cop_curve,
         )
@@ -269,6 +338,23 @@ def test_physical_and_legacy_thermal_parameters_cannot_mix() -> None:
     assert not response["ok"]
     assert response["error"]["code"] == "invalid_request"
     assert "cannot also set gain_c_per_kwh" in response["error"]["message"]
+
+
+def test_relaxed_formulation_rejects_discrete_heat_pump_steps() -> None:
+    request = optimizer_request()
+    request["thermal_loads"] = [
+        artifact().optimizer_load(
+            initial_temperature_c=20,
+            minimum_temperature_c=19,
+            maximum_temperature_c=22,
+            outside_temperature_c=[0] * len(request["slots"]),
+            max_electric_power_w=4_000,
+            allowed_steps_w=[0, 4_000],
+        )
+    ]
+    response = handle(request)
+    assert not response["ok"]
+    assert "requires auto or milp" in response["error"]["message"]
 
 
 def test_modelica_reference_has_same_site_boundary_and_fmi_mode() -> None:

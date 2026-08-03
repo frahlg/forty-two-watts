@@ -42,6 +42,12 @@ type TemperatureBand struct {
 	MaxC    float64
 }
 
+// Valid reports whether the envelope is safe to use for a decision.
+func (b TemperatureBand) Valid() bool {
+	return finite(b.MinC) && finite(b.NormalC) && finite(b.MaxC) &&
+		b.MinC < b.MaxC && b.NormalC >= b.MinC && b.NormalC <= b.MaxC
+}
+
 // Contains reports whether temp is within the hard envelope.
 func (b TemperatureBand) Contains(tempC float64) bool {
 	return finite(tempC) && tempC >= b.MinC && tempC <= b.MaxC
@@ -100,6 +106,10 @@ type DecisionInput struct {
 
 	SpaceTempC *float64
 	SpaceBand  TemperatureBand
+	// SpaceAssessment is optional proof from an aligned model transition.
+	// When supplied, an unreasonable observation blocks active influence and
+	// leaves the heat pump on its own local controller.
+	SpaceAssessment *TransitionAssessment
 
 	DHWTempC *float64
 	DHWBand  TemperatureBand
@@ -139,13 +149,28 @@ func DecideIntent(in DecisionInput) Intent {
 
 	if in.SpaceTempC != nil {
 		temp := *in.SpaceTempC
+		if !in.SpaceBand.Valid() {
+			intent.Reason = "invalid space temperature band"
+			return intent
+		}
+		if !finite(temp) {
+			intent.Reason = "invalid space temperature"
+			return intent
+		}
+		if in.SpaceAssessment != nil && !in.SpaceAssessment.Reasonable {
+			intent.Reason = "thermal model check failed"
+			if in.SpaceAssessment.Reason != "" {
+				intent.Reason += ": " + in.SpaceAssessment.Reason
+			}
+			return intent
+		}
 		intent.PreconditionHeadroomC, intent.ShedHeadroomC = spaceHeadroom(in.Kind, in.SpaceBand, temp)
-		if finite(temp) && temp < in.SpaceBand.MinC {
+		if temp < in.SpaceBand.MinC {
 			intent.Kind = IntentProtectComfort
 			intent.Reason = "space temperature below minimum"
 			return intent
 		}
-		if finite(temp) && temp > in.SpaceBand.MaxC && in.Kind == AssetCooling {
+		if temp > in.SpaceBand.MaxC && in.Kind == AssetCooling {
 			intent.Kind = IntentProtectComfort
 			intent.Reason = "space temperature above maximum"
 			return intent
@@ -154,8 +179,16 @@ func DecideIntent(in DecisionInput) Intent {
 
 	if in.DHWTempC != nil {
 		temp := *in.DHWTempC
+		if !in.DHWBand.Valid() {
+			intent.Reason = "invalid dhw temperature band"
+			return intent
+		}
+		if !finite(temp) {
+			intent.Reason = "invalid dhw temperature"
+			return intent
+		}
 		intent.DHWWarmHeadroomC = in.DHWBand.WarmHeadroomC(temp)
-		if finite(temp) && temp < in.DHWBand.MinC {
+		if temp < in.DHWBand.MinC {
 			intent.Kind = IntentProtectComfort
 			intent.Reason = "dhw temperature below minimum"
 			return intent

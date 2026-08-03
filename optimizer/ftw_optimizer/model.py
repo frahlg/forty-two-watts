@@ -40,6 +40,7 @@ class ThermalVars:
     spec: dict[str, Any]
     power: cp.Expression
     temperature: cp.Expression
+    mass_temperature: cp.Expression | None
     lower_slack: cp.Variable
     upper_slack: cp.Variable
 
@@ -450,18 +451,25 @@ def solve(payload: dict[str, Any]) -> dict[str, Any]:
         if min_temp >= max_temp:
             raise ProtocolError(f"thermal_loads[{i}] temperature bounds are inconsistent")
         outside = _vector(spec.get("outside_temp_c", [initial] * n), n, f"thermal_loads[{i}].outside_temp_c")
+        max_power = positive_number(spec.get("max_power_w"), f"thermal_loads[{i}].max_power_w")
         steps_raw = require_list(spec.get("allowed_steps_w", []), f"thermal_loads[{i}].allowed_steps_w")
+        if steps_raw and formulation == "relaxed":
+            raise ProtocolError(
+                f"thermal_loads[{i}].allowed_steps_w requires auto or milp formulation"
+            )
         if steps_raw and formulation != "relaxed":
             steps = sorted(set(finite_number(v, f"thermal_loads[{i}].allowed_steps_w") for v in steps_raw))
             if steps[0] < 0 or 0.0 not in steps:
                 raise ProtocolError(f"thermal_loads[{i}].allowed_steps_w must contain 0")
+            if steps[-1] > max_power:
+                raise ProtocolError(f"thermal_loads[{i}].allowed_steps_w exceeds max_power_w")
             selection = cp.Variable((len(steps), n), boolean=True, name=f"thermal_{i}_step")
             constraints.append(cp.sum(selection, axis=0) == 1)
             power = np.asarray(steps) @ selection
             discrete = True
         else:
             power_var = cp.Variable(n, nonneg=True, name=f"thermal_{i}_power")
-            constraints.append(power_var <= positive_number(spec.get("max_power_w"), f"thermal_loads[{i}].max_power_w"))
+            constraints.append(power_var <= max_power)
             power = power_var
         lower_slack = cp.Variable(n + 1, nonneg=True, name=f"thermal_{i}_lower_slack")
         upper_slack = cp.Variable(n + 1, nonneg=True, name=f"thermal_{i}_upper_slack")
@@ -489,6 +497,7 @@ def solve(payload: dict[str, Any]) -> dict[str, Any]:
                     + dynamics_2r2c.offset[t]
                 )
             temp = state[:, 0]
+            mass_temp: cp.Expression | None = state[:, 1]
         else:
             dynamics = thermal_transition_coefficients(spec, dt_h, outside)
             state_1r1c = cp.Variable(n + 1, name=f"thermal_{i}_temp")
@@ -502,10 +511,20 @@ def solve(payload: dict[str, Any]) -> dict[str, Any]:
                     + dynamics.offset[t]
                 )
             temp = state_1r1c
+            mass_temp = None
         constraints += [temp + lower_slack >= min_temp, temp - upper_slack <= max_temp]
         service_slack += cp.sum(lower_slack + upper_slack) / ((max_temp - min_temp) * (n + 1))
         total_thermal += power
-        thermal_loads.append(ThermalVars(spec, power, temp, lower_slack, upper_slack))
+        thermal_loads.append(
+            ThermalVars(
+                spec,
+                power,
+                temp,
+                mass_temp,
+                lower_slack,
+                upper_slack,
+            )
+        )
 
     # Curtailment is a shared schedule, so it must be feasible in every
     # scenario. Bounding it by base PV alone would turn excess curtailment into
@@ -812,10 +831,15 @@ def solve(payload: dict[str, Any]) -> dict[str, Any]:
             flex_energy[flex_id] = float(flex.energy.value[t + 1])
         thermal_power: dict[str, float] = {}
         thermal_state: dict[str, float] = {}
+        thermal_mass_state: dict[str, float] = {}
         for i, thermal in enumerate(thermal_loads):
             thermal_id = str(thermal.spec.get("id", f"thermal-{i}"))
             thermal_power[thermal_id] = float(thermal.power.value[t])
             thermal_state[thermal_id] = float(thermal.temperature.value[t + 1])
+            if thermal.mass_temperature is not None:
+                thermal_mass_state[thermal_id] = float(
+                    thermal.mass_temperature.value[t + 1]
+                )
         grid_w = float(base_vars["import"].value[t] - base_vars["export"].value[t])
         grid_kwh = grid_w * dt_h[t] / 1000.0
         raw_cost = price[t] * max(grid_kwh, 0.0) - export_price[t] * max(-grid_kwh, 0.0)
@@ -836,6 +860,7 @@ def solve(payload: dict[str, Any]) -> dict[str, Any]:
                 "flex_energy_wh": flex_energy,
                 "thermal_power_w": thermal_power,
                 "thermal_state": thermal_state,
+                "thermal_mass_state": thermal_mass_state,
             }
         )
 
