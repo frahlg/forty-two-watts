@@ -476,6 +476,18 @@ type OptimizerMultistage struct {
 	PHToleranceW           float64  `yaml:"ph_tolerance_w,omitempty" json:"ph_tolerance_w,omitempty"`
 }
 
+// ThermalTwin enables a diagnostic joint heat/storage solve with the promoted
+// physical home model. The active storage plan keeps the whole-house load.
+// Core skips the shadow whenever telemetry or weather is not ready.
+type ThermalTwin struct {
+	Enabled         bool      `yaml:"enabled" json:"enabled"`
+	HomeSpecPath    string    `yaml:"home_spec_path,omitempty" json:"home_spec_path,omitempty"`
+	ArtifactPath    string    `yaml:"artifact_path,omitempty" json:"artifact_path,omitempty"`
+	OptimizerSocket string    `yaml:"optimizer_socket,omitempty" json:"optimizer_socket,omitempty"`
+	MaxMetricAgeS   float64   `yaml:"max_metric_age_s,omitempty" json:"max_metric_age_s,omitempty"`
+	AllowedStepsW   []float64 `yaml:"allowed_steps_w,omitempty" json:"allowed_steps_w,omitempty"`
+}
+
 // Planner configures the MPC scheduler (optional — disabled if omitted).
 // Mode: "self_consumption" (default) | "cheap_charge" | "arbitrage".
 type Planner struct {
@@ -502,6 +514,7 @@ type Planner struct {
 	OptimizerRecourseNonAnticipativeSlots int                  `yaml:"optimizer_recourse_non_anticipative_slots,omitempty" json:"optimizer_recourse_non_anticipative_slots,omitempty"`
 	OptimizerChallengerPolicy             string               `yaml:"optimizer_challenger_policy,omitempty" json:"optimizer_challenger_policy,omitempty"`
 	OptimizerMultistage                   *OptimizerMultistage `yaml:"optimizer_multistage,omitempty" json:"optimizer_multistage,omitempty"`
+	ThermalTwin                           *ThermalTwin         `yaml:"thermal_twin,omitempty" json:"thermal_twin,omitempty"`
 	BaseLoadW                             float64              `yaml:"base_load_w,omitempty" json:"base_load_w,omitempty"`
 	HorizonHours                          int                  `yaml:"horizon_hours,omitempty" json:"horizon_hours,omitempty"`
 	IntervalMin                           int                  `yaml:"interval_min,omitempty" json:"interval_min,omitempty"`
@@ -1228,6 +1241,15 @@ func (c *Config) ResolveDriverPaths(baseDir string) {
 		}
 		c.Drivers[i].Lua = filepath.Join(baseDir, p)
 	}
+	if c.Planner != nil && c.Planner.ThermalTwin != nil {
+		twin := c.Planner.ThermalTwin
+		if twin.HomeSpecPath != "" && !filepath.IsAbs(twin.HomeSpecPath) {
+			twin.HomeSpecPath = filepath.Join(baseDir, twin.HomeSpecPath)
+		}
+		if twin.ArtifactPath != "" && !filepath.IsAbs(twin.ArtifactPath) {
+			twin.ArtifactPath = filepath.Join(baseDir, twin.ArtifactPath)
+		}
+	}
 }
 
 func stripLeadingDotDot(p string) string {
@@ -1274,6 +1296,11 @@ func (c *Config) UnresolveDriverPaths(baseDir string) {
 			}
 		}
 		c.Drivers[i].Lua = relToBaseDir(baseDir, p)
+	}
+	if c.Planner != nil && c.Planner.ThermalTwin != nil {
+		twin := c.Planner.ThermalTwin
+		twin.HomeSpecPath = relToBaseDir(baseDir, twin.HomeSpecPath)
+		twin.ArtifactPath = relToBaseDir(baseDir, twin.ArtifactPath)
 	}
 }
 
@@ -1363,6 +1390,9 @@ func applyDefaults(c *Config) {
 	}
 	if c.Planner != nil && c.Planner.OptimizerTimeoutS == 0 {
 		c.Planner.OptimizerTimeoutS = optimizercontract.DefaultTimeout.Seconds()
+	}
+	if c.Planner != nil && c.Planner.ThermalTwin != nil && c.Planner.ThermalTwin.Enabled && c.Planner.ThermalTwin.MaxMetricAgeS == 0 {
+		c.Planner.ThermalTwin.MaxMetricAgeS = 15 * 60
 	}
 	if c.Fuse.Phases == 0 {
 		c.Fuse.Phases = 3
@@ -1751,6 +1781,34 @@ func (c *Config) Validate() error {
 			case "", "auto", "extensive", "progressive_hedging":
 			default:
 				return fmt.Errorf("planner.optimizer_multistage.decomposition_method is invalid: %q", ms.DecompositionMethod)
+			}
+		}
+		if twin := p.ThermalTwin; twin != nil {
+			if twin.MaxMetricAgeS < 0 || math.IsNaN(twin.MaxMetricAgeS) || math.IsInf(twin.MaxMetricAgeS, 0) {
+				return errors.New("planner.thermal_twin.max_metric_age_s must be finite and non-negative")
+			}
+			if twin.Enabled {
+				if twin.MaxMetricAgeS > 60*60 {
+					return errors.New("planner.thermal_twin.max_metric_age_s must not exceed 3600")
+				}
+				if p.Engine == "dp" {
+					return errors.New("planner.thermal_twin requires the python optimizer engine")
+				}
+				if strings.TrimSpace(twin.HomeSpecPath) == "" || strings.TrimSpace(twin.ArtifactPath) == "" {
+					return errors.New("planner.thermal_twin needs home_spec_path and artifact_path when enabled")
+				}
+			}
+			hasZero := false
+			for _, step := range twin.AllowedStepsW {
+				if math.IsNaN(step) || math.IsInf(step, 0) || step < 0 {
+					return errors.New("planner.thermal_twin.allowed_steps_w must contain finite non-negative values")
+				}
+				if step == 0 {
+					hasZero = true
+				}
+			}
+			if len(twin.AllowedStepsW) > 0 && !hasZero {
+				return errors.New("planner.thermal_twin.allowed_steps_w must contain 0")
 			}
 		}
 	}

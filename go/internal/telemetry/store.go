@@ -429,6 +429,13 @@ func (s *Store) LatestMetric(driver, name string) (float64, time.Time, bool) {
 	return 0, time.Time{}, false
 }
 
+// DriverHealthy is the read-only health hook used by model consumers. A
+// cached metric from an offline driver must not look like a live observation.
+func (s *Store) DriverHealthy(name string) bool {
+	health := s.DriverHealth(name)
+	return health != nil && health.IsOnline()
+}
+
 // FlushSamples returns + clears all buffered metric samples. The control
 // loop calls this once per cycle and forwards to the persistent store.
 func (s *Store) FlushSamples() []MetricSample {

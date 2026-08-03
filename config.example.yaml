@@ -250,3 +250,18 @@ home_link:
 #     ph_max_iterations: 8
 #     ph_rho: 50
 #     ph_tolerance_w: 5
+#   # Optional physical home model. Paths are relative to config.yaml. Core
+#   # accepts only a promoted, content-addressed artifact and runs its joint
+#   # heat/storage schedule as a diagnostic shadow. The active storage plan
+#   # keeps the whole-house forecast until a guarded heat-pump adapter exists.
+#   thermal_twin:
+#     enabled: false
+#     home_spec_path: thermal/home-spec.json
+#     artifact_path: thermal/home-model.json
+#     # Unix/auto deployments need a second optimizer sidecar on a distinct
+#     # socket. A process deployment starts a second local worker on demand.
+#     # optimizer_socket: /run/ftw-thermal-optimizer/optimizer.sock
+#     max_metric_age_s: 900
+#     # Omit for a continuous shadow model. Add only steps that a later guarded
+#     # heat-pump adapter could request.
+#     # allowed_steps_w: [0, 1000, 2000, 3000, 4000]

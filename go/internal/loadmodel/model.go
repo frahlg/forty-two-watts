@@ -221,6 +221,19 @@ func HourOfWeek(t time.Time) int {
 // outdoor temperature tempC (0 if unknown). Blends per-bucket EMA with
 // the typical prior by sample count, then adds the heating correction.
 func (m Model) Predict(t time.Time, tempC float64) float64 {
+	base := m.PredictBase(t)
+	heating := m.PredictHeating(tempC)
+	y := base + heating
+	if m.PeakW > 0 && y > 3*m.PeakW {
+		y = 3 * m.PeakW
+	}
+	return y
+}
+
+// PredictBase returns native household demand with the fitted electric-heating
+// component removed. MPC uses it only in the thermal shadow, where the
+// promoted physical model adds that component back as a planned load.
+func (m Model) PredictBase(t time.Time) float64 {
 	idx := HourOfWeek(t)
 	b := m.Bucket[idx]
 	trust := float64(b.Samples) / MinTrustSamples
@@ -229,18 +242,21 @@ func (m Model) Predict(t time.Time, tempC float64) float64 {
 	}
 	prior := m.prior(idx)
 	base := trust*b.Mean + (1-trust)*prior
-	heating := 0.0
-	if tempC < HeatingReferenceC {
-		heating = m.HeatingW_per_degC * (HeatingReferenceC - tempC)
-	}
-	y := base + heating
-	if y < 0 {
+	if base < 0 {
 		return 0
 	}
-	if m.PeakW > 0 && y > 3*m.PeakW {
-		y = 3 * m.PeakW
+	if m.PeakW > 0 && base > 3*m.PeakW {
+		base = 3 * m.PeakW
 	}
-	return y
+	return base
+}
+
+// PredictHeating returns only the model's current electric-heating estimate.
+func (m Model) PredictHeating(tempC float64) float64 {
+	if !math.IsNaN(tempC) && !math.IsInf(tempC, 0) && tempC < HeatingReferenceC {
+		return m.HeatingW_per_degC * (HeatingReferenceC - tempC)
+	}
+	return 0
 }
 
 // PredictNoTemp is a convenience that predicts without a temperature

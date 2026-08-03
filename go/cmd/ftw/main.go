@@ -57,6 +57,7 @@ import (
 	"github.com/srcfl/ftw/go/internal/selfupdate"
 	"github.com/srcfl/ftw/go/internal/state"
 	"github.com/srcfl/ftw/go/internal/telemetry"
+	"github.com/srcfl/ftw/go/internal/thermal"
 )
 
 // Version gets injected at build time via -ldflags. Defaults to "dev" for
@@ -1102,6 +1103,31 @@ func main() {
 		slog.Info("caldav started", "listen", cfg.CalDAV.ListenAddr(), "url", cfg.CalDAV.URL, "calendar", cfg.CalDAV.CalendarPath)
 	}
 
+	// Load the promoted thermal artifact before MPC. This runtime can prepare
+	// proposals and checks, but it has no driver command surface.
+	var thermalRuntime *thermal.Runtime
+	if cfg.Planner != nil && cfg.Planner.ThermalTwin != nil && cfg.Planner.ThermalTwin.Enabled {
+		twin := cfg.Planner.ThermalTwin
+		loaded, thermalErr := thermal.LoadRuntime(
+			twin.HomeSpecPath,
+			twin.ArtifactPath,
+			tel,
+			thermal.RuntimeOptions{
+				MaxMetricAge:  time.Duration(twin.MaxMetricAgeS * float64(time.Second)),
+				AllowedStepsW: twin.AllowedStepsW,
+			},
+		)
+		if thermalErr != nil {
+			slog.Error("thermal twin disabled; whole-house load remains active", "err", thermalErr)
+		} else {
+			thermalRuntime = loaded
+			slog.Info("thermal twin loaded",
+				"model_id", loaded.Artifact.ModelID,
+				"model_type", loaded.Artifact.ModelType,
+				"revision", loaded.Artifact.Revision)
+		}
+	}
+
 	// ---- Start MPC planner (optional) ----
 	mpcSvc = buildMPC(cfg, st, tel, capacities)
 	if mpcSvc != nil {
@@ -1143,8 +1169,22 @@ func main() {
 				}
 				return loadSvc.PredictWith(t, loadmodel.ProfileHome)
 			}
+			if thermalRuntime != nil {
+				mpcSvc.LoadWithoutThermal = func(t time.Time) float64 {
+					if calSvc.IsAwayAt(t) {
+						return loadSvc.PredictBaseWith(t, loadmodel.ProfileAway)
+					}
+					return loadSvc.PredictBaseWith(t, loadmodel.ProfileHome)
+				}
+			}
 		} else {
 			mpcSvc.Load = loadSvc.Predict
+			if thermalRuntime != nil {
+				mpcSvc.LoadWithoutThermal = loadSvc.PredictBase
+			}
+		}
+		if thermalRuntime != nil {
+			mpcSvc.Thermal = thermalRuntime.OptimizerLoads
 		}
 		mpcSvc.Price = priceFc.Predict
 		mpcSvc.SiteMeter = cfg.SiteMeterDriver()
@@ -3500,7 +3540,7 @@ func buildMPC(cfg *config.Config, st *state.Store, tel *telemetry.Store, capacit
 				PHMaxIterations: ms.PHMaxIterations, PHRho: ms.PHRho, PHToleranceW: ms.PHToleranceW,
 			}
 		}
-		ext, err := mpc.NewExternalOptimizer(mpc.ExternalOptimizerConfig{
+		externalConfig := mpc.ExternalOptimizerConfig{
 			Command:   []string{python, "-m", "ftw_optimizer.worker"},
 			ModuleDir: moduleDir, Timeout: timeout,
 			TransportMode: transportMode, SocketPath: socketPath,
@@ -3509,11 +3549,41 @@ func buildMPC(cfg *config.Config, st *state.Store, tel *telemetry.Store, capacit
 			CVaRWeight: cvarWeight, CVaRAlpha: pl.OptimizerCVaRAlpha,
 			IdleTimeout: idleTimeout,
 			Multistage:  multistage,
-		})
+		}
+		ext, err := mpc.NewExternalOptimizer(externalConfig)
 		if err != nil {
 			slog.Error("mpc: configure primary optimizer failed; using Go DP", "err", err)
 		} else {
 			svc.Optimizer = ext
+			if twin := pl.ThermalTwin; twin != nil && twin.Enabled {
+				thermalConfig := externalConfig
+				thermalConfigured := false
+				switch transportMode {
+				case "process":
+					// NewExternalOptimizer owns a separate warm process.
+					thermalConfigured = true
+				default:
+					thermalSocket := strings.TrimSpace(twin.OptimizerSocket)
+					if fromEnv := strings.TrimSpace(os.Getenv("FTW_THERMAL_OPTIMIZER_SOCKET")); fromEnv != "" {
+						thermalSocket = fromEnv
+					}
+					if thermalSocket != "" && thermalSocket != socketPath {
+						thermalConfig.TransportMode = "unix"
+						thermalConfig.SocketPath = thermalSocket
+						thermalConfigured = true
+					} else {
+						slog.Warn("mpc: thermal shadow disabled; unix/auto transport needs a distinct thermal optimizer socket")
+					}
+				}
+				if thermalConfigured {
+					thermalExt, thermalErr := mpc.NewExternalOptimizer(thermalConfig)
+					if thermalErr != nil {
+						slog.Warn("mpc: configure thermal optimizer failed; thermal shadow disabled", "err", thermalErr)
+					} else {
+						svc.ThermalOptimizer = thermalExt
+					}
+				}
+			}
 			svc.EnableRecourseShadow = pl.OptimizerRecourseShadow
 			svc.RecourseNonAnticipativeSlots = pl.OptimizerRecourseNonAnticipativeSlots
 			svc.ChallengerPolicy = pl.OptimizerChallengerPolicy

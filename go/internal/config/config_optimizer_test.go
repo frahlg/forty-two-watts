@@ -1,6 +1,7 @@
 package config
 
 import (
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -22,6 +23,61 @@ func TestPlannerOptimizerTimeoutUsesSharedDefault(t *testing.T) {
 	explicit := &Planner{OptimizerTimeoutS: 12.5}
 	if got := explicit.OptimizerTimeout(); got != 12500*time.Millisecond {
 		t.Fatalf("explicit OptimizerTimeout = %s, want 12.5s", got)
+	}
+}
+
+func TestPlannerThermalTwinConfigResolvesPathsAndDefaultsAge(t *testing.T) {
+	baseDir := "/tmp/ftw-config"
+	cfg, err := Parse([]byte(minimalYAML+`
+planner:
+  enabled: true
+  engine: python
+  thermal_twin:
+    enabled: true
+    home_spec_path: thermal/home.json
+    artifact_path: thermal/model.json
+    allowed_steps_w: [0, 2000, 4000]
+`), baseDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	twin := cfg.Planner.ThermalTwin
+	if twin.MaxMetricAgeS != 900 {
+		t.Fatalf("max metric age = %g, want 900", twin.MaxMetricAgeS)
+	}
+	if twin.HomeSpecPath != filepath.Join(baseDir, "thermal/home.json") || twin.ArtifactPath != filepath.Join(baseDir, "thermal/model.json") {
+		t.Fatalf("thermal paths not resolved: %+v", twin)
+	}
+	cfg.UnresolveDriverPaths(baseDir)
+	if twin.HomeSpecPath != "thermal/home.json" || twin.ArtifactPath != "thermal/model.json" {
+		t.Fatalf("thermal paths not restored: %+v", twin)
+	}
+}
+
+func TestPlannerThermalTwinConfigRejectsUnsafeCombinations(t *testing.T) {
+	base := Config{
+		Site: Site{SmoothingAlpha: 0.3},
+		Fuse: Fuse{MaxAmps: 16, Phases: 3, Voltage: 230},
+		Planner: &Planner{Engine: "python", ThermalTwin: &ThermalTwin{
+			Enabled: true, HomeSpecPath: "home.json", ArtifactPath: "model.json",
+		}},
+	}
+	for name, mutate := range map[string]func(*Planner){
+		"dp engine":          func(planner *Planner) { planner.Engine = "dp" },
+		"missing artifact":   func(planner *Planner) { planner.ThermalTwin.ArtifactPath = "" },
+		"steps without zero": func(planner *Planner) { planner.ThermalTwin.AllowedStepsW = []float64{1000} },
+		"unsafe metric age":  func(planner *Planner) { planner.ThermalTwin.MaxMetricAgeS = 3601 },
+	} {
+		t.Run(name, func(t *testing.T) {
+			planner := *base.Planner
+			twin := *base.Planner.ThermalTwin
+			planner.ThermalTwin = &twin
+			mutate(&planner)
+			cfg := Config{Site: base.Site, Fuse: base.Fuse, Planner: &planner}
+			if err := cfg.Validate(); err == nil {
+				t.Fatal("expected validation error")
+			}
+		})
 	}
 }
 

@@ -103,6 +103,17 @@ func TestHeatingConfiguredBoostsColdDayPrediction(t *testing.T) {
 	}
 }
 
+func TestPredictBaseExcludesFittedHeating(t *testing.T) {
+	m := NewModel(5000)
+	m.HeatingW_per_degC = 300
+	at := time.Date(2026, 1, 5, 12, 0, 0, 0, time.UTC)
+	base := m.PredictBase(at)
+	full := m.Predict(at, 8)
+	if full-base != 3000 {
+		t.Fatalf("full-base = %.0f W, want 3000 W", full-base)
+	}
+}
+
 func TestHourOfWeekDeterministic(t *testing.T) {
 	// Monday 00:00 UTC → 0
 	mon := time.Date(2026, 1, 5, 0, 0, 0, 0, time.UTC)

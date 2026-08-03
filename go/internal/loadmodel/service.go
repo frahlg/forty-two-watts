@@ -228,6 +228,19 @@ func (s *Service) Predict(t time.Time) float64 {
 	return s.activeModelLocked().Predict(t, temp)
 }
 
+// PredictBase is the thermal-split companion to Predict. It returns the
+// learned weekly native load without adding the temperature-linked heating
+// term. Callers must use Predict for active control; this split is for the
+// thermal shadow until a guarded heat-pump adapter exists.
+func (s *Service) PredictBase(t time.Time) float64 {
+	if s == nil {
+		return 0
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.activeModelLocked().PredictBase(t)
+}
+
 // PredictWith is like Predict but forces a specific profile's model,
 // regardless of which profile is currently active. The calendar service
 // (issue #498) uses it to predict reduced "away"-profile load for the slots
@@ -255,6 +268,24 @@ func (s *Service) PredictWith(t time.Time, profile Profile) float64 {
 		m = s.activeModelLocked()
 	}
 	return m.Predict(t, temp)
+}
+
+// PredictBaseWith returns one profile's native load without its fitted
+// electric-heating term.
+func (s *Service) PredictBaseWith(t time.Time, profile Profile) float64 {
+	if s == nil {
+		return 0
+	}
+	if !profile.valid() {
+		return s.PredictBase(t)
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	m := s.models[profile]
+	if m == nil {
+		m = s.activeModelLocked()
+	}
+	return m.PredictBase(t)
 }
 
 // Start kicks off the online-learning goroutine.

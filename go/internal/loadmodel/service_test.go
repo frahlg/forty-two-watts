@@ -54,6 +54,16 @@ func TestSeedHeatingCoefAppliesOnColdStart(t *testing.T) {
 	}
 }
 
+func TestServicePredictBaseUsesActiveProfileWithoutHeating(t *testing.T) {
+	s := NewService(nil, nil, "", 5000, 0)
+	s.SetHeatingCoef(250)
+	at := time.Date(2026, 1, 5, 12, 0, 0, 0, time.UTC)
+	s.Temp = func(time.Time) (float64, bool) { return 8, true }
+	if delta := s.Predict(at) - s.PredictBase(at); delta != 2500 {
+		t.Fatalf("heating split = %.0f W, want 2500 W", delta)
+	}
+}
+
 func TestProfileSwitchTrainsOnlyActiveProfile(t *testing.T) {
 	tel := telemetry.NewStore()
 	tel.Update("site", telemetry.DerMeter, 1000, nil, nil)
