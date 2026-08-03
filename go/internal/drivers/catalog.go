@@ -278,25 +278,38 @@ var driverBlockRe = regexp.MustCompile(`(?s)DRIVER\s*=\s*\{(.*?)\n\}`)
 // pattern does not match.
 var driverAliasRe = regexp.MustCompile(`(?m)^\s*DRIVER\s*=\s*([A-Za-z_][A-Za-z0-9_]*)\s*$`)
 
+// extractDriverBlock returns the body of the table DRIVER holds after the
+// chunk runs: the last assignment wins, exactly as Lua executes them. A
+// signed artifact wrapping an FTW-native source contains both forms — the
+// source's own inline table and the generator's trailing
+// `DRIVER = __sourceful_ftw_metadata` — and the trailing alias carries the
+// identity the artifact was signed under. Preferring the inline table here
+// made the installer reject valid signed drivers whose source block lagged
+// the catalog (myuplink@1.1.1 with an inline 1.0.0). A last alias that names
+// no parseable table yields empty rather than borrowing an earlier table's
+// identity; DRIVER is nil at runtime in that case too.
 func extractDriverBlock(src string) string {
-	if m := driverBlockRe.FindStringSubmatch(src); len(m) >= 2 {
-		return m[1]
+	inlinePos, inlineBlock := -1, ""
+	if ms := driverBlockRe.FindAllStringSubmatchIndex(src, -1); len(ms) > 0 {
+		m := ms[len(ms)-1]
+		inlinePos, inlineBlock = m[0], src[m[2]:m[3]]
 	}
-	// Follow the alias to the table it names. Without this, every signed
-	// driver parses as empty metadata, and the installer rejects it for an
-	// id/version mismatch it can never satisfy.
-	alias := driverAliasRe.FindStringSubmatch(src)
-	if len(alias) < 2 {
+	aliasPos, aliasName := -1, ""
+	if as := driverAliasRe.FindAllStringSubmatchIndex(src, -1); len(as) > 0 {
+		a := as[len(as)-1]
+		aliasPos, aliasName = a[0], src[a[2]:a[3]]
+	}
+	if aliasPos > inlinePos {
+		aliasBlockRe, err := regexp.Compile(`(?s)local\s+` + regexp.QuoteMeta(aliasName) + `\s*=\s*\{(.*?)\n\}`)
+		if err != nil {
+			return ""
+		}
+		if m := aliasBlockRe.FindStringSubmatch(src); len(m) >= 2 {
+			return m[1]
+		}
 		return ""
 	}
-	aliasBlockRe, err := regexp.Compile(`(?s)local\s+` + regexp.QuoteMeta(alias[1]) + `\s*=\s*\{(.*?)\n\}`)
-	if err != nil {
-		return ""
-	}
-	if m := aliasBlockRe.FindStringSubmatch(src); len(m) >= 2 {
-		return m[1]
-	}
-	return ""
+	return inlineBlock
 }
 
 // pickString matches `name = "value"` inside the block.
