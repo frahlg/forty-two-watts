@@ -1,5 +1,69 @@
 # Changelog
 
+## 1.15.1
+
+### Patch Changes
+
+- ca4822b: Help report: the forecast check now compares forecast and reality as a ratio,
+  and the load-model note no longer repeats an explanation that turned out to be
+  wrong.
+
+  A live report from a v1.15.0 install showed a plan slot sized for 1.47 kW
+  against a house drawing 3.65 kW — two and a half times out — and Findings said
+  nothing. The old measure divided the difference by the larger figure, which
+  saturates at 1.0 and therefore cannot express "twice wrong" at all: that case
+  scored 0.597 against a 0.6 threshold. A solar forecast of 11.7 kW against
+  7.4 kW actual scored 0.584 and was missed the same way. Both are exactly what
+  the check exists to catch. It is now `max/min ≥ 1.5`, which has no ceiling, on
+  figures above a 500 W floor.
+
+  The load-model paragraph claimed that discarding negative samples makes a
+  large-solar site's model skew low. Discarding the lower tail biases the
+  surviving mean _high_, so the explanation was backwards. It now describes what
+  the model actually does — one sample a minute into 168 hourly buckets — and
+  what a real problem looks like: a small average error next to a gap that
+  persists across several plan slots.
+
+  A forecast gap on an install whose model has not finished learning is now a
+  note rather than a problem, and says so, instead of contradicting the "still
+  learning" line two rows below it and suggesting a reset that would only
+  restart the clock.
+
+- ca4822b: Overview: the Market now price strip draws its bars from zero, like the
+  full chart.
+
+  It used to draw each slot's distance from the mean — the cheapest
+  mornings drew the tallest bars, hanging below the line — which read
+  backwards next to the full chart one tap away. Height now means price.
+  The average ahead stays visible as a dotted line at its own height, the
+  same mark the full chart uses for it; a negative-price slot hangs below
+  zero in yellow the same way; and a flat day draws level bars instead of
+  stretching a small wobble to full height.
+
+- 8b59603: One button, one file when asking for help. The plan card's "Something looks
+  wrong?" button now downloads `ftw-help-<stamp>.zip` — the help report as
+  `00-help-report.md`, sorted first, with the redacted config, driver health,
+  recent logs and an hour of telemetry behind it.
+
+  Before this there were two downloads and the user had to guess which one we
+  wanted: the report from the plan card, the log bundle from a driver's Diagnose
+  modal. They would send one and we would ask for the other.
+
+  The archive is a zip rather than a `.tar.gz` because its whole purpose is to be
+  handed to somebody else, and Windows and every chat client open a zip without a
+  second tool. Around 10 kB on a two-driver install.
+
+  `GET /api/support/report` still returns the bare Markdown for anyone who wants
+  only the text.
+
+  The report also now carries the slot's energy books — what the plan asked for,
+  what the batteries actually moved, and what the energy-allocation path thinks
+  it delivered — plus a finding when a slot is a quarter of the way through and
+  delivery is under half the rate the plan needs. That is the shape of the
+  reports that keep arriving: a plan card reading "charge 4.5 kW, now", a live
+  target of 0 W, and nothing in between to show whether the plan reached
+  dispatch at all.
+
 ## 1.15.0
 
 ### Minor Changes
