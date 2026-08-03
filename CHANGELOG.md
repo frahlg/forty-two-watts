@@ -1,5 +1,104 @@
 # Changelog
 
+## 1.15.0
+
+### Minor Changes
+
+- 54d6530: Prices: pick any of the 46 European bidding zones the price API publishes,
+  and be billed in the currency of the country you picked.
+
+  The zone picker offered twelve Nordic codes typed into two `<select>`
+  elements and the Go side knew twelve EIC codes, so a household in Belgium,
+  the Netherlands or Spain could not choose its own zone even though the
+  Sourceful API has served every ENTSO-E area all along. Both lists now come
+  from one table, `go/internal/prices/zones.go`, generated from that API's
+  `/areas` endpoint and served to the UI at `GET /api/prices/zones`. The
+  picker asks for a country first and a zone second, because everyone knows
+  they live in Italy and nobody knows their area code is `IT-CENTRE-NORTH`.
+
+  Currency stops being Swedish by assumption. It defaults to the currency of
+  the chosen zone, and the price API — which converts to EUR and SEK and
+  quietly answers anything else with EUR — is only asked for those two;
+  every other currency is converted here from EUR with the ECB rates the
+  service already caches. Where no rate is available the fetch fails rather
+  than storing a number that is wrong by an exchange rate, which is a number
+  the planner would spend money on. The old 11.5 SEK/EUR fallback is gone for
+  the same reason.
+
+  Two related faults fixed on the way. The direct ENTSO-E provider assumed
+  every day-ahead document is priced in EUR; Poland and Hungary among others
+  publish in their own currency, so it now reads `currency_Unit.name` and
+  converts from that. Its EIC code for Germany was the country code rather
+  than the DE-LU bidding zone, and NO5 was missing outright.
+
+  Prices are stored as minor units per kWh with no currency attached, so
+  changing the currency clears the price cache — otherwise cost history would
+  add öre to cent. The next fetch refills today and tomorrow. Every price
+  label in the UI now follows the configured currency: öre, cent, øre, grosz,
+  Rappen, or the major unit where the minor one is out of circulation
+  (4.30 Kč/kWh, not 430 haléř).
+
+  Existing installs are untouched: no zone means SE3, no currency means SEK,
+  and a Swedish install still asks the API for SEK exactly as before.
+
+- 4212dbb: Help report: `GET /api/support/report` returns a single Markdown file
+  describing what FTW is doing and why, reachable from a "Something looks
+  wrong?" button under the plan chart and from any driver's Diagnose modal.
+  It exists because answering "why is it discharging when the plan says
+  charge?" currently takes a screenshot round-trip per question — one thread
+  needed nine of them to establish that a load forecast said 383 W while the
+  house was drawing 7.9 kW.
+
+  The file opens with `Findings`: automated checks written in the order a
+  person would run them — stale plan, fallback solver, offline or faulted
+  devices, active safety limits, and a forecast-versus-reality comparison for
+  both load and solar. Under that come the live site state, the plan slot
+  covering _this moment_ (stated before anything about the next one, since
+  confusing the two is what sends these threads sideways), the surrounding
+  slots with the solver's reasoning, forecast accuracy, driver health,
+  component versions, and the recent warning and error log.
+
+  It is one file rather than a bundle because people paste it into a chat and
+  ask for help there; a tarball of JSON does not survive that. The plan window
+  is trimmed to a few hours either side of now and logs to warnings and errors,
+  which keeps it small enough to upload and to read in full.
+
+  `/api/support/dump` is unchanged and remains the deep bundle for cases the
+  report cannot close.
+
+### Patch Changes
+
+- 41e59ef: Load model: replace the MAE-band outlier filter with a physical ceiling
+  taken from the main fuse. The band rejected the upper half of the real
+  load distribution, and could lock the model out of a level it had not seen
+  before, permanently.
+
+  A rejected sample updates neither `MAE` nor `Samples`, so the band
+  `max(MAE × 10, 200)` never grew in response to being persistently wrong.
+  Measured on a clean model: an hour at 400 W left MAE at 57 W and the band
+  at 570 W; a following week at 5 kW was rejected in full, 100% of samples,
+  and the prediction never moved off 1794 W.
+
+  The band was the wrong instrument, not merely mistuned. Household load is
+  multimodal — a few hundred watts of baseline, then 11 kW when the sauna,
+  oven and car overlap — and nothing about a residual's size separates
+  "unusual but real" from "wrong". A band fitted to the quiet hours always
+  excludes the busy ones. Short-term measurement noise is already handled a
+  layer down, by the Kalman filter in telemetry whose smoothed output this
+  model reads, so the second filter was both harmful and redundant.
+
+  What remains is the rejection physics licenses: a house cannot draw more
+  than its main fuse passes. The ceiling is `fuse capacity × 1.25`, passed in
+  from configuration and never derived from what the model has learned, so it
+  holds from the first sample and cannot be talked down by a model that has
+  mislearned. With no fuse configured the check disables itself rather than
+  inventing a limit.
+
+  A sustained shift to a new load level is now learned directly. A one-minute
+  spike still trains — it is real consumption — and the bucket EMA damps it
+  to a tenth of the gap, which is what keeps an hour from being defined by
+  its loudest minute.
+
 ## 1.14.0
 
 ### Minor Changes
