@@ -2331,6 +2331,9 @@ func main() {
 	// the configreload watcher updates those fields directly, so a
 	// startup snapshot here would go stale on the first hot-reload.
 	dtS := float64(cfg.Site.ControlIntervalS)
+	// Every dispatch command carries its own deadline — see
+	// driverCommandTimeout for the stall it bounds.
+	driverCmdTimeout := driverCommandTimeout(controlInterval)
 
 	// Graceful shutdown
 	sigc := make(chan os.Signal, 1)
@@ -2649,9 +2652,7 @@ func main() {
 					continue
 				}
 				payload, _ := json.Marshal(map[string]any{"action": "battery", "power_w": t.TargetW})
-				if err := reg.Send(ctx, t.Driver, payload); err != nil {
-					slog.Warn("driver send", "name", t.Driver, "err", err)
-				}
+				sendDriverCommand(ctx, reg, "driver send", t.Driver, payload, driverCmdTimeout)
 			}
 
 			// ---- PV curtailment dispatch ----
@@ -2677,9 +2678,7 @@ func main() {
 						"action": "curtail_disable",
 					})
 				}
-				if err := reg.Send(ctx, c.Driver, payload); err != nil {
-					slog.Warn("pv curtail send", "name", c.Driver, "err", err)
-				}
+				sendDriverCommand(ctx, reg, "pv curtail send", c.Driver, payload, driverCmdTimeout)
 			}
 
 			// LP dispatch ran at the top of this tick — see the
