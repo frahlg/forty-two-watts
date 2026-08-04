@@ -36,7 +36,7 @@ RUN cd go && \
     go build -trimpath -ldflags="-s -w -X main.Version=${VERSION}" \
     -o /out/ftw-backup ./cmd/ftw-backup
 # --- Runtime ---------------------------------------------------------------
-FROM alpine:3.22
+FROM alpine:3.24
 
 # HTTPS integrations and timezone-aware price/plan windows need these at
 # runtime. BusyBox wget provides the health check without adding Python/curl.
