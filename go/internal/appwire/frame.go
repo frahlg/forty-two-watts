@@ -87,15 +87,18 @@ func mustEncMode() cbor.EncMode {
 }
 
 // Envelope is the CBOR map every frame carries: {t, id?, b?}.
+//
+// Field names match go/internal/appproto's, which is the layer that fills
+// these in. Two spellings of one wire format is how the two drift.
 type Envelope struct {
-	// Type is the message type. A type this box has never heard of is not an
-	// error — see Decode.
-	Type string
+	// T is the message type. A type this box has never heard of is not an
+	// error — see DecodeFrame.
+	T string
 	// ID is the request id; replies echo it. Nil when absent.
 	ID *uint32
-	// Body stays encoded. Keeping it raw is what lets the message layer own
-	// the fifteen shapes and this layer own none of them.
-	Body cbor.RawMessage
+	// B is the body, left encoded. Keeping it raw is what lets the message
+	// layer own the fifteen shapes and this layer own none of them.
+	B cbor.RawMessage
 }
 
 // MarshalBody encodes a message body with the same deterministic settings the
@@ -110,8 +113,12 @@ func MarshalBody(v any) (cbor.RawMessage, error) {
 
 // Frame is one Noise transport message.
 type Frame struct {
-	Lane     uint8
-	Flags    uint8
+	Lane  uint8
+	Flags uint8
+	// Bucket is the padded size on the wire. DecodeFrame fills it in from what
+	// arrived, so a caller can tell a 512-byte lane 0 frame from a 256-byte one
+	// without measuring the slice itself.
+	Bucket   int
 	Envelope Envelope
 }
 
@@ -130,19 +137,19 @@ func BulkBucketFor(payloadBytes int) (bucket int, ok bool) {
 	return 0, false
 }
 
-// Encode writes one frame, zero-padded to bucket.
+// EncodeFrame writes one frame, zero-padded to f.Bucket.
 //
 // It fails rather than growing the bucket. Silently emitting a larger frame
 // would defeat the padding entirely — and the padding is the integrity check
 // on the privacy claim, not spare room — so a caller that overruns lane 0 hears
 // about it at the point it happens.
-func Encode(f Frame, bucket int) ([]byte, error) {
+func EncodeFrame(f Frame) ([]byte, error) {
 	// Checked here rather than left to the session layer because the box is
 	// the end that emits the 1 Hz stream: an off-bucket lane 0 frame makes
 	// frame length a function of what happened in the house, which is the one
 	// thing the padding exists to prevent.
-	if f.Lane == LaneControl && !slices.Contains(ControlBuckets[:], bucket) {
-		return nil, fmt.Errorf("%w: lane 0 bucket %d is not %v", ErrFrameBucket, bucket, ControlBuckets)
+	if f.Lane == LaneControl && !slices.Contains(ControlBuckets[:], f.Bucket) {
+		return nil, fmt.Errorf("%w: lane 0 bucket %d is not %v", ErrFrameBucket, f.Bucket, ControlBuckets)
 	}
 
 	payload, err := f.Envelope.marshal()
@@ -153,11 +160,11 @@ func Encode(f Frame, bucket int) ([]byte, error) {
 	if len(payload) > MaxPayload {
 		return nil, fmt.Errorf("%w: %d bytes", ErrFrameTooLarge, len(payload))
 	}
-	if needed := HeaderBytes + len(payload); needed > bucket {
-		return nil, fmt.Errorf("%w: needs %d bytes, bucket is %d", ErrFrameExceedsBucket, needed, bucket)
+	if needed := HeaderBytes + len(payload); needed > f.Bucket {
+		return nil, fmt.Errorf("%w: needs %d bytes, bucket is %d", ErrFrameExceedsBucket, needed, f.Bucket)
 	}
 
-	out := make([]byte, bucket) // zero-filled, which is the padding
+	out := make([]byte, f.Bucket) // zero-filled, which is the padding
 	out[0] = FrameVersion
 	out[1] = f.Lane
 	out[2] = f.Flags
@@ -168,14 +175,14 @@ func Encode(f Frame, bucket int) ([]byte, error) {
 	return out, nil
 }
 
-// Decode reads one frame. Everything past the declared length is ignored
+// DecodeFrame reads one frame. Everything past the declared length is ignored
 // without inspection: AEAD already covers the padding, so validating it would
 // only add a way to reject a frame that is fine.
 //
 // Unknown envelope keys and unknown message types are not errors. That is the
 // rule that lets an app pinned in a service worker degrade instead of showing
 // a white screen when it meets a newer box, and the reverse.
-func Decode(b []byte) (Frame, error) {
+func DecodeFrame(b []byte) (Frame, error) {
 	if len(b) < HeaderBytes {
 		return Frame{}, fmt.Errorf("%w: %d bytes, need at least %d", ErrFrameShort, len(b), HeaderBytes)
 	}
@@ -188,7 +195,7 @@ func Decode(b []byte) (Frame, error) {
 		return Frame{}, fmt.Errorf("%w: declared %d in a %d-byte frame", ErrFrameTruncated, length, len(b))
 	}
 
-	f := Frame{Lane: b[1], Flags: b[2]}
+	f := Frame{Lane: b[1], Flags: b[2], Bucket: len(b)}
 	if err := f.Envelope.unmarshal(b[HeaderBytes : HeaderBytes+length]); err != nil {
 		return Frame{}, err
 	}
@@ -209,16 +216,16 @@ func (e Envelope) marshal() ([]byte, error) {
 	if e.ID != nil {
 		entries++
 	}
-	if e.Body != nil {
+	if e.B != nil {
 		entries++
 	}
 
-	typ, err := cborEnc.Marshal(e.Type)
+	typ, err := cborEnc.Marshal(e.T)
 	if err != nil {
 		return nil, fmt.Errorf("appwire: encoding envelope type: %w", err)
 	}
 
-	out := make([]byte, 0, len(typ)+len(e.Body)+16)
+	out := make([]byte, 0, len(typ)+len(e.B)+16)
 	out = append(out, byte(0xa0|entries)) // a map of at most three pairs
 	out = append(out, keyType...)
 	out = append(out, typ...)
@@ -231,9 +238,9 @@ func (e Envelope) marshal() ([]byte, error) {
 		out = append(out, keyID...)
 		out = append(out, id...)
 	}
-	if e.Body != nil {
+	if e.B != nil {
 		out = append(out, keyBody...)
-		out = append(out, e.Body...)
+		out = append(out, e.B...)
 	}
 
 	return out, nil
@@ -255,7 +262,7 @@ func (e *Envelope) unmarshal(payload []byte) error {
 	if err := cbor.Unmarshal(raw, &typ); err != nil {
 		return fmt.Errorf("%w: type is not a string", ErrFrameEnvelope)
 	}
-	e.Type = typ
+	e.T = typ
 
 	// An id that is not a u32 is dropped rather than fatal, for the same
 	// reason unknown keys are: a peer of another vintage still gets read.
@@ -267,6 +274,6 @@ func (e *Envelope) unmarshal(payload []byte) error {
 		}
 	}
 
-	e.Body = fields["b"]
+	e.B = fields["b"]
 	return nil
 }

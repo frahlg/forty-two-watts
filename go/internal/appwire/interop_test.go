@@ -92,9 +92,12 @@ func TestInteropFrames(t *testing.T) {
 				t.Fatalf("frame is %d bytes, bucket is %d", len(wire), want.Bucket)
 			}
 
-			frame, err := Decode(wire)
+			frame, err := DecodeFrame(wire)
 			if err != nil {
-				t.Fatalf("Decode: %v", err)
+				t.Fatalf("DecodeFrame: %v", err)
+			}
+			if frame.Bucket != want.Bucket {
+				t.Errorf("bucket = %d, want %d", frame.Bucket, want.Bucket)
 			}
 			if frame.Lane != want.Lane {
 				t.Errorf("lane = %d, want %d", frame.Lane, want.Lane)
@@ -121,9 +124,9 @@ func TestInteropFrames(t *testing.T) {
 				return
 			}
 
-			got, err := Encode(frame, want.Bucket)
+			got, err := EncodeFrame(frame)
 			if err != nil {
-				t.Fatalf("Encode: %v", err)
+				t.Fatalf("EncodeFrame: %v", err)
 			}
 			if !bytes.Equal(got, wire) {
 				t.Fatalf("re-encoded frame differs from the app's bytes\n got %x\nwant %x", got, wire)

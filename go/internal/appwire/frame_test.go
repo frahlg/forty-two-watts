@@ -15,39 +15,39 @@ func body(t *testing.T, v any) cbor.RawMessage {
 	t.Helper()
 	b, err := MarshalBody(v)
 	if err != nil {
-		t.Fatalf("MarshalBody: %v", err)
+		t.Fatalf("MarshalB: %v", err)
 	}
 	return b
 }
 
-func control(env Envelope, flags uint8) Frame {
-	return Frame{Lane: LaneControl, Flags: flags, Envelope: env}
+func control(env Envelope, flags uint8, bucket int) Frame {
+	return Frame{Lane: LaneControl, Flags: flags, Bucket: bucket, Envelope: env}
 }
 
 func TestFrameRoundTrip(t *testing.T) {
 	in := control(Envelope{
-		Type: "cmd.ack",
-		ID:   u32(42),
-		Body: body(t, map[string]any{"leaseId": "x", "expiresAtMs": 1000}),
-	}, 0)
+		T:  "cmd.ack",
+		ID: u32(42),
+		B:  body(t, map[string]any{"leaseId": "x", "expiresAtMs": 1000}),
+	}, 0, 512)
 
-	wire, err := Encode(in, 512)
+	wire, err := EncodeFrame(in)
 	if err != nil {
-		t.Fatalf("Encode: %v", err)
+		t.Fatalf("EncodeFrame: %v", err)
 	}
-	out, err := Decode(wire)
+	out, err := DecodeFrame(wire)
 	if err != nil {
-		t.Fatalf("Decode: %v", err)
+		t.Fatalf("DecodeFrame: %v", err)
 	}
 
-	if out.Envelope.Type != "cmd.ack" {
-		t.Errorf("type = %q, want cmd.ack", out.Envelope.Type)
+	if out.Envelope.T != "cmd.ack" {
+		t.Errorf("type = %q, want cmd.ack", out.Envelope.T)
 	}
 	if out.Envelope.ID == nil || *out.Envelope.ID != 42 {
 		t.Errorf("id = %v, want 42", out.Envelope.ID)
 	}
-	if !bytes.Equal(out.Envelope.Body, in.Envelope.Body) {
-		t.Errorf("body = %x, want %x", out.Envelope.Body, in.Envelope.Body)
+	if !bytes.Equal(out.Envelope.B, in.Envelope.B) {
+		t.Errorf("body = %x, want %x", out.Envelope.B, in.Envelope.B)
 	}
 	if out.Lane != LaneControl {
 		t.Errorf("lane = %d, want %d", out.Lane, LaneControl)
@@ -55,9 +55,9 @@ func TestFrameRoundTrip(t *testing.T) {
 }
 
 func TestFrameHeader(t *testing.T) {
-	wire, err := Encode(control(Envelope{Type: "tick"}, 0), 512)
+	wire, err := EncodeFrame(control(Envelope{T: "tick"}, 0, 512))
 	if err != nil {
-		t.Fatalf("Encode: %v", err)
+		t.Fatalf("EncodeFrame: %v", err)
 	}
 
 	if wire[0] != FrameVersion {
@@ -72,23 +72,23 @@ func TestFrameHeader(t *testing.T) {
 }
 
 func TestFrameCarriesTruncationFlag(t *testing.T) {
-	wire, err := Encode(control(Envelope{Type: "delta"}, FlagTrunc), 512)
+	wire, err := EncodeFrame(control(Envelope{T: "delta"}, FlagTrunc, 512))
 	if err != nil {
-		t.Fatalf("Encode: %v", err)
+		t.Fatalf("EncodeFrame: %v", err)
 	}
-	f, err := Decode(wire)
+	f, err := DecodeFrame(wire)
 	if err != nil {
-		t.Fatalf("Decode: %v", err)
+		t.Fatalf("DecodeFrame: %v", err)
 	}
 	if !f.Truncated() {
 		t.Error("truncation flag was lost")
 	}
 
-	wire, err = Encode(control(Envelope{Type: "delta"}, 0), 512)
+	wire, err = EncodeFrame(control(Envelope{T: "delta"}, 0, 512))
 	if err != nil {
-		t.Fatalf("Encode: %v", err)
+		t.Fatalf("EncodeFrame: %v", err)
 	}
-	if f, err := Decode(wire); err != nil || f.Truncated() {
+	if f, err := DecodeFrame(wire); err != nil || f.Truncated() {
 		t.Errorf("unset flag decoded as truncated (err %v)", err)
 	}
 }
@@ -110,13 +110,13 @@ func TestPaddingIsConstantRegardlessOfContent(t *testing.T) {
 	}
 
 	for _, p := range payloads {
-		env := Envelope{Type: "delta"}
+		env := Envelope{T: "delta"}
 		if p != nil {
-			env.Body = body(t, p)
+			env.B = body(t, p)
 		}
-		wire, err := Encode(control(env, 0), 512)
+		wire, err := EncodeFrame(control(env, 0, 512))
 		if err != nil {
-			t.Fatalf("Encode: %v", err)
+			t.Fatalf("EncodeFrame: %v", err)
 		}
 		if len(wire) != 512 {
 			t.Errorf("frame is %d bytes, want 512 whatever the payload", len(wire))
@@ -125,9 +125,9 @@ func TestPaddingIsConstantRegardlessOfContent(t *testing.T) {
 }
 
 func TestPaddingIsZeroed(t *testing.T) {
-	wire, err := Encode(control(Envelope{Type: "tick"}, 0), 512)
+	wire, err := EncodeFrame(control(Envelope{T: "tick"}, 0, 512))
 	if err != nil {
-		t.Fatalf("Encode: %v", err)
+		t.Fatalf("EncodeFrame: %v", err)
 	}
 
 	declared := int(binary.BigEndian.Uint16(wire[4:6]))
@@ -147,16 +147,16 @@ func TestPaddingIsZeroed(t *testing.T) {
 // box emits that stream, so the refusal belongs in its encoder rather than in
 // whatever calls it.
 func TestLaneZeroTakesOnlyAControlBucket(t *testing.T) {
-	if _, err := Encode(control(Envelope{Type: "tick"}, 0), 1024); !errors.Is(err, ErrFrameBucket) {
+	if _, err := EncodeFrame(control(Envelope{T: "tick"}, 0, 1024)); !errors.Is(err, ErrFrameBucket) {
 		t.Fatalf("err = %v, want ErrFrameBucket", err)
 	}
 	for _, bucket := range ControlBuckets {
-		if _, err := Encode(control(Envelope{Type: "tick"}, 0), bucket); err != nil {
+		if _, err := EncodeFrame(control(Envelope{T: "tick"}, 0, bucket)); err != nil {
 			t.Fatalf("bucket %d: %v", bucket, err)
 		}
 	}
 	// Bulk steps freely; it already leaks that a transfer is happening.
-	if _, err := Encode(Frame{Lane: LaneBulk, Envelope: Envelope{Type: "snap"}}, 4096); err != nil {
+	if _, err := EncodeFrame(Frame{Lane: LaneBulk, Bucket: 4096, Envelope: Envelope{T: "snap"}}); err != nil {
 		t.Fatalf("bulk: %v", err)
 	}
 }
@@ -167,7 +167,7 @@ func TestEncodeRefusesToGrowTheBucket(t *testing.T) {
 		fields[string(rune('A'+i%26))+string(rune('a'+i/26))] = i
 	}
 
-	_, err := Encode(control(Envelope{Type: "snap", Body: body(t, fields)}, 0), 512)
+	_, err := EncodeFrame(control(Envelope{T: "snap", B: body(t, fields)}, 0, 512))
 	if !errors.Is(err, ErrFrameExceedsBucket) {
 		t.Fatalf("err = %v, want ErrFrameExceedsBucket; growing the bucket defeats the padding", err)
 	}
@@ -176,7 +176,7 @@ func TestEncodeRefusesToGrowTheBucket(t *testing.T) {
 // A service worker can pin a bundle for a long time. A hard version wall turns
 // that into a white screen, so unknown things are ignored, not fatal.
 func TestUnknownKeysAndTypesSurvive(t *testing.T) {
-	// Hand-built, because Encode cannot produce a key it does not know:
+	// Hand-built, because EncodeFrame cannot produce a key it does not know:
 	// {"t": "delta", "b": {"seq": 1}, "futureField": "from a newer box"}.
 	payload, err := cbor.Marshal(map[string]any{
 		"t":           "delta",
@@ -192,16 +192,16 @@ func TestUnknownKeysAndTypesSurvive(t *testing.T) {
 	binary.BigEndian.PutUint16(wire[4:6], uint16(len(payload)))
 	copy(wire[HeaderBytes:], payload)
 
-	f, err := Decode(wire)
+	f, err := DecodeFrame(wire)
 	if err != nil {
-		t.Fatalf("Decode: %v", err)
+		t.Fatalf("DecodeFrame: %v", err)
 	}
-	if f.Envelope.Type != "delta" {
-		t.Errorf("type = %q, want delta", f.Envelope.Type)
+	if f.Envelope.T != "delta" {
+		t.Errorf("type = %q, want delta", f.Envelope.T)
 	}
 
 	var decoded map[string]int
-	if err := cbor.Unmarshal(f.Envelope.Body, &decoded); err != nil {
+	if err := cbor.Unmarshal(f.Envelope.B, &decoded); err != nil {
 		t.Fatalf("body: %v", err)
 	}
 	if decoded["seq"] != 1 {
@@ -210,25 +210,25 @@ func TestUnknownKeysAndTypesSurvive(t *testing.T) {
 }
 
 func TestDecodesATypeItHasNeverHeardOf(t *testing.T) {
-	wire, err := Encode(control(Envelope{Type: "some.future.type", Body: body(t, map[string]int{"x": 1})}, 0), 512)
+	wire, err := EncodeFrame(control(Envelope{T: "some.future.type", B: body(t, map[string]int{"x": 1})}, 0, 512))
 	if err != nil {
-		t.Fatalf("Encode: %v", err)
+		t.Fatalf("EncodeFrame: %v", err)
 	}
-	f, err := Decode(wire)
+	f, err := DecodeFrame(wire)
 	if err != nil {
-		t.Fatalf("Decode: %v", err)
+		t.Fatalf("DecodeFrame: %v", err)
 	}
-	if f.Envelope.Type != "some.future.type" {
-		t.Errorf("type = %q", f.Envelope.Type)
+	if f.Envelope.T != "some.future.type" {
+		t.Errorf("type = %q", f.Envelope.T)
 	}
 }
 
 func TestMalformedFrames(t *testing.T) {
 	valid := func(t *testing.T) []byte {
 		t.Helper()
-		wire, err := Encode(control(Envelope{Type: "tick"}, 0), 512)
+		wire, err := EncodeFrame(control(Envelope{T: "tick"}, 0, 512))
 		if err != nil {
-			t.Fatalf("Encode: %v", err)
+			t.Fatalf("EncodeFrame: %v", err)
 		}
 		return wire
 	}
@@ -273,7 +273,7 @@ func TestMalformedFrames(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := Decode(tc.frame(t)); !errors.Is(err, tc.want) {
+			if _, err := DecodeFrame(tc.frame(t)); !errors.Is(err, tc.want) {
 				t.Fatalf("err = %v, want %v", err, tc.want)
 			}
 		})
@@ -305,9 +305,9 @@ func TestEnvelopeKeyOrderMatchesTheReference(t *testing.T) {
 	// t, id, b — the order the app emits, so a frame built here is byte-equal
 	// to one built there from the same values. See interop_test.go for the
 	// same claim checked against the app's own bytes.
-	wire, err := Encode(control(Envelope{Type: "a", ID: u32(1), Body: cbor.RawMessage{0x02}}, 0), 256)
+	wire, err := EncodeFrame(control(Envelope{T: "a", ID: u32(1), B: cbor.RawMessage{0x02}}, 0, 256))
 	if err != nil {
-		t.Fatalf("Encode: %v", err)
+		t.Fatalf("EncodeFrame: %v", err)
 	}
 	want := []byte{0xa3, 0x61, 0x74, 0x61, 0x61, 0x62, 0x69, 0x64, 0x01, 0x61, 0x62, 0x02}
 	if got := wire[HeaderBytes : HeaderBytes+len(want)]; !bytes.Equal(got, want) {

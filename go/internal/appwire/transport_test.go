@@ -42,21 +42,21 @@ func connect(t *testing.T) (app, box *Transport) {
 
 func tickFrame(t *testing.T) []byte {
 	t.Helper()
-	wire, err := Encode(control(Envelope{Type: "tick", Body: body(t, map[string]int{"seq": 1})}, 0), 512)
+	wire, err := EncodeFrame(control(Envelope{T: "tick", B: body(t, map[string]int{"seq": 1})}, 0, 512))
 	if err != nil {
-		t.Fatalf("Encode: %v", err)
+		t.Fatalf("EncodeFrame: %v", err)
 	}
 	return wire
 }
 
 func deltaFrame(t *testing.T, fields map[string]int) []byte {
 	t.Helper()
-	wire, err := Encode(control(Envelope{
-		Type: "delta",
-		Body: body(t, map[string]any{"seq": 2, "fields": fields}),
-	}, 0), 512)
+	wire, err := EncodeFrame(control(Envelope{
+		T: "delta",
+		B: body(t, map[string]any{"seq": 2, "fields": fields}),
+	}, 0, 512))
 	if err != nil {
-		t.Fatalf("Encode: %v", err)
+		t.Fatalf("EncodeFrame: %v", err)
 	}
 	return wire
 }
