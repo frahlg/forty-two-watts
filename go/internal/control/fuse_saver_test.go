@@ -224,10 +224,18 @@ func TestFuseSaverBypassesSlew(t *testing.T) {
 // ---- Per-phase clamp ----
 
 // setupPerPhase wires a meter that emits l1_a/l2_a/l3_a in
-// DerReading.Data and a single battery. Aggregate gridW stays
-// deliberately under the fuse to prove the per-phase clamp fires
-// independently of the aggregate guard.
+// DerReading.Data and a single battery on a 3Φ 230 V site. Aggregate
+// gridW stays deliberately under the fuse to prove the per-phase clamp
+// fires independently of the aggregate guard.
 func setupPerPhase(aggGridW float64, l1A, l2A, l3A float64, batSoC float64, maxDischargeW float64) (*telemetry.Store, *State, map[string]float64) {
+	return setupPerPhaseSite(3, 230, aggGridW, l1A, l2A, l3A, batSoC, maxDischargeW)
+}
+
+// setupPerPhaseSite is setupPerPhase with the site's fuse description
+// spelled out. Phase count and per-phase voltage drive the conversion
+// from a worst-phase overage into aggregate battery watts, so a test
+// that cares about that conversion states them.
+func setupPerPhaseSite(phases int, voltage float64, aggGridW float64, l1A, l2A, l3A float64, batSoC float64, maxDischargeW float64) (*telemetry.Store, *State, map[string]float64) {
 	s := telemetry.NewStore()
 	data, _ := json.Marshal(map[string]any{
 		"l1_a": l1A,
@@ -241,7 +249,8 @@ func setupPerPhase(aggGridW float64, l1A, l2A, l3A float64, batSoC float64, maxD
 	s.DriverHealthMut("bat").RecordSuccess()
 	st := NewState(0, 50, "meter")
 	st.SiteFuseAmps = 16
-	st.SiteFuseVoltage = 230
+	st.SiteFuseVoltage = voltage
+	st.SiteFusePhases = phases
 	st.DriverLimits = map[string]PowerLimits{
 		"bat": {MaxChargeW: 10000, MaxDischargeW: maxDischargeW},
 	}
@@ -452,6 +461,139 @@ func TestPerPhaseClampSafetyMarginZeroIsBackCompat(t *testing.T) {
 	if math.Abs(guarded[0].TargetW-expected) > 1 {
 		t.Errorf("safety_margin_a=0 must match pre-PR behaviour: got %.0f W, want %.0f W",
 			guarded[0].TargetW, expected)
+	}
+}
+
+// ---- Per-phase relief is scaled by the site's phase count ----
+//
+// A worst-phase overage is watts on one phase; the dispatcher commands
+// aggregate battery watts. The conversion between them is the site's
+// phase count, and on a 1Φ site the aggregate meter and the single
+// phase are the same wire — relief there is 1 × the overage, not 3 ×.
+//
+// A 1Φ site at 24 A on a 16 A fuse (0.5 A margin ⇒ 15.5 A threshold,
+// 230 V): fuse budget 3680 W, aggregate ceiling 3565 W, meter at
+// 5520 W. Worst-phase overage = (24 − 15.5) × 230 = 1955 W, which on
+// this site is also exactly the aggregate overage — the two numbers
+// must agree when there is only one phase.
+
+// Import side, battery idle: the forced discharge equals the overage
+// once, and leaves the meter on the import side of zero.
+func TestPerPhaseReliefMatchesSinglePhaseSiteOnImport(t *testing.T) {
+	store, state, caps := setupPerPhaseSite(1, 230, 5520, 24, 0, 0, 0.6, 10000)
+	state.SiteFuseSafetyA = 0.5
+	fuseMaxW := 16 * 230.0 * 1
+
+	out := fuseSaverFromZero(store, state, caps, fuseMaxW)
+	if out == nil {
+		t.Fatalf("1Φ site at 24 A on a 16 A fuse: expected a forced discharge")
+	}
+	expected := -1955.0
+	if math.Abs(out[0].TargetW-expected) > 1 {
+		t.Fatalf("forced discharge = %.0f W, want %.0f W (overage × 1 phase, "+
+			"not × 3)", out[0].TargetW, expected)
+	}
+	// The site has one phase, so the post-dispatch meter is that
+	// phase. Demanding 3 × 1955 W would have driven 5520 W of import
+	// to 345 W of export: relief the site never needed, pushing the
+	// same breaker up the other way.
+	if postGridW := 5520 + out[0].TargetW; postGridW < 0 {
+		t.Errorf("post-dispatch grid = %.0f W: relief overshot through zero "+
+			"into export", postGridW)
+	}
+}
+
+// Export side — the direction forceFuseDischarge deliberately skips
+// (more discharge would worsen it) and applyFuseGuard owns. The same
+// phase-count law applies: shrink the discharge by the overage once.
+func TestPerPhaseReliefMatchesSinglePhaseSiteOnExport(t *testing.T) {
+	// Meter magnitudes mirror the import case: 5520 W out, 24 A on the
+	// one phase. Pixii-style signed per-phase amps, so L1 reads −24.
+	store, state, _ := setupPerPhaseSite(1, 230, -5520, -24, 0, 0, 0.6, 10000)
+	state.SiteFuseSafetyA = 0.5
+	fuseMaxW := 16 * 230.0 * 1
+
+	// The battery is already discharging what the meter shows, and the
+	// target holds it there — so the aggregate export overage is the
+	// per-phase one. On a site with one phase the two must agree.
+	setBatteryLiveW(store, "bat", -5000, 0.6)
+
+	targets := []DispatchTarget{{Driver: "bat", TargetW: -5000}}
+	guarded := applyFuseGuard(targets, store, state, fuseMaxW)
+	if !guarded[0].Clamped {
+		t.Fatalf("export-side per-phase overage must clamp the discharge target")
+	}
+	// Discharge 5000 − overage 1955 − buffer (half the 115 W margin)
+	// = 2987.5 W. Demanding 1955 × 3 leaves nothing: the discharge is
+	// zeroed and the site swings to 520 W of import.
+	expected := -2987.5
+	if math.Abs(guarded[0].TargetW-expected) > 1 {
+		t.Errorf("discharge after 1Φ export clamp = %.1f W, want %.1f W",
+			guarded[0].TargetW, expected)
+	}
+}
+
+// setBatteryLiveW drives a battery's smoothed reading to w. The store
+// Kalman-filters every sample, so one update lands about three quarters
+// of the way there; repeat until the filter has converged.
+func setBatteryLiveW(s *telemetry.Store, driver string, w, soc float64) {
+	for i := 0; i < 12; i++ {
+		s.Update(driver, telemetry.DerBattery, w, &soc, nil)
+	}
+	s.DriverHealthMut(driver).RecordSuccess()
+}
+
+// A 1Φ site has no L2 and no L3. Current reported on a phase the site
+// does not have is not a breaker this guard defends — reading it fires
+// the clamp on a site that is nowhere near its fuse.
+func TestPerPhaseClampReadsConfiguredPhasesOnly(t *testing.T) {
+	store, state, caps := setupPerPhaseSite(1, 230, 2300, 10, 24, 24, 0.6, 10000)
+	out := fuseSaverFromZero(store, state, caps, 16*230.0*1)
+	if out != nil {
+		t.Errorf("1Φ site with L1 at 10 A is under its fuse; l2_a/l3_a must "+
+			"not fire the clamp. got %v", out)
+	}
+}
+
+// Per-phase watts come from the configured voltage, the same source
+// fuseSafetyMarginW uses. A 240 V site converts its amps at 240 V.
+func TestPerPhaseClampUsesConfiguredVoltage(t *testing.T) {
+	store, state, _ := setupPerPhaseSite(3, 240, 7000, 18, 12, 8, 0.6, 10000)
+	targets := []DispatchTarget{{Driver: "bat", TargetW: 4000}}
+	guarded := applyFuseGuard(targets, store, state, 16*240.0*3)
+	if !guarded[0].Clamped {
+		t.Fatalf("L1 at 18 A on a 16 A fuse must clamp")
+	}
+	// (18 − 16) × 240 = 480 W per phase × 3 = 1440 W of relief.
+	// Charge 4000 → 2560. At the old hardcoded 230 V it would be 2620.
+	expected := 2560.0
+	if math.Abs(guarded[0].TargetW-expected) > 1 {
+		t.Errorf("charge after per-phase clamp on a 240 V site = %.0f W, "+
+			"want %.0f W", guarded[0].TargetW, expected)
+	}
+}
+
+// Amps alone do not describe a fuse. Without a phase count and a
+// voltage there is no conversion to watts, so the per-phase clamp
+// stays off rather than inventing 230 V / 3Φ — the same law
+// fuseSafetyMarginW follows. Production config always fills both
+// (defaults 230 V / 3Φ, validation rejects <= 0).
+func TestPerPhaseClampOffWhenFuseDescriptionIncomplete(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		phases  int
+		voltage float64
+	}{
+		{"no phase count", 0, 230},
+		{"no voltage", 3, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, state, caps := setupPerPhaseSite(
+				tc.phases, tc.voltage, 9000, 18, 12, 8, 0.6, 10000)
+			if out := fuseSaverFromZero(store, state, caps, 11040); out != nil {
+				t.Errorf("incomplete fuse description must not clamp per phase, got %v", out)
+			}
+		})
 	}
 }
 
