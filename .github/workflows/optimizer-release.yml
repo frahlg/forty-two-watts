@@ -180,7 +180,7 @@ jobs:
           registry: ghcr.io
           username: ${{ vars.SOURCEFUL_GHCR_USER || github.actor }}
           password: ${{ secrets.SOURCEFUL_GHCR_TOKEN || secrets.GITHUB_TOKEN }}
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@v7
         with:
           context: .
           file: ./Dockerfile.optimizer
