@@ -268,11 +268,13 @@ func assertGoldenCoverage(t *testing.T, all []goldenRecord, byID map[string]gold
 
 // assertGoldenSlewCoverage holds the corpus to the slew limiter.
 //
-// The limiter is the last stage in dispatch that can raise a target's
-// magnitude: everything after it shrinks toward zero. It also anchors on the
-// battery's measured output rather than the previous command, so it is the one
-// clamp whose answer depends on what the hardware is doing this second. A
-// corpus that runs it at 100 kW is a corpus that never sees it.
+// The limiter is the one stage in dispatch that raises a target's magnitude
+// without a safety reason to: the fuse guard and the boost reserve shrink
+// toward zero, forceFuseDischarge enlarges only to stop a trip, and slew
+// enlarges because the battery is not where the plan wants it yet. It also
+// anchors on the measured output rather than the previous command, so it is
+// the one clamp whose answer depends on what the hardware is doing this
+// second. A corpus that runs it at 100 kW is a corpus that never sees it.
 //
 // The records named here are the shapes that must not quietly leave the
 // corpus. Where the assertion states an outcome, that outcome is a safety

@@ -836,13 +836,15 @@ func targetedScenarios() []goldenScenario {
 // 250–2000 W band operators pick in between — so the limiter binds and the
 // corpus can see it.
 //
-// It matters because the slew limiter is the last stage that can INVENT
-// power. Every other clamp shrinks a target toward zero; slew re-anchors on
-// the battery's measured output (SmoothedW) and walks one step from there, so
-// a target of 0 W becomes ±SlewRateW whenever the battery is not already
-// still. Nothing downstream floors the charge side of that: applyFuseGuard
-// only shrinks, floorNegativeTargets is discharge-only, and planSignIntent
-// returns 0 for an idle slot.
+// It matters because of what the limiter can do to a target. Every other
+// stage either shrinks one toward zero or, in forceFuseDischarge's case,
+// enlarges it to stop a fuse trip. The slew limiter enlarges one for no reason
+// beyond where the battery happens to be: it re-anchors on the measured output
+// (SmoothedW) and walks a step from there, so a target of 0 W becomes
+// ±SlewRateW whenever the battery is not already still. Nothing downstream
+// floors the charge side of that — applyFuseGuard only shrinks,
+// floorNegativeTargets is discharge-only, and planSignIntent returns 0 for an
+// idle slot.
 //
 // KNOWN BUG RECORDED HERE, NOT FIXED HERE. The slew/bug_* and
 // slew/blocked_sibling_* records capture dispatch commanding charge on a tick
