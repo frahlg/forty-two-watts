@@ -2382,6 +2382,7 @@ func main() {
 	const evStopHigh = 100.0 // W — "was actually drawing"
 	const evStopLow = 50.0   // W — "now essentially zero"
 	var staleDefaults staleSiteDefaultTracker
+	actuation := newDriverActuationTracker(tel)
 	for {
 		select {
 		case <-sigc:
@@ -2465,6 +2466,15 @@ func main() {
 					slog.Info("driver telemetry recovered — back online", "name", tr.Name)
 					bus.Publish(events.DriverRecovered{Driver: tr.Name, At: time.Now()})
 				}
+			}
+			// Same law for a driver that is answering but cannot actuate,
+			// whether it says so itself or core found out by having its
+			// commands refused. Joins watchdogDefaulted so the freshness
+			// gate below doesn't send it a second default this tick. See
+			// driver_failure_default.go.
+			for _, name := range actuation.update(tickNow, observeOnlySnap) {
+				sendDriverDefault(ctx, srv, name, driverCannotActuateReason, observeOnlySnap)
+				watchdogDefaulted[name] = struct{}{}
 			}
 			// Fire a HealthTick so subscribers that track user-level
 			// thresholds (e.g. notifications) can evaluate their own
@@ -2669,7 +2679,7 @@ func main() {
 					continue
 				}
 				payload, _ := json.Marshal(map[string]any{"action": "battery", "power_w": t.TargetW})
-				sendDriverCommand(ctx, reg, "driver send", t.Driver, payload, driverCmdTimeout)
+				actuation.dispatchCommand(ctx, reg, "driver send", t.Driver, payload, driverCmdTimeout, tickNow)
 			}
 
 			// ---- PV curtailment dispatch ----

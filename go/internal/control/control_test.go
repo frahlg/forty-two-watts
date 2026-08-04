@@ -262,6 +262,38 @@ func TestDeviceFaultExcludesBatteryAndReallocates(t *testing.T) {
 	}
 }
 
+// Same exclusion, reached from the other side: the driver reports itself
+// healthy but has rejected the commands core sent it. Before, it kept
+// Status=ok and stayed in the dispatch set, so the plan went on counting on
+// power it never delivered and the shortfall became grid import.
+func TestCommandFaultExcludesBatteryAndReallocates(t *testing.T) {
+	store := seedStore(3000, []struct { // site importing 3 kW
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+		{"sungrow", 0, 0.5},
+	})
+	store.SetDriverCommandFault("ferroamp", true, "modbus write refused")
+
+	st := NewState(0, 50, "ferroamp")
+	st.Mode = ModeSelfConsumption
+	var sungrow float64
+	sawSungrow := false
+	for _, tg := range ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200, "sungrow": 9600}), 11040) {
+		if tg.Driver == "ferroamp" {
+			t.Errorf("a battery that refuses commands must NOT get a dispatch target, got %.0f W", tg.TargetW)
+		}
+		if tg.Driver == "sungrow" {
+			sungrow = tg.TargetW
+			sawSungrow = true
+		}
+	}
+	if !sawSungrow || sungrow >= 0 {
+		t.Errorf("sungrow should cover the load alone (negative target), got saw=%v %.0f W", sawSungrow, sungrow)
+	}
+}
+
 func TestChargeModeRespectsFuseGuard(t *testing.T) {
 	store := seedStore(10000, []struct {
 		name          string

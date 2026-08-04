@@ -51,10 +51,11 @@ func driverCommandTimeout(controlInterval time.Duration) time.Duration {
 	return timeout
 }
 
-// sendDriverCommand sends one dispatch command under its own deadline.
-// A timeout is logged at Warn with the driver name so a chronically slow
-// driver shows up in the log instead of quietly eating tick cadence;
-// kind names the dispatch path ("driver send", "pv curtail send").
+// sendDriverCommand sends one dispatch command under its own deadline and
+// returns what the driver made of it. A timeout is logged at Warn with the
+// driver name so a chronically slow driver shows up in the log instead of
+// quietly eating tick cadence; kind names the dispatch path ("driver send",
+// "pv curtail send").
 //
 // A timeout is deliberately not recorded as a driver failure. The driver
 // goroutine serialises polls and commands, so a driver wedged inside
@@ -62,7 +63,8 @@ func driverCommandTimeout(controlInterval time.Duration) time.Duration {
 // watchdog already walks it to its autonomous default mode. Counting the
 // timeout separately would double-book the same fault and could push a
 // merely slow cloud driver out of control on one bad round trip.
-func sendDriverCommand(ctx context.Context, reg driverCommandSender, kind, name string, payload []byte, timeout time.Duration) {
+// driverActuationTracker applies the same rule to the error it returns.
+func sendDriverCommand(ctx context.Context, reg driverCommandSender, kind, name string, payload []byte, timeout time.Duration) error {
 	cmdCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	err := reg.Send(cmdCtx, name, payload)
@@ -73,4 +75,5 @@ func sendDriverCommand(ctx context.Context, reg driverCommandSender, kind, name 
 	default:
 		slog.Warn(kind, "name", name, "err", err)
 	}
+	return err
 }
