@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
+	"strconv"
 	"sync"
 	"time"
 
@@ -88,7 +90,7 @@ func Start(cfg *config.Nova, id *Identity, store *state.Store, tel *telemetry.St
 		scheme = "ssl"
 	}
 	opts := paho.NewClientOptions().
-		AddBroker(fmt.Sprintf("%s://%s:%d", scheme, cfg.MQTTHost, cfg.MQTTPort)).
+		AddBroker(novaBrokerURL(scheme, cfg.MQTTHost, cfg.MQTTPort)).
 		SetClientID("ftw-nova-" + sanitizeTopicSegment(cfg.GatewaySerial)).
 		SetAutoReconnect(true).
 		SetConnectRetry(true).
@@ -106,7 +108,7 @@ func Start(cfg *config.Nova, id *Identity, store *state.Store, tel *telemetry.St
 		}).
 		SetOnConnectHandler(func(_ paho.Client) {
 			slog.Info("nova MQTT connected",
-				"broker", fmt.Sprintf("%s:%d", cfg.MQTTHost, cfg.MQTTPort),
+				"broker", novaBrokerAddress(cfg.MQTTHost, cfg.MQTTPort),
 				"gateway_serial", cfg.GatewaySerial)
 			p.requestDriverInventory()
 		}).
@@ -120,6 +122,14 @@ func Start(cfg *config.Nova, id *Identity, store *state.Store, tel *telemetry.St
 
 	go p.run()
 	return p, nil
+}
+
+func novaBrokerAddress(host string, port int) string {
+	return net.JoinHostPort(host, strconv.Itoa(port))
+}
+
+func novaBrokerURL(scheme, host string, port int) string {
+	return scheme + "://" + novaBrokerAddress(host, port)
 }
 
 // Stop shuts down the publish loop and disconnects from the broker.

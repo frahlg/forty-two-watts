@@ -3,6 +3,8 @@ package evcloud
 import (
 	"errors"
 	"fmt"
+	"net"
+	"strconv"
 	"strings"
 	"time"
 
@@ -105,7 +107,7 @@ func (c *CTEK) ListChargers(cfg *config.EVCharger) ([]Charger, error) {
 
 	cli, err := c.dial(host, port, unitID)
 	if err != nil {
-		return nil, fmt.Errorf("ctek: dial %s:%d (unit %d): %w", host, port, unitID, err)
+		return nil, fmt.Errorf("ctek: dial %s (unit %d): %w", ctekAddress(host, port), unitID, err)
 	}
 	defer cli.Close()
 
@@ -146,7 +148,7 @@ func decodeCTEKSerial(regs []uint16) string {
 // via simonvetter, sets the unit ID, and returns a thin adapter that
 // implements ctekClient.
 func ctekDialReal(host string, port, unitID int) (ctekClient, error) {
-	url := fmt.Sprintf("tcp://%s:%d", host, port)
+	url := "tcp://" + ctekAddress(host, port)
 	cli, err := sv.NewClient(&sv.ClientConfiguration{
 		URL:     url,
 		Timeout: ctekProbeTimeout,
@@ -161,6 +163,10 @@ func ctekDialReal(host string, port, unitID int) (ctekClient, error) {
 		_ = cli.SetUnitId(uint8(unitID))
 	}
 	return &ctekRealClient{cli: cli}, nil
+}
+
+func ctekAddress(host string, port int) string {
+	return net.JoinHostPort(host, strconv.Itoa(port))
 }
 
 type ctekRealClient struct{ cli *sv.ModbusClient }

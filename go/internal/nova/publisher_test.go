@@ -43,6 +43,15 @@ func TestDriverInventoryContentSHAIgnoresGeneratedAt(t *testing.T) {
 	}
 }
 
+func TestNovaBrokerURLFormatsIPv6(t *testing.T) {
+	if got := novaBrokerURL("ssl", "fd00::5", 8883); got != "ssl://[fd00::5]:8883" {
+		t.Fatalf("broker URL = %q, want ssl://[fd00::5]:8883", got)
+	}
+	if got := novaBrokerAddress("mqtt.local", 1883); got != "mqtt.local:1883" {
+		t.Fatalf("broker address = %q, want mqtt.local:1883", got)
+	}
+}
+
 // TestAssemble_PicksUpClean Snake CaseFromLuaEmit confirms that
 // arbitrary fields a Lua driver emits inside host.emit() flow into
 // the clean payload unmodified — because the emit convention and

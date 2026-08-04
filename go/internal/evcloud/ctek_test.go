@@ -155,3 +155,9 @@ func TestCTekDescribe(t *testing.T) {
 		t.Errorf("defaults: got port=%d unit=%d, want 502/1", d.DefaultPort, d.DefaultUnitID)
 	}
 }
+
+func TestCTekAddressFormatsIPv6(t *testing.T) {
+	if got := ctekAddress("fd00::5", 1502); got != "[fd00::5]:1502" {
+		t.Fatalf("address = %q, want [fd00::5]:1502", got)
+	}
+}
