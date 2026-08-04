@@ -1480,6 +1480,13 @@ func main() {
 		}()
 	}
 
+	// One tracker for every dispatch path: storage, PV curtail and EV all
+	// report refused commands here, and it walks a driver that cannot
+	// actuate to its declared default. Built before the loadpoint
+	// controller because that controller needs it. See
+	// driver_failure_default.go.
+	actuation := newDriverActuationTracker(tel)
+
 	// ---- EV loadpoint controller ----
 	// loadpoint.Controller owns per-tick EV dispatch, including the
 	// energy-allocation contract, snapping and phase transitions.
@@ -1528,6 +1535,12 @@ func main() {
 			}, true
 		}
 		lpController = loadpoint.NewController(lpMgr, planAdapter, telAdapter, reg.Send)
+		// A charger that answers every poll and refuses every setpoint is
+		// the storage bug of #800 on the EV wire: it holds its last
+		// current and the plan keeps counting the load. Only the periodic
+		// ev_set_current is reported — see loadpoint.DispatchOutcomeFunc
+		// for the sends that are deliberately not.
+		lpController.SetDispatchOutcome(actuation.recordCommandOutcome)
 		// Wire the site fuse so the per-phase EV clamp and the
 		// phase-split derivation can use the actual site voltage and
 		// breaker rating instead of hard-coding 230 V × 16 A.
@@ -2382,7 +2395,6 @@ func main() {
 	const evStopHigh = 100.0 // W — "was actually drawing"
 	const evStopLow = 50.0   // W — "now essentially zero"
 	var staleDefaults staleSiteDefaultTracker
-	actuation := newDriverActuationTracker(tel)
 	for {
 		select {
 		case <-sigc:
@@ -2693,20 +2705,9 @@ func main() {
 			ctrlMu.Lock()
 			curtailTargets := control.ComputePVCurtail(ctrl, tel)
 			ctrlMu.Unlock()
-			for _, c := range curtailTargets {
-				var payload []byte
-				if c.LimitW > 0 {
-					payload, _ = json.Marshal(map[string]any{
-						"action":  "curtail",
-						"power_w": c.LimitW,
-					})
-				} else {
-					payload, _ = json.Marshal(map[string]any{
-						"action": "curtail_disable",
-					})
-				}
-				sendDriverCommand(ctx, reg, "pv curtail send", c.Driver, payload, driverCmdTimeout)
-			}
+			// The cap is a dispatch command and its outcome is counted; the
+			// release is not. See pv_curtail_dispatch.go.
+			dispatchPVCurtail(ctx, reg, actuation, curtailTargets, driverCmdTimeout, tickNow)
 
 			// LP dispatch ran at the top of this tick — see the
 			// "EV dispatch first" block above.

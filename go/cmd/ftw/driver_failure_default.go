@@ -36,6 +36,17 @@ import (
 // control — see set_self_consumption in sungrow.lua, which returns the
 // default as held rather than failed for exactly that case — and nothing
 // here escalates on it.
+//
+// Every path that dispatches feeds this, because a charger and a PV inverter
+// go silently wrong the same way a battery does. Which command on a path
+// counts is decided where that path lives, and every choice answers one
+// question: does refusing this say core cannot put power where it asked?
+//
+//   - Storage sends the `battery` setpoint. main.go's dispatch loop.
+//   - PV curtail sends the `curtail` cap, which counts, and the
+//     `curtail_disable` release, which does not. pv_curtail_dispatch.go.
+//   - The loadpoint sends the periodic `ev_set_current`, which counts, and
+//     four other things that do not. See loadpoint.DispatchOutcomeFunc.
 
 const (
 	// driverRefusalLimit is how many refused dispatch commands in a row
@@ -101,6 +112,28 @@ func (t *driverActuationTracker) dispatchCommand(
 	now time.Time,
 ) {
 	t.recordCommandOutcome(name, sendDriverCommand(ctx, reg, kind, name, payload, timeout), now)
+}
+
+// releaseCommand sends a command that hands a device back to its own control
+// — a curtail release — and files no outcome. It exists so the two halves of
+// a dispatch path read as a pair at the call site, rather than one of them
+// quietly dropping an error.
+//
+// This is the same rule dispatchCommand's doc names, seen from the other end:
+// only dispatch commands are counted, never the release. A driver that
+// rejects a release is reporting that it was never under control, and there
+// is a second reason here beyond that principle — ComputePVCurtail sends
+// `curtail_disable` to a driver the moment it drops offline, so counting a
+// refused release would let an excluded driver hold itself out on the
+// strength of its own exclusion, with no way back.
+func (t *driverActuationTracker) releaseCommand(
+	ctx context.Context,
+	reg driverCommandSender,
+	kind, name string,
+	payload []byte,
+	timeout time.Duration,
+) {
+	_ = sendDriverCommand(ctx, reg, kind, name, payload, timeout)
 }
 
 // recordCommandOutcome files the result of one dispatch command. Only a
