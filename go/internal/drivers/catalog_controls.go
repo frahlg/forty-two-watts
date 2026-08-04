@@ -49,10 +49,17 @@ func ControlsForDriver(catalog []CatalogEntry, luaPath string) []CatalogControl 
 	if luaPath == "" {
 		return nil
 	}
-	wantPath := filepath.ToSlash(luaPath)
+	wantPath := filepath.ToSlash(filepath.Clean(luaPath))
 	wantFilename := filepath.Base(wantPath)
+	// A filename is only a fallback. When two sources contain the same
+	// filename, the configured path is the only safe identity we have.
 	for _, e := range catalog {
-		if strings.EqualFold(e.Path, wantPath) || strings.EqualFold(e.Filename, wantFilename) {
+		if strings.EqualFold(filepath.ToSlash(filepath.Clean(e.Path)), wantPath) {
+			return e.Controls
+		}
+	}
+	for _, e := range catalog {
+		if strings.EqualFold(e.Filename, wantFilename) {
 			return e.Controls
 		}
 	}
@@ -70,7 +77,7 @@ func ControlsForDriver(catalog []CatalogEntry, luaPath string) []CatalogControl 
 // formed: no id, an input type outside the vocabulary, or a number without
 // both bounds. A slider with one end is not a control, it is a guess.
 func pickControls(block string) []CatalogControl {
-	body := nestedBlock(block, "controls")
+	body := nestedBlock(stripLuaComments(block), "controls")
 	if body == "" {
 		return nil
 	}
@@ -146,6 +153,100 @@ func nestedBlock(block, name string) string {
 	return ""
 }
 
+// stripLuaComments blanks comments without changing quoted strings or line
+// breaks. The catalog parser is deliberately not a Lua interpreter, so it
+// must remove a commented declaration before the lightweight table matcher
+// sees it. Both line comments and long-bracket comments are valid Lua.
+func stripLuaComments(src string) string {
+	out := []byte(src)
+	for i := 0; i < len(src); {
+		switch src[i] {
+		case '"':
+			i++
+			for i < len(src) {
+				if src[i] == '\\' {
+					i += 2
+					continue
+				}
+				if src[i] == '"' {
+					i++
+					break
+				}
+				i++
+			}
+			continue
+		case '-':
+			if i+1 >= len(src) || src[i+1] != '-' {
+				i++
+				continue
+			}
+			if end, level, ok := luaLongBracketOpen(src, i+2); ok {
+				j := end
+				for j < len(src) {
+					if close, ok := luaLongBracketClose(src, j, level); ok {
+						j = close
+						break
+					}
+					j++
+				}
+				blankLuaComment(out, i, j)
+				i = j
+				continue
+			}
+			j := i
+			for j < len(src) && src[j] != '\n' {
+				j++
+			}
+			blankLuaComment(out, i, j)
+			i = j
+			continue
+		default:
+			i++
+		}
+	}
+	return string(out)
+}
+
+func blankLuaComment(out []byte, start, end int) {
+	if end > len(out) {
+		end = len(out)
+	}
+	for i := start; i < end; i++ {
+		if out[i] != '\n' && out[i] != '\r' {
+			out[i] = ' '
+		}
+	}
+}
+
+func luaLongBracketOpen(src string, start int) (end, level int, ok bool) {
+	if start >= len(src) || src[start] != '[' {
+		return 0, 0, false
+	}
+	i := start + 1
+	for i < len(src) && src[i] == '=' {
+		i++
+		level++
+	}
+	if i >= len(src) || src[i] != '[' {
+		return 0, 0, false
+	}
+	return i + 1, level, true
+}
+
+func luaLongBracketClose(src string, start, level int) (end int, ok bool) {
+	if start >= len(src) || src[start] != ']' {
+		return 0, false
+	}
+	i := start + 1
+	for n := 0; n < level && i < len(src) && src[i] == '='; n++ {
+		i++
+	}
+	if i >= len(src) || src[i] != ']' {
+		return 0, false
+	}
+	return i + 1, true
+}
+
 // topLevelTables splits a list body into its `{ … }` entries, ignoring braces
 // nested inside each entry.
 func topLevelTables(body string) []string {
@@ -194,12 +295,16 @@ func fieldString(block, name string) string {
 }
 
 func fieldNumber(block, name string) *float64 {
-	re := regexp.MustCompile(`(?:^|[\s,{])` + regexp.QuoteMeta(name) + `\s*=\s*(-?[0-9]+(?:\.[0-9]+)?)`)
+	// The trailing delimiter is part of the match so a value such as 1e6foo
+	// cannot be accepted as the prefix 1. Decimal exponent notation is valid
+	// Lua metadata; malformed values are rejected rather than shortened.
+	luaNumber := `[-+]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][-+]?[0-9]+)?`
+	re := regexp.MustCompile(`(?:^|[\s,{])` + regexp.QuoteMeta(name) + `\s*=(\s*)` + `(` + luaNumber + `)([^A-Za-z0-9_.]|$)`)
 	m := re.FindStringSubmatch(block)
-	if len(m) < 2 {
+	if len(m) < 3 {
 		return nil
 	}
-	value, err := strconv.ParseFloat(strings.TrimSpace(m[1]), 64)
+	value, err := strconv.ParseFloat(m[2], 64)
 	if err != nil {
 		return nil
 	}

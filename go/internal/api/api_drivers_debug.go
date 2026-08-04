@@ -136,6 +136,16 @@ func (s *Server) driverControls(name string) []drivers.CatalogControl {
 	if lua == "" {
 		return nil
 	}
+	// Config.ResolveDriverPaths normally makes lua absolute. Read that exact
+	// file first when it is available: a local overlay may contain the same
+	// filename as a deliberately selected managed or bundled driver.
+	if info, err := os.Stat(lua); err == nil && !info.IsDir() {
+		entry, err := drivers.ParseCatalogFile(lua)
+		if err != nil {
+			return nil
+		}
+		return entry.Controls
+	}
 
 	dir := s.deps.DriverDir
 	if dir == "" {

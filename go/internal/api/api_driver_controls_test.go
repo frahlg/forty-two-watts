@@ -137,3 +137,50 @@ func TestDriverDetailResolvesControlsByFileNotName(t *testing.T) {
 		t.Errorf("unknown driver: controls = %+v, want none", got.Controls)
 	}
 }
+
+func TestDriverDetailUsesConfiguredFileWhenFilenameIsShadowed(t *testing.T) {
+	root := t.TempDir()
+	userDir := filepath.Join(root, "user")
+	bundledDir := filepath.Join(root, "bundled")
+	for _, dir := range []string{userDir, bundledDir} {
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	localLua := `DRIVER = {
+  id = "local",
+  name = "Local shadow",
+  controls = {
+    { id = "local_control", input = { type = "number", min = 0, max = 1 } },
+  },
+}
+`
+	if err := os.WriteFile(filepath.Join(userDir, "foo.lua"), []byte(localLua), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bundledLua := `DRIVER = {
+  id = "bundled",
+  name = "Bundled selected",
+  controls = {
+    { id = "bundled_control", input = { type = "number", min = 0, max = 1 } },
+  },
+}
+`
+	configured := filepath.Join(bundledDir, "foo.lua")
+	if err := os.WriteFile(configured, []byte(bundledLua), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := New(&Deps{
+		Tel:           telemetry.NewStore(),
+		Cfg:           &config.Config{Drivers: []config.Driver{{Name: "heat", Lua: configured}}},
+		CfgMu:         &sync.RWMutex{},
+		UserDriverDir: userDir,
+		DriverDir:     bundledDir,
+		ConfigPath:    filepath.Join(root, "config.yaml"),
+	})
+	got := driverDetail(t, srv, "heat")
+	if len(got.Controls) != 1 || got.Controls[0].ID != "bundled_control" {
+		t.Fatalf("controls = %+v, want the configured bundled file", got.Controls)
+	}
+}

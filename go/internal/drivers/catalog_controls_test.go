@@ -164,6 +164,63 @@ func TestControlsSurviveBraceInsideString(t *testing.T) {
 	}
 }
 
+func TestControlsMatchConfiguredPathBeforeFilenameFallback(t *testing.T) {
+	local := []CatalogControl{{ID: "local"}}
+	bundled := []CatalogControl{{ID: "bundled"}}
+	catalog := []CatalogEntry{
+		{Path: "drivers/foo.lua", Filename: "foo.lua", Controls: local},
+		{Path: "drivers/selected/foo.lua", Filename: "foo.lua", Controls: bundled},
+	}
+
+	got := ControlsForDriver(catalog, "drivers/selected/foo.lua")
+	if len(got) != 1 || got[0].ID != "bundled" {
+		t.Fatalf("controls = %+v, want the path-matched entry", got)
+	}
+}
+
+func TestControlsIgnoreCommentedDeclarations(t *testing.T) {
+	entry := writeDriver(t, `DRIVER = {
+  id = "probe",
+  -- controls = { { id = "line_disabled", input = { type = "number", min = 0, max = 1 } } },
+  --[[ controls = { { id = "block_disabled", input = { type = "number", min = 0, max = 1 } } } ]]
+}
+`)
+	if len(entry.Controls) != 0 {
+		t.Fatalf("commented controls = %+v, want none", entry.Controls)
+	}
+}
+
+func TestControlsParseExponentNumbers(t *testing.T) {
+	entry := writeDriver(t, `DRIVER = {
+  id = "probe",
+  controls = {
+    { id = "set_limit", input = { type = "number", min = -1e-3, max = 1e6, step = 1e-1 } },
+  },
+}
+`)
+	if len(entry.Controls) != 1 {
+		t.Fatalf("controls = %+v, want one exponent-valued control", entry.Controls)
+	}
+	input := entry.Controls[0].Input
+	if input.Min == nil || *input.Min != -1e-3 || input.Max == nil || *input.Max != 1e6 ||
+		input.Step == nil || *input.Step != 1e-1 {
+		t.Fatalf("input = %+v, want min=-1e-3 max=1e6 step=1e-1", input)
+	}
+}
+
+func TestControlsRejectMalformedExponentInsteadOfParsingPrefix(t *testing.T) {
+	entry := writeDriver(t, `DRIVER = {
+  id = "probe",
+  controls = {
+    { id = "set_limit", input = { type = "number", min = 0, max = 1e6oops } },
+  },
+}
+`)
+	if len(entry.Controls) != 0 {
+		t.Fatalf("malformed exponent controls = %+v, want none", entry.Controls)
+	}
+}
+
 // Every bundled driver must still parse. This is the check that would catch
 // a controls reader that quietly ate an unrelated field.
 func TestBundledCatalogStillParses(t *testing.T) {
