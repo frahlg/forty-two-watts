@@ -3474,25 +3474,22 @@ func applyFuseGuard(targets []DispatchTarget, store *telemetry.Store, state *Sta
 	}
 	predicted := currentGrid - currentBat + sumTarget
 
-	// Per-phase overage: the worst single-phase amperage above the fuse
-	// trip threshold (less the safety margin), expressed as AGGREGATE
-	// battery action needed to bring it back. Assumes a 3Φ-balanced
-	// battery — each unit of total battery action contributes 1/3 to
-	// each phase, so a worst-phase overage of N watts requires 3 × N
-	// watts of total battery action to bring it under. Conservative
-	// for 1Φ batteries (Pixii Home etc.): they over-correct on the
-	// other phases, less import / export there, still safe.
+	// Per-phase relief: the worst single-phase amperage above the fuse
+	// trip threshold (less the safety margin), converted by
+	// perPhaseReliefW into the AGGREGATE battery action needed to bring
+	// it back — the site's configured phase count does that conversion.
 	//
-	// `perPhaseOverageW` is direction-agnostic — phase amps from the
-	// meter are absolute magnitudes. Attribute to whichever side the
-	// AGGREGATE METER is currently flowing (currentGrid), not to the
-	// post-target `predicted`. Per-phase amps and currentGrid are read
-	// from the same DerMeter sample, so they're internally consistent;
+	// This guard uses relief in BOTH directions. `perPhaseOverageW` is
+	// direction-agnostic — phase amps from the meter are absolute
+	// magnitudes. Attribute to whichever side the AGGREGATE METER is
+	// currently flowing (currentGrid), not to the post-target
+	// `predicted`. Per-phase amps and currentGrid are read from the
+	// same DerMeter sample, so they're internally consistent;
 	// `predicted` mixes in `sumTarget` (a hypothetical future state)
 	// and can swing across 0 on a large planner request, attributing
 	// a current-export overage to the import path (or vice versa) and
 	// pushing the grid further into the violating direction.
-	perPhase := perPhaseOverageW(store, state) * 3.0
+	perPhase := perPhaseReliefW(store, state)
 	// Aggregate budget honours the safety margin too — keep dispatch
 	// commands strictly inside the breaker envelope so the inverter's
 	// own per-phase limiter doesn't fire first and cause a flap.
@@ -3708,12 +3705,26 @@ func (s *State) effectiveExportCeilingW(fuseMaxW float64) float64 {
 // driver must emit l1_a / l2_a / l3_a in DerReading.Data — Pixii,
 // Ferroamp, and Sungrow all do this today.
 //
+// Only the configured phases are read, in L1/L2/L3 order, matching
+// sitePhaseCurrentsAt in cmd/ftw: a 1Φ site has no L2, so a stray
+// l2_a in the meter payload is not a breaker this site owns.
+//
+// Same law as fuseSafetyMarginW: amps become watts only through the
+// configured per-phase voltage. No hardcoded 230 V here — a site whose
+// fuse description is incomplete gets no per-phase clamp rather than an
+// invented one. Config fills both fields (fuse.voltage defaults to 230,
+// fuse.phases to 3, and validation rejects <= 0), so this only affects
+// harnesses that wire SiteFuseAmps alone.
+//
 // Direction-agnostic: phase amps from the meter are absolute magnitudes,
 // so this function reports overage regardless of whether the breaker is
 // being approached on the import or export side. The caller attributes
 // the overage to whichever direction the aggregate grid is flowing.
 func perPhaseOverageW(store *telemetry.Store, state *State) float64 {
 	if state == nil || state.SiteFuseAmps <= 0 || state.SiteMeterDriver == "" {
+		return 0
+	}
+	if state.SiteFuseVoltage <= 0 || state.SiteFusePhases <= 0 {
 		return 0
 	}
 	r := store.Get(state.SiteMeterDriver, telemetry.DerMeter)
@@ -3734,8 +3745,14 @@ func perPhaseOverageW(store *telemetry.Store, state *State) float64 {
 	// when a phase is at -17 A. The fuse trips on current magnitude
 	// regardless of direction, and the caller attributes the overage
 	// to the active aggregate-grid direction.
+	phaseAmps := [...]*float64{d.L1A, d.L2A, d.L3A}
+	phases := state.SiteFusePhases
+	if phases > len(phaseAmps) {
+		phases = len(phaseAmps)
+	}
 	maxA := 0.0
-	for _, p := range []*float64{d.L1A, d.L2A, d.L3A} {
+	for i := 0; i < phases; i++ {
+		p := phaseAmps[i]
 		if p == nil {
 			continue
 		}
@@ -3751,11 +3768,30 @@ func perPhaseOverageW(store *telemetry.Store, state *State) float64 {
 	if maxA <= threshold {
 		return 0
 	}
-	v := state.SiteFuseVoltage
-	if v <= 0 {
-		v = 230 // back-compat for tests / e2e that wire only SiteFuseAmps
+	return (maxA - threshold) * state.SiteFuseVoltage
+}
+
+// perPhaseReliefW converts a worst-phase overage into the AGGREGATE
+// battery action needed to clear it. One conversion, one law: a battery
+// spreads its action evenly across the site's phases, so each watt of
+// aggregate action relieves 1/SiteFusePhases watts on the worst phase,
+// and an overage of N watts needs N × SiteFusePhases watts of action.
+//
+// The phase count is the site's, from config — not the constant 3 the
+// two call sites used to carry separately. On a 1Φ site the aggregate
+// meter and the single phase are the same wire, so demanding 3 × N
+// there overshoots by 2 × N and can push the grid through zero into a
+// violation on the opposite side.
+//
+// Conservative for a 1Φ battery on a 3Φ site (Pixii Home etc.): it
+// over-corrects on the phases it does not sit on — less import/export
+// there, still safe.
+func perPhaseReliefW(store *telemetry.Store, state *State) float64 {
+	overage := perPhaseOverageW(store, state)
+	if overage <= 0 {
+		return 0
 	}
-	return (maxA - threshold) * v
+	return overage * float64(state.SiteFusePhases)
 }
 
 // applyPlanSignFloor enforces "executed battery total must agree in sign
@@ -4012,21 +4048,23 @@ func forceFuseDischarge(
 	// aggregate, not per-phase.
 	effImportW := state.effectiveImportCeilingW(fuseMaxW)
 	overage := predicted - effImportW
-	// Per-phase overage trumps aggregate when bigger — but ONLY on the
-	// import side. perPhaseOverageW is direction-agnostic (uses |amps|),
-	// so an export-side phase trip would otherwise cause this function
-	// to command MORE discharge, pushing the over-current phase further
-	// over the breaker. applyFuseGuard's exportOverage branch already
-	// shrinks discharge for that case before we run.
+	// Per-phase relief trumps aggregate when bigger — but ONLY on the
+	// import side. This function's single lever is MORE discharge, and
+	// perPhaseReliefW is direction-agnostic (its overage uses |amps|),
+	// so honouring it during export would push the over-current phase
+	// further over the breaker. applyFuseGuard's exportOverage branch
+	// already shrinks discharge for that case before we run. The
+	// direction limit is stated here, at the one call that needs it,
+	// rather than baked into a second copy of the conversion.
 	//
 	// Gate on `currentGrid` (live aggregate at the meter) rather than
 	// `predicted`. Per-phase amps and currentGrid come from the same
 	// DerMeter sample; predicted mixes in sumTarget which can swing
 	// across 0 and silently flip the gate.
-	if currentGrid >= 0 {
-		perPhaseOverage := perPhaseOverageW(store, state) * 3.0
-		if perPhaseOverage > overage {
-			overage = perPhaseOverage
+	importSide := currentGrid >= 0
+	if importSide {
+		if relief := perPhaseReliefW(store, state); relief > overage {
+			overage = relief
 		}
 	}
 	if overage <= 0 {
