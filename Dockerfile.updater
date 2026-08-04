@@ -31,7 +31,7 @@ RUN cd go && \
 # docker:27-cli bundles the `docker` binary + `docker compose` plugin +
 # ca-certificates + tzdata, which is exactly what we need to execute
 # compose pulls against the host daemon.
-FROM docker:27-cli
+FROM docker:28-cli
 
 # Compose pull hits GHCR over TLS; docker:cli already bundles ca-certs.
 COPY --from=builder /out/ftw-updater /usr/local/bin/ftw-updater
