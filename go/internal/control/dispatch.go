@@ -2221,14 +2221,36 @@ func ComputeDispatch(
 	return applyDispatchSafetyPipeline(raw, store, state, driverCapacities, fuseMaxW, dispatchSafetyOptions{
 		manualHoldActive:  manualHoldActive,
 		noSelfDischarge:   noSelfDischarge,
+		noSelfCharge:      noSelfCharge,
+		chargeBlocked:     chargeBlockedDrivers(onlineBats),
 		updatePrevTargets: true,
 		recordDispatch:    true,
 	})
 }
 
+// chargeBlockedDrivers is the set of online batteries that told us this tick
+// they cannot charge. distributeProportional already parks them at 0; this
+// carries the same fact past the slew limiter, which anchors on measured
+// power and knows nothing about capability.
+func chargeBlockedDrivers(bats []batteryInfo) map[string]bool {
+	var out map[string]bool
+	for _, b := range bats {
+		if !b.chargeBlocked {
+			continue
+		}
+		if out == nil {
+			out = make(map[string]bool, len(bats))
+		}
+		out[b.driver] = true
+	}
+	return out
+}
+
 type dispatchSafetyOptions struct {
 	manualHoldActive  bool
 	noSelfDischarge   bool
+	noSelfCharge      bool
+	chargeBlocked     map[string]bool
 	updatePrevTargets bool
 	recordDispatch    bool
 }
@@ -2264,6 +2286,7 @@ func applyDispatchSafetyPipeline(
 	if opts.noSelfDischarge {
 		targets = floorNegativeTargets(targets)
 	}
+	targets = floorBlockedCharge(targets, opts.noSelfCharge, opts.chargeBlocked)
 
 	// A battery-boost lease may never draw the stationary fleet below its
 	// explicit reserve. Apply this immediately before forceFuseDischarge:
@@ -3168,6 +3191,60 @@ func pvSurplusAbsorbHeadroomW(batteries []batteryInfo, capPct, remainingS float6
 func floorNegativeTargets(targets []DispatchTarget) []DispatchTarget {
 	for i := range targets {
 		if targets[i].TargetW < 0 {
+			targets[i].TargetW = 0
+			targets[i].Clamped = true
+		}
+	}
+	return targets
+}
+
+// floorBlockedCharge is the charge-side mirror of floorNegativeTargets: a
+// target may not command charge into a direction this tick already closed.
+//
+// It exists because the slew limiter anchors every target on the battery's
+// MEASURED output rather than on the command, so a battery physically
+// charging at +2000 W is pulled back toward +2000 W from whatever the stages
+// above decided — including the 0 W that noSelfCharge pinned two hundred
+// lines earlier. Nothing below used to undo that: applyFuseGuard only shrinks
+// toward zero, floorNegativeTargets covers the discharge side only, and
+// planSignIntent reports "idle, no opinion" for an idle slot. A
+// passive-arbitrage idle slot with the meter at -2000 W, the battery live at
+// +2000 W and SlewRateW=500 therefore commanded +1500 W of charging on the
+// tick whose entire purpose was to let that surplus reach the meter.
+//
+// Two authorities close the charge direction, both decided before slew runs:
+//
+//   - noSelfCharge — the site-wide block: planner_self's export-surplus gate,
+//     planner_self's stale plan, and the arbitrage-family idle live-export
+//     gate. It pins the fleet TOTAL to zero; this bounds each command.
+//   - chargeBlocked — the driver's own capability report. Its share was
+//     already handed to capable siblings, so re-opening it double-counts the
+//     charge as well as ignoring the hardware.
+//
+// This is a bound on the output, not a list of the reasons the output was
+// closed. The snap-to-zero carve-out inside the slew loop is the list
+// version, and it names only plannerSelfExportSurplusGate and manual hold;
+// the two charge gates added to ComputeDispatch after it were never added to
+// it. That is how this bug was born, and a floor cannot be born that way. It
+// only ever moves a target toward zero, so it can neither create motion nor
+// widen a clamp applied above it — and nothing after it raises charge:
+// applyBatteryBoostReserve touches negative targets only, and
+// forceFuseDischarge only forces discharge.
+//
+// The discharge-side twin of the per-driver half is deliberately NOT here: a
+// dischargeBlocked battery re-opened by slew is the same shape, but flooring
+// it has to answer whether the fuse emergency in forceFuseDischarge outranks
+// a driver's "I cannot discharge". Charge has no such override, so it is the
+// half that can be fixed without deciding that.
+func floorBlockedCharge(targets []DispatchTarget, noSelfCharge bool, chargeBlocked map[string]bool) []DispatchTarget {
+	if !noSelfCharge && len(chargeBlocked) == 0 {
+		return targets
+	}
+	for i := range targets {
+		if targets[i].TargetW <= 0 {
+			continue
+		}
+		if noSelfCharge || chargeBlocked[targets[i].Driver] {
 			targets[i].TargetW = 0
 			targets[i].Clamped = true
 		}
