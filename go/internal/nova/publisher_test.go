@@ -2,6 +2,7 @@ package nova
 
 import (
 	"encoding/json"
+	"net/url"
 	"testing"
 	"time"
 
@@ -44,11 +45,39 @@ func TestDriverInventoryContentSHAIgnoresGeneratedAt(t *testing.T) {
 }
 
 func TestNovaBrokerURLFormatsIPv6(t *testing.T) {
-	if got := novaBrokerURL("ssl", "fd00::5", 8883); got != "ssl://[fd00::5]:8883" {
-		t.Fatalf("broker URL = %q, want ssl://[fd00::5]:8883", got)
+	cases := []struct {
+		name string
+		host string
+		want string
+	}{
+		{name: "IPv4", host: "10.0.0.5", want: "ssl://10.0.0.5:8883"},
+		{name: "hostname", host: "mqtt.local", want: "ssl://mqtt.local:8883"},
+		{name: "bare IPv6", host: "fd00::5", want: "ssl://[fd00::5]:8883"},
+		{name: "bracketed IPv6", host: "[fd00::5]", want: "ssl://[fd00::5]:8883"},
+		{name: "raw zone ID", host: "fe80::5%en0", want: "ssl://[fe80::5%25en0]:8883"},
+		{name: "bracketed raw zone ID", host: "[fe80::5%en0]", want: "ssl://[fe80::5%25en0]:8883"},
+		{name: "already encoded zone ID", host: "fe80::5%25en0", want: "ssl://[fe80::5%25en0]:8883"},
+		{name: "bracketed encoded zone ID", host: "[fe80::5%25en0]", want: "ssl://[fe80::5%25en0]:8883"},
 	}
-	if got := novaBrokerAddress("mqtt.local", 1883); got != "mqtt.local:1883" {
-		t.Fatalf("broker address = %q, want mqtt.local:1883", got)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := novaBrokerURL("ssl", tc.host, 8883)
+			if got != tc.want {
+				t.Fatalf("broker URL = %q, want %s", got, tc.want)
+			}
+			if _, err := url.Parse(got); err != nil {
+				t.Fatalf("broker URL does not parse: %v", err)
+			}
+		})
+	}
+	if got := novaBrokerAddress("[fd00::5]", 1883); got != "[fd00::5]:1883" {
+		t.Fatalf("bracketed broker address = %q, want [fd00::5]:1883", got)
+	}
+	if got := novaBrokerAddress("10.0.0.5", 1883); got != "10.0.0.5:1883" {
+		t.Fatalf("IPv4 broker address = %q, want 10.0.0.5:1883", got)
+	}
+	if got := novaBrokerAddress("[fe80::5%en0]", 1883); got != "[fe80::5%en0]:1883" {
+		t.Fatalf("zone broker address = %q, want [fe80::5%%en0]:1883", got)
 	}
 }
 

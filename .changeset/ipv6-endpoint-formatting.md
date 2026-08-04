@@ -2,4 +2,4 @@
 "ftw": patch
 ---
 
-Format IPv6 literals correctly for CTEK, Nova, and driver-fingerprint endpoints.
+Format bare and already-bracketed IPv6 literals, including Nova zone IDs, correctly for CTEK, Nova, and driver-fingerprint endpoints.

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -125,11 +126,35 @@ func Start(cfg *config.Nova, id *Identity, store *state.Store, tel *telemetry.St
 }
 
 func novaBrokerAddress(host string, port int) string {
-	return net.JoinHostPort(host, strconv.Itoa(port))
+	return net.JoinHostPort(unbracketIPv6Host(host), strconv.Itoa(port))
 }
 
 func novaBrokerURL(scheme, host string, port int) string {
-	return scheme + "://" + novaBrokerAddress(host, port)
+	host = encodeIPv6ZoneForURL(unbracketIPv6Host(host))
+	return scheme + "://" + net.JoinHostPort(host, strconv.Itoa(port))
+}
+
+func unbracketIPv6Host(host string) string {
+	if len(host) < 2 || host[0] != '[' || host[len(host)-1] != ']' {
+		return host
+	}
+	inner := host[1 : len(host)-1]
+	address := inner
+	if zone := strings.LastIndexByte(address, '%'); zone >= 0 {
+		address = address[:zone]
+	}
+	if strings.Contains(address, ":") && net.ParseIP(address) != nil {
+		return inner
+	}
+	return host
+}
+
+func encodeIPv6ZoneForURL(host string) string {
+	percent := strings.IndexByte(host, '%')
+	if percent < 0 || !strings.Contains(host[:percent], ":") || strings.HasPrefix(host[percent:], "%25") {
+		return host
+	}
+	return host[:percent] + "%25" + host[percent+1:]
 }
 
 // Stop shuts down the publish loop and disconnects from the broker.

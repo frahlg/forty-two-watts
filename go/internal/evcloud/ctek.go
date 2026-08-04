@@ -166,7 +166,22 @@ func ctekDialReal(host string, port, unitID int) (ctekClient, error) {
 }
 
 func ctekAddress(host string, port int) string {
-	return net.JoinHostPort(host, strconv.Itoa(port))
+	return net.JoinHostPort(unbracketIPv6Host(host), strconv.Itoa(port))
+}
+
+func unbracketIPv6Host(host string) string {
+	if len(host) < 2 || host[0] != '[' || host[len(host)-1] != ']' {
+		return host
+	}
+	inner := host[1 : len(host)-1]
+	address := inner
+	if zone := strings.LastIndexByte(address, '%'); zone >= 0 {
+		address = address[:zone]
+	}
+	if strings.Contains(address, ":") && net.ParseIP(address) != nil {
+		return inner
+	}
+	return host
 }
 
 type ctekRealClient struct{ cli *sv.ModbusClient }
