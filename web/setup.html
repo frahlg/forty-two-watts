@@ -619,6 +619,18 @@
 
     <div id="driver-description" class="driver-desc" style="display:none"></div>
 
+    <div id="driver-not-listed" class="driver-desc" style="display:none">
+      <p>This list is what's installed on this gateway. More drivers can be
+        installed from the signed driver repository after setup, in
+        <strong>Settings &rarr; Devices</strong>.</p>
+      <p style="margin-top:8px">No driver for your device anywhere? Ask for one in the
+        <a href="https://github.com/srcfl/device-drivers/issues" target="_blank" rel="noopener">driver
+        repository's issue tracker</a> &mdash; include the device make, model
+        and how it talks (Modbus, MQTT, HTTP&hellip;).</p>
+      <button class="btn-primary" style="margin-top:12px" onclick="skipUnlistedDevice()">Continue
+        without this device</button>
+    </div>
+
     <div class="wizard-actions">
       <button class="btn-secondary" onclick="goStep(3)">Back</button>
       <button class="btn-primary" id="driver-next-btn" onclick="goStep(5)" disabled>Continue</button>

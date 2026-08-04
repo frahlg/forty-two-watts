@@ -3,7 +3,7 @@
 // flows, the control loop responds to transients, commands round-trip,
 // self-tune runs, battery models learn.
 //
-// Run with:  FTW_E2E=1 go test ./go/test/e2e -timeout 120s -v
+// Run with:  FTW_E2E=1 go test ./go/test/e2e -timeout 180s -v   (or: make e2e)
 // Uses the repo's drivers/ferroamp.lua + drivers/sungrow.lua scripts.
 package e2e
 
@@ -225,6 +225,11 @@ func setupStack(t *testing.T) *stack {
 		}
 	}()
 
+	// One physics tick before the drivers connect, so the first Modbus read and
+	// the first MQTT message have a simulated site behind them. This one stays
+	// a sleep: at this point there is no driver, no telemetry and no API to
+	// ask, so there is no condition to poll. Everything after the drivers
+	// start waits on a condition instead — see waitForStatus.
 	time.Sleep(200 * time.Millisecond)
 
 	// ---- Build cfg + open state + start drivers ----
@@ -377,24 +382,89 @@ func setupStack(t *testing.T) *stack {
 	return s
 }
 
-func (s *stack) waitForPV(timeout time.Duration) {
+// waitForStatus polls /api/status until want reports true, and returns the
+// status that satisfied it.
+//
+// Nothing in this stack settles on a schedule. The control loop ticks once a
+// second, the PI output passes a slew limiter, the driver readings are
+// exponentially smoothed and the simulators run their own physics ticker, so
+// how long a change takes to show up moves with the machine. A literal sleep
+// has to be sized for the slowest runner and then costs that much on every
+// run, and it still fails as a bare "wrong value" once a runner is slower than
+// the guess. Polling the condition costs what the stack actually needs.
+//
+// timeout is a backstop, not a schedule: pick it far above the observed
+// settling time so that hitting it means the state never arrived at all. The
+// what string is what the failure says the stack was waiting for, so write it
+// as the condition itself.
+func (s *stack) waitForStatus(what string, timeout time.Duration, want func(map[string]any) bool) map[string]any {
 	s.t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
+	start := time.Now()
+	deadline := start.Add(timeout)
+	var last map[string]any
+	for {
 		resp, err := http.Get(s.baseURL() + "/api/status")
 		if err == nil {
 			var status map[string]any
-			_ = json.NewDecoder(resp.Body).Decode(&status)
+			decErr := json.NewDecoder(resp.Body).Decode(&status)
 			resp.Body.Close()
-			if pv, ok := status["pv_w"].(float64); ok && pv != 0 {
-				return
+			if decErr == nil {
+				last = status
+				if want(status) {
+					// Logging what each wait actually cost keeps the
+					// deadlines honest: when the stack gets slower, the
+					// numbers move here first, well before a timeout.
+					s.t.Logf("waited %s for %s", time.Since(start).Round(10*time.Millisecond), what)
+					return status
+				}
 			}
 		} else if resp != nil {
 			resp.Body.Close()
 		}
+		if !time.Now().Before(deadline) {
+			s.t.Fatalf("timed out after %s waiting for %s; last status: %s",
+				timeout, what, statusSummary(last))
+		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	s.t.Fatalf("timed out after %s waiting for pv_w telemetry", timeout)
+}
+
+// statusSummary renders the fields a stuck wait needs in its failure message:
+// which mode the controller was in, what it saw and what it commanded.
+func statusSummary(status map[string]any) string {
+	if status == nil {
+		return "none received"
+	}
+	mode, _ := status["mode"].(string)
+	num := func(key string) float64 {
+		v, _ := status[key].(float64)
+		return v
+	}
+	dispatch := "[]"
+	if targets, ok := status["dispatch"].([]any); ok && len(targets) > 0 {
+		parts := make([]string, 0, len(targets))
+		for _, t := range targets {
+			m, ok := t.(map[string]any)
+			if !ok {
+				continue
+			}
+			name, _ := m["driver"].(string)
+			target, _ := m["target_w"].(float64)
+			parts = append(parts, fmt.Sprintf("%s=%.0fW", name, target))
+		}
+		dispatch = "[" + strings.Join(parts, " ") + "]"
+	}
+	return fmt.Sprintf("mode=%s grid=%.0fW target=%.0fW pv=%.0fW bat=%.0fW load=%.0fW dispatch=%s",
+		mode, num("grid_w"), num("grid_target_w"), num("pv_w"), num("bat_w"), num("load_w"), dispatch)
+}
+
+func (s *stack) waitForPV(timeout time.Duration) {
+	s.t.Helper()
+	s.waitForStatus("pv_w telemetry to arrive from the ferroamp driver", timeout,
+		func(status map[string]any) bool {
+			pv, ok := status["pv_w"].(float64)
+			return ok && pv != 0
+		})
 }
 
 func (s *stack) Close() {
@@ -531,38 +601,56 @@ func TestE2E_FullStack(t *testing.T) {
 	if code := s.postJSON("/api/target", map[string]any{"grid_target_w": 3000}, nil); code != 200 {
 		t.Errorf("target POST: %d", code)
 	}
-	time.Sleep(6 * time.Second)
-	s.getJSON("/api/status", &status)
+	// Target is positive (want more import) → batteries should charge → bat > 0.
+	// The wait carries the assertion: it holds the same threshold the fixed
+	// sleep used to check once, so a controller that never charges still fails
+	// the test — it just stops costing six seconds when the controller is
+	// working.
+	status = s.waitForStatus("batteries to charge (bat_w >= 300 W) under grid_target_w=+3000",
+		30*time.Second, func(st map[string]any) bool {
+			bat, ok := st["bat_w"].(float64)
+			return ok && bat >= 300
+		})
 	bat := status["bat_w"].(float64)
 	t.Logf("after target=+3000W (want more import): bat=%.0fW (site: + = charge)", bat)
-	// Target is positive (want more import) → batteries should charge → bat > 0
-	if bat < 300 {
-		t.Errorf("expected batteries to charge (bat_w > 300), got %.0f", bat)
-	}
 
-	// Also test the opposite: target negative → batteries discharge.
-	// Longer wait because the PI integrator has to fully unwind from the
-	// previous strong-charge state + slew rate caps the reversal speed.
+	// Also test the opposite: target negative → batteries discharge. At
+	// minimum, the battery should be moving AWAY from the charging state it
+	// was in. The reversal is slow by construction — the PI integrator has to
+	// unwind from the charge state and the slew limiter caps how fast the
+	// target can cross — and how slow depends on where in the charge ramp the
+	// reading above was taken, since that is what the 500 W is measured from.
+	// Between 5 s and 15 s here on a developer machine, so the deadline is
+	// four times the worst of that: still loud, still well inside the 180 s
+	// the suite gets from `make e2e`.
 	prevBat := bat
 	s.postJSON("/api/target", map[string]any{"grid_target_w": -3000}, nil)
-	time.Sleep(12 * time.Second)
-	s.getJSON("/api/status", &status)
+	status = s.waitForStatus(
+		fmt.Sprintf("batteries to move toward discharge (bat_w < %.0f W, from %.0f W) under grid_target_w=-3000",
+			prevBat-500, prevBat),
+		60*time.Second, func(st map[string]any) bool {
+			b, ok := st["bat_w"].(float64)
+			return ok && b < prevBat-500
+		})
 	bat = status["bat_w"].(float64)
 	t.Logf("after target=-3000W (want more export): bat=%.0fW (site: − = discharge)", bat)
-	// At minimum, battery should be moving AWAY from charging state toward
-	// discharge. Full reversal takes ~15-20s with default PI tuning.
-	if bat >= prevBat-500 {
-		t.Errorf("expected bat to move meaningfully toward discharge (was %.0f, now %.0f)",
-			prevBat, bat)
-	}
 
-	// 4. Mode switching — idle should zero out dispatch
+	// 4. Mode switching — idle should zero out dispatch.
+	// The API handler flips the mode as soon as it returns, so reading the
+	// mode back proves nothing about dispatch. Clearing the targets is the
+	// next control tick's work: idle short-circuits ComputeDispatch, which
+	// leaves no targets behind unless the fuse-saver overrides it. Wait for
+	// both — the mode the operator asked for, and dispatch actually empty.
 	s.postJSON("/api/mode", map[string]any{"mode": "idle"}, nil)
-	time.Sleep(2 * time.Second)
-	s.getJSON("/api/status", &status)
-	if m := status["mode"].(string); m != "idle" {
-		t.Errorf("mode: %s", m)
-	}
+	status = s.waitForStatus("idle mode to clear the dispatch targets", 20*time.Second,
+		func(st map[string]any) bool {
+			if m, _ := st["mode"].(string); m != "idle" {
+				return false
+			}
+			targets, ok := st["dispatch"].([]any)
+			return ok && len(targets) == 0
+		})
+	t.Logf("idle: mode=%v dispatch targets=%d", status["mode"], len(status["dispatch"].([]any)))
 
 	// Back to self_consumption for subsequent tests
 	s.postJSON("/api/mode", map[string]any{"mode": "self_consumption"}, nil)

@@ -1,5 +1,52 @@
 # Changelog
 
+## 1.15.2
+
+### Patch Changes
+
+- de94bae: A Modbus device that answers but refuses a register no longer costs the whole
+  poll. Only a failure to reach the device does.
+
+  The rule was `attempts == successes`: one register missing out of twenty threw
+  away every reading in that poll, including the ones that arrived. That made a
+  driver's own tolerance count for nothing — `sungrow.lua` marks 19 of its 20
+  reads optional precisely so a partial read still reports — and it made the
+  driver permanently useless on a string inverter, which has no battery
+  registers and refuses them on every poll for as long as it is installed.
+
+  A device replying "illegal data address" is stronger proof of life than a
+  register that read cleanly: it replied. So a poll is now current when
+  something was read and nothing failed at the transport. Reads skipped because
+  a reconnect backoff was already running are counted separately too — they are
+  downstream of one transport failure, not fresh evidence of several, which is
+  why a single dropped packet used to report as "8 of 20 modbus reads failed"
+  when seven of those eight never reached the wire.
+
+  The guarantee that matters is unchanged: an unreachable device still fails
+  every poll, so a stale site meter still stops dispatch. Poll errors now say
+  which of the two happened.
+
+- c7fe6c9: Driver installs: the metadata check now reads the identity a signed artifact
+  was signed under, so a wrapped FTW-native source installs again.
+
+  A signed artifact assigns DRIVER three times when it wraps a source that
+  declares its own table: the generator's alias first, the source's inline
+  block, and the alias again at the end — reasserted exactly so the source
+  cannot overwrite the identity it was signed under. Lua runs the last
+  assignment, but the catalog parser preferred the inline block whenever one
+  existed. A v1.15.0 install refused the myuplink 1.1.1 beta with "driver
+  metadata id/version myuplink@1.0.0, want myuplink@1.1.1": the manifest and
+  the wrapper both said 1.1.1; the stale inline block said 1.0.0. The sungrow
+  artifact fails the same way on id — inline sungrow-shx against catalog
+  sungrow — so no wrapped FTW-native source could install from the repository
+  at all.
+
+  The parser now takes the assignment that appears last, as the VM would. A
+  trailing alias that names no parseable table still parses as empty rather
+  than borrowing an earlier table's identity, and an inline block written after
+  the trailing alias is reported as-is, so the installer refuses the override
+  against the manifest.
+
 ## 1.15.1
 
 ### Patch Changes

@@ -13,6 +13,10 @@
   var selectedCatalog = null;    // CatalogEntry from /api/drivers/catalog
   var driverCatalog = [];        // full catalog cache
 
+  // Picker option for a device with no catalog entry. Deliberately not a
+  // number so it can never be mistaken for a catalog index.
+  var NOT_LISTED = '__not_listed__';
+
   // --- Step navigation ---
 
   function renderDots() {
@@ -49,6 +53,13 @@
   // Back from step 7 goes to step 6 if we have drivers, step 2 if we skipped
   window.goStepBack7 = function () {
     goStep(configuredDrivers.length > 0 ? 6 : 2);
+  };
+
+  // Forward path for a device the catalog cannot serve: the devices
+  // summary when something is already configured, otherwise straight on
+  // to the integrations.
+  window.skipUnlistedDevice = function () {
+    goStep(configuredDrivers.length > 0 ? 6 : 7);
   };
 
   // --- Step 3: Scan ---
@@ -202,6 +213,14 @@
       sel.appendChild(opt);
     });
 
+    // The escape hatch. Without it, a device with no catalog entry
+    // dead-ends this step: Continue stays disabled and the only
+    // affordance left is Back.
+    var notListed = document.createElement('option');
+    notListed.value = NOT_LISTED;
+    notListed.textContent = 'My device is not listed…';
+    sel.appendChild(notListed);
+
     // A positive fingerprint preselects the matching catalog driver while
     // still sending the operator through the normal configuration form.
     if (selectedDevice && selectedDevice.matchedFilename) {
@@ -222,13 +241,26 @@
     var sel = document.getElementById('driver-select');
     var btn = document.getElementById('driver-next-btn');
     var descEl = document.getElementById('driver-description');
+    var notListedEl = document.getElementById('driver-not-listed');
 
     if (!sel.value) {
       selectedCatalog = null;
       btn.disabled = true;
       descEl.style.display = 'none';
+      notListedEl.style.display = 'none';
       return;
     }
+
+    if (sel.value === NOT_LISTED) {
+      // Nothing to configure, so Continue stays held; the panel offers
+      // its own forward path instead.
+      selectedCatalog = null;
+      btn.disabled = true;
+      descEl.style.display = 'none';
+      notListedEl.style.display = 'block';
+      return;
+    }
+    notListedEl.style.display = 'none';
 
     selectedCatalog = driverCatalog[parseInt(sel.value, 10)];
     btn.disabled = false;

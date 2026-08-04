@@ -38,6 +38,10 @@ type CatalogEntry struct {
 	Description        string         `json:"description,omitempty"`
 	Homepage           string         `json:"homepage,omitempty"`
 	ConnectionDefaults map[string]any `json:"connection_defaults,omitempty"`
+	// AuthPostPath is the URL path a read-only driver signs in at. A driver
+	// that reads a vendor cloud has to POST for a token before it can read,
+	// and that POST is not actuation. Only meaningful with ReadOnly.
+	AuthPostPath string `json:"auth_post_path,omitempty"`
 	// ReadOnly means the driver never accepts dispatch commands. The catalog
 	// UI uses it to avoid presenting battery capacity as a control opt-in and
 	// to enable battery_telemetry_only for gateway-style drivers.
@@ -57,6 +61,10 @@ type CatalogEntry struct {
 	VerifiedAt         string   `json:"verified_at,omitempty"`         // ISO date of most recent entry
 	VerificationNotes  string   `json:"verification_notes,omitempty"`
 	TestedModels       []string `json:"tested_models,omitempty"` // e.g. ["Home", "Charge"]
+
+	// Controls are the operator-facing commands the driver declares. Empty
+	// for every driver that only reports. See catalog_controls.go.
+	Controls []CatalogControl `json:"controls,omitempty"`
 
 	// ConfigSecrets lists driver-specific config keys that the Settings
 	// UI / setup wizard should render as password inputs and store
@@ -194,6 +202,7 @@ func parseCatalogEntry(path string) (CatalogEntry, error) {
 	e.VerificationNotes = pickString(block, "verification_notes")
 	e.TestedModels = pickList(block, "tested_models")
 	e.ConfigSecrets = pickList(block, "config_secrets")
+	e.Controls = pickControls(block)
 	return e, nil
 }
 

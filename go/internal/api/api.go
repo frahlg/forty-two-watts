@@ -27,6 +27,7 @@ import (
 	"github.com/srcfl/ftw/go/internal/battery"
 	"github.com/srcfl/ftw/go/internal/calendar"
 	"github.com/srcfl/ftw/go/internal/config"
+	"github.com/srcfl/ftw/go/internal/configreload"
 	"github.com/srcfl/ftw/go/internal/control"
 	"github.com/srcfl/ftw/go/internal/driverrepo"
 	"github.com/srcfl/ftw/go/internal/drivers"
@@ -71,29 +72,37 @@ type Deps struct {
 	Tel            *telemetry.Store
 	// LogRing is the in-memory log buffer wired in main.go. Nil makes
 	// /api/drivers/{name}/logs and /api/support/dump return 503.
-	LogRing           *telemetry.LogRing
-	Ctrl              *control.State
-	CtrlMu            *sync.Mutex
-	State             *state.Store
-	CapMu             *sync.RWMutex
-	Capacities           map[string]float64 // driver → battery_capacity_wh (controllable pool)
-	TelemetryCapacities  map[string]float64 // all site batteries incl. observe_only (SoC weighting)
-	CfgMu             *sync.RWMutex
-	Cfg               *config.Config
-	ConfigPath        string
-	DriverDir         string // where to scan for Lua drivers (default: <config-dir>/drivers)
-	UserDriverDir     string // persistent user-drivers overlay; searched before DriverDir
-	Models            map[string]*battery.Model
-	ModelsMu          *sync.Mutex
-	SelfTune          *selftune.Coordinator
-	DtS               float64                                   // control interval seconds (for model τ / age displays)
-	SaveConfig        func(path string, c *config.Config) error // injection for testability
-	WebDir            string                                    // static assets root (default "web")
-	ColdDir           string                                    // cold-storage root for parquet rolloff; empty disables cold fallback
-	DataDir           string                                    // complete persistent-data root used by portable backups
-	StatePath         string                                    // absolute primary SQLite path used by portable backups
-	BackupDir         string                                    // full .ftwbak output; may be an externally mounted path
-	DataMaintenanceMu *sync.Mutex                               // excludes Parquet rolloff/pruning while a full backup is captured
+	LogRing             *telemetry.LogRing
+	Ctrl                *control.State
+	CtrlMu              *sync.Mutex
+	State               *state.Store
+	CapMu               *sync.RWMutex
+	Capacities          map[string]float64 // driver → battery_capacity_wh (controllable pool)
+	TelemetryCapacities map[string]float64 // all site batteries incl. observe_only (SoC weighting)
+	CfgMu               *sync.RWMutex
+	Cfg                 *config.Config
+	ConfigPath          string
+	DriverDir           string // where to scan for Lua drivers (default: <config-dir>/drivers)
+	UserDriverDir       string // persistent user-drivers overlay; searched before DriverDir
+	Models              map[string]*battery.Model
+	ModelsMu            *sync.Mutex
+	SelfTune            *selftune.Coordinator
+	DtS                 float64                                   // control interval seconds (for model τ / age displays)
+	SaveConfig          func(path string, c *config.Config) error // injection for testability
+	// ConfigApplier is main.go's config-applied callback — the same
+	// closure the configreload watcher runs (registry reload with SoC
+	// bounds, capacities, inverter groups, fuse and mpc/loadmodel
+	// site-meter sync). Injected so POST /api/config applies a saved
+	// config exactly like a file edit would. Nil (tests, minimal
+	// embeddings) still applies control-level fields via
+	// configreload.Apply; only the callback's extras are skipped.
+	ConfigApplier     configreload.Applier
+	WebDir            string      // static assets root (default "web")
+	ColdDir           string      // cold-storage root for parquet rolloff; empty disables cold fallback
+	DataDir           string      // complete persistent-data root used by portable backups
+	StatePath         string      // absolute primary SQLite path used by portable backups
+	BackupDir         string      // full .ftwbak output; may be an externally mounted path
+	DataMaintenanceMu *sync.Mutex // excludes Parquet rolloff/pruning while a full backup is captured
 	// SnapshotDir is where pre-update snapshots of state.db + config.yaml
 	// are written by the self-update flow. Defaults to
 	// `<cold_dir_parent>/snapshots`; main.go is responsible for passing
@@ -197,6 +206,25 @@ type Server struct {
 	savingsCacheMu sync.Mutex
 	savingsCache   map[string]daySavings
 
+	// controlStates serializes command dispatch, default dispatch, and hold
+	// transitions per driver. Process-lifetime only, deliberately: a restart
+	// should leave no device held by a setting nobody remembers making.
+	controlStateMu sync.Mutex
+	controlStates  map[string]*controlDriverState
+
+	// beforeDriverControlSend is a package-test seam for reproducing a
+	// lifecycle change between request validation and registry dispatch. It is
+	// nil in production; SendWithGeneration still binds every real dispatch to
+	// the selected running generation.
+	beforeDriverControlSend func()
+	// beforeDriverControlStateLock is a package-test seam for the narrower
+	// lookup-to-lock lifecycle race. It runs after the state map lookup while
+	// the map lock is still held, before the per-driver state lock is taken.
+	beforeDriverControlStateLock func()
+	// beforeDriverDefaultStateLock is a package-test seam for the default path's
+	// lookup-to-lock lifecycle race. It is nil in production.
+	beforeDriverDefaultStateLock func()
+
 	versionUpdateMu sync.Mutex
 	driverUpdateMu  sync.Mutex
 	backupMu        sync.Mutex
@@ -216,10 +244,16 @@ func New(deps *Deps) *Server {
 		deps.WebDir = "web"
 	}
 	s := &Server{
-		deps:       deps,
-		mux:        http.NewServeMux(),
-		dailyCache: make(map[string]state.DayEnergy),
-		drafts:     newDriverDrafts(),
+		deps:          deps,
+		mux:           http.NewServeMux(),
+		dailyCache:    make(map[string]state.DayEnergy),
+		controlStates: make(map[string]*controlDriverState),
+		drafts:        newDriverDrafts(),
+	}
+	if deps.Registry != nil {
+		// Registry removal is the lifecycle boundary for a driver generation.
+		// Clear the API hold before a replacement instance can be added.
+		deps.Registry.SetLifecycleHook(s.clearDriverControl)
 	}
 	s.routes()
 	// A draft's timer died with the previous process, so anything left behind
@@ -269,6 +303,8 @@ func (s *Server) routes() {
 	s.handle("GET  /api/logs", s.handleGlobalLogs)
 	s.handle("GET  /api/support/dump", s.handleSupportDump)
 	s.handle("GET  /api/support/report", s.handleSupportReport)
+	s.handle("POST   /api/drivers/{name}/control", s.handleDriverControl)
+	s.handle("DELETE /api/drivers/{name}/control", s.handleDriverControlRelease)
 	s.handle("POST /api/drivers/{name}/restart", s.handleDriverRestart)
 	s.handle("POST /api/drivers/{name}/disable", s.handleDriverDisable)
 	s.handle("POST /api/drivers/{name}/enable", s.handleDriverEnable)
@@ -1272,23 +1308,18 @@ func (s *Server) handlePostConfig(w http.ResponseWriter, r *http.Request) {
 			slog.Warn("failed to persist ev_charger_password", "err", err)
 		}
 	}
-	// Apply control-level changes immediately (file watcher will also pick
-	// this up but we're snappier).
-	s.deps.CtrlMu.Lock()
-	s.deps.Ctrl.SetGridTarget(newCfg.Site.GridTargetW)
-	s.deps.Ctrl.GridToleranceW = newCfg.Site.GridToleranceW
-	s.deps.Ctrl.SlewRateW = newCfg.Site.SlewRateW
-	s.deps.Ctrl.MinDispatchIntervalS = newCfg.Site.MinDispatchIntervalS
-	s.deps.Ctrl.PVSurplusAbsorbSoCCapPct = newCfg.Site.PVSurplusAbsorbSoCCapPct
-	s.deps.Ctrl.PVSurplusAbsorbThresholdW = newCfg.Site.PVSurplusAbsorbThresholdW
-	s.deps.CtrlMu.Unlock()
-	if s.deps.Registry != nil {
+	// One apply path, shared with the file watcher. Hand-applying a
+	// subset here and swapping the shared pointer is what #760 was: the
+	// watcher then diffed new against new, so everything this handler
+	// didn't copy — starting with the site-meter designation — never
+	// reached the running controller until a restart.
+	configreload.Apply(s.deps.CfgMu, s.deps.Cfg, s.deps.CtrlMu, s.deps.Ctrl,
+		&newCfg, s.deps.ConfigApplier)
+	if s.deps.ConfigApplier == nil && s.deps.Registry != nil {
+		// Minimal embeddings without main.go's callback still need the
+		// new driver set running.
 		s.deps.Registry.Reload(r.Context(), newCfg.Drivers, newCfg.Site.TroubleshootingMode)
 	}
-	// Update shared cfg pointer
-	s.deps.CfgMu.Lock()
-	*s.deps.Cfg = newCfg
-	s.deps.CfgMu.Unlock()
 	slog.Info("config updated via API", "restart_required", len(restartReasons) > 0)
 	writeJSON(w, 200, map[string]any{
 		"status":           "ok",
