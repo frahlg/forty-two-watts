@@ -34,7 +34,7 @@ current host API and the source of truth for it. Today it registers:
 | Driver control | `set_poll_interval`, `set_warmup_s`, `set_watchdog_timeout_s`, `set_device_fault` |
 | Helpers | `log`, `sleep`, `millis`, `now_ms`, `json_encode`, `json_decode`, `persist_secret` |
 | Decoding | `decode_string`, `decode_i16`, `decode_i32_be`, `decode_i32_le`, `decode_u32_be`, `decode_u32_le` |
-| Modbus | `modbus_read`, `modbus_write`, `modbus_write_multi` |
+| Modbus | `modbus_read`, `write`, `write_registers` (canonical); `modbus_write`, `modbus_write_multi` (legacy aliases) |
 | MQTT | `mqtt_pub`, `mqtt_sub`, `mqtt_publish`, `mqtt_subscribe`, `mqtt_messages` |
 | HTTP | `http_get`, `http_post`, `http_patch` |
 | WebSocket | `ws_open`, `ws_send`, `ws_messages`, `ws_is_open`, `ws_close` |
@@ -43,8 +43,9 @@ current host API and the source of truth for it. Today it registers:
 | Crypto | `aes_gcm_decrypt` |
 
 Some calls answer to two names. `srcfl/device-drivers` treats the Blixt L1 host
-API as its naming reference, so `write`, `write_registers` and `now_ms` resolve
-to `modbus_write`, `modbus_write_multi` and `millis`. `host.emit` likewise
+API as its naming reference, so the canonical `write`, `write_registers` and
+`now_ms` names resolve to `modbus_write`, `modbus_write_multi` and `millis`.
+`host.emit` likewise
 reads `W` and `SoC_nom_fract` when `w` and `soc` are absent; when both are
 present the lowercase key wins. Both spellings are correct — prefer the
 canonical one in a new driver.
@@ -56,8 +57,10 @@ device write that never landed would otherwise report success.
 
 ## Capability grants
 
-A YAML driver entry grants only what the file needs. The keys are `modbus`,
-`mqtt`, `serial`, `http`, `websocket` and `tcp`:
+A YAML driver entry grants only what the file needs. The resource keys are
+`modbus`, `mqtt`, `serial`, `http`, `websocket` and `tcp`. A driver that needs
+no external I/O can use `standalone: true` instead; `standalone` is a boolean,
+not a resource block:
 
 ```yaml
 drivers:
@@ -69,6 +72,16 @@ drivers:
         host: 192.168.1.20
         port: 502
         unit_id: 1
+```
+
+For a driver with no external I/O, use:
+
+```yaml
+drivers:
+  - name: clock
+    lua: drivers/clock.lua
+    capabilities:
+      standalone: true
 ```
 
 Calls without a granted capability return an error rather than reaching the
