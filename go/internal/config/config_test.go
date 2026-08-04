@@ -893,21 +893,31 @@ func TestStripLeadingDotDot(t *testing.T) {
 	}
 }
 
+func testAbsolutePath(p string) string {
+	got, err := filepath.Abs(filepath.FromSlash(p))
+	if err != nil {
+		panic(err)
+	}
+	return got
+}
+
 func TestResolveDriverPaths(t *testing.T) {
-	baseDir := "/etc/ftw"
+	baseDir := testAbsolutePath("/etc/ftw")
+	absin := testAbsolutePath("/etc/ftw/drivers/b.lua")
+	absout := testAbsolutePath("/opt/drivers/c.lua")
 	c := &Config{Drivers: []Driver{
 		{Name: "rel", Lua: "drivers/a.lua"},
-		{Name: "absin", Lua: "/etc/ftw/drivers/b.lua"},
-		{Name: "absout", Lua: "/opt/drivers/c.lua"},
+		{Name: "absin", Lua: absin},
+		{Name: "absout", Lua: absout},
 		{Name: "escape", Lua: "../../secrets/d.lua"},
 		{Name: "empty"},
 	}}
 	c.ResolveDriverPaths(baseDir)
 	want := map[string]string{
-		"rel":    "/etc/ftw/drivers/a.lua", // joined with baseDir
-		"absin":  "/etc/ftw/drivers/b.lua", // already absolute, untouched
-		"absout": "/opt/drivers/c.lua",     // absolute outside baseDir, untouched
-		"escape": "/etc/ftw/secrets/d.lua", // leading "../" stripped, then joined
+		"rel":    filepath.Join(baseDir, "drivers", "a.lua"), // joined with baseDir
+		"absin":  absin,                                      // already absolute, untouched
+		"absout": absout,                                     // absolute outside baseDir, untouched
+		"escape": filepath.Join(baseDir, "secrets", "d.lua"), // leading "../" stripped, then joined
 		"empty":  "",
 	}
 	for _, d := range c.Drivers {
@@ -918,11 +928,13 @@ func TestResolveDriverPaths(t *testing.T) {
 }
 
 func TestUnresolveDriverPathsRoundtrip(t *testing.T) {
-	baseDir := "/etc/ftw"
+	baseDir := testAbsolutePath("/etc/ftw")
+	absin := testAbsolutePath("/etc/ftw/drivers/b.lua")
+	absout := testAbsolutePath("/opt/drivers/c.lua")
 	original := []Driver{
 		{Name: "rel", Lua: "drivers/a.lua"},
-		{Name: "absin", Lua: "/etc/ftw/drivers/b.lua"}, // absolute but inside baseDir
-		{Name: "absout", Lua: "/opt/drivers/c.lua"},    // absolute outside baseDir — must stay absolute
+		{Name: "absin", Lua: absin},   // absolute but inside baseDir
+		{Name: "absout", Lua: absout}, // absolute outside baseDir — must stay absolute
 		{Name: "empty"},
 	}
 	c := &Config{Drivers: append([]Driver(nil), original...)}
@@ -937,14 +949,14 @@ func TestUnresolveDriverPathsRoundtrip(t *testing.T) {
 	for _, d := range c.Drivers {
 		got[d.Name] = d.Lua
 	}
-	if got["rel"] != "drivers/a.lua" {
-		t.Errorf("rel: got %q, want drivers/a.lua", got["rel"])
+	if got["rel"] != filepath.Join("drivers", "a.lua") {
+		t.Errorf("rel: got %q, want %s", got["rel"], filepath.Join("drivers", "a.lua"))
 	}
-	if got["absin"] != "drivers/b.lua" {
-		t.Errorf("absin: got %q, want drivers/b.lua", got["absin"])
+	if got["absin"] != filepath.Join("drivers", "b.lua") {
+		t.Errorf("absin: got %q, want %s", got["absin"], filepath.Join("drivers", "b.lua"))
 	}
-	if got["absout"] != "/opt/drivers/c.lua" {
-		t.Errorf("absout: got %q, want /opt/drivers/c.lua (must remain absolute)", got["absout"])
+	if got["absout"] != absout {
+		t.Errorf("absout: got %q, want %s (must remain absolute)", got["absout"], absout)
 	}
 	if got["empty"] != "" {
 		t.Errorf("empty: got %q, want empty string", got["empty"])
@@ -954,9 +966,9 @@ func TestUnresolveDriverPathsRoundtrip(t *testing.T) {
 	// Resolve — the UI save/load cycle relies on this being a fixed point.
 	c.ResolveDriverPaths(baseDir)
 	want := map[string]string{
-		"rel":    "/etc/ftw/drivers/a.lua",
-		"absin":  "/etc/ftw/drivers/b.lua",
-		"absout": "/opt/drivers/c.lua",
+		"rel":    filepath.Join(baseDir, "drivers", "a.lua"),
+		"absin":  absin,
+		"absout": absout,
 		"empty":  "",
 	}
 	for _, d := range c.Drivers {

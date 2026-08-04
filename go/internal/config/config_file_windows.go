@@ -5,6 +5,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -19,7 +20,11 @@ func createConfigTemp(path string, _ os.FileMode) (*os.File, error) {
 	if err != nil {
 		return nil, fmt.Errorf("build private config security descriptor: %w", err)
 	}
-	pathPtr, err := windows.UTF16PtrFromString(path)
+	openPath, err := normalizeWindowsConfigPath(path)
+	if err != nil {
+		return nil, fmt.Errorf("normalize config temp path: %w", err)
+	}
+	pathPtr, err := windows.UTF16PtrFromString(openPath)
 	if err != nil {
 		return nil, err
 	}
@@ -33,7 +38,7 @@ func createConfigTemp(path string, _ os.FileMode) (*os.File, error) {
 		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
 		sa,
 		windows.CREATE_NEW,
-		windows.FILE_ATTRIBUTE_NORMAL,
+		windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT,
 		0,
 	)
 	if err != nil {
@@ -45,6 +50,85 @@ func createConfigTemp(path string, _ os.FileMode) (*os.File, error) {
 		return nil, fmt.Errorf("wrap config temp handle")
 	}
 	return f, nil
+}
+
+const windowsLongPathThreshold = 248
+
+// normalizeWindowsConfigPath follows the long-path rule used by the Go
+// standard library. Short and relative paths stay unchanged. A long path is
+// first made absolute, then gets the extended prefix needed by CreateFile;
+// UNC paths use the required \\?\UNC form.
+func normalizeWindowsConfigPath(path string) (string, error) {
+	if isExtendedWindowsPath(path) {
+		return path, nil
+	}
+	pathLength := len(path)
+	if !filepath.IsAbs(path) {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return "", err
+		}
+		pathLength += len(cwd) + 1
+	}
+	if pathLength < windowsLongPathThreshold {
+		return path, nil
+	}
+	fullPath, err := fullWindowsPath(path)
+	if err != nil {
+		return "", err
+	}
+	if isExtendedWindowsPath(fullPath) || isWindowsDevicePath(fullPath) {
+		return fullPath, nil
+	}
+	if isWindowsUNCPath(fullPath) {
+		return `\\?\UNC\` + fullPath[2:], nil
+	}
+	return `\\?\` + fullPath, nil
+}
+
+func fullWindowsPath(path string) (string, error) {
+	pathPtr, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return "", err
+	}
+	size := uint32(len(path) + 1)
+	if size < 256 {
+		size = 256
+	}
+	for {
+		buf := make([]uint16, size)
+		n, err := windows.GetFullPathName(pathPtr, size, &buf[0], nil)
+		if err != nil {
+			return "", err
+		}
+		if n == 0 {
+			return "", fmt.Errorf("GetFullPathName returned an empty path")
+		}
+		if n < size {
+			return windows.UTF16ToString(buf[:n]), nil
+		}
+		size = n + 1
+	}
+}
+
+func isExtendedWindowsPath(path string) bool {
+	if len(path) < 4 {
+		return false
+	}
+	return path[:4] == `\??\` ||
+		(isWindowsSeparator(path[0]) && isWindowsSeparator(path[1]) && path[2] == '?' && isWindowsSeparator(path[3]))
+}
+
+func isWindowsUNCPath(path string) bool {
+	return len(path) >= 2 && isWindowsSeparator(path[0]) && isWindowsSeparator(path[1])
+}
+
+func isWindowsDevicePath(path string) bool {
+	return len(path) >= 4 && isWindowsUNCPath(path) && path[2] == '.' && isWindowsSeparator(path[3])
+}
+
+func isWindowsSeparator(c byte) bool {
+	return c == '\\' || c == '/'
 }
 
 func ownerOnlyConfigSecurityDescriptor() (*windows.SECURITY_DESCRIPTOR, error) {
