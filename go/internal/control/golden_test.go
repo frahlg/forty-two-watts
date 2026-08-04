@@ -2,10 +2,11 @@ package control
 
 // Golden replay of ComputeDispatch.
 //
-// testdata/golden/ holds 435 recorded dispatch ticks: seven families covering
+// testdata/golden/ holds 590 recorded dispatch ticks: eight families covering
 // the reactive modes, all four planner modes, fuse pressure in both
-// directions, degraded siblings, EV and battery-boost reserves, and the
-// incident scenarios that forecast_scenarios_test.go already names. Each
+// directions, degraded siblings, EV and battery-boost reserves, the slew
+// limiter at rates a site actually runs, and the incident scenarios that
+// forecast_scenarios_test.go already names. Each
 // record stores the inputs to one ComputeDispatch call — telemetry, State,
 // slot directive, driver capacities, fuse ceiling — next to the per-driver
 // targets and clamp attributions that call returned. This test rebuilds each
@@ -60,7 +61,28 @@ const (
 
 	// goldenExpectedRecords guards against a half-written re-recording
 	// silently shrinking the net.
-	goldenExpectedRecords = 435
+	goldenExpectedRecords = 590
+
+	// goldenSlewBindingMarginW is how far a record's targets have to move
+	// when the slew limiter is switched off before that record counts as
+	// one where the limiter genuinely bound. Small enough to catch a
+	// tightly-anchored tick, large enough that float noise cannot qualify.
+	goldenSlewBindingMarginW = 50
+
+	// goldenMinSlewBindingRecords is the floor on how many such records the
+	// corpus holds. The corpus that shipped in #790 had 391 of 435 records
+	// running at SlewRateW 10 kW or 100 kW — the limiter was switched off
+	// in all but name, and none of its interactions were covered. This
+	// number is the tripwire for that happening again; it sits well under
+	// what the slew_limiter family records today, so ordinary drift in
+	// dispatch does not trip it and a lost family does.
+	goldenMinSlewBindingRecords = 60
+
+	// goldenSlewRealisticRateW is the loosest rate that still counts as
+	// production-realistic: control.NewState defaults to 500 W and
+	// config.Defaults to 3000 W, so anything at or under 3000 W is a rate
+	// a site actually runs.
+	goldenSlewRealisticRateW = 3000
 
 	// goldenMaxReported caps how many changed records get a full diff, so a
 	// change that moves everything still produces readable output.
@@ -77,6 +99,7 @@ var goldenFamilyNames = []string{
 	"seeded_fuse",
 	"seeded_siblings",
 	"seeded_ev_boost",
+	"slew_limiter",
 }
 
 // readGoldenCorpus loads every family from dir and returns the records in
@@ -209,6 +232,8 @@ func assertGoldenCoverage(t *testing.T, all []goldenRecord, byID map[string]gold
 			sf.ClampAttributions, sf.PerDriverTargets)
 	}
 
+	assertGoldenSlewCoverage(t, all, byID)
+
 	// Generic scans across the whole corpus.
 	var nFuseSaturated, nHoldLatched, nPerPhase, nStale, nBlocked, nEmpty int
 	for _, r := range all {
@@ -239,6 +264,160 @@ func assertGoldenCoverage(t *testing.T, all []goldenRecord, byID map[string]gold
 	if nFuseSaturated == 0 || nHoldLatched == 0 || nPerPhase == 0 || nStale == 0 {
 		t.Error("coverage gap: one of the generic families never fired its clamp")
 	}
+}
+
+// assertGoldenSlewCoverage holds the corpus to the slew limiter.
+//
+// The limiter is the last stage in dispatch that can raise a target's
+// magnitude: everything after it shrinks toward zero. It also anchors on the
+// battery's measured output rather than the previous command, so it is the one
+// clamp whose answer depends on what the hardware is doing this second. A
+// corpus that runs it at 100 kW is a corpus that never sees it.
+//
+// The records named here are the shapes that must not quietly leave the
+// corpus. Where the assertion states an outcome, that outcome is a safety
+// invariant somebody would want back if it broke. Where it only states that
+// the shape is present, dispatch's behaviour on that shape is a known bug and
+// the record exists to make the fix visible — see the family's doc comment in
+// golden_dump_test.go.
+func assertGoldenSlewCoverage(t *testing.T, all []goldenRecord, byID map[string]goldenRecord) {
+	t.Helper()
+
+	// A fuse overflow cannot wait for the ramp: forceFuseDischarge runs
+	// after the limiter for that reason. Hold the ordering — the commanded
+	// discharge is several slew steps away from where the battery is.
+	if fr, ok := byID["slew/fuse_relief_beats_smoothing_500"]; !ok {
+		t.Error("missing slew/fuse_relief_beats_smoothing_500")
+	} else {
+		move := math.Abs(sumGoldenTargets(fr) - goldenLiveBatteryW(fr))
+		if sumGoldenTargets(fr) >= 0 || move <= 2*fr.Inputs.State.SlewRateW {
+			t.Errorf("record no longer shows fuse relief out-ranking the ramp: target sum %.0f W is %.0f W "+
+				"from the live %.0f W anchor, which is inside two %.0f W slew steps",
+				sumGoldenTargets(fr), move, goldenLiveBatteryW(fr), fr.Inputs.State.SlewRateW)
+		}
+	}
+
+	// planner_self planned an export this slot. The snap-to-zero carve-out
+	// in the slew loop is what stops the limiter walking a charging battery
+	// back into that surplus one step at a time.
+	if cz, ok := byID["slew/carveout_export_surplus_gate_snaps_to_zero"]; !ok {
+		t.Error("missing slew/carveout_export_surplus_gate_snaps_to_zero")
+	} else if math.Abs(sumGoldenTargets(cz)) > 1 {
+		t.Errorf("snap-to-zero carve-out not exercised: target sum %.0f W from a live %.0f W anchor",
+			sumGoldenTargets(cz), goldenLiveBatteryW(cz))
+	}
+
+	// The discharge side of the same problem IS floored after the limiter,
+	// by floorNegativeTargets. This record is the reference the charge-side
+	// records below are compared against.
+	if nd, ok := byID["slew/no_self_discharge_charge_slot_live_discharging"]; !ok {
+		t.Error("missing slew/no_self_discharge_charge_slot_live_discharging")
+	} else if sumGoldenTargets(nd) < -1 {
+		t.Errorf("noSelfDischarge floor not exercised: target sum %.0f W on a charge slot",
+			sumGoldenTargets(nd))
+	}
+
+	// The charge side is not floored. These records hold the shape — a
+	// charge block armed, a battery live on the charge side, and a rate at
+	// which one step does not cover the anchor — without asserting the
+	// watts, which are today's bug and tomorrow's fix.
+	for _, id := range []string{
+		"slew/bug_no_self_charge_idle_slot_leak_500",
+		"slew/bug_no_self_charge_stale_plan_leak",
+		"slew/blocked_sibling_slew_reopens_parked_charge",
+	} {
+		r, ok := byID[id]
+		if !ok {
+			t.Errorf("missing %s — it is the corpus's record of the slew charge leak", id)
+			continue
+		}
+		live := goldenLiveBatteryW(r)
+		if live <= r.Inputs.State.SlewRateW {
+			t.Errorf("%s no longer exercises the leak: live battery %.0f W is within one %.0f W step, so the limiter reaches 0 W anyway",
+				id, live, r.Inputs.State.SlewRateW)
+		}
+	}
+
+	// The corpus as a whole: how many records does the limiter actually
+	// change the answer on, and does it bind at a rate a site would run.
+	var binding, bindingAtRealisticRate int
+	var largest float64
+	var largestID string
+	for _, r := range all {
+		effect := goldenSlewEffectW(r)
+		if effect <= goldenSlewBindingMarginW {
+			continue
+		}
+		binding++
+		if r.Inputs.State.SlewRateW <= goldenSlewRealisticRateW {
+			bindingAtRealisticRate++
+		}
+		if effect > largest {
+			largest, largestID = effect, r.ScenarioID
+		}
+	}
+	t.Logf("slew coverage: %d records bind (>%0.f W), %d of them at a production-realistic rate (<= %.0f W/tick); largest effect %.0f W on %s",
+		binding, float64(goldenSlewBindingMarginW), bindingAtRealisticRate,
+		float64(goldenSlewRealisticRateW), largest, largestID)
+	if binding < goldenMinSlewBindingRecords {
+		t.Errorf("coverage gap: only %d records where the slew limiter binds by more than %.0f W, want at least %d. "+
+			"A corpus recorded at unreachable slew rates cannot see the limiter at all — re-record the slew_limiter family.",
+			binding, float64(goldenSlewBindingMarginW), goldenMinSlewBindingRecords)
+	}
+	if bindingAtRealisticRate < goldenMinSlewBindingRecords {
+		t.Errorf("coverage gap: only %d binding records run at <= %.0f W/tick; the rest bind only at rates no site configures",
+			bindingAtRealisticRate, float64(goldenSlewRealisticRateW))
+	}
+}
+
+// goldenSlewEffectW replays a record twice — as recorded, and with the slew
+// limiter opted out — and returns the largest per-driver difference in watts.
+//
+// It is measured rather than stored because a record holds only the final
+// targets, and by then the limiter's contribution is indistinguishable from
+// every other clamp's. SlewEnabled=false skips exactly the ramp clamp and
+// nothing else (not the snap-to-zero carve-out above it, not the re-clamp
+// below it), so the difference between the two runs is the limiter's effect on
+// the answer that reached the hardware.
+func goldenSlewEffectW(r goldenRecord) float64 {
+	if !r.Inputs.State.SlewEnabled {
+		return 0
+	}
+	on := runGoldenScenario(goldenScenario{ID: r.ScenarioID, Seed: r.Seed, Inputs: r.Inputs})
+	off := r.Inputs
+	off.State.SlewEnabled = false
+	unslewed := runGoldenScenario(goldenScenario{ID: r.ScenarioID, Seed: r.Seed, Inputs: off})
+
+	byDriver := map[string]float64{}
+	for _, tg := range on.PerDriverTargets {
+		byDriver[tg.Driver] += tg.TargetW
+	}
+	for _, tg := range unslewed.PerDriverTargets {
+		byDriver[tg.Driver] -= tg.TargetW
+	}
+	var largest float64
+	for _, d := range byDriver {
+		if math.Abs(d) > largest {
+			largest = math.Abs(d)
+		}
+	}
+	return largest
+}
+
+// goldenLiveBatteryW sums the measured output of the batteries the record
+// dispatched — the anchor the slew limiter ramps from.
+func goldenLiveBatteryW(r goldenRecord) float64 {
+	dispatched := map[string]bool{}
+	for _, tg := range r.PerDriverTargets {
+		dispatched[tg.Driver] = true
+	}
+	var sum float64
+	for _, b := range r.Inputs.Batteries {
+		if dispatched[b.Driver] {
+			sum += b.CurrentW
+		}
+	}
+	return sum
 }
 
 func sumGoldenTargets(r goldenRecord) float64 {

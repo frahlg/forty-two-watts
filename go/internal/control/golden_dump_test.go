@@ -826,6 +826,541 @@ func targetedScenarios() []goldenScenario {
 	return out
 }
 
+// ---- family: slew limiter -------------------------------------------------
+//
+// The other six families run at SlewRateW 10 kW or 100 kW, which is another
+// way of saying they run with the slew limiter switched off: no realistic
+// per-tick move is large enough to reach the bound. This family runs at rates
+// a site actually uses — 500 W (control.NewState's default), 3000 W (the
+// config default a site inherits when it sets no slew_rate_w), and the
+// 250–2000 W band operators pick in between — so the limiter binds and the
+// corpus can see it.
+//
+// It matters because the slew limiter is the last stage that can INVENT
+// power. Every other clamp shrinks a target toward zero; slew re-anchors on
+// the battery's measured output (SmoothedW) and walks one step from there, so
+// a target of 0 W becomes ±SlewRateW whenever the battery is not already
+// still. Nothing downstream floors the charge side of that: applyFuseGuard
+// only shrinks, floorNegativeTargets is discharge-only, and planSignIntent
+// returns 0 for an idle slot.
+//
+// KNOWN BUG RECORDED HERE, NOT FIXED HERE. The slew/bug_* and
+// slew/blocked_sibling_* records capture dispatch commanding charge on a tick
+// that forbids charging:
+//
+//	passive_arbitrage idle slot, meter -2000 W, battery live +2000 W,
+//	SlewRateW 500 -> noSelfCharge pins the fleet total to 0 W, the slew
+//	limiter re-anchors on +2000 W and commands +1500 W of charging.
+//
+// The snap-to-zero carve-out in the slew loop covers plannerSelfExportSurplus
+// and the zero-power manual hold; it does not cover the stale-plan block or
+// the arbitrage-family live-export gate, so those two leak. The corpus records
+// behaviour as of this commit, not desired behaviour: when the fix lands,
+// these records move, and the diff is the fix stated in watts. That is the
+// point of recording them.
+func slewScenarios() []goldenScenario {
+	mk := func(id string, in goldenInputs) goldenScenario {
+		return goldenScenario{ID: "slew/" + id, Inputs: in}
+	}
+	// react builds a reactive-mode state at a realistic slew rate.
+	react := func(mode Mode, slewW float64) goldenStateInputs {
+		s := defaultGoldenState(mode)
+		s.SlewRateW = slewW
+		return s
+	}
+	// plan builds an energy-path planner state at a realistic slew rate.
+	plan := func(mode Mode, slewW float64) goldenStateInputs {
+		s := react(mode, slewW)
+		s.GridToleranceW = 60
+		s.UseEnergyDispatch = true
+		return s
+	}
+	// idleSlot is the arbitrage-family idle slot: the DP deliberately chose
+	// to move no energy, which is what arms the live-export charge gate.
+	idleSlot := func(strategy string) *goldenSlot { return slotFor(0, strategy) }
+	// exportSurplusSlot arms plannerSelfExportSurplusGate: no battery energy
+	// planned and a planned export baseline.
+	exportSurplusSlot := func() *goldenSlot {
+		s := slotFor(0, "self_consumption")
+		s.PlannedGridW = -2000
+		s.HasPlannedGridW = true
+		return s
+	}
+	var out []goldenScenario
+
+	// ---- anchoring: measured output far from the commanded target --------
+	//
+	// The whole point of anchoring on SmoothedW rather than the previous
+	// command. One record per rate per direction, so a change to the bound
+	// itself shows up as a clean ladder across seven records.
+	for _, rate := range []float64{250, 500, 1000, 1500, 3000} {
+		out = append(out, mk(fmt.Sprintf("anchor_charging_wants_discharge_%.0f", rate), goldenInputs{
+			FuseMaxW: 11040, GridW: 4000,
+			Batteries: []goldenBattery{gb("ferroamp", 15200, 3000, 0.65)},
+			State:     react(ModeSelfConsumption, rate),
+		}))
+		out = append(out, mk(fmt.Sprintf("anchor_discharging_wants_charge_%.0f", rate), goldenInputs{
+			FuseMaxW: 11040, GridW: -4000,
+			PV:        []goldenPV{{Driver: "pv-0", PowerW: -7000}},
+			Batteries: []goldenBattery{gb("ferroamp", 15200, -3000, 0.45)},
+			State:     react(ModeSelfConsumption, rate),
+		}))
+	}
+	// Same two shapes with the limiter opted out: the control pair that says
+	// what the anchoring records would have been without smoothing.
+	offC := react(ModeSelfConsumption, 500)
+	offC.SlewEnabled = false
+	out = append(out, mk("anchor_charging_wants_discharge_slew_disabled", goldenInputs{
+		FuseMaxW: 11040, GridW: 4000,
+		Batteries: []goldenBattery{gb("ferroamp", 15200, 3000, 0.65)},
+		State:     offC,
+	}))
+	offD := react(ModeSelfConsumption, 500)
+	offD.SlewEnabled = false
+	out = append(out, mk("anchor_discharging_wants_charge_slew_disabled", goldenInputs{
+		FuseMaxW: 11040, GridW: -4000,
+		PV:        []goldenPV{{Driver: "pv-0", PowerW: -7000}},
+		Batteries: []goldenBattery{gb("ferroamp", 15200, -3000, 0.45)},
+		State:     offD,
+	}))
+
+	// ---- direction reversal across zero ----------------------------------
+	out = append(out, mk("reversal_charge_to_discharge_crosses_zero", goldenInputs{
+		FuseMaxW: 11040, GridW: 3000,
+		Batteries: []goldenBattery{gb("ferroamp", 15200, 200, 0.70)},
+		State:     react(ModeSelfConsumption, 500),
+	}))
+	out = append(out, mk("reversal_discharge_to_charge_crosses_zero", goldenInputs{
+		FuseMaxW: 11040, GridW: -3000,
+		PV:        []goldenPV{{Driver: "pv-0", PowerW: -5000}},
+		Batteries: []goldenBattery{gb("ferroamp", 15200, -200, 0.40)},
+		State:     react(ModeSelfConsumption, 500),
+	}))
+	// Negative control: the move is small enough that the limiter never
+	// binds. If a change makes THIS record move, the bound moved.
+	out = append(out, mk("reversal_inside_one_step_unbound", goldenInputs{
+		FuseMaxW: 11040, GridW: 400,
+		Batteries: []goldenBattery{gb("ferroamp", 15200, 300, 0.60)},
+		State:     react(ModeSelfConsumption, 500),
+	}))
+	out = append(out, mk("reversal_planner_discharge_slot_from_charging", goldenInputs{
+		FuseMaxW: 11040, GridW: 500,
+		Batteries: []goldenBattery{gb("ferroamp", 15200, 2500, 0.60)},
+		State:     plan(ModePlannerArbitrage, 500),
+		Slot:      slotFor(-2000, "arbitrage"),
+	}))
+	out = append(out, mk("reversal_planner_charge_slot_from_discharging", goldenInputs{
+		FuseMaxW: 11040, GridW: 500,
+		Batteries: []goldenBattery{gb("ferroamp", 15200, -2500, 0.40)},
+		State:     plan(ModePlannerCheap, 500),
+		Slot:      slotFor(2000, "cheap"),
+	}))
+
+	// ---- the bug: a closed charge block re-opened by slew ----------------
+	//
+	// noSelfCharge pins the fleet total to 0 W; the limiter then walks
+	// SlewRateW back toward the battery's live charging power and commands
+	// charge anyway. Recorded at three rates because the leak is exactly
+	// min(SlewRateW, live charge) and vanishes once one step covers the
+	// whole anchor.
+	for _, rate := range []float64{250, 500, 1500} {
+		out = append(out, mk(fmt.Sprintf("bug_no_self_charge_idle_slot_leak_%.0f", rate), goldenInputs{
+			FuseMaxW: 11040, GridW: -2000,
+			Batteries: []goldenBattery{gb("ferroamp", 15200, 2000, 0.55)},
+			State:     plan(ModePlannerPassiveArbitrage, rate),
+			Slot:      idleSlot("passive_arbitrage"),
+		}))
+	}
+	// One step covers the whole anchor: total lands on 0 W and no charge
+	// leaks. The same gate, the same battery, a different rate.
+	out = append(out, mk("no_self_charge_idle_slot_slew_3000_reaches_zero", goldenInputs{
+		FuseMaxW: 11040, GridW: -2000,
+		Batteries: []goldenBattery{gb("ferroamp", 15200, 2000, 0.55)},
+		State:     plan(ModePlannerPassiveArbitrage, 3000),
+		Slot:      idleSlot("passive_arbitrage"),
+	}))
+	// Live PV telemetry present: the operator-visible shape of the same
+	// tick, where the surplus the gate is protecting is on the meter.
+	out = append(out, mk("bug_no_self_charge_idle_slot_leak_with_pv", goldenInputs{
+		FuseMaxW: 11040, GridW: -2500,
+		PV:        []goldenPV{{Driver: "pv-0", PowerW: -5000}},
+		Batteries: []goldenBattery{gb("ferroamp", 15200, 2500, 0.60)},
+		State:     plan(ModePlannerPassiveArbitrage, 500),
+		Slot:      idleSlot("passive_arbitrage"),
+	}))
+	// planner_arbitrage idle slot arms the same gate.
+	out = append(out, mk("bug_no_self_charge_arbitrage_idle_slot_leak", goldenInputs{
+		FuseMaxW: 11040, GridW: -2000,
+		Batteries: []goldenBattery{gb("ferroamp", 15200, 2000, 0.50)},
+		State:     plan(ModePlannerArbitrage, 500),
+		Slot:      idleSlot("arbitrage"),
+	}))
+	// Two live-charging batteries: the leak is per driver, so it scales
+	// with fleet size rather than being shared out of one budget.
+	out = append(out, mk("bug_no_self_charge_idle_slot_leak_two_batteries", goldenInputs{
+		FuseMaxW: 11040, GridW: -3500,
+		Batteries: []goldenBattery{
+			gb("ferroamp", 15200, 2000, 0.55),
+			gb("sungrow", 9600, 1500, 0.50),
+		},
+		State: plan(ModePlannerPassiveArbitrage, 500),
+		Slot:  idleSlot("passive_arbitrage"),
+	}))
+	// planner_self with no fresh plan: the stale-plan charge block, which
+	// the snap-to-zero carve-out does not cover either.
+	out = append(out, mk("bug_no_self_charge_stale_plan_leak", goldenInputs{
+		FuseMaxW: 11040, GridW: -1500,
+		PV:        []goldenPV{{Driver: "pv-0", PowerW: -4000}},
+		Batteries: []goldenBattery{gb("ferroamp", 15200, 2500, 0.60)},
+		State:     plan(ModePlannerSelf, 500),
+		Slot:      staleSlot(),
+	}))
+	// A discharge-blocked battery is parked at 0 W by the distributor and
+	// then walked back toward its live discharge by the same mechanism.
+	blk := gb("ferroamp", 15200, -2000, 0.50)
+	blk.DischargeBlocked = true
+	out = append(out, mk("blocked_sibling_slew_reopens_parked_target", goldenInputs{
+		FuseMaxW: 11040, GridW: 2500,
+		Batteries: []goldenBattery{blk, gb("sungrow", 9600, 0, 0.60)},
+		State:     react(ModeSelfConsumption, 500),
+	}))
+	cblk := gb("ferroamp", 15200, 2000, 0.50)
+	cblk.ChargeBlocked = true
+	out = append(out, mk("blocked_sibling_slew_reopens_parked_charge", goldenInputs{
+		FuseMaxW: 11040, GridW: -2500,
+		PV:        []goldenPV{{Driver: "pv-0", PowerW: -5000}},
+		Batteries: []goldenBattery{cblk, gb("sungrow", 9600, 0, 0.40)},
+		State:     react(ModeSelfConsumption, 500),
+	}))
+
+	// ---- snap-to-zero carve-out: where it applies ------------------------
+	//
+	// plannerSelfExportSurplusGate is one of the two gates the carve-out
+	// covers. Same battery, same rate, same pinned total as the bug records
+	// above — and the target lands on 0 W instead of leaking.
+	out = append(out, mk("carveout_export_surplus_gate_snaps_to_zero", goldenInputs{
+		FuseMaxW: 11040, GridW: -1500,
+		PV:        []goldenPV{{Driver: "pv-0", PowerW: -4000}},
+		Batteries: []goldenBattery{gb("ferroamp", 15200, 2500, 0.60)},
+		State:     plan(ModePlannerSelf, 500),
+		Slot:      exportSurplusSlot(),
+	}))
+	// The carve-out is direction-blind: a live discharge is snapped too.
+	out = append(out, mk("carveout_export_surplus_gate_snaps_discharge", goldenInputs{
+		FuseMaxW: 11040, GridW: -4000,
+		PV:        []goldenPV{{Driver: "pv-0", PowerW: -6000}},
+		Batteries: []goldenBattery{gb("ferroamp", 15200, -800, 0.70)},
+		State:     plan(ModePlannerSelf, 500),
+		Slot:      exportSurplusSlot(),
+	}))
+	// ...and where it does not: identical tick, stale plan instead of a
+	// planned export, so the carve-out predicate misses the gate and the
+	// limiter walks its step away from the 0 W the block asked for.
+	out = append(out, mk("carveout_absent_stale_plan_walks_a_step", goldenInputs{
+		FuseMaxW: 11040, GridW: -4000,
+		PV:        []goldenPV{{Driver: "pv-0", PowerW: -6000}},
+		Batteries: []goldenBattery{gb("ferroamp", 15200, -800, 0.70)},
+		State:     plan(ModePlannerSelf, 500),
+		Slot:      staleSlot(),
+	}))
+
+	// ---- the other side of the gate: discharge IS floored downstream -----
+	//
+	// floorNegativeTargets runs for noSelfDischarge, so the mirror-image
+	// leak on the discharge side is caught after the limiter. Recorded next
+	// to the charge-side records above: the asymmetry is the bug.
+	out = append(out, mk("no_self_discharge_charge_slot_live_discharging", goldenInputs{
+		FuseMaxW: 11040, GridW: 500,
+		Batteries: []goldenBattery{gb("ferroamp", 15200, -2000, 0.40)},
+		State:     plan(ModePlannerCheap, 500),
+		Slot:      slotFor(2000, "cheap"),
+	}))
+	out = append(out, mk("no_self_discharge_arbitrage_charge_slot_live_discharging", goldenInputs{
+		FuseMaxW: 11040, GridW: 500,
+		Batteries: []goldenBattery{gb("ferroamp", 15200, -2500, 0.35)},
+		State:     plan(ModePlannerArbitrage, 500),
+		Slot:      slotFor(2500, "arbitrage"),
+	}))
+
+	// ---- fuse pressure beats smoothing -----------------------------------
+	//
+	// forceFuseDischarge runs after the limiter for exactly this reason: a
+	// fuse overflow cannot wait for the ramp. These records hold that
+	// ordering — the commanded discharge is many slew steps deep.
+	for _, rate := range []float64{250, 500} {
+		out = append(out, mk(fmt.Sprintf("fuse_relief_beats_smoothing_%.0f", rate), goldenInputs{
+			FuseMaxW: 11040, GridW: 15000,
+			Batteries: []goldenBattery{gb("ferroamp", 15200, 2000, 0.70)},
+			State:     react(ModeSelfConsumption, rate),
+		}))
+	}
+	out = append(out, mk("fuse_relief_from_charging_anchor_planner", goldenInputs{
+		FuseMaxW: 11040, GridW: 15500,
+		Batteries: []goldenBattery{gb("ferroamp", 15200, 2500, 0.65)},
+		State:     plan(ModePlannerCheap, 500),
+		Slot:      slotFor(1500, "cheap"),
+	}))
+	// Over the fuse only because the battery is charging: the guard shrinks
+	// the post-slew target back under the ceiling, the forced discharge
+	// never has to fire, and the limiter is still in play upstream.
+	out = append(out, mk("fuse_guard_shrink_with_slew", goldenInputs{
+		FuseMaxW: 11040, GridW: 13000,
+		Batteries: []goldenBattery{gb("ferroamp", 15200, 4000, 0.60)},
+		State:     react(ModeSelfConsumption, 500),
+	}))
+	// Export side: there is no forced charge, only the guard shrinking the
+	// discharge — but it shrinks straight past the slew step, which is the
+	// same ordering stated in the other direction.
+	out = append(out, mk("fuse_export_ceiling_beats_smoothing", goldenInputs{
+		FuseMaxW: 11040, GridW: -15000,
+		PV:        []goldenPV{{Driver: "pv-0", PowerW: -16000}},
+		Batteries: []goldenBattery{gb("ferroamp", 15200, -2000, 0.50)},
+		State:     react(ModeSelfConsumption, 500),
+	}))
+	pp := react(ModeSelfConsumption, 500)
+	pp.SiteFuseAmps = 16
+	pp.SiteFuseVoltage = 230
+	pp.SiteFusePhases = 3
+	out = append(out, mk("per_phase_overage_with_slew", goldenInputs{
+		FuseMaxW: 11040, GridW: 1000,
+		MeterPhases: &goldenPhases{L1A: 20, L2A: 4, L3A: 5},
+		Batteries:   []goldenBattery{gb("ferroamp", 15200, 1500, 0.60)},
+		State:       pp,
+	}))
+	ev := react(ModeSelfConsumption, 500)
+	ev.EVChargingW = 6000
+	out = append(out, mk("ev_joint_allocator_with_slew", goldenInputs{
+		FuseMaxW: 11040, GridW: 9000,
+		Batteries: []goldenBattery{gb("ferroamp", 15200, 2000, 0.55)},
+		State:     ev,
+	}))
+	bb := react(ModeSelfConsumption, 500)
+	bb.BatteryBoostReserveSoC = 0.50
+	bb.BatteryBoostEVChargingW = 2000
+	out = append(out, mk("boost_reserve_floor_with_slew", goldenInputs{
+		FuseMaxW: 11040, GridW: 3000,
+		Batteries: []goldenBattery{gb("ferroamp", 15200, -1500, 0.45)},
+		State:     bb,
+	}))
+
+	// ---- post-slew re-clamp ----------------------------------------------
+	//
+	// The anchor is the battery's measured output, which can sit outside
+	// what we are allowed to command. The re-clamp after the limiter is
+	// what stops the slewed target inheriting that overshoot.
+	rcC := react(ModeSelfConsumption, 500)
+	rcCB := gb("ferroamp", 15200, 6000, 0.40)
+	rcCB.MaxChargeW = 3000
+	rcCB.MaxDischargeW = 3000
+	out = append(out, mk("reclamp_after_slew_driver_limit_charge", goldenInputs{
+		FuseMaxW: 11040, GridW: -6000,
+		PV:        []goldenPV{{Driver: "pv-0", PowerW: -12000}},
+		Batteries: []goldenBattery{rcCB},
+		State:     rcC,
+	}))
+	rcDB := gb("ferroamp", 15200, -6000, 0.60)
+	rcDB.MaxChargeW = 2500
+	rcDB.MaxDischargeW = 2500
+	out = append(out, mk("reclamp_after_slew_driver_limit_discharge", goldenInputs{
+		FuseMaxW: 11040, GridW: 6000,
+		Batteries: []goldenBattery{rcDB},
+		State:     react(ModeSelfConsumption, 500),
+	}))
+	// No DriverLimits: MaxCommandW is the cap the slewed target hits.
+	out = append(out, mk("reclamp_after_slew_max_command", goldenInputs{
+		FuseMaxW: 17250, GridW: -8000,
+		PV:        []goldenPV{{Driver: "pv-0", PowerW: -14000}},
+		Batteries: []goldenBattery{gb("ferroamp", 15200, 4900, 0.40)},
+		State:     react(ModeSelfConsumption, 500),
+	}))
+
+	// ---- fleets: the limiter is per driver, not per site -----------------
+	out = append(out, mk("two_batteries_one_anchored_far", goldenInputs{
+		FuseMaxW: 11040, GridW: 4000,
+		Batteries: []goldenBattery{
+			gb("ferroamp", 15200, 3000, 0.60),
+			gb("sungrow", 9600, 0, 0.60),
+		},
+		State: react(ModeSelfConsumption, 500),
+	}))
+	out = append(out, mk("three_batteries_mixed_anchors", goldenInputs{
+		FuseMaxW: 11040, GridW: 5000,
+		Batteries: []goldenBattery{
+			gb("ferroamp", 15200, 2500, 0.65),
+			gb("sungrow", 9600, -1500, 0.55),
+			gb("pixii", 10000, 0, 0.45),
+		},
+		State: react(ModeSelfConsumption, 500),
+	}))
+	offB := gb("sungrow", 9600, -2000, 0.60)
+	offB.Online = false
+	out = append(out, mk("offline_sibling_not_slewed", goldenInputs{
+		FuseMaxW: 11040, GridW: 3000,
+		Batteries: []goldenBattery{gb("ferroamp", 15200, 2000, 0.60), offB},
+		State:     react(ModeSelfConsumption, 500),
+	}))
+	pr := react(ModePriority, 500)
+	pr.PriorityOrder = []string{"sungrow", "ferroamp"}
+	out = append(out, mk("priority_split_with_slew", goldenInputs{
+		FuseMaxW: 11040, GridW: 4000,
+		Batteries: []goldenBattery{
+			gb("ferroamp", 15200, 2000, 0.60),
+			gb("sungrow", 9600, -1000, 0.60),
+		},
+		State: pr,
+	}))
+	wt := react(ModeWeighted, 500)
+	wt.Weights = map[string]float64{"ferroamp": 2, "sungrow": 1}
+	out = append(out, mk("weighted_split_with_slew", goldenInputs{
+		FuseMaxW: 11040, GridW: 4000,
+		Batteries: []goldenBattery{
+			gb("ferroamp", 15200, 2000, 0.60),
+			gb("sungrow", 9600, -1000, 0.60),
+		},
+		State: wt,
+	}))
+	ps := react(ModePeakShaving, 500)
+	ps.PeakLimitW = 3000
+	out = append(out, mk("peak_shaving_with_slew", goldenInputs{
+		FuseMaxW: 11040, GridW: 6000,
+		Batteries: []goldenBattery{gb("ferroamp", 15200, 1500, 0.60)},
+		State:     ps,
+	}))
+	gt := react(ModeSelfConsumption, 500)
+	gt.GridTargetW = -500
+	out = append(out, mk("grid_target_offset_with_slew", goldenInputs{
+		FuseMaxW: 11040, GridW: 2500,
+		Batteries: []goldenBattery{gb("ferroamp", 15200, 2000, 0.60)},
+		State:     gt,
+	}))
+
+	return append(out, slewSeeded()...)
+}
+
+// slewSeeded fills the family out with pseudo-random ticks at realistic slew
+// rates: the named records above are the shapes somebody thought of, these are
+// the combinations nobody did. Seeds are fixed, so the set is reproducible.
+func slewSeeded() []goldenScenario {
+	rates := []float64{250, 500, 750, 1000, 1500, 2000, 3000}
+	modes := []Mode{
+		ModeSelfConsumption, ModePeakShaving, ModePriority, ModeWeighted,
+		ModePlannerSelf, ModePlannerCheap, ModePlannerPassiveArbitrage, ModePlannerArbitrage,
+	}
+	strategies := map[Mode]string{
+		ModePlannerSelf:             "self_consumption",
+		ModePlannerCheap:            "cheap",
+		ModePlannerPassiveArbitrage: "passive_arbitrage",
+		ModePlannerArbitrage:        "arbitrage",
+	}
+	out := make([]goldenScenario, 0, 105)
+	for i := 0; i < 105; i++ {
+		seed := int64(6000 + i)
+		rng := rand.New(rand.NewSource(seed))
+		mode := modes[i%len(modes)]
+		n := 1 + rng.Intn(3)
+		bats := seededBatteries(rng, n, 0.10, 0.90)
+		// Put at least one battery well away from any plausible target, so
+		// the anchor and the target disagree by more than one step.
+		far := roundW(1500 + rng.Float64()*4000)
+		if rng.Float64() < 0.50 {
+			far = -far
+		}
+		bats[rng.Intn(len(bats))].CurrentW = far
+		for j := range bats {
+			if rng.Float64() < 0.25 {
+				limitVals := []float64{2000, 3000, 5000}
+				bats[j].MaxChargeW = limitVals[rng.Intn(len(limitVals))]
+				bats[j].MaxDischargeW = limitVals[rng.Intn(len(limitVals))]
+			}
+		}
+
+		st := defaultGoldenState(mode)
+		st.SlewRateW = rates[rng.Intn(len(rates))]
+		if rng.Float64() < 0.10 {
+			st.SlewEnabled = false
+		}
+		if rng.Float64() < 0.10 {
+			st.GridTargetW = roundW(rng.Float64()*1000 - 500)
+		}
+		switch mode {
+		case ModePeakShaving:
+			st.PeakLimitW = roundW(3000 + rng.Float64()*3000)
+		case ModePriority:
+			order := make([]string, len(bats))
+			for j, b := range bats {
+				order[j] = b.Driver
+			}
+			rng.Shuffle(len(order), func(a, b int) { order[a], order[b] = order[b], order[a] })
+			st.PriorityOrder = order
+		case ModeWeighted:
+			w := map[string]float64{}
+			for _, b := range bats {
+				w[b.Driver] = round1(0.5 + rng.Float64()*2.5)
+			}
+			st.Weights = w
+		}
+
+		// Fuse pressure on a quarter of the set: relief has to out-rank
+		// smoothing there, and the two stages only meet under load.
+		fuseMaxW := 11040.0
+		var gridW float64
+		switch {
+		case rng.Float64() < 0.25:
+			gridW = roundW(fuseMaxW*1.05 + rng.Float64()*fuseMaxW*0.4)
+			if rng.Float64() < 0.35 {
+				gridW = -gridW
+			}
+		default:
+			gridW = roundW(rng.Float64()*12000 - 6000)
+		}
+
+		in := goldenInputs{
+			FuseMaxW:  fuseMaxW,
+			GridW:     gridW,
+			Batteries: bats,
+			State:     st,
+		}
+		if gridW < 0 || rng.Float64() < 0.40 {
+			in.PV = []goldenPV{{Driver: "pv-0", PowerW: -roundW(1000 + rng.Float64()*8000)}}
+		}
+		if rng.Float64() < 0.15 {
+			in.State.EVChargingW = roundW(3000 + rng.Float64()*5000)
+		}
+		if mode.IsPlannerMode() {
+			in.State.GridToleranceW = 60
+			in.State.UseEnergyDispatch = true
+			if rng.Float64() < 0.12 {
+				in.Slot = staleSlot()
+			} else {
+				slot := &goldenSlot{
+					Present:    true,
+					Strategy:   strategies[mode],
+					ElapsedS:   roundW(60 + rng.Float64()*640),
+					RemainingS: roundW(200 + rng.Float64()*600),
+				}
+				switch r := rng.Float64(); {
+				case r < 0.35:
+					// Idle slot: the case that arms the charge blocks.
+					slot.BatteryEnergyWh = roundW(rng.Float64()*60 - 30)
+				case r < 0.65:
+					slot.BatteryEnergyWh = roundW(400 + rng.Float64()*2600)
+				default:
+					slot.BatteryEnergyWh = -roundW(400 + rng.Float64()*2600)
+				}
+				if rng.Float64() < 0.45 {
+					slot.HasPlannedGridW = true
+					slot.PlannedGridW = roundW(rng.Float64()*6000 - 3000)
+				}
+				in.Slot = slot
+			}
+		}
+		out = append(out, goldenScenario{
+			ID: fmt.Sprintf("slew/seeded_%03d_%s", i, mode), Seed: seed, Inputs: in,
+		})
+	}
+	return out
+}
+
 // ---- seeded families ------------------------------------------------------
 
 var goldenNames = []string{"ferroamp", "sungrow", "pixii"}
@@ -1283,6 +1818,7 @@ func TestGoldenDump(t *testing.T) {
 		"seeded_fuse":         seededFuse,
 		"seeded_siblings":     seededSiblings,
 		"seeded_ev_boost":     seededEVBoost,
+		"slew_limiter":        slewScenarios,
 	}
 	families := goldenFamilyNames
 	for _, name := range families {
