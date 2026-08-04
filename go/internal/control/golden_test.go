@@ -6,19 +6,19 @@ package control
 // the reactive modes, all four planner modes, fuse pressure in both
 // directions, degraded siblings, EV and battery-boost reserves, the slew
 // limiter at rates a site actually runs, and the incident scenarios that
-// forecast_scenarios_test.go already names. Each
-// record stores the inputs to one ComputeDispatch call — telemetry, State,
-// slot directive, driver capacities, fuse ceiling — next to the per-driver
-// targets and clamp attributions that call returned. This test rebuilds each
-// scenario, calls the real ComputeDispatch, and checks the answer still
-// matches.
+// forecast_scenarios_test.go already names. Each record stores the inputs to
+// one ComputeDispatch call — telemetry, State, slot directive, driver
+// capacities, fuse ceiling — next to the per-driver targets and clamp
+// attributions that call returned. This test rebuilds each scenario, calls
+// the real ComputeDispatch, and checks the answer still matches.
 //
 // What the corpus is NOT: a statement of what dispatch SHOULD do. It is what
-// dispatch DID do at commit c7fe6c98 (recorded in each file's ftw_commit),
-// clamps, quirks and all. Nothing here was reviewed as correct. Its value is
-// that it makes any change to dispatch visible and specific, which the unit
-// tests around it cannot: they pin the cases somebody thought to write down,
-// and dispatch is a long function whose paths interact.
+// dispatch DID do at the commit each file records in its ftw_commit — a
+// family recorded later carries a later one — clamps, quirks and all. Nothing
+// here was reviewed as correct. Its value is that it makes any change to
+// dispatch visible and specific, which the unit tests around it cannot: they
+// pin the cases somebody thought to write down, and dispatch is a long
+// function whose paths interact.
 //
 // So a diff is a question, not a verdict. When this test fails, it is telling
 // you which scenarios your change moved and by how many watts. Read them. If
