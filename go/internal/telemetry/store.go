@@ -182,7 +182,10 @@ func (h *DriverHealth) RecordError(err string) {
 	}
 }
 
-// SetOffline marks the driver offline (e.g. by watchdog).
+// SetOffline marks the driver offline. WatchdogScan is the only runtime
+// caller: staleness is the one condition that takes a driver offline, so
+// this is the single place that writes StatusOffline. Tests use it to put
+// a driver in that state directly.
 func (h *DriverHealth) SetOffline() {
 	h.Status = StatusOffline
 }
@@ -650,7 +653,7 @@ func (s *Store) WatchdogScan(timeout time.Duration) []WatchdogTransition {
 		stale := h.LastSuccess == nil || now.Sub(*h.LastSuccess) > eff
 		wasOnline := h.Status != StatusOffline
 		if stale && wasOnline {
-			h.Status = StatusOffline
+			h.SetOffline()
 			out = append(out, WatchdogTransition{Name: name, Online: false})
 		} else if !stale && !wasOnline {
 			h.Status = StatusOk
