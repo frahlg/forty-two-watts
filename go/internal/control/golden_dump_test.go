@@ -24,10 +24,9 @@ package control
 // Every record is one call to ComputeDispatch from a freshly-constructed
 // telemetry.Store and control.State (single-tick semantics: PI integral
 // starts at zero, PrevTargets empty, slot accumulator on its rollover
-// branch). Slot directives are anchored to time.Now() with fixed nominal
-// elapsed/remaining offsets, so energy-path magnitudes are deterministic
-// up to sub-millisecond clock jitter (< 0.01 % relative) — which is why the
-// replay compares with a tolerance rather than for equality.
+// branch). Slot directives use one captured scenario instant with fixed
+// nominal elapsed/remaining offsets. The dispatch clock uses that same instant
+// so a scheduler pause cannot change an energy-path target.
 
 import (
 	"encoding/json"
@@ -37,6 +36,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"testing"
 	"time"
@@ -203,6 +203,13 @@ func defaultGoldenState(mode Mode) goldenStateInputs {
 }
 
 func runGoldenScenario(sc goldenScenario) goldenRecord {
+	return runGoldenScenarioAt(sc, time.Now(), 0)
+}
+
+// runGoldenScenarioAt keeps the scenario clock separate from the runner's
+// wall clock. The optional delay models a scheduler pause after the slot
+// directive has been requested, which used to change energy-path targets.
+func runGoldenScenarioAt(sc goldenScenario, scenarioNow time.Time, slotDirectiveDelay time.Duration) goldenRecord {
 	store := telemetry.NewStore()
 
 	var meterData json.RawMessage
@@ -265,6 +272,7 @@ func runGoldenScenario(sc goldenScenario) goldenRecord {
 
 	si := sc.Inputs.State
 	st := NewState(si.GridTargetW, si.GridToleranceW, "meter")
+	st.clock = func() time.Time { return scenarioNow }
 	st.Mode = Mode(si.Mode)
 	st.SlewRateW = si.SlewRateW
 	st.SlewEnabled = si.SlewEnabled
@@ -297,7 +305,7 @@ func runGoldenScenario(sc goldenScenario) goldenRecord {
 		st.Weights = si.Weights
 	}
 	if si.HoldoffActive {
-		now := time.Now()
+		now := scenarioNow
 		st.LastDispatch = &now
 	}
 	if sc.Inputs.Slot != nil {
@@ -306,10 +314,12 @@ func runGoldenScenario(sc goldenScenario) goldenRecord {
 			if !slot.Present {
 				return SlotDirective{}, false
 			}
-			now := time.Now()
+			if slotDirectiveDelay > 0 {
+				time.Sleep(slotDirectiveDelay)
+			}
 			return SlotDirective{
-				SlotStart:              now.Add(-time.Duration(slot.ElapsedS * float64(time.Second))),
-				SlotEnd:                now.Add(time.Duration(slot.RemainingS * float64(time.Second))),
+				SlotStart:              scenarioNow.Add(-time.Duration(slot.ElapsedS * float64(time.Second))),
+				SlotEnd:                scenarioNow.Add(time.Duration(slot.RemainingS * float64(time.Second))),
 				BatteryEnergyWh:        slot.BatteryEnergyWh,
 				Strategy:               slot.Strategy,
 				PlannedGridW:           slot.PlannedGridW,
@@ -371,7 +381,7 @@ func runGoldenScenario(sc goldenScenario) goldenRecord {
 		PlanStale:               st.PlanStale,
 		FuseSaturated:           st.FuseSaturated,
 		FuseEVMaxW:              st.FuseEVMaxW,
-		FuseHoldLatched:         st.FuseHoldUntil.After(time.Now()),
+		FuseHoldLatched:         st.FuseHoldUntil.After(st.now()),
 		FuseHoldMaxChargeW:      st.FuseHoldMaxChargeW,
 		FuseHoldMaxDischargeW:   st.FuseHoldMaxDischargeW,
 		PerPhaseOverageW:        perPhase,
@@ -403,6 +413,24 @@ func runGoldenScenario(sc goldenScenario) goldenRecord {
 			RawGridW:          sc.Inputs.GridW,
 			ProjectedGridW:    projected,
 		},
+	}
+}
+
+func TestGoldenPlannerScenarioIgnoresSchedulingDelay(t *testing.T) {
+	_, byID := readGoldenCorpus(t, goldenCorpusDir)
+	want, ok := byID["seeded_planner/095_planner_arbitrage"]
+	if !ok {
+		t.Fatal("missing seeded_planner/095_planner_arbitrage")
+	}
+
+	scenario := goldenScenario{ID: want.ScenarioID, Seed: want.Seed, Inputs: want.Inputs}
+	scenarioNow := time.Date(2024, time.January, 2, 3, 4, 5, 0, time.UTC)
+	withoutDelay := runGoldenScenarioAt(scenario, scenarioNow, 0)
+	withDelay := runGoldenScenarioAt(scenario, scenarioNow, 50*time.Millisecond)
+
+	if !reflect.DeepEqual(withoutDelay.PerDriverTargets, withDelay.PerDriverTargets) {
+		t.Fatalf("planner target changed after an intentional scheduling delay:\nwithout delay: %v\nwith delay: %v",
+			withoutDelay.PerDriverTargets, withDelay.PerDriverTargets)
 	}
 }
 

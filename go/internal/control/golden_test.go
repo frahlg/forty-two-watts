@@ -32,11 +32,10 @@ package control
 // did not expect also moved, you have found something before your users did.
 //
 // Two things never fix a failure here: deleting the record, and widening the
-// tolerance. The tolerance is 0.01 W absolute and exists for one reason —
-// energy-path targets are computed as Wh × 3600 / seconds-remaining against a
-// slot anchored to the wall clock, so they carry sub-millisecond jitter
-// (measured run-to-run drift across the corpus: ≤ 1.3e-5 W). Exact float
-// equality would flake. Anything above 0.01 W is a real change in behaviour.
+// tolerance. The tolerance remains 0.01 W absolute so the corpus still reports
+// small numeric changes without making the test depend on exact float output;
+// golden scenarios now use one injected clock instant for the slot and the
+// dispatch calculation. Anything above 0.01 W is a real change in behaviour.
 
 import (
 	"encoding/json"
