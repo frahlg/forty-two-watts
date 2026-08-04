@@ -1324,16 +1324,14 @@ func ComputeDispatch(
 		// neighbour's pool pump on the same fuse) can push grid
 		// import past the fuse with the battery sitting at 0 W. The
 		// fuse-saver overrides idle and forces discharge.
-		out := fuseSaverFromZero(store, state, driverCapacities, fuseMaxW)
+		out := fuseSaverEarlyExit(store, state, driverCapacities, fuseMaxW)
 		// LastTargets reflects what we actually issued: nil when
 		// the fuse-saver no-op'd, the discharge targets when it
 		// fired. /api/status, the history snapshot, and the RLS
-		// model loop all depend on this being accurate.
+		// model loop all depend on this being accurate. Idle is the
+		// one early exit that also clears it — the other two are
+		// suppressing a re-dispatch, not commanding zero.
 		state.LastTargets = out
-		if out != nil {
-			now := state.now()
-			state.LastDispatch = &now
-		}
 		return out
 	case ModeCharge:
 		targets := chargeAll(store, driverCapacities, state.DriverLimits)
@@ -1353,16 +1351,7 @@ func ComputeDispatch(
 			// Holdoff suppresses normal re-dispatch, but the
 			// fuse-saver overrides — an overflow can't wait 5 s for
 			// the next eligible tick.
-			out := fuseSaverFromZero(store, state, driverCapacities, fuseMaxW)
-			if out != nil {
-				// Same bookkeeping as the idle path so downstream
-				// consumers (status/history/learner) see the
-				// commanded discharge.
-				state.LastTargets = out
-				now := state.now()
-				state.LastDispatch = &now
-			}
-			return out
+			return fuseSaverEarlyExit(store, state, driverCapacities, fuseMaxW)
 		}
 	}
 
@@ -1843,7 +1832,16 @@ func ComputeDispatch(
 		surplusActive := state.EVSurplusOnlyReserveW > 0 && effectiveMode == ModeSelfConsumption
 		if !surplusActive && math.Abs(errW) < state.GridToleranceW &&
 			!(noSelfDischarge && anyBatteryDischarging(onlineBats)) {
-			return nil
+			// A small grid error is not a statement that the site is
+			// safe. errW compares one aggregate number against one
+			// aggregate target; two protections bind on numbers this
+			// check never reads — an operator tariff ceiling below the
+			// grid target, and a single phase over the breaker while
+			// the three-phase sum sits still. Leaving here without the
+			// fuse-saver skipped both, so a site inside the deadband
+			// had no per-phase protection at all. Idle and holdoff
+			// already do this; this exit was the one that did not.
+			return fuseSaverEarlyExit(store, state, driverCapacities, fuseMaxW)
 		}
 
 		// Outer PI — drives total correction we want across all batteries.
@@ -3857,10 +3855,38 @@ func planSignIntent(state *State) int {
 	return 0
 }
 
+// fuseSaverEarlyExit is the one shape every ComputeDispatch branch that
+// walks away from a cycle uses: run the fuse-saver, and when it fires,
+// record the dispatch so /api/status, the history snapshot and the RLS
+// model loop see the commanded discharge — and so the holdoff counts it
+// as a real dispatch rather than re-firing on the next tick.
+//
+// Three branches leave early — idle mode, the holdoff window, and the
+// reactive deadband. None of them means the site is safe; each means the
+// normal control law has nothing to say. This is one law, so it lives in
+// one place: the deadband exit was missing it for the whole life of the
+// function, and copies of a safety rule are how that happens.
+func fuseSaverEarlyExit(
+	store *telemetry.Store,
+	state *State,
+	driverCapacities map[string]float64,
+	fuseMaxW float64,
+) []DispatchTarget {
+	out := fuseSaverFromZero(store, state, driverCapacities, fuseMaxW)
+	if out == nil || state == nil {
+		return out
+	}
+	state.LastTargets = out
+	now := state.now()
+	state.LastDispatch = &now
+	return out
+}
+
 // fuseSaverFromZero is the early-return entry point for the fuse-saver.
-// Called from ComputeDispatch branches that would otherwise return nil
-// (idle mode, holdoff window) so the safety primary still gets a chance
-// to fire before we walk away from the cycle. Builds zero-W targets for
+// Called via fuseSaverEarlyExit from the ComputeDispatch branches that
+// would otherwise return nil (idle mode, holdoff window, reactive
+// deadband) so the safety primary still gets a chance to fire before we
+// walk away from the cycle. Builds zero-W targets for
 // every battery that is BOTH online (per DriverHealth) AND has a current
 // DerBattery reading, then runs them through forceFuseDischarge; if no
 // overflow is predicted, the result is nil (caller sees the same

@@ -679,3 +679,106 @@ func TestPeakCeilingAboveFuseFusewins(t *testing.T) {
 			out[0].TargetW, expected)
 	}
 }
+
+// ---- The reactive deadband is not a safe state ----
+//
+// ComputeDispatch's legacy/reactive arm short-circuits when the grid
+// error is inside GridToleranceW: nothing to correct, leave the
+// batteries where they are. That exit used to return before
+// applyFuseGuard, applyPlanSignFloor, applyBatteryBoostReserve and
+// forceFuseDischarge — so on a site sitting inside the deadband no
+// protection ran at all. The idle and holdoff exits already ran the
+// fuse-saver for exactly this reason; this one was missed.
+//
+// The deadband asks one question: is aggregate grid close to aggregate
+// target? Two protections answer to numbers that question never reads.
+
+// An operator tariff ceiling below the plan's grid target. The plan
+// asks for 8 kW of import, the meter delivers 8 kW, the error is zero
+// — and every one of those watts above 5 kW is billed at the peak
+// tariff the operator set the ceiling to avoid.
+func TestDeadbandExitDefendsPeakImportCeiling(t *testing.T) {
+	store, state, caps := setupFuseSaver(8000, 0, 0.6, 10000)
+	state.SetGridTarget(8000) // plan target — meter is exactly on it
+	state.PeakImportCeilingW = 5000
+	state.MinDispatchIntervalS = 0
+
+	out := ComputeDispatch(store, state, caps, 11040)
+	if len(out) == 0 {
+		t.Fatalf("grid 8000 W against a 5000 W peak ceiling: expected the " +
+			"fuse-saver to bridge, got no targets (3 kW peak overrun stands)")
+	}
+	// Predicted from zero = 8000. Effective import ceiling = 5000
+	// (peak binds below the 11040 W fuse). Overage = 3000.
+	expected := -3000.0
+	if math.Abs(out[0].TargetW-expected) > 1 {
+		t.Errorf("target = %.0f W, want %.0f W", out[0].TargetW, expected)
+	}
+	if !out[0].Clamped {
+		t.Errorf("Clamped flag must mark fuse-saver activation")
+	}
+}
+
+// An unbalanced site inside the aggregate deadband with one phase over
+// the breaker: a single-phase EVSE on L1 against three-phase PV export.
+// The aggregate says "nothing to do"; L1 is at 18 A on a 16 A fuse.
+func TestDeadbandExitDefendsPerPhaseBreaker(t *testing.T) {
+	store, state, caps := setupPerPhase(0, 18, 4, 4, 0.6, 10000)
+	state.SetGridTarget(0) // aggregate is exactly on target
+	state.MinDispatchIntervalS = 0
+
+	out := ComputeDispatch(store, state, caps, 11040)
+	if len(out) == 0 {
+		t.Fatalf("L1 at 18 A on a 16 A fuse inside the aggregate deadband: " +
+			"expected a forced discharge, got no targets")
+	}
+	// Per-phase overage = (18 − 16) × 230 = 460 W on the worst phase,
+	// × 3 under the balanced-3Φ assumption = 1380 W from idle.
+	expected := -1380.0
+	if math.Abs(out[0].TargetW-expected) > 1 {
+		t.Errorf("forced discharge = %.0f W, want %.0f W", out[0].TargetW, expected)
+	}
+	if !out[0].Clamped {
+		t.Errorf("Clamped flag must mark per-phase fuse-saver activation")
+	}
+}
+
+// The deadband still means "do nothing" when nothing binds. Running
+// the fuse-saver on this exit must not turn a quiet tick into a
+// dispatch: no targets, and no LastDispatch stamp that would start the
+// holdoff clock against a cycle that commanded nothing.
+func TestDeadbandExitStaysQuietWhenNothingBinds(t *testing.T) {
+	store, state, caps := setupFuseSaver(2000, 0, 0.6, 10000)
+	state.SetGridTarget(2000)
+	state.MinDispatchIntervalS = 0
+
+	out := ComputeDispatch(store, state, caps, 11040)
+	if len(out) != 0 {
+		t.Fatalf("grid on target, fuse and phases clear: expected no targets, got %+v", out)
+	}
+	if state.LastDispatch != nil {
+		t.Errorf("a no-op deadband tick must not record a dispatch")
+	}
+}
+
+// The fuse-saver fires from the deadband exit even while the holdoff
+// would otherwise suppress a re-dispatch on the following tick: firing
+// records the dispatch, so the next tick is the holdoff's to decide —
+// and the holdoff exit runs the same fuse-saver anyway.
+func TestDeadbandExitRecordsDispatchWhenFuseSaverFires(t *testing.T) {
+	store, state, caps := setupFuseSaver(8000, 0, 0.6, 10000)
+	state.SetGridTarget(8000)
+	state.PeakImportCeilingW = 5000
+	state.MinDispatchIntervalS = 5
+
+	out := ComputeDispatch(store, state, caps, 11040)
+	if len(out) == 0 {
+		t.Fatalf("expected fuse-saver discharge")
+	}
+	if state.LastDispatch == nil {
+		t.Errorf("a firing fuse-saver must record the dispatch")
+	}
+	if len(state.LastTargets) != len(out) {
+		t.Errorf("LastTargets = %+v, want the issued targets %+v", state.LastTargets, out)
+	}
+}
