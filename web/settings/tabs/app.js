@@ -50,30 +50,39 @@
       });
   }
 
+  // drawQR paints qrMatrix(text) into a canvas. Same shape as the calendar
+  // tab's, because /vendor/qrcode.js hands back a boolean matrix and leaves
+  // the painting to the caller — there is no constructor to call.
+  function drawQR(qrMatrix, text, target) {
+    var matrix = qrMatrix(text);
+    var n = matrix.length, quiet = 4, total = n + 2 * quiet;
+    var px = Math.max(2, Math.floor((target || 260) / total));
+    var size = total * px;
+    var canvas = document.createElement("canvas");
+    canvas.width = size; canvas.height = size;
+    var ctx = canvas.getContext("2d");
+    // Dark on light whatever the page theme. An inverted QR is one many phone
+    // cameras will not read.
+    ctx.fillStyle = "#ffffff"; ctx.fillRect(0, 0, size, size);
+    ctx.fillStyle = "#000000";
+    for (var r = 0; r < n; r++) {
+      for (var c = 0; c < n; c++) {
+        if (matrix[r][c]) ctx.fillRect((c + quiet) * px, (r + quiet) * px, px, px);
+      }
+    }
+    return canvas;
+  }
+
   function showCode(pairing) {
     var slot = document.getElementById("app-link-slot");
     if (!slot) return;
     slot.textContent = "";
 
-    var box = document.createElement("div");
-    box.id = "app-link-qr";
-    slot.appendChild(box);
-
     // Loaded on demand: this tab is opened once per phone, and every other
-    // page would otherwise carry the library for nothing.
+    // page would otherwise carry the encoder for nothing.
     import("/vendor/qrcode.js")
       .then(function (m) {
-        var QR = m.default || m.QRCode || window.QRCode;
-        new QR(box, {
-          text: pairing.url,
-          width: 260,
-          height: 260,
-          // Dark modules on light, whatever the page theme. An inverted QR is
-          // one many phone cameras will not read.
-          colorDark: "#000000",
-          colorLight: "#ffffff",
-          correctLevel: (QR.CorrectLevel && QR.CorrectLevel.M) || 0,
-        });
+        slot.appendChild(drawQR(m.qrMatrix, pairing.url, 260));
 
         var note = document.createElement("p");
         note.className = "hint";
