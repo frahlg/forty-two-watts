@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/srcfl/ftw/go/internal/api"
 	"github.com/srcfl/ftw/go/internal/appenroll"
 	"github.com/srcfl/ftw/go/internal/appproto"
 	"github.com/srcfl/ftw/go/internal/appuplink"
@@ -321,4 +322,18 @@ func siteMeterName(ctrl *control.State, ctrlMu *sync.Mutex) string {
 	ctrlMu.Lock()
 	defer ctrlMu.Unlock()
 	return ctrl.SiteMeterDriver
+}
+
+// appEnrollForAPI hands the enroller to the API, or nothing.
+//
+// A typed nil in an interface is not nil, so a disabled app link would give
+// the pairing routes something that passes their `== nil` check and then
+// panics on first use. Returning an untyped nil is the difference between
+// "pairing is off" and a crash on the one screen someone reaches for when
+// nothing else works.
+func appEnrollForAPI(enroll *appenroll.Identity, enabled bool) api.AppEnroller {
+	if !enabled || enroll == nil {
+		return nil
+	}
+	return enroll
 }

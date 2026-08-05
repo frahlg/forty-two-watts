@@ -83,6 +83,10 @@ type Deps struct {
 	// BatteryIdentity resolves the live driver to its current hardware.
 	BatteryIdentity func(driver string) (deviceID string, ok bool)
 
+	// AppEnroll mints pairing codes for the FTW app. Nil when app_link is off,
+	// which the pairing routes report rather than hiding.
+	AppEnroll AppEnroller
+
 	CfgMu         *sync.RWMutex
 	Cfg           *config.Config
 	ConfigPath    string
@@ -280,6 +284,8 @@ func (s *Server) routes() {
 	s.handle("GET /api/oauth/myuplink/callback", s.handleMyUplinkOAuthCallback)
 	s.handle("POST /api/oauth/myuplink/exchange", s.handleMyUplinkOAuthExchange)
 	s.handle("GET  /api/mode", s.handleGetMode)
+	s.handle("GET  /api/app-link/status", s.handleAppLinkStatus)
+	s.handle("POST /api/app-link/pairing", s.handleAppLinkPairing)
 	s.handle("POST /api/mode", s.handleSetMode)
 	s.handle("GET  /api/modes", s.handleModes)
 	s.handle("POST /api/target", s.handleSetTarget)
