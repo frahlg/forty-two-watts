@@ -194,6 +194,71 @@ func (a *appModes) ObservedMode() (control.Mode, bool) {
 	return a.ctrl.Mode, true
 }
 
+// appHistory serves the app's history tiles from the energy ledger.
+//
+// The ledger stores energy per flow per bucket; the wire wants mean power per
+// signed series. The mapping below is the site convention and nothing else:
+// positive watts flow into the site, so import minus export is the grid, and
+// PV is generation negated. W = Wh × 3 600 000 / bucket, no other arithmetic.
+type appHistory struct {
+	st *state.Store
+}
+
+func (a *appHistory) Series(
+	_ context.Context, name string, stepMs, fromMs, toMs int64,
+) ([]appproto.HistorySample, error) {
+	type term struct {
+		flow state.EnergyFlow
+		sign float64
+	}
+	var terms []term
+	switch name {
+	case "grid_w":
+		terms = []term{{state.FlowGridImport, 1}, {state.FlowGridExport, -1}}
+	case "pv_w":
+		terms = []term{{state.FlowPVGeneration, -1}}
+	case "battery_w":
+		terms = []term{{state.FlowBatteryCharge, 1}, {state.FlowBatteryDischarge, -1}}
+	case "load_w":
+		terms = []term{{state.FlowConsumerUse, 1}}
+	default:
+		// A series this box does not keep has no data. That is already a
+		// thing the wire can say, and it beats refusing the whole query
+		// because one series in it was unknown.
+		return nil, nil
+	}
+
+	points, _, err := a.st.LoadEnergyHistory(state.EnergyHistoryQuery{
+		SinceMS:  fromMs,
+		UntilMS:  toMs,
+		BucketMS: stepMs,
+		// One tile is at most 168 buckets; the ledger's own cap is 2000.
+		Limit: 2000,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	// A bucket exists on the wire only if some term reported it. A bucket
+	// where nothing was metered stays absent and becomes MISSING, which is
+	// the honest answer — zero would claim the house used no power at all.
+	byStart := map[int64]float64{}
+	for _, p := range points {
+		for _, t := range terms {
+			if p.Flow != t.flow {
+				continue
+			}
+			byStart[p.BucketStartMS] += t.sign * p.EnergyWh * 3_600_000 / float64(p.BucketLenMS)
+		}
+	}
+
+	out := make([]appproto.HistorySample, 0, len(byStart))
+	for start, w := range byStart {
+		out = append(out, appproto.HistorySample{StartMs: start, W: w})
+	}
+	return out, nil
+}
+
 // appPlans hands over the planner's current output.
 type appPlans struct {
 	planner *mpc.Service
@@ -282,6 +347,20 @@ func startAppLink(
 	modes := &appModes{ctrl: ctrl, ctrlMu: ctrlMu, state: st, mpc: planner}
 	plans := &appPlans{planner: planner, ctrl: ctrl, ctrlMu: ctrlMu}
 
+	// History rides on the energy ledger, so it exists exactly when state
+	// does. The capability is advertised in the same breath: a capability the
+	// box advertises but cannot answer is worse than one it never mentions.
+	var history appproto.HistoryProvider
+	caps := appproto.DefaultCaps()
+	if st != nil {
+		history = &appHistory{st: st}
+		caps = append(caps,
+			appproto.CapHistory5m,
+			appproto.CapHistory1h,
+			appproto.CapHistoryEtag,
+		)
+	}
+
 	uplink, err := appuplink.New(appuplink.Options{
 		Enroll: enroll,
 		Handler: func(sender appproto.Sender) (*appproto.Handler, error) {
@@ -289,13 +368,15 @@ func startAppLink(
 			// are read-only apart from the mode, and the mode goes through
 			// control's own validation.
 			return appproto.New(appproto.Config{
-				Clock:  appproto.SystemClock{StartedAt: site.started, Source: "ntp"},
-				Site:   site,
-				Info:   info,
-				Modes:  modes,
-				Plans:  plans,
-				Codec:  appuplink.Codec(),
-				Sender: sender,
+				Clock:   appproto.SystemClock{StartedAt: site.started, Source: "ntp"},
+				Site:    site,
+				Info:    info,
+				Modes:   modes,
+				Plans:   plans,
+				History: history,
+				Caps:    caps,
+				Codec:   appuplink.Codec(),
+				Sender:  sender,
 				// The three frozen power fields point at the source whose
 				// freshness governs them. The site meter is the only one the
 				// box can name without knowing the site's hardware.

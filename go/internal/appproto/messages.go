@@ -357,6 +357,74 @@ type Plan struct {
 }
 
 // --------------------------------------------------------------------------
+// History
+// --------------------------------------------------------------------------
+
+// HistQuery asks for stored series over a window.
+type HistQuery struct {
+	// Series are frozen field names — grid_w, pv_w, battery_w, load_w.
+	Series []string `cbor:"series"`
+	// Res is the resolution asked for. The box may serve coarser and says so
+	// in HistEnd.ResActual.
+	Res Resolution `cbor:"res"`
+	// FromMs and ToMs are wall clock: history is a question about days people
+	// remember, not about box uptime.
+	FromMs int64 `cbor:"fromMs"`
+	ToMs   int64 `cbor:"toMs"`
+	// Have names tiles the app already caches, so an unchanged tile is never
+	// resent. That is the entire transfer model on a metered connection.
+	Have []HistTileRef `cbor:"have,omitempty"`
+	// MaxPoints caps the answer; the box widens the step to stay under it.
+	MaxPoints *int64 `cbor:"maxPoints,omitempty"`
+}
+
+// HistTileRef names a cached tile.
+type HistTileRef struct {
+	TileID string `cbor:"tileId"`
+	Etag   string `cbor:"etag"`
+}
+
+// HistChunk is one tile of column-packed samples.
+type HistChunk struct {
+	TileID  string     `cbor:"tileId"`
+	Etag    string     `cbor:"etag"`
+	Res     Resolution `cbor:"res"`
+	StartMs int64      `cbor:"startMs"`
+	// StepMs is the point spacing after aggregation. Res says which store the
+	// data came from; the two answer different questions.
+	StepMs int64 `cbor:"stepMs"`
+	// Series names the columns, in Data order.
+	Series []string `cbor:"series"`
+	// Data is int32 LE, one contiguous block per series. MISSING is
+	// math.MinInt32 — distinct from zero, which is a real reading.
+	Data []byte `cbor:"data"`
+	// Partial marks the trailing tile that is still filling. Never cached.
+	Partial bool `cbor:"partial"`
+}
+
+// HistEnd closes a query.
+type HistEnd struct {
+	ResActual Resolution `cbor:"resActual"`
+	// Gaps are ranges the box knows it cannot serve, and why. The app says
+	// "evicted" or "no data" instead of drawing a hole and guessing.
+	Gaps []HistGap `cbor:"gaps"`
+}
+
+// HistGap is one such range.
+type HistGap struct {
+	FromMs int64  `cbor:"fromMs"`
+	ToMs   int64  `cbor:"toMs"`
+	Reason string `cbor:"reason"`
+}
+
+// Gap reasons, as the app spells them.
+const (
+	GapNoData  = "no_data"
+	GapEvicted = "evicted"
+	GapBoxDown = "box_down"
+)
+
+// --------------------------------------------------------------------------
 // Errors, events, teardown
 // --------------------------------------------------------------------------
 

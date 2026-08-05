@@ -26,6 +26,11 @@ type Config struct {
 	Codec  FrameCodec
 	Sender Sender
 
+	// History serves stored series, or nil on a box that keeps none. Optional
+	// on purpose: the capability is only advertised when a provider exists,
+	// and an advertised-but-broken feature is worse than an absent one.
+	History HistoryProvider
+
 	// Caps is what this box advertises. Names must come from the generated
 	// contract constants; a typo is refused at construction rather than
 	// silently hiding a feature in the app.
@@ -182,17 +187,7 @@ func (h *Handler) dispatch(ctx context.Context, env Envelope) error {
 	case MsgPlanGet:
 		return h.onPlanGet(env.ID)
 	case MsgHistQuery:
-		// Not built yet. Answering the request it belongs to is the whole
-		// point of a request id: the app narrows one chart instead of
-		// raising a session-wide banner.
-		if env.ID != nil {
-			return h.sendError(env.ID, ErrorBody{
-				Code:      ErrUnavailable,
-				Retryable: ErrorRetryable[ErrUnavailable],
-				Args:      map[string]any{"subsystem": "history"},
-			})
-		}
-		return nil
+		return h.onHistQuery(ctx, env)
 	default:
 		// Unknown types are ignored, never fatal. That rule in both
 		// directions is what lets a newer app talk to an older box and a
@@ -761,7 +756,31 @@ func (h *Handler) sendPlan(id *uint32) error {
 		h.cfg.Clock.UptimeMs(),
 		h.cfg.Clock.Now(),
 	)
-	return h.sendBulk(MsgPlan, id, body)
+
+	// The optimizer plans further than the wire carries: 193 fifteen-minute
+	// slots encode to ~17 kB and the largest bulk bucket is 16 kB. Send the
+	// nearest slots that fit and drop the far tail — the app shows twelve
+	// hours, and slots two days out are a guess about a guess. What must
+	// never happen is the alternative: an encode error here used to kill the
+	// whole session, which the app experienced as "the box hangs up whenever
+	// I open the plan".
+	for {
+		env, err := newEnvelope(MsgPlan, id, body)
+		if err != nil {
+			return err
+		}
+		raw, err := EncodeEnvelope(env)
+		if err != nil {
+			return err
+		}
+		if bulkBucketFor(len(raw)) != 0 {
+			return h.send(Frame{Lane: LaneBulk, Bucket: bulkBucketFor(len(raw)), Envelope: env})
+		}
+		if len(body.Slots) <= 1 {
+			return fmt.Errorf("appproto: a single plan slot does not fit any bulk bucket")
+		}
+		body.Slots = body.Slots[:len(body.Slots)*3/4]
+	}
 }
 
 // --------------------------------------------------------------------------
