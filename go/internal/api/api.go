@@ -1359,23 +1359,16 @@ func (s *Server) handleSetMode(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]string{"error": "unknown mode: " + req.Mode})
 		return
 	}
+	// control.ApplyMode is the one door into a mode change: it drops any
+	// active manual hold and resets the PI integrator along with setting the
+	// mode. See its comment for what leaving either out has already cost.
 	s.deps.CtrlMu.Lock()
-	s.deps.Ctrl.Mode = m
-	// An explicit mode change is a reset signal: drop any active
-	// battery manual hold so the new mode takes effect on the very
-	// next dispatch tick. Mirrors the loadpoint manual_hold UX.
-	s.deps.Ctrl.ClearBatteryManualHold()
-	// Reset the PI integrator. The integral accumulated under the
-	// previous mode's error signal is meaningless to the new mode
-	// — keeping it caused integrator windup → wrong-direction stuck
-	// output across the 2026-05-24 evening mode switch (live
-	// regression: discharged the fleet to 7 % overnight while the
-	// PI integral was pinned in the wrong direction). Mode change
-	// is a discrete event; start the new regime from a clean PI.
-	if s.deps.Ctrl.PI != nil {
-		s.deps.Ctrl.PI.Reset()
-	}
+	applyErr := s.deps.Ctrl.ApplyMode(m)
 	s.deps.CtrlMu.Unlock()
+	if applyErr != nil {
+		writeJSON(w, 400, map[string]string{"error": applyErr.Error()})
+		return
+	}
 	if err := s.deps.State.SaveConfig("mode", req.Mode); err != nil {
 		slog.Warn("failed to persist mode", "err", err)
 	}

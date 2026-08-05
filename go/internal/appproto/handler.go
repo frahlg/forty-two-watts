@@ -69,6 +69,11 @@ type Handler struct {
 	lastSent    map[string]int64
 	lastSources map[string]SourceWire
 	lastBlocked []string
+	// lastRev is the controlRev this client was last told. A command carries
+	// the rev it expected, so a client left holding a stale one would have
+	// every command refused with no way to find out the new number — the
+	// snapshot is the only message that carries it.
+	lastRev uint64
 }
 
 // DefaultCaps is what this layer alone can back.
@@ -316,6 +321,18 @@ func (h *Handler) onSub(env Envelope) error {
 		bucket = 512
 	}
 
+	h.mu.Lock()
+	h.subscribed = true
+	h.bucket = bucket
+	h.seq = 0
+	h.mu.Unlock()
+
+	return h.sendSnapshot()
+}
+
+// sendSnapshot puts the full site state on the bulk lane and records what the
+// client now knows.
+func (h *Handler) sendSnapshot() error {
 	uptimeMs := h.cfg.Clock.UptimeMs()
 	snap := h.cfg.Site.Snapshot()
 	fields := fieldValues(snap, h.modes)
@@ -326,15 +343,13 @@ func (h *Handler) onSub(env Envelope) error {
 	}
 
 	h.mu.Lock()
-	h.subscribed = true
-	h.bucket = bucket
-	h.seq = 0
 	h.lastSent = make(map[string]int64, len(fields))
 	for k, v := range fields {
 		h.lastSent[k] = v
 	}
 	h.lastSources = sources
 	h.lastBlocked = blocked
+	h.lastRev = snap.ControlRev
 	h.mu.Unlock()
 
 	return h.sendBulk(MsgSnap, nil, Snap{
@@ -366,6 +381,20 @@ func (h *Handler) Tick() error {
 
 	uptimeMs := h.cfg.Clock.UptimeMs()
 	snap := h.cfg.Site.Snapshot()
+
+	// A controlRev the client has not been told is a client whose every
+	// command will be refused for a conflict it cannot see. Only the snapshot
+	// carries the number, so a change in it costs one bulk frame — which is
+	// also how the client resyncs mid-session rather than on reconnect.
+	h.mu.Lock()
+	stale := snap.ControlRev != h.lastRev
+	h.mu.Unlock()
+	if stale {
+		if err := h.sendSnapshot(); err != nil {
+			return err
+		}
+	}
+
 	fields := fieldValues(snap, h.modes)
 	sources := wireSources(snap, uptimeMs)
 	blocked := snap.DispatchBlockedBy

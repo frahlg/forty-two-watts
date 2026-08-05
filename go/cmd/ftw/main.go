@@ -34,6 +34,7 @@ import (
 	_ "time/tzdata"
 
 	"github.com/srcfl/ftw/go/internal/api"
+	"github.com/srcfl/ftw/go/internal/appuplink"
 	"github.com/srcfl/ftw/go/internal/arp"
 	"github.com/srcfl/ftw/go/internal/battery"
 	"github.com/srcfl/ftw/go/internal/caldavserver"
@@ -576,6 +577,13 @@ func main() {
 
 	// ---- Shared mutexes for API/control/models ----
 	ctrlMu := &sync.Mutex{}
+	// The revision of controllable state. The app sends the revision a
+	// command expected to act against and the box refuses the command when
+	// they differ, so this has to move whenever the mode, the targets or the
+	// ceilings do. It is derived from the state rather than incremented at
+	// each mutation site, because control is written from four places and a
+	// counter every one of them had to remember would be wrong within a month.
+	controlRev := &control.Revision{}
 	capMu := &sync.RWMutex{}
 	cfgMu := &sync.RWMutex{}
 	modelsMu := &sync.Mutex{}
@@ -2108,6 +2116,31 @@ func main() {
 	)
 	if homeLinkErr != nil {
 		slog.Warn("Home Link unavailable")
+	}
+
+	// The FTW app's uplink. Separate from Home Link and not a variant of it:
+	// it speaks the app's own protocol end to end and reaches the box through
+	// a relay that holds no keys.
+	appLinkWatchdog := time.Duration(cfg.Site.WatchdogTimeoutS) * time.Second
+	if appLinkWatchdog <= 0 {
+		appLinkWatchdog = 60 * time.Second
+	}
+	boxID := ""
+	if identityState.Nova != nil {
+		boxID = identityState.Nova.PublicKeyHex()[:16]
+	}
+	appEnroll, appLinkEnabled, appLinkErr := startAppLink(
+		ctx, cfg, identityKeyPath, boxID, Version,
+		st, tel, mpcSvc, ctrl, ctrlMu, controlRev, appLinkWatchdog,
+	)
+	switch {
+	case appLinkErr != nil:
+		slog.Warn("app link unavailable", "err", appLinkErr)
+	case appLinkEnabled:
+		slog.Info("app link connected", "relay", appuplink.Endpoint,
+			"paired_devices", appEnroll.AuthorisedCount())
+	default:
+		slog.Info("app link disabled — set app_link.enabled to turn it on")
 	}
 
 	deps = &api.Deps{

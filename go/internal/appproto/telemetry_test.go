@@ -382,3 +382,41 @@ func nan() float64 {
 	var zero float64
 	return zero / zero
 }
+
+// controlRev is what makes expect.rev a real check. When it moves mid-session
+// the client has to hear the new number, and only the snapshot carries it —
+// otherwise every command from then on is refused for a conflict the app
+// cannot see or resolve without reconnecting.
+func TestAChangedControlRevResendsTheSnapshot(t *testing.T) {
+	h, box, rec, _ := newRig(t)
+	deliver(t, h, MsgHello, nil, Hello{Proto: ProtoRange{Min: 0, Max: ProtoMax}})
+	deliver(t, h, MsgSub, nil, Sub{Bucket: 512, Hz: 1})
+	rec.reset()
+
+	if err := h.Tick(); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	if rec.has(MsgSnap) {
+		t.Fatal("an unchanged controlRev cost a snapshot")
+	}
+
+	box.snap.ControlRev = 8
+	rec.reset()
+	if err := h.Tick(); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	snap := body[Snap](t, rec.only(t, MsgSnap))
+	if snap.ControlRev != 8 {
+		t.Fatalf("controlRev = %d, want 8", snap.ControlRev)
+	}
+
+	// Once, not on every tick after.
+	rec.reset()
+	if err := h.Tick(); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	if rec.has(MsgSnap) {
+		t.Fatal("the snapshot went out again with nothing changed")
+	}
+}

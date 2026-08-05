@@ -68,6 +68,9 @@ func RestartRequiredFor(oldCfg, newCfg *Config) []string {
 	if !pointerEqual(oldCfg.HomeLink, newCfg.HomeLink) {
 		reasons = append(reasons, "home_link — outbound remote access is connected at startup")
 	}
+	if !pointerEqual(oldCfg.AppLink, newCfg.AppLink) {
+		reasons = append(reasons, "app_link — the app uplink is connected at startup")
+	}
 	if !pointerEqual(oldCfg.EVCharger, newCfg.EVCharger) {
 		reasons = append(reasons, "ev_charger — EV charger client is constructed once at startup")
 	}

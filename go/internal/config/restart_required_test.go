@@ -79,6 +79,7 @@ func TestRestartRequiredFor_BootSections(t *testing.T) {
 		{"planner toggled", func(c *Config) { c.Planner = &Planner{Enabled: true} }, "planner"},
 		{"nova toggled", func(c *Config) { c.Nova = &Nova{Enabled: true, URL: "https://x"} }, "nova"},
 		{"home link toggled", func(c *Config) { c.HomeLink = &HomeLink{Enabled: true} }, "home_link"},
+		{"app link toggled", func(c *Config) { c.AppLink = &AppLink{Enabled: true} }, "app_link"},
 		{"ev_charger added", func(c *Config) {
 			c.EVCharger = &EVCharger{Provider: "easee", Username: "a@b.c"}
 		}, "ev_charger"},

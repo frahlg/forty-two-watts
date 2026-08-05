@@ -181,6 +181,13 @@ state:
 home_link:
   enabled: false
 
+# The FTW app. Opt-in, and one switch: the box holds an outbound connection to
+# a relay that carries encrypted frames and holds no keys, so there is no
+# endpoint to choose and no transport to pick. Pair a phone by scanning the
+# box's code; the pairing code is single-use and expires in ten minutes.
+app_link:
+  enabled: false
+
 # Independently distributed Lua drivers. The signed stable catalog is refreshed
 # by default, but refresh never downloads, activates, or restarts a driver.
 # Add `device_repository: { enabled: false }` to opt out. The expanded form is:
