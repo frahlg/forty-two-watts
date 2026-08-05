@@ -252,17 +252,18 @@ func TestHoldoffDelaysTheChargeBlockButDoesNotDefeatIt(t *testing.T) {
 	}
 }
 
-// The idle exit is left alone because it withholds commands from every
-// battery equally — that is idle's declared contract ("Do nothing — no
-// dispatch", modes_catalog.go). It is not a charge-block bypass: the
-// site-wide block cannot be armed there at all, because effectiveMode reaches
-// ModeIdle only from the operator's own idle mode or from a planner slot that
-// took the branch where all three noSelfCharge gates are false. What remains
-// is the per-driver report, and this test pins that idle treats it exactly as
-// it treats an unblocked battery. If somebody later decides idle must
-// withdraw the previous command on entry, this test moves — and it should,
-// because that is a decision about what idle means, not about charge blocks.
-func TestIdleExitWithholdsCommandsFromBlockedAndUnblockedAlike(t *testing.T) {
+// Idle is not a charge-block bypass, and the reason has not changed now that
+// it commands a held zero rather than withholding commands: the site-wide
+// block cannot be armed there at all, because effectiveMode reaches ModeIdle
+// only from the operator's own idle mode or from a planner slot that took the
+// branch where all three noSelfCharge gates are false. What remains is the
+// per-driver report, and this test pins that idle treats it exactly as it
+// treats an unblocked battery — 0 W either way, which is what a charge block
+// asks for and what idle asks for.
+//
+// The note this test used to carry said that if somebody later decided idle
+// must withdraw the previous command on entry, the test would move. It did.
+func TestIdleHoldsBlockedAndUnblockedBatteriesAlike(t *testing.T) {
 	caps := caps(map[string]float64{"ferroamp": 15200})
 
 	blocked := NewState(0, 60, "meter")
@@ -283,8 +284,12 @@ func TestIdleExitWithholdsCommandsFromBlockedAndUnblockedAlike(t *testing.T) {
 	if len(blockedOut) != len(unblockedOut) {
 		t.Errorf("idle treated a charge-blocked battery differently: blocked=%v unblocked=%v", blockedOut, unblockedOut)
 	}
-	if len(blockedOut) != 0 {
-		t.Errorf("idle issued %d target(s) %v — idle mode dispatches nothing", len(blockedOut), blockedOut)
+	if len(blockedOut) != 1 {
+		t.Fatalf("idle issued %d target(s) %v — idle holds every battery it may command", len(blockedOut), blockedOut)
+	}
+	if math.Abs(blockedOut[0].TargetW) > 0.01 || math.Abs(unblockedOut[0].TargetW) > 0.01 {
+		t.Errorf("idle must hold both at 0 W: blocked=%.2f W unblocked=%.2f W",
+			blockedOut[0].TargetW, unblockedOut[0].TargetW)
 	}
 }
 

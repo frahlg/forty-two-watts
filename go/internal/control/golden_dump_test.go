@@ -680,7 +680,8 @@ func targetedScenarios() []goldenScenario {
 		State:     defaultGoldenState(ModeSelfConsumption),
 	}))
 
-	// forceFuseDischarge from idle mode (fuseSaverFromZero path).
+	// forceFuseDischarge from idle mode: the saver flips idle's held zero to
+	// discharge through the ordinary safety pipeline.
 	out = append(out, mk("force_fuse_discharge_idle", goldenInputs{
 		FuseMaxW: 11040, GridW: 12500,
 		Batteries: []goldenBattery{gb("ferroamp", 15200, 0, 0.60)},
@@ -1053,11 +1054,16 @@ func earlyExitScenarios() []goldenScenario {
 		Slot:        staleSlot(),
 	}))
 
-	// ---- idle exit -------------------------------------------------------
+	// ---- idle ------------------------------------------------------------
 	//
 	// Idle has run the fuse-saver against the aggregate fuse since long
 	// before #803 — targeted/force_fuse_discharge_idle records that. What it
 	// had no record of is the other two numbers the saver reads.
+	//
+	// These four now also record the hold underneath: idle commands 0 W to
+	// every battery it may command, so each of them answers two questions at
+	// once — is the fleet stopped, and can the protection still reach past
+	// the stop when the breaker is threatened.
 	idlePeak := defaultGoldenState(ModeIdle)
 	idlePeak.PeakImportCeilingW = 4000
 	out = append(out, mk("idle_peak_ceiling_binds", goldenInputs{
@@ -1078,7 +1084,8 @@ func earlyExitScenarios() []goldenScenario {
 		State:       phases1(defaultGoldenState(ModeIdle)),
 	}))
 	// Negative control: idle with both protections configured and neither
-	// over its limit. Idle means idle.
+	// over its limit. Nothing binds, so what is left is the bare hold —
+	// 0 W, unclamped. This is the record that would catch an over-fire.
 	idleQuiet := phases3(defaultGoldenState(ModeIdle), 0)
 	idleQuiet.PeakImportCeilingW = 8000
 	out = append(out, mk("idle_nothing_binds_quiet", goldenInputs{

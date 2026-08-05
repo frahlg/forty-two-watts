@@ -1420,20 +1420,36 @@ func ComputeDispatch(
 	// ---- Idle + Charge short-circuits ----
 	switch effectiveMode {
 	case ModeIdle:
-		// Even in idle, the reactive fuse-saver runs: an unplanned
-		// load (manual_hold injecting EV power, oven turning on,
-		// neighbour's pool pump on the same fuse) can push grid
-		// import past the fuse with the battery sitting at 0 W. The
-		// fuse-saver overrides idle and forces discharge.
-		out := fuseSaverEarlyExit(store, state, driverCapacities, fuseMaxW)
-		// LastTargets reflects what we actually issued: nil when
-		// the fuse-saver no-op'd, the discharge targets when it
-		// fired. /api/status, the history snapshot, and the RLS
-		// model loop all depend on this being accurate. Idle is the
-		// one early exit that also clears it — the other two are
-		// suppressing a re-dispatch, not commanding zero.
-		state.LastTargets = out
-		return out
+		// Idle stops the fleet; it does not stop talking to it. A
+		// battery holds the last setpoint it accepted until it is given
+		// another one, so a mode that issues nothing parks the fleet
+		// wherever the previous mode left it — enter idle while the
+		// battery is charging at 5 kW and it charges at 5 kW.
+		//
+		// What happens next is then the vendor's decision rather than
+		// ours, and the vendors disagree. Ferroamp's forced mode
+		// EXPIRES: on 2026-06-10 an EnergyHub reverted to its own
+		// self-consumption and charged 2.6 kW from the grid while FTW
+		// believed it was idling. Sungrow holds instead, so the same
+		// operator action leaves two sites in two different states.
+		// ferroamp.lua's zero branch already re-publishes forced idle
+		// on every command for exactly this reason — it just never
+		// heard from this mode.
+		//
+		// So command it: an explicit 0 W to every battery we may
+		// command, rebuilt and re-sent every tick, which makes the hold
+		// ours and stops it decaying into autonomous behaviour.
+		//
+		// Protection is not off in idle. These zeros go through the
+		// same safety pipeline as every other dispatch path, so the
+		// reactive fuse-saver still overrides them and forces discharge
+		// when an unplanned load (an oven, an EV, a neighbour's pump on
+		// the same fuse) threatens the breaker.
+		targets := holdFleetAtZero(store, driverCapacities)
+		return applyDispatchSafetyPipeline(targets, store, state, driverCapacities, fuseMaxW, dispatchSafetyOptions{
+			updatePrevTargets: true,
+			recordDispatch:    true,
+		})
 	case ModeCharge:
 		targets := chargeAll(store, driverCapacities, state.DriverLimits)
 		return applyDispatchSafetyPipeline(targets, store, state, driverCapacities, fuseMaxW, dispatchSafetyOptions{
@@ -4122,11 +4138,15 @@ func planSignIntent(state *State) int {
 // model loop see the commanded discharge — and so the holdoff counts it
 // as a real dispatch rather than re-firing on the next tick.
 //
-// Three branches leave early — idle mode, the holdoff window, and the
-// reactive deadband. None of them means the site is safe; each means the
-// normal control law has nothing to say. This is one law, so it lives in
-// one place: the deadband exit was missing it for the whole life of the
-// function, and copies of a safety rule are how that happens.
+// Two branches leave early — the holdoff window and the reactive deadband.
+// Neither means the site is safe; each means the normal control law has
+// nothing to say. This is one law, so it lives in one place: the deadband
+// exit was missing it for the whole life of the function, and copies of a
+// safety rule are how that happens.
+//
+// Idle used to be the third. It no longer leaves early at all: it commands a
+// held zero and reaches the fuse-saver through the ordinary safety pipeline,
+// which is the same protection by a shorter route.
 func fuseSaverEarlyExit(
 	store *telemetry.Store,
 	state *State,
@@ -4143,17 +4163,48 @@ func fuseSaverEarlyExit(
 	return out
 }
 
+// holdFleetAtZero builds the forced-idle command set: 0 W for every battery
+// this dispatcher is allowed to command. Eligibility is the same predicate the
+// main path's "gather online batteries" applies — a health record that reports
+// online, plus a live DerBattery reading — so idle commands exactly the fleet
+// every other mode commands, and no more.
+//
+// Both exclusions are load-bearing rather than tidiness. An offline or faulted
+// driver is owed its autonomous default mode, not a setpoint, and that is the
+// tracker's job in cmd/ftw, not this one's. A driver with no battery reading
+// has not shown it has a battery to hold: sungrow.lua rejects a `battery`
+// command on a string inverter outright, and a rejection core asked for is a
+// rejection core counts.
+//
+// Used by ModeIdle to hold the fleet, and by fuseSaverFromZero as the baseline
+// the fuse-saver flips to discharge. One function so the two can never come to
+// disagree about which batteries are under our control.
+func holdFleetAtZero(store *telemetry.Store, capacities map[string]float64) []DispatchTarget {
+	if store == nil {
+		return nil
+	}
+	out := make([]DispatchTarget, 0, len(capacities))
+	for name := range capacities {
+		h := store.DriverHealth(name)
+		if h == nil || !h.IsOnline() {
+			continue
+		}
+		if r := store.Get(name, telemetry.DerBattery); r == nil {
+			continue
+		}
+		out = append(out, DispatchTarget{Driver: name, TargetW: 0})
+	}
+	return out
+}
+
 // fuseSaverFromZero is the early-return entry point for the fuse-saver.
 // Called via fuseSaverEarlyExit from the ComputeDispatch branches that
-// would otherwise return nil (idle mode, holdoff window, reactive
-// deadband) so the safety primary still gets a chance to fire before we
-// walk away from the cycle. Builds zero-W targets for
-// every battery that is BOTH online (per DriverHealth) AND has a current
-// DerBattery reading, then runs them through forceFuseDischarge; if no
-// overflow is predicted, the result is nil (caller sees the same
-// empty-dispatch behaviour as before). Filtering to online+telemetry
-// matches ComputeDispatch's main path and avoids commanding offline
-// batteries via the fuse-saver back door.
+// would otherwise return nil (holdoff window, reactive deadband) so the
+// safety primary still gets a chance to fire before we walk away from the
+// cycle. Takes holdFleetAtZero's command set — every battery that is BOTH
+// online (per DriverHealth) AND has a current DerBattery reading — and runs
+// it through forceFuseDischarge; if no overflow is predicted, the result is
+// nil and the caller sees the same empty dispatch it saw before.
 func fuseSaverFromZero(
 	store *telemetry.Store,
 	state *State,
@@ -4163,17 +4214,7 @@ func fuseSaverFromZero(
 	if fuseMaxW <= 0 || len(driverCapacities) == 0 || store == nil {
 		return nil
 	}
-	zeros := make([]DispatchTarget, 0, len(driverCapacities))
-	for name := range driverCapacities {
-		h := store.DriverHealth(name)
-		if h == nil || !h.IsOnline() {
-			continue
-		}
-		if r := store.Get(name, telemetry.DerBattery); r == nil {
-			continue
-		}
-		zeros = append(zeros, DispatchTarget{Driver: name, TargetW: 0})
-	}
+	zeros := holdFleetAtZero(store, driverCapacities)
 	if len(zeros) == 0 {
 		return nil
 	}

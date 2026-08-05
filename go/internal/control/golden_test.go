@@ -397,7 +397,7 @@ func assertGoldenSlewCoverage(t *testing.T, all []goldenRecord, byID map[string]
 func assertGoldenEarlyExitCoverage(t *testing.T, all []goldenRecord, byID map[string]goldenRecord) {
 	t.Helper()
 
-	for _, exit := range []string{"deadband", "idle", "holdoff"} {
+	for _, exit := range []string{"deadband", "holdoff"} {
 		prefix := "early_exit/" + exit + "_"
 		var fired, quiet int
 		for _, r := range all {
@@ -429,6 +429,48 @@ func assertGoldenEarlyExitCoverage(t *testing.T, all []goldenRecord, byID map[st
 		if quiet == 0 {
 			t.Errorf("coverage gap: no %s record where nothing binds; a corpus of only-firing records cannot see an over-fire", exit)
 		}
+	}
+
+	// Idle is held to a different law than the two exits above, and the
+	// difference is the point of it: it does not leave the cycle, so it is
+	// never allowed to be silent. Its quiet case is a commanded zero — the
+	// hold that stops a battery keeping the last setpoint it accepted, or
+	// (Ferroamp, 2026-06-10) letting a forced mode expire back into charging
+	// from the grid. Its firing case is the fuse-saver, which must still
+	// reach past that hold. A record with no targets at all would mean idle
+	// had gone back to trusting the vendor, so it is the one thing this
+	// cannot accept.
+	var idleHeld, idleFired int
+	for _, r := range all {
+		if !strings.HasPrefix(r.ScenarioID, "early_exit/idle_") {
+			continue
+		}
+		if len(r.PerDriverTargets) == 0 {
+			t.Errorf("%s: idle commanded nothing — the fleet is holding its last setpoint, not stopped", r.ScenarioID)
+			continue
+		}
+		if sum := sumGoldenTargets(r); sum < -1 {
+			idleFired++
+			for _, tg := range r.PerDriverTargets {
+				if !tg.Clamped || tg.TargetW > 0 {
+					t.Errorf("%s: the fuse-saver may only command clamped discharge, got %+.0f W clamped=%v on %s",
+						r.ScenarioID, tg.TargetW, tg.Clamped, tg.Driver)
+				}
+			}
+			continue
+		}
+		idleHeld++
+		for _, tg := range r.PerDriverTargets {
+			if math.Abs(tg.TargetW) > goldenToleranceW {
+				t.Errorf("%s: idle holds at 0 W, got %+.2f W on %s", r.ScenarioID, tg.TargetW, tg.Driver)
+			}
+		}
+	}
+	if idleFired == 0 {
+		t.Error("coverage gap: no idle record where a protection binds — the fuse-saver no longer reaches past the hold")
+	}
+	if idleHeld == 0 {
+		t.Error("coverage gap: no idle record where nothing binds; a corpus of only-firing records cannot see an over-fire")
 	}
 
 	// The aggregate ceiling. The operator's tariff peak sits below the fuse,
