@@ -2,6 +2,7 @@ package control
 
 import (
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"math"
 	"time"
@@ -994,6 +995,106 @@ func (s *State) now() time.Time {
 func (s *State) SetGridTarget(w float64) {
 	s.GridTargetW = w
 	s.PI.Setpoint = w
+}
+
+// SetPeakLimit applies the peak-shaving import threshold, rejecting the
+// values a site can never act on. Both operator paths — POST
+// /api/peak_limit and the Home Assistant peak_limit_w number — go
+// through here, so the rule has one home; there is no YAML key for it.
+// Callers hold the control mutex.
+//
+// Two rejections, both about a setting that reads as armed and is not:
+//
+//   - Negative. The threshold is the import level above which shaving
+//     starts correcting. Below zero, dispatch's `gridW > PeakLimitW`
+//     branch turns a site sitting at zero grid into a positive error and
+//     commands discharge to force export; the band between the limit and
+//     zero meanwhile falls into the `gridW < 0` charge arm, so the two
+//     halves of the same setting disagree. A knob named for an import
+//     peak must not be able to order export.
+//
+//   - Above the fuse. Every import-side clamp already binds at the fuse
+//     less its safety margin, so a threshold above that can never be the
+//     first thing to bind: peak-shaving mode would do nothing the fuse
+//     guard was not already doing, while the operator reads their number
+//     back from /api/status and believes the tariff is defended.
+//
+// Zero is accepted and keeps the meaning dispatch already gives it —
+// "correct everything above 0 W of import". This is deliberately NOT the
+// zero-means-disabled convention that PeakImportCeilingW and MaxExportW
+// use. Peak shaving is a mode: it is switched off by leaving the mode,
+// not by zeroing the threshold. Reading 0 as "disabled" here would let a
+// site running peak_shaving import without limit, and a wire value that
+// means two things is how the Ferroamp pplim=0 lock bit us.
+//
+// The comparison is against the fuse, not effectiveImportCeilingW, even
+// though PeakImportCeilingW can bind lower. The fuse is a property of the
+// site; the ceiling is another operator knob that may be set after this
+// one, and validating a knob against a knob makes acceptance depend on
+// the order the two were typed. A peak limit under the fuse but over a
+// tighter tariff ceiling is redundant, not misleading — the tighter
+// number is already doing the operator's stated job.
+//
+// There is no lower bound beyond zero. A threshold under the site's base
+// load binds hard rather than silently, the battery covers what it can,
+// and the rest shows up as import over the limit — visible, and the
+// operator's business. We have no quantified hardware or control risk to
+// point at, so we do not clamp it.
+//
+// A site whose fuse is not described (SiteFuseAmps <= 0, as in test and
+// e2e harnesses) gets the negative check only, matching fuseSafetyMarginW
+// and perPhaseOverageW: an incomplete fuse description yields no clamp
+// rather than an invented one.
+func (s *State) SetPeakLimit(w float64) error {
+	if w < 0 {
+		return fmt.Errorf("peak_limit_w must be ≥ 0, got %.0f W", w)
+	}
+	if ceiling := s.peakLimitCeilingW(); ceiling > 0 && w > ceiling {
+		return fmt.Errorf(
+			"peak_limit_w %.0f W is above the site's import ceiling %.0f W "+
+				"(fuse %.0f A × %.0f V × %d phases, less a %.1f A safety margin) "+
+				"— a peak limit above the fuse can never bind",
+			w, ceiling, s.SiteFuseAmps, s.SiteFuseVoltage, s.SiteFusePhases, s.SiteFuseSafetyA)
+	}
+	s.PeakLimitW = w
+	return nil
+}
+
+// PeakLimitIsDead reports whether the current peak-shaving threshold sits
+// above the site's import ceiling, i.e. can never bind. SetPeakLimit
+// refuses to create that state, but a config reload that lowers
+// fuse.max_amps can arrive at it from the other direction, under a value
+// that was legal when it was set. Returns false when the fuse is not
+// described. Caller holds the control mutex.
+func (s *State) PeakLimitIsDead() (float64, bool) {
+	ceiling := s.peakLimitCeilingW()
+	return ceiling, ceiling > 0 && s.PeakLimitW > ceiling
+}
+
+// peakLimitCeilingW is the highest peak limit that can still be the first
+// thing to bind: the fuse less the margin every import clamp already
+// keeps. 0 means "the site's fuse is not described", not "no headroom".
+func (s *State) peakLimitCeilingW() float64 {
+	fuseW := s.siteFuseMaxW()
+	if fuseW <= 0 {
+		return 0
+	}
+	ceiling := fuseW - s.fuseSafetyMarginW()
+	if ceiling < 0 {
+		return 0
+	}
+	return ceiling
+}
+
+// siteFuseMaxW is the aggregate breaker budget in watts, from the same
+// three fields the control tick multiplies together. Returns 0 when any
+// of them is unset — no invented 230 V / 3 phases here, matching
+// fuseSafetyMarginW.
+func (s *State) siteFuseMaxW() float64 {
+	if s == nil || s.SiteFuseAmps <= 0 || s.SiteFuseVoltage <= 0 || s.SiteFusePhases <= 0 {
+		return 0
+	}
+	return s.SiteFuseAmps * s.SiteFuseVoltage * float64(s.SiteFusePhases)
 }
 
 // batteryInfo is internal state read from telemetry per dispatch cycle.
