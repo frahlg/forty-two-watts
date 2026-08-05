@@ -2123,7 +2123,7 @@ func main() {
 	if identityState.Nova != nil {
 		boxID = identityState.Nova.PublicKeyHex()[:16]
 	}
-	appEnroll, appLinkEnabled, appLinkErr := startAppLink(
+	appEnroll, appUplink, appLinkEnabled, appLinkErr := startAppLink(
 		ctx, cfg, identityKeyPath, boxID, Version,
 		st, tel, mpcSvc, ctrl, ctrlMu, controlRev, appLinkWatchdog,
 	)
@@ -2142,7 +2142,7 @@ func main() {
 		State: st,
 		CapMu: capMu, Capacities: capacities, TelemetryCapacities: telemetryCapacities,
 		BatteryIdentity: batteryIdentity,
-		AppEnroll:       appEnrollForAPI(appEnroll, appLinkEnabled),
+		AppEnroll:       appEnrollForAPI(appEnroll, appUplink, appLinkEnabled),
 		CfgMu:           cfgMu, Cfg: cfg, ConfigPath: *configPath,
 		ConfigApplier:       applyConfigChange,
 		DriverDir:           resolveDriverDir(),

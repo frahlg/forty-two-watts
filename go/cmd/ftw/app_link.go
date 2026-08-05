@@ -335,15 +335,15 @@ func startAppLink(
 	ctrlMu *sync.Mutex,
 	revision *control.Revision,
 	siteMeterStale time.Duration,
-) (*appenroll.Identity, bool, error) {
+) (*appenroll.Identity, *appuplink.Uplink, bool, error) {
 	enabled := cfg != nil && cfg.AppLink != nil && cfg.AppLink.Enabled
 
 	enroll, err := appenroll.LoadOrCreate(identityKeyPath)
 	if err != nil {
-		return nil, enabled, err
+		return nil, nil, enabled, err
 	}
 	if !enabled {
-		return enroll, false, nil
+		return enroll, nil, false, nil
 	}
 
 	// The box's own zone, read from the host. The app renders plan slot times
@@ -399,7 +399,7 @@ func startAppLink(
 		},
 	})
 	if err != nil {
-		return enroll, enabled, err
+		return enroll, nil, enabled, err
 	}
 
 	go func() {
@@ -408,13 +408,57 @@ func startAppLink(
 		}
 	}()
 
-	return enroll, true, nil
+	return enroll, uplink, true, nil
 }
 
 func siteMeterName(ctrl *control.State, ctrlMu *sync.Mutex) string {
 	ctrlMu.Lock()
 	defer ctrlMu.Unlock()
 	return ctrl.SiteMeterDriver
+}
+
+// appLinkAPI is the API's view of enrollment: the identity plus, when the
+// uplink runs, the ability to tear a revoked phone's sessions down at once
+// rather than at its next reconnect.
+type appLinkAPI struct {
+	enroll *appenroll.Identity
+	uplink *appuplink.Uplink
+}
+
+func (a *appLinkAPI) MintPairingCode() ([]byte, time.Time, error) {
+	return a.enroll.MintPairingCode()
+}
+
+func (a *appLinkAPI) EnrollmentURL(code []byte, lanHint string) (string, error) {
+	return a.enroll.EnrollmentURL(code, lanHint)
+}
+
+func (a *appLinkAPI) AuthorisedCount() int { return a.enroll.AuthorisedCount() }
+
+func (a *appLinkAPI) Devices() []api.AppDevice {
+	infos := a.enroll.Devices()
+	out := make([]api.AppDevice, 0, len(infos))
+	for _, d := range infos {
+		out = append(out, api.AppDevice{ID: d.ID, AddedAtMs: d.AddedAtMs, LastSeenMs: d.LastSeenMs})
+	}
+	return out
+}
+
+func (a *appLinkAPI) RevokeDevice(id string) error {
+	key, err := a.enroll.Revoke(id)
+	if err != nil {
+		if errors.Is(err, appenroll.ErrUnknownDevice) {
+			return api.ErrUnknownAppDevice
+		}
+		return err
+	}
+	// Forgetting the key locks the next handshake out; dropping the live
+	// sessions locks out the one running now. Both, or "remove" quietly
+	// means "remove within the hour".
+	if a.uplink != nil && key != nil {
+		a.uplink.DropSessionsByAppKey(key)
+	}
+	return nil
 }
 
 // appEnrollForAPI hands the enroller to the API, or nothing.
@@ -424,9 +468,9 @@ func siteMeterName(ctrl *control.State, ctrlMu *sync.Mutex) string {
 // panics on first use. Returning an untyped nil is the difference between
 // "pairing is off" and a crash on the one screen someone reaches for when
 // nothing else works.
-func appEnrollForAPI(enroll *appenroll.Identity, enabled bool) api.AppEnroller {
+func appEnrollForAPI(enroll *appenroll.Identity, uplink *appuplink.Uplink, enabled bool) api.AppEnroller {
 	if !enabled || enroll == nil {
 		return nil
 	}
-	return enroll
+	return &appLinkAPI{enroll: enroll, uplink: uplink}
 }
