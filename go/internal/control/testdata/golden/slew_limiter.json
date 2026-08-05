@@ -1,7 +1,7 @@
 {
   "family": "slew_limiter",
   "generated_by": "FTW_GOLDEN_DUMP=1 go test ./internal/control/ -run TestGoldenDump",
-  "ftw_commit": "fe2c904fe03665775f79265fc3302f4f30808fc7",
+  "ftw_commit": "c85bfe1528d5ccdcd6d9080378b0d8b4e610c276",
   "record_count": 155,
   "records": [
     {
