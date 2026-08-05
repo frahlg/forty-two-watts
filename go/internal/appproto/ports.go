@@ -85,6 +85,13 @@ type Snapshot struct {
 	// BatterySoCKnown is false when no battery reports a state of charge.
 	BatterySoCKnown bool
 
+	// EVW is the summed charger draw, positive while charging — a charger
+	// consumes like any other load. EVWKnown is false on a site with no
+	// charger at all, and then field 10 is never sent: the app draws no EV
+	// node rather than a dead one showing an invented zero.
+	EVW      float64
+	EVWKnown bool
+
 	Sources []Source
 
 	// DispatchBlockedBy names the source ids currently stopping dispatch.

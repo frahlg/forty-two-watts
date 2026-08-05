@@ -28,6 +28,8 @@ const (
 	FidSrcPv Fid = 8
 	// FidSrcBattery — source_ref, unit none.
 	FidSrcBattery Fid = 9
+	// FidEvW — power, unit W.
+	FidEvW Fid = 10
 )
 
 // FrozenFieldNames maps a frozen field id to its registry name.
@@ -41,6 +43,7 @@ var FrozenFieldNames = map[Fid]string{
 	FidSrcGrid:    "src_grid",
 	FidSrcPv:      "src_pv",
 	FidSrcBattery: "src_battery",
+	FidEvW:        "ev_w",
 }
 
 // FrozenFieldUnits maps a frozen field id to its unit, empty when it has none.
@@ -54,6 +57,7 @@ var FrozenFieldUnits = map[Fid]string{
 	FidSrcGrid:    "",
 	FidSrcPv:      "",
 	FidSrcBattery: "",
+	FidEvW:        "W",
 }
 
 // Capabilities are presence, not levels. An app hides what is absent and

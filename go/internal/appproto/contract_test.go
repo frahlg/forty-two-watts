@@ -66,6 +66,10 @@ func TestFrozenFieldIdsAreFrozen(t *testing.T) {
 		7: "src_grid",
 		8: "src_pv",
 		9: "src_battery",
+		// Extended deliberately on 2026-08-05 for EV charging. The freeze
+		// covers the id's meaning, not its presence: like battery_soc,
+		// ev_w is sent only when the hardware exists.
+		10: "ev_w",
 	}
 	for fid, name := range want {
 		if got := FrozenFieldNames[fid]; got != name {

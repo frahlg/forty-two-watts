@@ -132,6 +132,18 @@ func (a *appSite) Snapshot() appproto.Snapshot {
 		snap.BatterySoC = socTotal / float64(socCount)
 	}
 
+	// EV chargers. Known means the site has one at all — an idle charger
+	// is a real 0 W reading, a site without one sends no field 10 and the
+	// app draws no EV node. Positive while charging: a charger consumes
+	// like any other load.
+	for _, reading := range a.tel.ReadingsByType(telemetry.DerEV) {
+		addSource(reading.Driver)
+		snap.EVWKnown = true
+		if health := a.tel.DriverHealth(reading.Driver); health != nil && health.IsOnline() {
+			snap.EVW += reading.SmoothedW
+		}
+	}
+
 	// grid = load + battery + pv, all site-signed. Rearranged, not
 	// re-derived: a second formula here would be a second thing to keep in
 	// step with docs/site-convention.md.
