@@ -65,9 +65,6 @@ func RestartRequiredFor(oldCfg, newCfg *Config) []string {
 	if !pointerEqual(oldCfg.Nova, newCfg.Nova) {
 		reasons = append(reasons, "nova — federation client is constructed once at startup")
 	}
-	if !pointerEqual(oldCfg.HomeLink, newCfg.HomeLink) {
-		reasons = append(reasons, "home_link — outbound remote access is connected at startup")
-	}
 	if !pointerEqual(oldCfg.AppLink, newCfg.AppLink) {
 		reasons = append(reasons, "app_link — the app uplink is connected at startup")
 	}
