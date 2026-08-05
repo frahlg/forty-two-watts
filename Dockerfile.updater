@@ -33,17 +33,17 @@ RUN cd go && \
 # alpine-based and was the last thing keeping a second libc in the deployment.
 #
 # The docker CLI and the compose plugin are copied straight out of the official
-# CLI image rather than installed from Docker's apt repository: it is the same
-# upstream artifact, it pins the version explicitly, and it keeps apt out of the
-# emulated arm64 layer.
+# CLI image rather than installed from Docker's apt repository. The reference is
+# pinned to Docker Official Images' multi-arch index digest, so BuildKit selects
+# the matching amd64 or arm64 manifest without pinning one platform by mistake.
 FROM debian:trixie-slim
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends ca-certificates tzdata && \
     rm -rf /var/lib/apt/lists/*
 
-COPY --from=docker:27-cli /usr/local/bin/docker /usr/local/bin/docker
-COPY --from=docker:27-cli /usr/local/libexec/docker/cli-plugins/docker-compose \
+COPY --from=docker:27-cli@sha256:851f91d241214e7c6db86513b270d58776379aacc5eb9c4a87e5b47115e3065c /usr/local/bin/docker /usr/local/bin/docker
+COPY --from=docker:27-cli@sha256:851f91d241214e7c6db86513b270d58776379aacc5eb9c4a87e5b47115e3065c /usr/local/libexec/docker/cli-plugins/docker-compose \
                           /usr/local/libexec/docker/cli-plugins/docker-compose
 
 COPY --from=builder /out/ftw-updater /usr/local/bin/ftw-updater

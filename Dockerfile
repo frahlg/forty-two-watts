@@ -59,11 +59,12 @@ FROM debian:trixie-slim
 #                    boundaries with no error, so this is load-bearing.
 # wget             — the HEALTHCHECK below AND ftw-updater's readiness probe,
 #                    which `docker exec`s wget in THIS image to decide whether
-#                    an update commits. Debian slim ships neither wget nor curl,
-#                    so it must be installed explicitly; dropping it would make
-#                    every self-update fail its health gate and roll back.
+#                    an update commits. Debian slim does not include wget by
+#                    default, so it must be installed explicitly; dropping it
+#                    would make every self-update fail its health gate and roll
+#                    back.
 # libnss-mdns      — resolves ".local" for glibc programs in the image (getent,
-#                    curl, wget), so in-container debugging agrees with the
+#                    wget), so in-container debugging agrees with the
 #                    host. apt wires mdns4_minimal into /etc/nsswitch.conf on
 #                    install. At run time it forwards to avahi-daemon over
 #                    /run/avahi-daemon/socket, which must be bind-mounted; see

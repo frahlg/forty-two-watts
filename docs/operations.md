@@ -183,7 +183,7 @@ driver configuration.
 ### `.local` names inside the container
 
 The image ships `libnss-mdns`, so ordinary glibc tools inside the container —
-`getent hosts zap.local`, `curl`, `wget` — resolve `.local` the way they do on
+`getent hosts zap.local` and `wget` — resolve `.local` the way they do on
 the host. `apt` wires `mdns4_minimal [NOTFOUND=return]` into
 `/etc/nsswitch.conf` when the package is installed; nothing else is needed at
 build time.
