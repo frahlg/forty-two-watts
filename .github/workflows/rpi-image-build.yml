@@ -87,26 +87,23 @@ jobs:
   build:
     name: build RPi installer image
     if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
+    # Native arm64. pi-gen debootstraps an arm64 rootfs and then runs every
+    # stage's scripts inside it, so on an x86 runner the whole build executes
+    # under qemu-user-static instruction emulation — which is what made this
+    # job take an hour. Here the chroot runs on its own architecture and no
+    # binfmt interpreter is involved at all.
+    runs-on: ubuntu-24.04-arm
     permissions:
       contents: write
     steps:
       - name: Free disk space
         # pi-gen needs more scratch space than the standard runner exposes.
+        # The x86 image ships toolchains the ARM image does not; rm -rf on a
+        # missing path is a no-op, so the same list is safe on both.
         run: |
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost "${AGENT_TOOLSDIRECTORY}"
           sudo docker system prune -af
           df -h /
-
-      - name: Install qemu for arm64 cross-build
-        # Keep the known-good static interpreter setup until the native ARM
-        # runner path has been benchmarked with this pinned pi-gen revision.
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends qemu-user-static
-          sudo ln -sf /usr/bin/qemu-aarch64-static /usr/bin/qemu-aarch64
-          sudo docker run --privileged --rm tonistiigi/binfmt --install arm64
-          which qemu-aarch64
 
       - name: Checkout
         uses: actions/checkout@v5
