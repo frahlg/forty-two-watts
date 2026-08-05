@@ -15,6 +15,10 @@
   var S = (window.FTWSettings = window.FTWSettings || { tabs: {} });
   S.tabs = S.tabs || {};
 
+  // The tab context, kept so the callbacks below can read the live config
+  // without threading it through every handler.
+  var pairingCtx = null;
+
   function setStatus(text) {
     var el = document.getElementById("app-link-status");
     if (el) el.textContent = text;
@@ -26,7 +30,26 @@
     return n + " phones paired.";
   }
 
-  function refreshStatus() {
+  // What the checkbox says and what the box is doing are two different
+  // things, because the uplink is connected at startup. Between saving and
+  // restarting they disagree, and that gap is the whole reason this says
+  // anything at all: a checkbox that goes quiet after Save leaves someone
+  // pressing a pairing button that cannot work yet.
+  //
+  // `saved` is the checkbox, read from the config the Save button will post.
+  // `running` is /api/app-link/status, which reports the process.
+  function describe(saved, running) {
+    if (running) {
+      if (!saved) return "Running. It stops at the next restart.";
+      return null; // The caller shows the pairing count instead.
+    }
+    if (saved) return "Saved. Press Save, then restart, to finish turning it on.";
+    return "Off. Turn it on above, save, and restart.";
+  }
+
+  function refreshStatus(ctx) {
+    var saved = !!(ctx && ctx.config.app_link && ctx.config.app_link.enabled);
+
     fetch("/api/app-link/status")
       .then(function (r) {
         return r.ok ? r.json() : null;
@@ -38,12 +61,9 @@
           if (button) button.disabled = true;
           return;
         }
-        if (!s.enabled) {
-          setStatus("The app link is off. Set app_link.enabled in your configuration and restart.");
-          if (button) button.disabled = true;
-          return;
-        }
-        setStatus(pairedText(s.paired_devices));
+        var note = describe(saved, s.enabled);
+        setStatus(note === null ? pairedText(s.paired_devices) : note);
+        if (button) button.disabled = !s.enabled;
       })
       .catch(function () {
         setStatus("Could not reach the box.");
@@ -128,27 +148,46 @@
       .then(function () {
         button.disabled = false;
         button.textContent = "Show a new code";
-        refreshStatus();
+        refreshStatus(pairingCtx);
       });
   }
 
   S.tabs.app = {
-    render: function () {
+    render: function (ctx) {
+      if (!ctx.config.app_link) ctx.config.app_link = { enabled: false };
+      var enabled = !!ctx.config.app_link.enabled;
+      pairingCtx = ctx;
+
       // Wired after this string becomes the DOM.
       setTimeout(function () {
         var button = document.getElementById("app-link-pair");
         if (button) button.addEventListener("click", requestCode);
-        refreshStatus();
+
+        // The shared data-checkbox-path handler writes the config; this only
+        // repaints the line underneath, so the wording follows the checkbox
+        // before anyone presses Save.
+        var toggle = document.getElementById("app-link-enabled");
+        if (toggle) toggle.addEventListener("change", function () { refreshStatus(ctx); });
+
+        refreshStatus(ctx);
       }, 0);
 
       return (
         "<fieldset><legend>The FTW app</legend>" +
-        '<p class="hint">Scan this with the FTW app to add a phone. The code works ' +
-        "once and expires in a few minutes, so ask for a new one when you need it. " +
-        "Everything the app needs is in the code itself — none of it passes through " +
-        "Sourceful, which is why the app can be sure it is talking to this box.</p>" +
+        '<p class="hint">The FTW app talks to this box directly. Turning this on ' +
+        "lets it reach you when you are away from home; nothing readable passes " +
+        "through Sourceful either way.</p>" +
+        '<label><input type="checkbox" id="app-link-enabled" ' +
+        'data-checkbox-path="app_link.enabled"' + (enabled ? " checked" : "") +
+        "> Let the FTW app connect to this box</label>" +
+        '<p class="hint">Takes effect after a restart — the box offers one when ' +
+        "you save.</p>" +
         '<p id="app-link-status" class="hint">checking…</p>' +
-        '<button type="button" id="app-link-pair">Show pairing code</button>' +
+        '<button type="button" id="app-link-pair" disabled>Show pairing code</button>' +
+        '<p class="hint">Scan the code with the FTW app to add a phone. It works ' +
+        "once and expires in a few minutes, so ask for a new one when you need it. " +
+        "Everything the app needs is in the code itself, which is why the app can " +
+        "be sure it is talking to this box.</p>" +
         '<div id="app-link-slot"></div>' +
         "</fieldset>"
       );
