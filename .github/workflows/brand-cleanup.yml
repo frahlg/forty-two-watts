@@ -9,6 +9,13 @@ on:
 permissions:
   contents: read
 
+# Superseded pull-request runs answer a diff nobody will read again, so drop
+# them. Pushes to master keep running to completion: they are the record that
+# a merged commit passed, and there are few enough of them to be worth it.
+concurrency:
+  group: brand-cleanup-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   active-copy:
     name: no new legacy product copy
