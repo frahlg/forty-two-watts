@@ -1829,9 +1829,25 @@ func ComputeDispatch(
 		// stuck at that previous level, defeating the whole point of
 		// the reserve. Falling through forces a fresh dispatch that
 		// drives the battery toward 0 (or the post-PI cap below).
+		//
+		// The charge-side clause is the mirror of the discharge one on
+		// the line above it, and it is here for the same reason: a
+		// small grid error can be small BECAUSE the battery is doing
+		// the forbidden thing. An idle arbitrage slot over a 2 kW PV
+		// surplus reads -50 W at the meter while the battery absorbs
+		// the other 2000 W; the error stays inside the deadband for as
+		// long as the violation lasts, and no tick ever reaches
+		// floorBlockedCharge to stop it. Falling through issues the 0 W
+		// the block already decided. Gated on a battery MEASURED
+		// charging, not on the block alone, so a tick with nothing to
+		// withdraw stays quiet and no driver is handed a command it
+		// could refuse. Safety does not thin out on this path: the
+		// full pipeline ends in the same forceFuseDischarge the
+		// early exit's fuse-saver would have run.
 		surplusActive := state.EVSurplusOnlyReserveW > 0 && effectiveMode == ModeSelfConsumption
 		if !surplusActive && math.Abs(errW) < state.GridToleranceW &&
-			!(noSelfDischarge && anyBatteryDischarging(onlineBats)) {
+			!(noSelfDischarge && anyBatteryDischarging(onlineBats)) &&
+			!anyBlockedBatteryCharging(onlineBats, noSelfCharge) {
 			// A small grid error is not a statement that the site is
 			// safe. errW compares one aggregate number against one
 			// aggregate target; two protections bind on numbers this
@@ -3020,6 +3036,37 @@ func distributeByCapacity(bats []batteryInfo, desiredTotal, totalCap float64) []
 func anyBatteryDischarging(bats []batteryInfo) bool {
 	for _, b := range bats {
 		if b.currentW < -1 {
+			return true
+		}
+	}
+	return false
+}
+
+// anyBlockedBatteryCharging reports whether a battery whose charge direction
+// this tick has closed is measured charging right now. It is the charge-side
+// twin of anyBatteryDischarging, and it exists for the deadband exit: an
+// exit that issues no target withdraws nothing, because the control tick
+// only sends commands for targets ComputeDispatch returned and a driver
+// holds its last accepted setpoint until it gets another one.
+//
+// Both authorities that floorBlockedCharge honours are read here, so the two
+// cannot drift apart:
+//
+//   - noSelfCharge — the site-wide block, already computed above.
+//   - chargeBlocked — the driver's own capability report.
+//
+// MEASURED charge, not the previous command, decides. That mirrors
+// anyBatteryDischarging's ±1 W test and keeps the predicate honest: a
+// battery that is not actually charging has nothing to withdraw, so the
+// tick stays quiet and no driver is handed a command it could refuse. The
+// cost is that a fresh charge command not yet visible at the meter waits one
+// tick, which is the same latency the discharge side has always accepted.
+func anyBlockedBatteryCharging(bats []batteryInfo, noSelfCharge bool) bool {
+	for _, b := range bats {
+		if b.currentW <= 1 {
+			continue
+		}
+		if noSelfCharge || b.chargeBlocked {
 			return true
 		}
 	}
