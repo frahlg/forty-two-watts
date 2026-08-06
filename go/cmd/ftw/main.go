@@ -1103,8 +1103,16 @@ func main() {
 		slog.Info("caldav started", "listen", cfg.CalDAV.ListenAddr(), "url", cfg.CalDAV.URL, "calendar", cfg.CalDAV.CalendarPath)
 	}
 
+	// ---- Billing-demand tracker (tariff-configured C&I sites) ----
+	demandTracker, demandSched, demandErr := newDemandTracker(cfg, st)
+	if demandErr != nil {
+		slog.Error("tariff schedule invalid", "err", demandErr)
+		os.Exit(1)
+	}
+
 	// ---- Start MPC planner (optional) ----
 	mpcSvc = buildMPC(cfg, st, tel, capacities)
+	wireCommercialSpec(mpcSvc, cfg, demandSched, demandTracker)
 	if mpcSvc != nil {
 		// Plumb the site fuse so the DP joint-plans battery + EV under
 		// the fuse from the start (instead of producing plans that
@@ -2060,13 +2068,6 @@ func main() {
 	)
 	if homeLinkErr != nil {
 		slog.Warn("Home Link unavailable")
-	}
-
-	// Billing-demand tracker — only on tariff-configured (C&I) sites.
-	demandTracker, demandErr := newDemandTracker(cfg, st)
-	if demandErr != nil {
-		slog.Error("tariff schedule invalid", "err", demandErr)
-		os.Exit(1)
 	}
 
 	deps = &api.Deps{

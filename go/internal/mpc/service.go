@@ -97,6 +97,11 @@ type Service struct {
 	// the pvmodel residual std. Drives downside-PV safety planning (Alt 2).
 	// Optional; nil → no downside haircut.
 	PVUncertaintyW func() float64
+	// Commercial supplies the C&I planning spec (demand charge on the
+	// billing peak, backup reserve) for the slots about to be planned.
+	// Wired in main.go from the tariff schedule + demand tracker on
+	// tariff-configured sites; nil on residential sites.
+	Commercial func(slots []Slot) *CommercialSpec
 	// PVForecastSafetyK scales the downside-PV haircut: the DP plans against
 	// forecast PV minus k·σ. 0 = raw forecast (no hedge). main.go defaults the
 	// unset config to 1.0.
@@ -998,6 +1003,9 @@ func (s *Service) replan(ctx context.Context) *Plan {
 	p.MinArbitrageSpreadOreKwh = s.MinArbitrageSpreadOreKwh
 	p.ExportFloorOreKwh = s.ExportFloorOreKwh
 	p.PVForecastSafetyK = s.PVForecastSafetyK
+	if s.Commercial != nil {
+		p.Commercial = s.Commercial(slots)
+	}
 	if s.PVUncertaintyW != nil {
 		p.PVUncertaintyW = math.Max(0, s.PVUncertaintyW())
 	}

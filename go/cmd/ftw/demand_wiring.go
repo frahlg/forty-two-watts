@@ -6,6 +6,7 @@ import (
 
 	"github.com/srcfl/ftw/go/internal/config"
 	"github.com/srcfl/ftw/go/internal/demand"
+	"github.com/srcfl/ftw/go/internal/mpc"
 	"github.com/srcfl/ftw/go/internal/state"
 	"github.com/srcfl/ftw/go/internal/tariff"
 )
@@ -30,13 +31,13 @@ func (p demandPersister) SaveDemandInterval(iv demand.Interval) error {
 // Returns nil (no tracking) when no tariff is configured; a broken tariff
 // config is a startup error — the operator asked for demand-charge
 // management, silently skipping it would be a billing surprise.
-func newDemandTracker(cfg *config.Config, st *state.Store) (*demand.Tracker, error) {
+func newDemandTracker(cfg *config.Config, st *state.Store) (*demand.Tracker, *tariff.Schedule, error) {
 	if cfg.Tariff == nil {
-		return nil, nil
+		return nil, nil, nil
 	}
 	sched, err := tariff.Compile(cfg.Tariff)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	classify := func(ts time.Time) demand.Classification {
 		r, err := sched.Resolve(ts)
@@ -57,5 +58,46 @@ func newDemandTracker(cfg *config.Config, st *state.Store) (*demand.Tracker, err
 		tr.SeedPeak(cycle, peak, ivMs)
 		slog.Info("billing peak restored", "cycle_start", cycle.Format(time.DateOnly), "peak_kva", peak)
 	}
-	return tr, nil
+	return tr, sched, nil
+}
+
+// wireCommercialSpec connects the tariff schedule + demand tracker to the
+// planner: per-slot demand-window flags, the live billing peak (kVA →
+// real-power W via the assumed power factor, since the planner optimizes
+// W), the kVA demand rate converted the same way, and the backup reserve.
+func wireCommercialSpec(svc *mpc.Service, cfg *config.Config, sched *tariff.Schedule, tr *demand.Tracker) {
+	if svc == nil || sched == nil || tr == nil {
+		return
+	}
+	pf := cfg.Site.EffectivePowerFactor()
+	rateOrePerKW := 0.0
+	if cfg.Tariff != nil && cfg.Tariff.DemandChargeCtKVA > 0 {
+		// cost = rate_kva × kVA = (rate_kva / pf) × kW.
+		rateOrePerKW = cfg.Tariff.DemandChargeCtKVA / pf
+	}
+	backupWh := 0.0
+	if cfg.Site.BackupReserve != nil {
+		backupWh = cfg.Site.BackupReserve.MinUsableEnergyWh
+	}
+	if rateOrePerKW == 0 && backupWh == 0 {
+		return
+	}
+	svc.Commercial = func(slots []mpc.Slot) *mpc.CommercialSpec {
+		spec := &mpc.CommercialSpec{
+			DemandRateOrePerKW:      rateOrePerKW,
+			BillingPeakSoFarW:       tr.PeakSoFarKVA(time.Now()) * 1000 * pf,
+			BackupMinUsableEnergyWh: backupWh,
+		}
+		if rateOrePerKW > 0 {
+			active := make([]bool, len(slots))
+			for i, sl := range slots {
+				mid := time.UnixMilli(sl.StartMs).Add(time.Duration(sl.LenMin) * time.Minute / 2)
+				if r, err := sched.Resolve(mid); err == nil {
+					active[i] = r.DemandActive
+				}
+			}
+			spec.DemandActive = active
+		}
+		return spec
+	}
 }

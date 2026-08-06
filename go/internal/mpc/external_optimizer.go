@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"slices"
 	"strings"
@@ -192,14 +193,61 @@ func NewExternalOptimizer(cfg ExternalOptimizerConfig) (*ExternalOptimizer, erro
 }
 
 type externalRequest struct {
-	SchemaVersion int                `json:"schema_version"`
-	RequestID     string             `json:"request_id"`
-	Settings      externalSettings   `json:"settings"`
-	Slots         []externalSlot     `json:"slots"`
-	Storages      []externalStorage  `json:"storages"`
-	FlexLoads     []externalFlexLoad `json:"flex_loads"`
-	ThermalLoads  []map[string]any   `json:"thermal_loads"`
-	Scenarios     []map[string]any   `json:"scenarios,omitempty"`
+	SchemaVersion int                 `json:"schema_version"`
+	RequestID     string              `json:"request_id"`
+	Settings      externalSettings    `json:"settings"`
+	Slots         []externalSlot      `json:"slots"`
+	Storages      []externalStorage   `json:"storages"`
+	FlexLoads     []externalFlexLoad  `json:"flex_loads"`
+	ThermalLoads  []map[string]any    `json:"thermal_loads"`
+	Scenarios     []map[string]any    `json:"scenarios,omitempty"`
+	Commercial    *externalCommercial `json:"commercial_constraints,omitempty"`
+}
+
+// externalCommercial mirrors the worker's commercial_constraints_v1
+// payload (optimizer/ftw_optimizer/model.py). Only the fields FTW wires
+// today are populated; the reserve/uncertainty vectors default worker-side
+// to zero.
+type externalCommercial struct {
+	Version                 string                `json:"version"`
+	BackupMinUsableEnergyWh []float64             `json:"backup_min_usable_energy_wh,omitempty"`
+	DemandCharge            *externalDemandCharge `json:"demand_charge,omitempty"`
+}
+
+type externalDemandCharge struct {
+	RateOrePerKW      float64 `json:"rate_ore_per_kw"`
+	BillingPeakSoFarW float64 `json:"billing_peak_so_far_w"`
+	ActiveWindow      []bool  `json:"active_window"`
+}
+
+const commercialConstraintsFeature = "commercial_constraints_v1"
+
+// commercialRequestBlock renders Params.Commercial for the wire, or nil
+// when there is nothing to send.
+func commercialRequestBlock(slots []Slot, p Params) *externalCommercial {
+	c := p.Commercial
+	if c == nil {
+		return nil
+	}
+	out := &externalCommercial{Version: "srcful-commercial-v1"}
+	if c.BackupMinUsableEnergyWh > 0 {
+		vec := make([]float64, len(slots))
+		for i := range vec {
+			vec[i] = c.BackupMinUsableEnergyWh
+		}
+		out.BackupMinUsableEnergyWh = vec
+	}
+	if c.DemandRateOrePerKW > 0 && len(c.DemandActive) == len(slots) {
+		out.DemandCharge = &externalDemandCharge{
+			RateOrePerKW:      c.DemandRateOrePerKW,
+			BillingPeakSoFarW: math.Max(0, c.BillingPeakSoFarW),
+			ActiveWindow:      append([]bool(nil), c.DemandActive...),
+		}
+	}
+	if out.BackupMinUsableEnergyWh == nil && out.DemandCharge == nil {
+		return nil
+	}
+	return out
 }
 
 type externalSettings struct {
@@ -341,6 +389,22 @@ func (o *ExternalOptimizer) optimize(ctx context.Context, slots []Slot, p Params
 	request := o.buildRequest(slots, p)
 	request.Settings.ScenarioPolicy = scenarioPolicy
 	request.Settings.NonAnticipativeSlots = nonAnticipativeSlots
+	// Commercial constraints ride only the shared champion (the worker
+	// rejects them on challenger policies) and only when the handshake
+	// advertises the feature. A missing feature degrades to TOU-only
+	// optimization with a warning — never a hard failure: the backup
+	// floor stays enforced by ValidatePlan's replay against Params and
+	// by the dispatch SoC clamp, and demand still bills what it bills.
+	// (Lesson from the `champion` rollout: never make a new feature a
+	// requirement before the fleet's optimizer images advertise it.)
+	if block := commercialRequestBlock(slots, p); block != nil && scenarioPolicy == "shared" {
+		if info, err := o.transport.Health(ctx); err == nil && optimizerHasFeature(info, commercialConstraintsFeature) {
+			request.Commercial = block
+		} else {
+			slog.Warn("optimizer lacks commercial_constraints_v1 — planning without demand charge",
+				"handshake_err", err)
+		}
+	}
 	if scenarioPolicy == "multistage" {
 		ms := o.cfg.Multistage
 		request.Settings.ScenarioLimit = ms.ScenarioLimit
@@ -583,6 +647,16 @@ func ValidatePlan(slots []Slot, p Params, plan *Plan) error {
 	}
 	lowerSoCRecovery := math.Max(0, p.SoCMinPct-p.InitialSoCPct)
 	upperSoCRecovery := math.Max(0, p.InitialSoCPct-p.SoCMaxPct)
+	// Load-shedding backup floor (C&I): planned aggregate stored energy
+	// must not drop below the reserve. Same recovery pattern as the SoC
+	// bounds — a site that STARTS below the floor may stay there while
+	// recovering, but a plan must never deepen the deficit.
+	backupFloorWh := 0.0
+	backupRecoveryWh := 0.0
+	if p.Commercial != nil && p.Commercial.BackupMinUsableEnergyWh > 0 && p.CapacityWh > 0 {
+		backupFloorWh = p.Commercial.BackupMinUsableEnergyWh
+		backupRecoveryWh = math.Max(0, backupFloorWh-p.CapacityWh*p.InitialSoCPct/100)
+	}
 	activeLoadpoints := p.activeLoadpoints()
 	evSoC := make(map[string]float64, len(activeLoadpoints))
 	for _, lp := range activeLoadpoints {
@@ -655,6 +729,15 @@ func ValidatePlan(slots []Slot, p Params, plan *Plan) error {
 		}
 		lowerSoCRecovery = math.Min(lowerSoCRecovery, lowerRecovery)
 		upperSoCRecovery = math.Min(upperSoCRecovery, upperRecovery)
+		if backupFloorWh > 0 {
+			energyWh := soc / 100 * p.CapacityWh
+			deficit := math.Max(0, backupFloorWh-energyWh)
+			tol := math.Max(1, p.CapacityWh*0.0002)
+			if deficit > backupRecoveryWh+tol {
+				return fmt.Errorf("slot %d drains stored energy %.0f Wh below the %.0f Wh backup reserve", i, energyWh, backupFloorWh)
+			}
+			backupRecoveryWh = math.Min(backupRecoveryWh, deficit)
+		}
 		totalLoadpointW := 0.0
 		for lpIdx, lp := range activeLoadpoints {
 			powerW := a.LoadpointPowerW[lp.ID]

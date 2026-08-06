@@ -219,6 +219,34 @@ type Params struct {
 	// fallback still receives downside-adjusted slots directly from Service.
 	PVUncertaintyW    float64
 	PVForecastSafetyK float64
+
+	// Commercial carries the C&I planning spec (demand charge on the
+	// billing-cycle peak, load-shedding backup floor) on tariff-configured
+	// sites. Nil on residential sites — every consumer treats nil as
+	// "feature absent". Serialized to the optimizer only when its
+	// handshake advertises commercial_constraints_v1; the backup floor is
+	// additionally enforced by ValidatePlan and (independently) by the
+	// dispatch SoC clamp, so a missing feature degrades to TOU-only
+	// optimization rather than unsafe behavior.
+	Commercial *CommercialSpec
+}
+
+// CommercialSpec is the C&I slice of Params.
+type CommercialSpec struct {
+	// DemandRateOrePerKW: minor currency units per kW of billing-cycle
+	// peak (kVA tariffs are converted via the assumed power factor at
+	// wiring time, since the planner optimizes real power).
+	DemandRateOrePerKW float64
+	// BillingPeakSoFarW is the highest counted demand interval this
+	// billing cycle, in W (same PF conversion). The optimizer only pays
+	// for peak growth above it.
+	BillingPeakSoFarW float64
+	// DemandActive marks the slots inside the tariff's demand window.
+	// Must be len(slots) when non-nil.
+	DemandActive []bool
+	// BackupMinUsableEnergyWh is the site-level load-shedding reserve:
+	// planned aggregate stored energy must not drop below it.
+	BackupMinUsableEnergyWh float64
 }
 
 // StorageAssetSpec is one independently constrained home battery in the
