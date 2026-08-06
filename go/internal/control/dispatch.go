@@ -178,6 +178,17 @@ type SlotDirectiveFunc func(now time.Time) (SlotDirective, bool)
 // `max_discharge_w` (see PowerLimits + State.DriverLimits, issue #145).
 const MaxCommandW = 5000
 
+// defaultCommandCap resolves the fallback per-battery command cap:
+// the operator's site.max_command_w when set, else the MaxCommandW
+// constant. Single read site so the fallback can never drift across
+// clamp points.
+func (s *State) defaultCommandCap() float64 {
+	if s.DefaultCommandW > 0 {
+		return s.DefaultCommandW
+	}
+	return MaxCommandW
+}
+
 // evActiveThresholdW is the floor below which state.EVChargingW is
 // treated as driver-side noise (a connected-but-idle wallbox bleeds a
 // few watts of last-known smoothed reading after the contactor
@@ -574,6 +585,13 @@ type State struct {
 	// Issue #145.
 	DriverLimits map[string]PowerLimits
 
+	// DefaultCommandW replaces the MaxCommandW constant as the fallback
+	// per-battery command cap when > 0. Config-gated: values above 5 kW
+	// require site.profile: commercial (enforced at config validation).
+	// 0 keeps the historical 5 kW default so every existing site and
+	// directly-constructed State behaves unchanged.
+	DefaultCommandW float64
+
 	// FuseHold* — hysteresis state from applyFuseGuard. After a clamp
 	// fires, the latched maximum aggregate-battery magnitude (for the
 	// direction that tripped) is held for ~30 s so the planner can't
@@ -938,8 +956,9 @@ type batteryInfo struct {
 	soc           float64
 	online        bool
 	group         string  // inverter-affinity tag; empty = untagged (#143)
-	maxChargeW    float64 // per-driver cap; 0 = use MaxCommandW default (#145)
-	maxDischargeW float64 // per-driver cap; 0 = use MaxCommandW default (#145)
+	maxChargeW    float64 // per-driver cap; 0 = use the site/global default (#145)
+	maxDischargeW float64 // per-driver cap; 0 = use the site/global default (#145)
+	defaultCapW   float64 // site-level default cap; 0 = MaxCommandW constant
 
 	// Per-direction blocks the driver reports this cycle. A battery that
 	// can't move in the demanded direction (e.g. a Ferroamp ESO floored at
@@ -954,11 +973,15 @@ type batteryInfo struct {
 }
 
 // chargeCap returns the effective per-battery charge ceiling, falling
-// back to MaxCommandW when the driver didn't set an explicit limit.
-// Kept a method so every clamp point queries the same fallback rule.
+// back to the site default (then MaxCommandW) when the driver didn't
+// set an explicit limit. Kept a method so every clamp point queries the
+// same fallback rule.
 func (b batteryInfo) chargeCap() float64 {
 	if b.maxChargeW > 0 {
 		return b.maxChargeW
+	}
+	if b.defaultCapW > 0 {
+		return b.defaultCapW
 	}
 	return MaxCommandW
 }
@@ -969,6 +992,9 @@ func (b batteryInfo) chargeCap() float64 {
 func (b batteryInfo) dischargeCap() float64 {
 	if b.maxDischargeW > 0 {
 		return b.maxDischargeW
+	}
+	if b.defaultCapW > 0 {
+		return b.defaultCapW
 	}
 	return MaxCommandW
 }
@@ -1261,7 +1287,7 @@ func ComputeDispatch(
 		}
 		return out
 	case ModeCharge:
-		targets := chargeAll(store, driverCapacities, state.DriverLimits)
+		targets := chargeAll(store, driverCapacities, state.DriverLimits, state.defaultCommandCap())
 		return applyDispatchSafetyPipeline(targets, store, state, driverCapacities, fuseMaxW, dispatchSafetyOptions{
 			updatePrevTargets: true,
 			recordDispatch:    true,
@@ -1352,6 +1378,7 @@ func ComputeDispatch(
 			group:            state.InverterGroups[name],
 			maxChargeW:       lim.MaxChargeW,
 			maxDischargeW:    lim.MaxDischargeW,
+			defaultCapW:      state.DefaultCommandW,
 			dischargeBlocked: dischargeBlocked,
 			chargeBlocked:    chargeBlocked,
 		})
@@ -2120,8 +2147,8 @@ func ComputeDispatch(
 	// per-driver cap (DriverLimits, falling back to MaxCommandW) so we
 	// never issue a command outside safe bounds.
 	for i := range raw {
-		maxC := float64(MaxCommandW)
-		maxD := float64(MaxCommandW)
+		maxC := state.defaultCommandCap()
+		maxD := state.defaultCommandCap()
 		if lim, ok := state.DriverLimits[raw[i].Driver]; ok {
 			if lim.MaxChargeW > 0 {
 				maxC = lim.MaxChargeW
@@ -2762,7 +2789,7 @@ func liveCurtailLimitW(state *State, store *telemetry.Store) (float64, bool) {
 		if r.SoC == nil || *r.SoC >= pvCurtailBatterySoCMax {
 			continue
 		}
-		capW := float64(MaxCommandW)
+		capW := state.defaultCommandCap()
 		if lim, ok := state.DriverLimits[r.Driver]; ok && lim.MaxChargeW > 0 {
 			capW = lim.MaxChargeW
 		}
@@ -3278,14 +3305,14 @@ func distributeWeighted(bats []batteryInfo, totalCorrection float64, weights map
 // (or MaxCommandW default when the driver doesn't override). Used by
 // the "Charge" manual mode as a sanity-check / pre-peak-fill knob.
 // Issue #145 — previously hardcoded at +5 kW regardless of hardware.
-func chargeAll(store *telemetry.Store, capacities map[string]float64, limits map[string]PowerLimits) []DispatchTarget {
+func chargeAll(store *telemetry.Store, capacities map[string]float64, limits map[string]PowerLimits, defaultW float64) []DispatchTarget {
 	out := make([]DispatchTarget, 0)
 	for name := range capacities {
 		h := store.DriverHealth(name)
 		if h == nil || !h.IsOnline() {
 			continue
 		}
-		target := float64(MaxCommandW)
+		target := defaultW
 		if lim, ok := limits[name]; ok && lim.MaxChargeW > 0 {
 			target = lim.MaxChargeW
 		}

@@ -592,6 +592,19 @@ func (p *Planner) PVSafetyK() float64 {
 type Site struct {
 	TroubleshootingMode  bool    `yaml:"troubleshooting_mode,omitempty" json:"troubleshooting_mode,omitempty"`
 	Name                 string  `yaml:"name" json:"name"`
+	// Profile declares the site class: "" / "residential" (identical) or
+	// "commercial". It gates configuration ranges that would be unsafe on
+	// a home install (e.g. max_command_w above 5 kW) and, later, C&I
+	// behavior like demand-charge planning. It never changes behavior by
+	// itself — every consumer keys off an explicit config value that
+	// merely *requires* the commercial profile to exceed home-scale
+	// bounds.
+	Profile string `yaml:"profile,omitempty" json:"profile,omitempty"`
+	// MaxCommandW overrides the global per-battery command cap applied
+	// when a driver has no max_charge_w / max_discharge_w override.
+	// 0 = the long-standing 5 kW default. Values above 5000 require
+	// profile: commercial — a typo must not lift a home site's clamp.
+	MaxCommandW float64 `yaml:"max_command_w,omitempty" json:"max_command_w,omitempty"`
 	ControlIntervalS     int     `yaml:"control_interval_s" json:"control_interval_s"`
 	GridTargetW          float64 `yaml:"grid_target_w" json:"grid_target_w"`
 	GridToleranceW       float64 `yaml:"grid_tolerance_w" json:"grid_tolerance_w"`
@@ -667,6 +680,9 @@ type Site struct {
 	// as PV waned. Set it just under the observed trip point.
 	MaxExportW float64 `yaml:"max_export_w,omitempty" json:"max_export_w,omitempty"`
 }
+
+// IsCommercial reports whether the operator declared this a C&I site.
+func (s Site) IsCommercial() bool { return s.Profile == "commercial" }
 
 // DefaultFuseSafetyMarginA is the fall-back per-phase amp headroom
 // applied when fuse.safety_margin_a is unset (nil) in the YAML.
@@ -1581,6 +1597,17 @@ func (c *Config) Validate() error {
 		return errors.New("at least one driver must be is_site_meter: true")
 	}
 
+	switch c.Site.Profile {
+	case "", "residential", "commercial":
+	default:
+		return fmt.Errorf("site.profile must be \"residential\" or \"commercial\", got %q", c.Site.Profile)
+	}
+	if c.Site.MaxCommandW < 0 {
+		return errors.New("site.max_command_w must be >= 0")
+	}
+	if c.Site.MaxCommandW > 5000 && !c.Site.IsCommercial() {
+		return errors.New("site.max_command_w above 5000 requires site.profile: commercial")
+	}
 	if c.Site.ControlIntervalS < 0 {
 		return errors.New("site.control_interval_s must be >= 0")
 	}

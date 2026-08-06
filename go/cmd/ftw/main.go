@@ -785,6 +785,7 @@ func main() {
 			// explicit 0 → disabled. See EffectiveSafetyMarginA.
 			ctrl.SiteFuseSafetyA = newCfg.Fuse.EffectiveSafetyMarginA()
 			ctrl.MaxExportW = newCfg.Site.MaxExportW
+			ctrl.DefaultCommandW = newCfg.Site.MaxCommandW
 			ctrlMu.Unlock()
 
 			// Keep the loadpoint controller's per-phase EV fuse clamp in

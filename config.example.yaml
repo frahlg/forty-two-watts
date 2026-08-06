@@ -3,6 +3,12 @@
 
 site:
   name: "Home"
+  # profile: commercial         # C&I site declaration. Unlocks commercial-scale
+  #                             # config ranges (e.g. max_command_w above 5000).
+  # max_command_w: 25000        # fallback per-battery command cap when a driver
+  #                             # has no max_charge_w/max_discharge_w override.
+  #                             # Unset = the long-standing 5 kW default; values
+  #                             # above 5000 require profile: commercial.
   control_interval_s: 2         # 2 s matches Ferroamp ehub ~1 Hz; drop to 1 for snappier response
   grid_target_w: 0              # 0 = self-consumption
   grid_tolerance_w: 42          # deadband (The Answer)
@@ -15,7 +21,9 @@ site:
 fuse:
   max_amps: 16
   phases: 3
-  voltage: 230
+  voltage: 230                  # phase-to-neutral. 230 V covers both European and
+                                # South African LV (230/400 V line-to-line) sites;
+                                # MaxPowerW = max_amps × voltage × phases.
 
 # ----------------------------------------------------------------------
 # Drivers — Lua scripts with per-driver capabilities.

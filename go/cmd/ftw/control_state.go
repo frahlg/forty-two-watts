@@ -42,5 +42,8 @@ func newControlStateFromConfig(cfg *config.Config) *control.State {
 	// battery discharge back so predicted export stays under max_export_w,
 	// protecting inverters that trip below the breaker rating.
 	ctrl.MaxExportW = cfg.Site.MaxExportW
+	// Site-level fallback command cap. 0 = keep the 5 kW MaxCommandW
+	// constant; >5 kW requires profile: commercial (config validation).
+	ctrl.DefaultCommandW = cfg.Site.MaxCommandW
 	return ctrl
 }
