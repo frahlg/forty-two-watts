@@ -260,6 +260,7 @@ func (r *Registry) Add(ctx context.Context, cfg config.Driver) error {
 	if err != nil {
 		return fmt.Errorf("load lua: %w", err)
 	}
+	luaDrv.ExecTimeout = cfg.ExecTimeout()
 	var drv driverRuntime = &luaRuntime{LuaDriver: luaDrv}
 
 	r.mu.Lock()

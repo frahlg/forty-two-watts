@@ -76,6 +76,13 @@ type LuaDriver struct {
 	Env  *HostEnv
 	Path string
 
+	// ExecTimeout bounds one Lua entrypoint execution for legacy
+	// (non-control-v2) drivers. 0 = unbounded, the historical behavior.
+	// Control-v2 drivers ignore it: their per-entrypoint deadlines are
+	// host policy, not operator config. Set once at construction/Add
+	// time, before the driver's goroutine starts.
+	ExecTimeout time.Duration
+
 	mu sync.Mutex
 	L  *lua.LState
 }
@@ -209,7 +216,7 @@ func (d *LuaDriver) Poll(ctx context.Context) (time.Duration, error) {
 	if fn == lua.LNil {
 		return 0, nil
 	}
-	cleanup := d.setLifecycleContext(ctx, 10*time.Second)
+	cleanup := d.setExecContext(ctx, 10*time.Second)
 	defer cleanup()
 	d.Env.beginPollEvidence()
 	if err := d.L.CallByParam(lua.P{Fn: fn, NRet: 1, Protect: true}); err != nil {
@@ -276,6 +283,8 @@ func (d *LuaDriver) Command(ctx context.Context, cmdJSON []byte) error {
 	if !ok {
 		power, _ = cmd["w"].(float64)
 	}
+	cleanup := d.setExecContext(ctx, 10*time.Second)
+	defer cleanup()
 	t := goToLua(d.L, cmd)
 	if err := d.L.CallByParam(lua.P{Fn: fn, NRet: 1, Protect: true},
 		lua.LString(action), lua.LNumber(power), t); err != nil {
@@ -484,6 +493,28 @@ func (d *LuaDriver) setLifecycleContext(parent context.Context, timeout time.Dur
 	if d.Env.RuntimePolicy == nil || !d.Env.RuntimePolicy.IsControlV2() {
 		return func() {}
 	}
+	return d.applyContext(parent, timeout)
+}
+
+// setExecContext bounds a steady-state entrypoint (poll, command,
+// default mode, cleanup). Control-v2 drivers keep their host-policy
+// deadline; legacy drivers get the operator-configurable ExecTimeout,
+// where 0 preserves the historical unbounded behavior. driver_init is
+// deliberately NOT routed through here — legacy inits may legitimately
+// block on slow discovery. A deadline abort surfaces as a Lua error
+// from the protected call, which callers already treat as a driver
+// failure (→ restart / watchdog default-mode path).
+func (d *LuaDriver) setExecContext(parent context.Context, v2Timeout time.Duration) func() {
+	if d.Env.RuntimePolicy != nil && d.Env.RuntimePolicy.IsControlV2() {
+		return d.applyContext(parent, v2Timeout)
+	}
+	if d.ExecTimeout <= 0 {
+		return func() {}
+	}
+	return d.applyContext(parent, d.ExecTimeout)
+}
+
+func (d *LuaDriver) applyContext(parent context.Context, timeout time.Duration) func() {
 	if parent == nil {
 		parent = context.Background()
 	}
@@ -532,7 +563,7 @@ func (d *LuaDriver) call(name string) error {
 	if fn == lua.LNil {
 		return nil
 	}
-	cleanup := d.setLifecycleContext(context.Background(), 5*time.Second)
+	cleanup := d.setExecContext(context.Background(), 5*time.Second)
 	defer cleanup()
 	if err := d.L.CallByParam(lua.P{Fn: fn, NRet: 1, Protect: true}); err != nil {
 		return err

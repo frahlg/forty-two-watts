@@ -70,6 +70,13 @@ and stop emitting when it is stale so core's watchdog can work.
 `driver_fingerprint(target)` is an optional passive setup probe. It must never
 reconfigure the device.
 
+`driver_poll`, `driver_command`, `driver_default_mode` and `driver_cleanup`
+run under a 10 s execution deadline; hitting it is treated like any other
+driver failure (restart and autonomous default mode). Slow is fine — wedged
+is not. An operator can tune this per driver with `command_timeout_s` in the
+driver's YAML block (`0` disables the deadline). `driver_init` is exempt:
+slow discovery at startup is legitimate.
+
 ## Sign convention
 
 Translate before calling `host.emit` and translate commands in the opposite

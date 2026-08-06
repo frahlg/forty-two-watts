@@ -760,6 +760,13 @@ type Driver struct {
 	// Disabled skips this driver at startup / reload. Set via the UI when
 	// you want to temporarily take a driver out without editing yaml.
 	Disabled bool `yaml:"disabled,omitempty" json:"disabled,omitempty"`
+	// CommandTimeoutS bounds one Lua entrypoint execution (driver_poll,
+	// driver_command, driver_default_mode, driver_cleanup) for legacy
+	// (non-control-v2) drivers. Unset → 10 s default; explicit 0 restores
+	// the historical unbounded behavior for a driver whose device is slow
+	// but working. Signed control-v2 drivers keep their own (tighter)
+	// host-enforced deadlines regardless of this value.
+	CommandTimeoutS *int `yaml:"command_timeout_s,omitempty" json:"command_timeout_s,omitempty"`
 	// Control opts this one site into one exact signed control artifact.
 	// The runtime rejects control unless all three pins match the active
 	// Device Support package. Merely selecting the beta channel or installing
@@ -784,6 +791,24 @@ type Driver struct {
 	// for backwards compatibility with master-branch configs).
 	MQTT   *MQTTConfig   `yaml:"mqtt,omitempty" json:"mqtt,omitempty"`
 	Modbus *ModbusConfig `yaml:"modbus,omitempty" json:"modbus,omitempty"`
+}
+
+// DefaultDriverCommandTimeout is the execution deadline applied to a
+// legacy driver's Lua entrypoints when command_timeout_s is unset.
+// Generous on purpose: cloud-API drivers legitimately spend seconds per
+// poll; the deadline exists to catch wedged-forever, not slow.
+const DefaultDriverCommandTimeout = 10 * time.Second
+
+// ExecTimeout resolves command_timeout_s: unset → the 10 s default,
+// explicit 0 (or negative) → no deadline (historical behavior).
+func (d Driver) ExecTimeout() time.Duration {
+	if d.CommandTimeoutS == nil {
+		return DefaultDriverCommandTimeout
+	}
+	if *d.CommandTimeoutS <= 0 {
+		return 0
+	}
+	return time.Duration(*d.CommandTimeoutS) * time.Second
 }
 
 // DriverControlOptIn is a per-site, fail-closed control grant. PackageID,
