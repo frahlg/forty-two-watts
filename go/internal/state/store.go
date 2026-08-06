@@ -1030,6 +1030,27 @@ func (s *Store) migrate() error {
 			ts_ms      INTEGER NOT NULL,
 			PRIMARY KEY(asset_id, flow, cursor_kind)
 		) WITHOUT ROWID, STRICT`,
+
+		// ---- Billing demand (kVA demand-charge tracking) ----
+		// One row per completed demand-integration interval (utility
+		// window, typically 30 min, clock-aligned). `counted` marks
+		// intervals inside the tariff's demand window; only those can
+		// set the billing peak. Written once per interval by the demand
+		// tracker — tiny write volume next to the telemetry tables.
+		`CREATE TABLE IF NOT EXISTS billing_demand (
+			cycle_start_ms    INTEGER NOT NULL,
+			interval_start_ms INTEGER NOT NULL,
+			avg_kva           REAL NOT NULL,
+			avg_kw            REAL NOT NULL,
+			band              TEXT NOT NULL DEFAULT '',
+			counted           INTEGER NOT NULL DEFAULT 0 CHECK(counted IN (0, 1)),
+			PRIMARY KEY (cycle_start_ms, interval_start_ms)
+		) WITHOUT ROWID, STRICT`,
+		`CREATE TABLE IF NOT EXISTS billing_peak (
+			cycle_start_ms    INTEGER PRIMARY KEY,
+			peak_kva          REAL NOT NULL,
+			interval_start_ms INTEGER NOT NULL
+		) STRICT`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.Exec(stmt); err != nil {

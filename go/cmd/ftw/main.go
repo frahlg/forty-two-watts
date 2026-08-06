@@ -2062,10 +2062,18 @@ func main() {
 		slog.Warn("Home Link unavailable")
 	}
 
+	// Billing-demand tracker — only on tariff-configured (C&I) sites.
+	demandTracker, demandErr := newDemandTracker(cfg, st)
+	if demandErr != nil {
+		slog.Error("tariff schedule invalid", "err", demandErr)
+		os.Exit(1)
+	}
+
 	deps = &api.Deps{
 		Tel: tel, LogRing: logRing, Ctrl: ctrl, CtrlMu: ctrlMu,
-		State: st,
-		CapMu: capMu, Capacities: capacities, TelemetryCapacities: telemetryCapacities,
+		Demand: demandTracker,
+		State:  st,
+		CapMu:  capMu, Capacities: capacities, TelemetryCapacities: telemetryCapacities,
 		CfgMu: cfgMu, Cfg: cfg, ConfigPath: *configPath,
 		DriverDir:           resolveDriverDir(),
 		UserDriverDir:       *userDriversDirFlag,
@@ -2453,6 +2461,7 @@ func main() {
 			siteMeterDriver := ctrl.SiteMeterDriver
 			siteFuseAmps := ctrl.SiteFuseAmps
 			siteFusePhases := ctrl.SiteFusePhases
+			siteFuseVoltage := ctrl.SiteFuseVoltage
 			ctrlMu.Unlock()
 			freshness := evaluateSiteDispatchFreshnessAt(
 				tel, siteMeterDriver, siteFuseAmps, siteFusePhases, watchdogTimeout, tickNow,
@@ -2510,6 +2519,19 @@ func main() {
 					continue
 				}
 				lpMgr.AnchorVehicleSoC(st.ID, pick.SoCPct)
+			}
+
+			// ---- Billing-demand observation (C&I tariff sites) ----
+			// Runs only while the site meter is fresh: a stale meter
+			// produces a coverage gap in the demand window, never
+			// fabricated demand.
+			if demandTracker != nil && freshness.Allowed() {
+				if mr := tel.Get(siteMeterDriver, telemetry.DerMeter); mr != nil {
+					est := telemetry.SiteApparentPowerVA(tel, siteMeterDriver, mr.RawW,
+						siteFusePhases, siteFuseVoltage, cfg.Site.EffectivePowerFactor(),
+						tickNow, watchdogTimeout)
+					demandTracker.Observe(tickNow, est.VA, mr.RawW)
+				}
 			}
 
 			if !freshness.Allowed() {

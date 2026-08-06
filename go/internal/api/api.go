@@ -28,6 +28,7 @@ import (
 	"github.com/srcfl/ftw/go/internal/calendar"
 	"github.com/srcfl/ftw/go/internal/config"
 	"github.com/srcfl/ftw/go/internal/control"
+	"github.com/srcfl/ftw/go/internal/demand"
 	"github.com/srcfl/ftw/go/internal/driverrepo"
 	"github.com/srcfl/ftw/go/internal/drivers"
 	"github.com/srcfl/ftw/go/internal/evcloud"
@@ -86,6 +87,9 @@ type Deps struct {
 	Models            map[string]*battery.Model
 	ModelsMu          *sync.Mutex
 	SelfTune          *selftune.Coordinator
+	// Demand is the kVA billing-demand tracker, wired only when a tariff
+	// with demand tracking is configured. Nil → /api/demand returns 404.
+	Demand            *demand.Tracker
 	DtS               float64                                   // control interval seconds (for model τ / age displays)
 	SaveConfig        func(path string, c *config.Config) error // injection for testability
 	WebDir            string                                    // static assets root (default "web")
@@ -301,6 +305,7 @@ func (s *Server) routes() {
 	s.handle("GET  /api/self_tune/status", s.handleSelfTuneStatus)
 	s.handle("POST /api/self_tune/cancel", s.handleSelfTuneCancel)
 	s.handle("GET  /api/history", s.handleHistory)
+	s.handle("GET  /api/demand", s.handleDemand)
 	s.handle("GET  /api/energy/daily", s.handleEnergyDaily)
 	s.handle("GET  /api/energy/assets", s.handleEnergyAssets)
 	s.handle("GET  /api/energy/history", s.handleEnergyHistory)
