@@ -1,0 +1,52 @@
+[Unit]
+Description=FTW read-only exporter for the local FTWDB shadow
+Documentation=https://github.com/srcfl/ftw/blob/master/docs/ftwdb-shadow-export.md
+After=ftw.service ftwdb-shadow.service
+Wants=ftwdb-shadow.service
+StartLimitIntervalSec=60s
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=ftw
+Group=ftw
+UMask=0077
+WorkingDirectory=/var/lib/ftw
+ExecStart=/opt/ftw/ftw-shadow-export -state /var/lib/ftw/state.db -identity-key /var/lib/ftw/nova.key -socket /run/ftwdb-shadow/ftwdb-shadow.sock -stream all -poll 30s -ledger-poll 5m -settle-delay 5s
+
+Restart=on-failure
+RestartSec=5s
+KillSignal=SIGTERM
+TimeoutStopSec=15s
+
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+# Live WAL readers may update SQLite shared-memory files. Do not grant write
+# access to either database, WAL, identity key, or their parent directory.
+ReadWritePaths=-/var/lib/ftw/state.db-shm -/var/lib/ftw/cache.db-shm
+ReadOnlyPaths=/var/lib/ftw/state.db -/var/lib/ftw/cache.db /var/lib/ftw/nova.key
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+RestrictAddressFamilies=AF_UNIX
+IPAddressDeny=any
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+TasksMax=32
+LimitNOFILE=256
+MemoryMax=128M
+
+[Install]
+WantedBy=multi-user.target

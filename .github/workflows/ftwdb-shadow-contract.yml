@@ -1,0 +1,55 @@
+name: FTWDB shadow contract
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/ftwdb-shadow-contract.yml"
+      - "go/cmd/ftw-shadow-export/**"
+      - "go/internal/ftwdbshadow/**"
+      - "go/internal/state/shadow_export.go"
+      - "go/internal/state/shadow_export_test.go"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  go-rust-contract:
+    name: Go to Rust contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out FTW
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Check out pinned FTWDB contract
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: srcfl/ftwdb
+          ref: f359d315d9d963694c06a603e39d26c6fa66917b
+          path: .ftwdb-contract
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: "1.26"
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: 1.97.1
+
+      - name: Compare frozen v1 fixtures
+        run: >-
+          diff -ru
+          .ftwdb-contract/testdata/shadow-protocol-v1
+          go/internal/ftwdbshadow/testdata/shadow-protocol-v1
+
+      - name: Build the pinned sidecar
+        run: cargo build --locked --manifest-path .ftwdb-contract/Cargo.toml --bin ftwdb-shadow
+
+      - name: Run the real Go to Rust exchange
+        working-directory: go
+        env:
+          FTWDB_SHADOW_BIN: ${{ github.workspace }}/.ftwdb-contract/target/debug/ftwdb-shadow
+        run: go test ./cmd/ftw-shadow-export -run TestRustSidecarInterop -count=1 -v

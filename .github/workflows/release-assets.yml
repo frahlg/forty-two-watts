@@ -139,6 +139,11 @@ jobs:
           go build -trimpath -ldflags "-s -w -X main.Version=${VERSION}" \
             -o "../bin/ftw-backup-${GOOS}-${GOARCH}${{ matrix.ext }}" \
             ./cmd/ftw-backup
+          if [[ "${GOOS}" == "linux" ]]; then
+            go build -trimpath -ldflags "-s -w -X main.Version=${VERSION}" \
+              -o "../bin/ftw-shadow-export-${GOOS}-${GOARCH}" \
+              ./cmd/ftw-shadow-export
+          fi
           ls -la \
             "../bin/ftw-${GOOS}-${GOARCH}${{ matrix.ext }}" \
             "../bin/ftw-backup-${GOOS}-${GOARCH}${{ matrix.ext }}"
@@ -165,10 +170,12 @@ jobs:
           else
             cp "bin/${BINARY}" "${STAGE}/ftw"
             cp "bin/ftw-backup-${PLATFORM}" "${STAGE}/ftw-backup"
+            cp "bin/ftw-shadow-export-${PLATFORM}" "${STAGE}/ftw-shadow-export"
             ln -s ftw "${STAGE}/forty-two-watts"
             tar czf "release/ftw-${PLATFORM}.tar.gz" \
-              -C "${STAGE}" ftw ftw-backup forty-two-watts \
+              -C "${STAGE}" ftw ftw-backup ftw-shadow-export forty-two-watts \
               -C ../.. drivers web optimizer/pyproject.toml optimizer/ftw_optimizer config.example.yaml LICENSE NOTICE
+            tar tzf "release/ftw-${PLATFORM}.tar.gz" | grep -qx 'ftw-shadow-export'
             cp "release/ftw-${PLATFORM}.tar.gz" "release/forty-two-watts-${PLATFORM}.tar.gz"
           fi
           (
