@@ -899,7 +899,14 @@ class FtwPriceChart extends FtwElement {
     // Geometry stash for hit-testing from raw clientX during touch
     // scrubbing — touchmove targets stay anchored to the touchstart
     // element, so we can't lean on data-idx like the mouse path does.
-    this._geom = { padL: pad.l, plotW, n, W };
+    // The drawn slots ride along with the geometry. The tooltip used to look
+    // its slot up in this._data.items, which is every slot the box sent —
+    // both days — while the bars come from the filtered horizon. With
+    // TOMORROW selected, bar 79 is tomorrow's 19:45 and items[79] is today's,
+    // so the tooltip printed the right clock time (both days start at
+    // midnight) over the wrong day's price. It read as a chart that disagreed
+    // with itself under your thumb.
+    this._geom = { padL: pad.l, plotW, n, W, items };
     const yToPx = (v) => pad.t + plotH - ((v - yMin) / (yMax - yMin)) * plotH;
     const zeroY = yToPx(0);
     const meanY = yToPx(meanP);
@@ -1196,7 +1203,9 @@ class FtwPriceChart extends FtwElement {
 
   _showTipAt(idx, localX, localY) {
     const tip = this.shadowRoot.querySelector("[data-tip]");
-    const item = this._data && this._data.items[idx];
+    // The slots actually on screen, not every slot held. See _geom.
+    const drawn = (this._geom && this._geom.items) || (this._data && this._data.items) || [];
+    const item = drawn[idx];
     if (!tip || !item) return;
     const price = this._priceFor(item);
     const tEnd = item.tsMs + item.lenMin * 60_000;
