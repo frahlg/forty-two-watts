@@ -73,6 +73,22 @@ discharge.
 SI prefixes (k, M, m) only appear in the UI display layer. API and telemetry
 always use the base SI unit.
 
+Reactive and apparent power (kVA demand tariffs) use these metric names,
+emitted per phase by the site-meter driver where the hardware provides them:
+
+| Metric | Unit | Meaning |
+|---|---|---|
+| `meter_l{1..3}_a` | A | Phase current (already required by the fuse guard) |
+| `meter_l{1..3}_v` | V | Measured phase voltage |
+| `meter_q_l{1..3}_var` | var | Signed net reactive power per phase |
+| `meter_q_imp_l{1..3}_var` / `meter_q_exp_l{1..3}_var` | var | Import/export reactive split (DSMR-style); net = imp − exp |
+| `meter_q_var`, `meter_q_imp_var` / `meter_q_exp_var` | var | Site-total spellings of the same |
+
+Core estimates apparent power (`go/internal/telemetry/apparent.go`) in this
+order: per-phase V·I when all configured phases have fresh currents, then
+√(P²+Q²) from reactive telemetry, then |P| divided by
+`site.assumed_power_factor`.
+
 ## Where the sign flip happens
 
 **At the driver boundary.** Each device speaks its own native convention:
