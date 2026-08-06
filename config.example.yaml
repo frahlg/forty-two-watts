@@ -183,6 +183,19 @@ state:
 app_link:
   enabled: false
 
+# Anonymous fleet ping. Once a day, at a time that moves, the box tells
+# Sourceful six things: its FTW version, its release channel, which driver
+# types it runs, roughly how much battery it has, its price zone and roughly
+# how old the install is. No id, no key, no serial, no site name, no counter
+# and no timestamp — nothing in the message says which box sent it. Two
+# limits: those six fields still describe a household, so a rare mix may be
+# the only one of its kind, and the endpoint sees the address you send from.
+# Settings → Fleet ping shows the exact message this box would send. On by
+# default; `enabled: false` turns it off without a restart.
+fleet_ping:
+  enabled: true
+  # endpoint: https://telemetry.sourceful.energy/v1/fleet
+
 # Independently distributed Lua drivers. The signed stable catalog is refreshed
 # by default, but refresh never downloads, activates, or restarts a driver.
 # Add `device_repository: { enabled: false }` to opt out. The expanded form is:

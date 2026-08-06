@@ -2137,12 +2137,26 @@ func main() {
 		slog.Info("app link disabled — set app_link.enabled to turn it on")
 	}
 
+	// The anonymous fleet ping: how many boxes, which versions, which drivers.
+	// Straight to Sourceful over HTTPS and never through the relay, which
+	// carries opaque bytes and holds nothing.
+	// The bundled drivers dir is deliberately not passed: which drivers this
+	// build ships with is compiled in, not discovered on disk. See
+	// fleetCatalogue for what that buys.
+	fleetPinger, fleetPingErr := startFleetPing(
+		ctx, cfg, cfgMu, st, Version, config.ManagedDriversDirOverride,
+	)
+	if fleetPingErr != nil {
+		slog.Warn("fleet ping unavailable", "err", fleetPingErr)
+	}
+
 	deps = &api.Deps{
 		Tel: tel, LogRing: logRing, Ctrl: ctrl, CtrlMu: ctrlMu,
 		State: st,
 		CapMu: capMu, Capacities: capacities, TelemetryCapacities: telemetryCapacities,
 		BatteryIdentity: batteryIdentity,
 		AppEnroll:       appEnrollForAPI(appEnroll, appUplink, appLinkEnabled),
+		FleetPing:       fleetPinger,
 		CfgMu:           cfgMu, Cfg: cfg, ConfigPath: *configPath,
 		ConfigApplier:       applyConfigChange,
 		DriverDir:           resolveDriverDir(),

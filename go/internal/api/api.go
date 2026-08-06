@@ -33,6 +33,7 @@ import (
 	"github.com/srcfl/ftw/go/internal/drivers"
 	"github.com/srcfl/ftw/go/internal/evcloud"
 	"github.com/srcfl/ftw/go/internal/events"
+	"github.com/srcfl/ftw/go/internal/fleetping"
 	"github.com/srcfl/ftw/go/internal/forecast"
 	"github.com/srcfl/ftw/go/internal/ha"
 	"github.com/srcfl/ftw/go/internal/loadmodel"
@@ -86,6 +87,12 @@ type Deps struct {
 	// AppEnroll mints pairing codes for the FTW app. Nil when app_link is off,
 	// which the pairing routes report rather than hiding.
 	AppEnroll AppEnroller
+
+	// FleetPing is the once-a-day anonymous count. Held so Settings can render
+	// the exact payload the sender would post, rather than a second rendering
+	// that could quietly disagree with it. Nil in tests and minimal
+	// embeddings; GET /api/fleet-ping then says so.
+	FleetPing *fleetping.Pinger
 
 	CfgMu         *sync.RWMutex
 	Cfg           *config.Config
@@ -288,6 +295,7 @@ func (s *Server) routes() {
 	s.handle("POST /api/app-link/pairing", s.handleAppLinkPairing)
 	s.handle("GET  /api/app-link/devices", s.handleAppLinkDevices)
 	s.handle("DELETE /api/app-link/devices/{id}", s.handleAppLinkDeviceRevoke)
+	s.handle("GET  /api/fleet-ping", s.handleFleetPing)
 	s.handle("POST /api/mode", s.handleSetMode)
 	s.handle("GET  /api/modes", s.handleModes)
 	s.handle("POST /api/target", s.handleSetTarget)
