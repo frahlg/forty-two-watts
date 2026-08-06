@@ -61,6 +61,40 @@ func newDemandTracker(cfg *config.Config, st *state.Store) (*demand.Tracker, *ta
 	return tr, sched, nil
 }
 
+// tariffPriceSource renders the compiled schedule as planner price rows.
+// SpotOreKwh stays 0: a scheduled-tariff C&I site without an export
+// agreement earns nothing at the meter, so the planner must never value
+// battery-to-grid export. Source "tariff" gets full confidence in
+// buildSlots — the rate table is deterministic.
+func tariffPriceSource(sched *tariff.Schedule, zone string) func(fromMs, untilMs int64) []state.PricePoint {
+	return func(fromMs, untilMs int64) []state.PricePoint {
+		from := time.UnixMilli(fromMs).In(sched.Location).Truncate(time.Hour)
+		until := time.UnixMilli(untilMs).In(sched.Location)
+		if !until.Truncate(time.Hour).Equal(until) {
+			// Whole hours only — a partial tail slot would carry a
+			// misleading length into the planner.
+			until = until.Truncate(time.Hour).Add(time.Hour)
+		}
+		slots, err := sched.SlotPrices(from, until, time.Hour)
+		if err != nil {
+			slog.Warn("tariff price source", "err", err)
+			return nil
+		}
+		out := make([]state.PricePoint, 0, len(slots))
+		for _, sp := range slots {
+			out = append(out, state.PricePoint{
+				Zone:        zone,
+				SlotTsMs:    sp.Start.UnixMilli(),
+				SlotLenMin:  int(sp.Len / time.Minute),
+				SpotOreKwh:  0,
+				TotalOreKwh: sp.RateCtKWh,
+				Source:      "tariff",
+			})
+		}
+		return out
+	}
+}
+
 // wireCommercialSpec connects the tariff schedule + demand tracker to the
 // planner: per-slot demand-window flags, the live billing peak (kVA →
 // real-power W via the assumed power factor, since the planner optimizes

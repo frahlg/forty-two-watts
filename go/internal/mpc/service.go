@@ -186,6 +186,14 @@ type Service struct {
 	// contractual ceiling. 0 = not declared.
 	NMDImportW float64
 
+	// PriceSource, when non-nil, replaces the stored day-ahead spot
+	// pipeline (Store.LoadPrices + forecast extension) as the origin of
+	// price rows for the horizon. Wired in main.go from the compiled
+	// tariff schedule on scheduled-tariff (C&I) sites, where prices are
+	// known deterministic TOU rates rather than published spot. Nil —
+	// the default — keeps the residential path untouched.
+	PriceSource func(fromMs, untilMs int64) []state.PricePoint
+
 	lastReplanAt time.Time
 	lastReason   string // "scheduled" | "reactive-pv" | "reactive-load" | "manual"
 
@@ -938,19 +946,27 @@ func (s *Service) replan(ctx context.Context) *Plan {
 	untilMs := now.Add(s.Horizon).UnixMilli()
 	sinceMs := now.UnixMilli() - 15*60*1000 // small margin — slot starting ≤15min ago still in-flight
 
-	prices, err := s.Store.LoadPrices(s.Zone, sinceMs, untilMs)
-	if err != nil {
-		slog.Warn("mpc: load prices", "err", err)
-		return nil
-	}
-	// Extend prices into the horizon using the learned forecast when
-	// the day-ahead source hasn't published that far yet. Otherwise
-	// the plan silently truncates the moment we pass the published
-	// cutoff — operators lose overnight planning exactly when they'd
-	// most want it.
-	if s.Price != nil {
-		prices = extendPricesWithForecast(prices, s.Zone, s.Price,
-			now.UnixMilli(), untilMs, s.GridTariffOreKwh, s.VATPercent)
+	var prices []state.PricePoint
+	if s.PriceSource != nil {
+		// Scheduled tariff: rates are deterministic, so no forecast
+		// extension is needed — the source renders the whole horizon.
+		prices = s.PriceSource(sinceMs, untilMs)
+	} else {
+		var err error
+		prices, err = s.Store.LoadPrices(s.Zone, sinceMs, untilMs)
+		if err != nil {
+			slog.Warn("mpc: load prices", "err", err)
+			return nil
+		}
+		// Extend prices into the horizon using the learned forecast when
+		// the day-ahead source hasn't published that far yet. Otherwise
+		// the plan silently truncates the moment we pass the published
+		// cutoff — operators lose overnight planning exactly when they'd
+		// most want it.
+		if s.Price != nil {
+			prices = extendPricesWithForecast(prices, s.Zone, s.Price,
+				now.UnixMilli(), untilMs, s.GridTariffOreKwh, s.VATPercent)
+		}
 	}
 	if len(prices) == 0 {
 		slog.Info("mpc: no prices available yet")

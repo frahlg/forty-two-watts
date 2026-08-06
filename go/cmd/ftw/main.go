@@ -1124,6 +1124,10 @@ func main() {
 	if mpcSvc != nil && cfg.Site.NMDkVA > 0 {
 		mpcSvc.NMDImportW = cfg.Site.NMDkVA * 1000 * cfg.Site.EffectivePowerFactor()
 	}
+	if mpcSvc != nil && demandSched != nil {
+		mpcSvc.PriceSource = tariffPriceSource(demandSched, mpcSvc.Zone)
+		slog.Info("planner price source: scheduled tariff")
+	}
 	if mpcSvc != nil {
 		// Plumb the site fuse so the DP joint-plans battery + EV under
 		// the fuse from the start (instead of producing plans that
