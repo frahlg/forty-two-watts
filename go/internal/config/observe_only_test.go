@@ -8,7 +8,7 @@ func TestObserveOnlyRequiresCapacity(t *testing.T) {
 		Fuse: Fuse{MaxAmps: 16, Phases: 3, Voltage: 230},
 		Drivers: []Driver{{
 			Name: "retailer-batt", Lua: "drivers/pixii.lua", IsSiteMeter: true,
-			ObserveOnly: true,
+			ObserveOnly:  true,
 			Capabilities: Capabilities{Modbus: &ModbusConfig{Host: "1.2.3.4", Port: 502, UnitID: 1}},
 		}},
 	}

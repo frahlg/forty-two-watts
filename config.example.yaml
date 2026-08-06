@@ -217,6 +217,54 @@ home_link:
 #         ftw-drivers-2026-01: MX+j27UBkyM099hTyJlmMLK9qlTTDUJsaK/vH12fFKc=
 # Refresh only updates the signed catalog. Install and activation stay explicit.
 
+# Scheduled (non-spot) retail tariff — C&I sites on time-of-use supply with
+# a demand charge (South African Eskom Megaflex-style shown; municipal
+# variants are the same shape with different numbers). Rates are minor
+# currency units per kWh (ZAR cents); the demand charge is cents per kVA on
+# the billing-cycle peak, measured over demand_integration_min windows in
+# the listed bands. Every day class must cover the full 24 h across its
+# bands; ranges may cross midnight. Holidays price as sundays.
+# tariff:
+#   timezone: Africa/Johannesburg
+#   billing_cycle_anchor_day: 1
+#   demand_charge_ct_kva: 35000        # R350.00 per kVA billing peak
+#   demand_window_bands: [peak, standard]
+#   demand_integration_min: 30
+#   holidays: ["2026-12-16", "2026-12-25", "2026-12-26"]
+#   seasons:
+#     - name: high                     # Jun-Aug
+#       months: [6, 7, 8]
+#       bands:
+#         weekday:
+#           - {band: peak,     hours: ["06:00-09:00", "17:00-19:00"], rate_ct_kwh: 650}
+#           - {band: standard, hours: ["09:00-17:00", "19:00-22:00"], rate_ct_kwh: 200}
+#           - {band: offpeak,  hours: ["22:00-06:00"],                rate_ct_kwh: 120}
+#         saturday:
+#           - {band: standard, hours: ["07:00-12:00", "18:00-20:00"], rate_ct_kwh: 180}
+#           - {band: offpeak,  hours: ["20:00-07:00", "12:00-18:00"], rate_ct_kwh: 110}
+#         sunday:
+#           - {band: offpeak,  hours: ["00:00-24:00"], rate_ct_kwh: 100}
+#     - name: low
+#       months: [1, 2, 3, 4, 5, 9, 10, 11, 12]
+#       bands:
+#         weekday:
+#           - {band: peak,     hours: ["07:00-10:00", "18:00-20:00"], rate_ct_kwh: 320}
+#           - {band: standard, hours: ["06:00-07:00", "10:00-18:00", "20:00-22:00"], rate_ct_kwh: 150}
+#           - {band: offpeak,  hours: ["22:00-06:00"], rate_ct_kwh: 95}
+#         saturday:
+#           - {band: standard, hours: ["07:00-12:00", "18:00-20:00"], rate_ct_kwh: 180}
+#           - {band: offpeak,  hours: ["20:00-07:00", "12:00-18:00"], rate_ct_kwh: 110}
+#         sunday:
+#           - {band: offpeak,  hours: ["00:00-24:00"], rate_ct_kwh: 100}
+#
+# C&I site declarations that pair with a tariff (see also site.profile /
+# site.max_command_w above):
+#   site.currency: ZAR                  # display only
+#   site.nmd_kva: 250                   # Notified Maximum Demand
+#   site.assumed_power_factor: 0.95     # kVA estimate without reactive telemetry
+#   site.backup_reserve:
+#     min_usable_energy_wh: 40000       # load-shedding ride-through floor
+
 # Mathematical MPC optimizer. Official Compose runs it as the independently
 # updatable ftw-optimizer service; native installs can point optimizer_command
 # at their venv's Python executable.

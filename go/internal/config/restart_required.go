@@ -59,6 +59,9 @@ func RestartRequiredFor(oldCfg, newCfg *Config) []string {
 	if !pointerEqual(oldCfg.Price, newCfg.Price) {
 		reasons = append(reasons, "price — spot-price service is constructed once at startup")
 	}
+	if !pointerEqual(oldCfg.Tariff, newCfg.Tariff) {
+		reasons = append(reasons, "tariff — the tariff schedule is compiled at startup")
+	}
 	if !pointerEqual(oldCfg.Planner, newCfg.Planner) {
 		reasons = append(reasons, "planner — MPC planner is constructed once at startup")
 	}

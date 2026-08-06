@@ -40,6 +40,51 @@ type Config struct {
 	HomeLink         *HomeLink          `yaml:"home_link,omitempty" json:"home_link,omitempty"`
 	Nova             *Nova              `yaml:"nova,omitempty" json:"nova,omitempty"`
 	DeviceRepository *DeviceRepository  `yaml:"device_repository,omitempty" json:"device_repository,omitempty"`
+	Tariff           *Tariff            `yaml:"tariff,omitempty" json:"tariff,omitempty"`
+}
+
+// Tariff declares a scheduled (non-spot) retail tariff: seasonal
+// time-of-use energy rates plus an optional demand charge on the
+// billing-cycle peak. First target is South African C&I supply
+// (Eskom Megaflex-style / municipal), but the schedule is fully
+// data-driven. Money is minor currency units (cents); the structural
+// interpreter lives in go/internal/tariff.
+type Tariff struct {
+	// Timezone the windows are defined in, e.g. "Africa/Johannesburg".
+	Timezone string `yaml:"timezone" json:"timezone"`
+	// BillingCycleAnchorDay is the day-of-month the utility's billing
+	// cycle starts (1-28). Default 1.
+	BillingCycleAnchorDay int `yaml:"billing_cycle_anchor_day,omitempty" json:"billing_cycle_anchor_day,omitempty"`
+	// DemandChargeCtKVA: minor currency units per kVA charged on the
+	// billing-cycle peak demand. 0 = energy-only tariff.
+	DemandChargeCtKVA float64 `yaml:"demand_charge_ct_kva,omitempty" json:"demand_charge_ct_kva,omitempty"`
+	// DemandWindowBands lists bands whose intervals count toward the
+	// billing peak (e.g. [peak, standard]). Empty = all bands.
+	DemandWindowBands []string `yaml:"demand_window_bands,omitempty" json:"demand_window_bands,omitempty"`
+	// DemandIntegrationMin is the utility's demand-integration window in
+	// minutes. Default 30 (SA utilities).
+	DemandIntegrationMin int `yaml:"demand_integration_min,omitempty" json:"demand_integration_min,omitempty"`
+	// Holidays are YYYY-MM-DD dates priced as the sunday day class.
+	Holidays []string       `yaml:"holidays,omitempty" json:"holidays,omitempty"`
+	Seasons  []TariffSeason `yaml:"seasons" json:"seasons"`
+}
+
+// TariffSeason maps months to per-day-class band tables.
+type TariffSeason struct {
+	Name   string `yaml:"name" json:"name"`
+	Months []int  `yaml:"months" json:"months"`
+	// Bands keys: weekday, saturday, sunday. Every day class must cover
+	// the whole day across its band windows.
+	Bands map[string][]TariffBand `yaml:"bands" json:"bands"`
+}
+
+// TariffBand is one TOU band's windows and energy rate.
+type TariffBand struct {
+	Band string `yaml:"band" json:"band"` // peak | standard | offpeak
+	// Hours are "HH:MM-HH:MM" ranges; a range crossing midnight
+	// ("22:00-06:00") is allowed and split internally.
+	Hours     []string `yaml:"hours" json:"hours"`
+	RateCtKWh float64  `yaml:"rate_ct_kwh" json:"rate_ct_kwh"`
 }
 
 // HomeLink enables the outbound-only encrypted remote read service. The relay
@@ -590,8 +635,8 @@ func (p *Planner) PVSafetyK() float64 {
 
 // Site is the top-level control loop config.
 type Site struct {
-	TroubleshootingMode  bool    `yaml:"troubleshooting_mode,omitempty" json:"troubleshooting_mode,omitempty"`
-	Name                 string  `yaml:"name" json:"name"`
+	TroubleshootingMode bool   `yaml:"troubleshooting_mode,omitempty" json:"troubleshooting_mode,omitempty"`
+	Name                string `yaml:"name" json:"name"`
 	// Profile declares the site class: "" / "residential" (identical) or
 	// "commercial". It gates configuration ranges that would be unsafe on
 	// a home install (e.g. max_command_w above 5 kW) and, later, C&I
@@ -605,14 +650,34 @@ type Site struct {
 	// 0 = the long-standing 5 kW default. Values above 5000 require
 	// profile: commercial — a typo must not lift a home site's clamp.
 	MaxCommandW float64 `yaml:"max_command_w,omitempty" json:"max_command_w,omitempty"`
-	ControlIntervalS     int     `yaml:"control_interval_s" json:"control_interval_s"`
-	GridTargetW          float64 `yaml:"grid_target_w" json:"grid_target_w"`
-	GridToleranceW       float64 `yaml:"grid_tolerance_w" json:"grid_tolerance_w"`
-	WatchdogTimeoutS     int     `yaml:"watchdog_timeout_s" json:"watchdog_timeout_s"`
-	SmoothingAlpha       float64 `yaml:"smoothing_alpha" json:"smoothing_alpha"`
-	Gain                 float64 `yaml:"gain" json:"gain"`
-	SlewRateW            float64 `yaml:"slew_rate_w" json:"slew_rate_w"`
-	MinDispatchIntervalS int     `yaml:"min_dispatch_interval_s" json:"min_dispatch_interval_s"`
+	// Currency is the display currency code (e.g. SEK, ZAR). Display
+	// only: all price plumbing stays in minor currency units per kWh
+	// (the MPC contract's historically-named "öre" fields — ZAR cents
+	// behave identically). Empty = the UI's existing default.
+	Currency string `yaml:"currency,omitempty" json:"currency,omitempty"`
+	// NMDkVA is the Notified Maximum Demand at the connection point in
+	// kVA (South African supply agreements; analogous contracted-demand
+	// figures elsewhere). 0 = not declared. When set, the control layer
+	// treats it as an import ceiling alongside the fuse and the planner
+	// keeps scheduled demand under it.
+	NMDkVA float64 `yaml:"nmd_kva,omitempty" json:"nmd_kva,omitempty"`
+	// AssumedPowerFactor estimates apparent power (kVA) from real power
+	// when the site meter emits no reactive telemetry (meter_q_l*_var).
+	// Typical C&I sites: 0.90-0.98. 0 = default 0.95. Only consulted on
+	// commercial-profile sites.
+	AssumedPowerFactor float64 `yaml:"assumed_power_factor,omitempty" json:"assumed_power_factor,omitempty"`
+	// BackupReserve holds battery energy back for grid-outage
+	// ride-through (load shedding). The planner never schedules below
+	// the floor and the dispatch clamp refuses to discharge through it.
+	BackupReserve        *BackupReserve `yaml:"backup_reserve,omitempty" json:"backup_reserve,omitempty"`
+	ControlIntervalS     int            `yaml:"control_interval_s" json:"control_interval_s"`
+	GridTargetW          float64        `yaml:"grid_target_w" json:"grid_target_w"`
+	GridToleranceW       float64        `yaml:"grid_tolerance_w" json:"grid_tolerance_w"`
+	WatchdogTimeoutS     int            `yaml:"watchdog_timeout_s" json:"watchdog_timeout_s"`
+	SmoothingAlpha       float64        `yaml:"smoothing_alpha" json:"smoothing_alpha"`
+	Gain                 float64        `yaml:"gain" json:"gain"`
+	SlewRateW            float64        `yaml:"slew_rate_w" json:"slew_rate_w"`
+	MinDispatchIntervalS int            `yaml:"min_dispatch_interval_s" json:"min_dispatch_interval_s"`
 
 	// SlewEnabled gates the external per-cycle ramp limiter. Both
 	// supported inverter families (Ferroamp, Sungrow) have their own
@@ -683,6 +748,19 @@ type Site struct {
 
 // IsCommercial reports whether the operator declared this a C&I site.
 func (s Site) IsCommercial() bool { return s.Profile == "commercial" }
+
+// EffectivePowerFactor resolves assumed_power_factor (0 → 0.95).
+func (s Site) EffectivePowerFactor() float64 {
+	if s.AssumedPowerFactor > 0 {
+		return s.AssumedPowerFactor
+	}
+	return 0.95
+}
+
+// BackupReserve reserves usable battery energy for outage ride-through.
+type BackupReserve struct {
+	MinUsableEnergyWh float64 `yaml:"min_usable_energy_wh" json:"min_usable_energy_wh"`
+}
 
 // DefaultFuseSafetyMarginA is the fall-back per-phase amp headroom
 // applied when fuse.safety_margin_a is unset (nil) in the YAML.
@@ -1309,6 +1387,14 @@ func relToBaseDir(baseDir, p string) string {
 
 // applyDefaults fills in sensible zero-value defaults.
 func applyDefaults(c *Config) {
+	if c.Tariff != nil {
+		if c.Tariff.BillingCycleAnchorDay == 0 {
+			c.Tariff.BillingCycleAnchorDay = 1
+		}
+		if c.Tariff.DemandIntegrationMin == 0 {
+			c.Tariff.DemandIntegrationMin = 30
+		}
+	}
 	if c.DeviceRepository == nil {
 		// The official signed stable catalog is safe to discover by default:
 		// refresh is read-only and never activates or restarts a driver. An
@@ -1601,6 +1687,18 @@ func (c *Config) Validate() error {
 	case "", "residential", "commercial":
 	default:
 		return fmt.Errorf("site.profile must be \"residential\" or \"commercial\", got %q", c.Site.Profile)
+	}
+	if c.Site.NMDkVA < 0 {
+		return errors.New("site.nmd_kva must be >= 0")
+	}
+	if pf := c.Site.AssumedPowerFactor; pf != 0 && (pf <= 0 || pf > 1) {
+		return errors.New("site.assumed_power_factor must be in (0, 1]")
+	}
+	if br := c.Site.BackupReserve; br != nil && br.MinUsableEnergyWh < 0 {
+		return errors.New("site.backup_reserve.min_usable_energy_wh must be >= 0")
+	}
+	if err := c.validateTariff(); err != nil {
+		return err
 	}
 	if c.Site.MaxCommandW < 0 {
 		return errors.New("site.max_command_w must be >= 0")
