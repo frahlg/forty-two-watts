@@ -270,6 +270,14 @@
       </div>
     </section>
 
+    <!-- Billing demand — the contractual boundary next to the fuse's
+         physical one. Self-fetching from /api/demand; removes itself on
+         residential sites (404), so only tariff-configured C&I installs
+         ever see it. -->
+    <section class="demand-row">
+      <ftw-demand-card poll-ms="30000"></ftw-demand-card>
+    </section>
+
 
     <!-- Electricity prices — full-width chart of upcoming prices with a
          total/spot toggle, peak/low markers, and a hover tooltip.
