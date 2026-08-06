@@ -53,6 +53,9 @@
   <script type="module" src="/components/index.js?v=histwrap7"></script>
 </head>
 <body class="ftw-app">
+  <!-- Login gate — removes itself instantly in open mode / with a live
+       session; otherwise covers the app until sign-in succeeds. -->
+  <ftw-login-gate></ftw-login-gate>
   <header>
     <img src="/logo.svg" alt="FTW" class="header-logo">
     <nav class="app-tabs" id="app-tabs" role="tablist" aria-label="Primary navigation">
