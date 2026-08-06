@@ -156,6 +156,7 @@ build:
 	@ln -sf ftw bin/forty-two-watts
 	cd go && go build -ldflags="$(LDFLAGS)" -o ../bin/sim-ferroamp ./cmd/sim-ferroamp
 	cd go && go build -ldflags="$(LDFLAGS)" -o ../bin/sim-sungrow ./cmd/sim-sungrow
+	cd go && go build -ldflags="$(LDFLAGS)" -o ../bin/sim-pcs ./cmd/sim-pcs
 	@ls -la bin/
 
 build-arm64:
@@ -234,6 +235,7 @@ run-sim:
 	@trap 'kill 0' SIGINT; \
 	(cd go && go run ./cmd/sim-ferroamp) & \
 	(cd go && go run ./cmd/sim-sungrow) & \
+	(cd go && go run ./cmd/sim-pcs) & \
 	wait
 
 dev: optimizer/.venv/.installed config.local.yaml
