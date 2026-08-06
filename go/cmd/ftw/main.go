@@ -44,6 +44,7 @@ import (
 	"github.com/srcfl/ftw/go/internal/ha"
 	"github.com/srcfl/ftw/go/internal/loadmodel"
 	"github.com/srcfl/ftw/go/internal/loadpoint"
+	"github.com/srcfl/ftw/go/internal/localauth"
 	modbuscli "github.com/srcfl/ftw/go/internal/modbus"
 	"github.com/srcfl/ftw/go/internal/mpc"
 	mqttcli "github.com/srcfl/ftw/go/internal/mqtt"
@@ -229,6 +230,9 @@ func main() {
 		case "nova-claim":
 			// Shift os.Args so the subcommand's flag.FlagSet sees its own flags.
 			runNovaClaim(os.Args[2:])
+			return
+		case "user":
+			runUserCLI(os.Args[2:])
 			return
 		}
 	}
@@ -2061,9 +2065,27 @@ func main() {
 		slog.Warn("Home Link unavailable")
 	}
 
+	// Login/role layer (api.auth.mode). Sessions live in memory; the
+	// bearer-token automation path stays valid via MutationToken.
+	authPolicy := api.AuthPolicy{
+		Mode:          cfg.API.AuthMode(),
+		Sessions:      localauth.NewSessions(0),
+		Users:         st,
+		MutationToken: apiMutationPolicy().Token,
+	}
+	if authPolicy.Mode != "open" {
+		if n, err := st.CountOperators(); err != nil || n == 0 {
+			slog.Error("api.auth.mode requires at least one enabled operator — create one with `ftw user add <name>`",
+				"mode", authPolicy.Mode, "err", err)
+			os.Exit(1)
+		}
+		slog.Info("api auth enabled", "mode", authPolicy.Mode)
+	}
+
 	deps = &api.Deps{
 		Tel: tel, LogRing: logRing, Ctrl: ctrl, CtrlMu: ctrlMu,
 		State: st,
+		Auth:  authPolicy,
 		CapMu: capMu, Capacities: capacities, TelemetryCapacities: telemetryCapacities,
 		CfgMu: cfgMu, Cfg: cfg, ConfigPath: *configPath,
 		DriverDir:           resolveDriverDir(),
@@ -2157,6 +2179,11 @@ func main() {
 			"upstream", u.String(),
 			"read_only", readOnly)
 	}
+	// Login/role layer wraps the wired mux (inside the outer
+	// SecureMutations wrap from boot; identity is checked after the
+	// CSRF/token/content-type gate short-circuits obvious garbage).
+	// Mode open makes this a pure pass-through plus the mutation audit.
+	handler = api.RequireAuth(handler, authPolicy, st)
 	// Swap the boot-phase handler for the fully wired mux — the listener
 	// bound at startup stays; no port gap for healthcheck probes.
 	apiHandler.Swap(handler)

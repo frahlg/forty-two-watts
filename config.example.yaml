@@ -131,6 +131,20 @@ drivers:
 
 api:
   port: 8080
+  # auth:
+  #   mode: local_trust     # open (default) | local_trust | required
+  #                         # local_trust: LAN clients unchanged; remote
+  #                         #   requests need a login (viewer to read,
+  #                         #   operator to change anything).
+  #                         # required: every API request needs a login,
+  #                         #   local included.
+  #                         # Create the first account on the box first:
+  #                         #   ftw user add <name>          (operator)
+  #                         #   ftw user add -role viewer <name>
+  #                         # Startup refuses non-open modes with zero
+  #                         # enabled operators, so a typo can't lock
+  #                         # you out. Mutations are audited to
+  #                         # /api/audit in every mode.
 
 # Home Assistant MQTT bridge (optional)
 homeassistant:

@@ -888,6 +888,32 @@ func (d Driver) EffectiveModbus() *ModbusConfig {
 // API is the HTTP server config.
 type API struct {
 	Port int `yaml:"port" json:"port"`
+	// Auth selects the API authentication mode:
+	//   open        (default) — today's behavior: reads unauthenticated,
+	//                mutations LAN-trust + optional bearer token.
+	//   local_trust — local clients as today; any non-local request
+	//                needs a login session (viewer to read, operator to
+	//                mutate). The bearer token still works for
+	//                automation mutations.
+	//   required    — every /api request needs a session, even locally
+	//                (login, health and static assets excepted).
+	// Requires at least one enabled operator account before it can be
+	// anything but open — enforced at validation so a typo can never
+	// lock the operator out of their own box.
+	Auth *APIAuth `yaml:"auth,omitempty" json:"auth,omitempty"`
+}
+
+// APIAuth is the API authentication config.
+type APIAuth struct {
+	Mode string `yaml:"mode" json:"mode"` // open | local_trust | required
+}
+
+// AuthMode resolves the configured mode, defaulting to open.
+func (a API) AuthMode() string {
+	if a.Auth == nil || a.Auth.Mode == "" {
+		return "open"
+	}
+	return a.Auth.Mode
 }
 
 // HomeAssistant is the MQTT bridge config.
@@ -1581,6 +1607,11 @@ func (c *Config) Validate() error {
 		return errors.New("at least one driver must be is_site_meter: true")
 	}
 
+	switch c.API.AuthMode() {
+	case "open", "local_trust", "required":
+	default:
+		return fmt.Errorf("api.auth.mode must be open, local_trust or required, got %q", c.API.Auth.Mode)
+	}
 	if c.Site.ControlIntervalS < 0 {
 		return errors.New("site.control_interval_s must be >= 0")
 	}

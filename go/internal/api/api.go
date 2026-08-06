@@ -68,6 +68,10 @@ type Deps struct {
 	// Handler boundary. Production requires tokens for non-local hostnames;
 	// the zero value retains local/test embedding compatibility.
 	MutationPolicy MutationPolicy
+	// Auth is the login/role layer (api.auth.mode). The zero value is
+	// mode open — today's behavior — so every existing embedding and
+	// test remains untouched.
+	Auth AuthPolicy
 	Tel            *telemetry.Store
 	// LogRing is the in-memory log buffer wired in main.go. Nil makes
 	// /api/drivers/{name}/logs and /api/support/dump return 503.
@@ -231,12 +235,27 @@ func New(deps *Deps) *Server {
 
 // Handler returns the http.Handler suitable for http.ListenAndServe.
 func (s *Server) Handler() http.Handler {
-	return SecureMutations(s.mux, s.deps.MutationPolicy)
+	// Identity/role layer outside, CSRF/token/content-type layer inside.
+	return RequireAuth(SecureMutations(s.mux, s.deps.MutationPolicy), s.deps.Auth, s.auditSink())
+}
+
+// auditSink returns the audit recorder, nil when state is absent (tests).
+func (s *Server) auditSink() interface {
+	AppendAudit(state.AuditEntry) error
+} {
+	if s.deps.State == nil {
+		return nil
+	}
+	return s.deps.State
 }
 
 func (s *Server) routes() {
 	// ---- JSON endpoints ----
 	s.handle("GET  /api/health", s.handleHealth)
+	s.handle("POST /api/auth/login", s.handleAuthLogin)
+	s.handle("POST /api/auth/logout", s.handleAuthLogout)
+	s.handle("GET  /api/auth/session", s.handleAuthSession)
+	s.handle("GET  /api/audit", s.handleAuditLog)
 	s.handle("GET  /api/status", s.handleStatus)
 	s.handle("GET  /api/system/info", s.handleSysInfo)
 	s.handle("GET  /api/storage/inventory", s.handleStorageInventory)

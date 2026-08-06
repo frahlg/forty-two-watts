@@ -1042,6 +1042,18 @@ func (s *Store) migrate() error {
 			created_ms    INTEGER NOT NULL,
 			disabled      INTEGER NOT NULL DEFAULT 0 CHECK(disabled IN (0, 1))
 		) STRICT`,
+		// Mutation audit trail: who changed what, when, from where.
+		// Attempts are recorded (not just successes) — for an audit
+		// log, a rejected write is as interesting as an accepted one.
+		`CREATE TABLE IF NOT EXISTS audit_log (
+			id          INTEGER PRIMARY KEY,
+			ts_ms       INTEGER NOT NULL,
+			principal   TEXT NOT NULL,
+			method      TEXT NOT NULL,
+			path        TEXT NOT NULL,
+			remote_addr TEXT NOT NULL DEFAULT ''
+		) STRICT`,
+		`CREATE INDEX IF NOT EXISTS idx_audit_log_ts ON audit_log(ts_ms DESC)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.Exec(stmt); err != nil {
