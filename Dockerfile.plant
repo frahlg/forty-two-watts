@@ -1,0 +1,47 @@
+# ftw-plant — multi-rack battery plant module. Independent, optional
+# container following the optimizer's module pattern: its own image, its
+# own release cadence, and a narrow versioned contract (/v1 over the
+# loopback, consumed by the ftw_plant Lua driver in core). Safe-absent:
+# stopping this container stales the driver in core (→ autonomous
+# default) and setpoint leases ramp the racks to zero.
+
+# --- Builder ---------------------------------------------------------------
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS builder
+
+RUN apk add --no-cache git
+
+WORKDIR /src
+
+COPY go/go.mod go/go.sum ./go/
+RUN cd go && go mod download
+
+COPY go/ ./go/
+
+ARG TARGETOS=linux
+ARG TARGETARCH
+ARG VERSION=dev
+RUN cd go && \
+    target_arch="${TARGETARCH:-$(go env GOARCH)}" && \
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${target_arch} \
+    go build -trimpath -ldflags="-s -w -X main.Version=${VERSION}" \
+    -o /out/ftw-plant ./cmd/ftw-plant
+
+# --- Runtime ---------------------------------------------------------------
+FROM alpine:3.22
+
+RUN apk add --no-cache ca-certificates tzdata
+
+# Layout:
+#   /app/ftw-plant        binary (immutable, replaced on upgrade)
+#   /app/data/            PERSISTENT — plant.yaml
+COPY --from=builder --chown=100:101 /out/ftw-plant /app/ftw-plant
+
+USER 100:101
+WORKDIR /app/data
+
+# Health: the /v1/status endpoint answers as soon as the controller is up.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \
+  CMD wget -qO- http://127.0.0.1:9200/v1/status >/dev/null || exit 1
+
+ENTRYPOINT ["/app/ftw-plant"]
+CMD ["-config", "/app/data/plant.yaml"]

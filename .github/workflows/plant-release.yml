@@ -1,0 +1,108 @@
+# ftw-plant release — modeled on optimizer-release.yml: the plant module
+# releases independently of core, beta first, and stable only promotes a
+# commit whose beta tag already exists at the identical SHA. No edge
+# channel.
+name: plant release
+
+on:
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: Publish beta first, then promote the exact commit to stable
+        required: true
+        type: choice
+        default: beta
+        options: [beta, stable]
+      version:
+        description: Plant SemVer without prefix (for example 0.1.0-beta.1 or 0.1.0)
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: plant-${{ inputs.channel }}-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: validate plant version
+    runs-on: ubuntu-latest
+    outputs:
+      release_tag: ${{ steps.version.outputs.release_tag }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - id: version
+        env:
+          CHANNEL: ${{ inputs.channel }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [ "${CHANNEL}" = "beta" ]; then
+            echo "${VERSION}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+-beta\.[0-9]+$' \
+              || { echo "beta version must look like 0.1.0-beta.1"; exit 1; }
+          else
+            echo "${VERSION}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' \
+              || { echo "stable version must look like 0.1.0"; exit 1; }
+            # Stable promotes the exact commit already validated as beta:
+            # some plant-v${VERSION}-beta.N tag must point at this SHA.
+            found=""
+            for tag in $(git tag --list "plant-v${VERSION}-beta.*"); do
+              if [ "$(git rev-parse "${tag}^{commit}")" = "${GITHUB_SHA}" ]; then
+                found="${tag}"
+              fi
+            done
+            [ -n "${found}" ] || { echo "no plant-v${VERSION}-beta.* tag at ${GITHUB_SHA}; publish beta first"; exit 1; }
+          fi
+          echo "release_tag=plant-v${VERSION}" >> "${GITHUB_OUTPUT}"
+
+  test:
+    name: plant tests
+    runs-on: ubuntu-latest
+    needs: validate
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go/go.mod
+      - run: cd go && go test ./internal/plant/... ./cmd/ftw-plant/... ./cmd/sim-pcs/... -count=1 -race
+
+  publish:
+    name: build and publish image
+    runs-on: ubuntu-latest
+    needs: [validate, test]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.plant
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: |
+            VERSION=${{ inputs.version }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ inputs.version }}
+          tags: |
+            ghcr.io/srcfl/ftw-plant:${{ inputs.version }}
+            ghcr.io/srcfl/ftw-plant:${{ inputs.channel }}
+      - name: tag release
+        run: |
+          set -euo pipefail
+          # Beta versions carry their -beta.N suffix inside inputs.version.
+          tag="plant-v${{ inputs.version }}"
+          git tag "${tag}" "${GITHUB_SHA}"
+          git push origin "${tag}"

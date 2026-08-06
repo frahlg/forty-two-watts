@@ -1,0 +1,17 @@
+# ftw-plant config example — copy to data/plant.yaml for the container
+# (or anywhere and pass -config). See go/cmd/ftw-plant/main.go.
+#
+# One entry per PCS/rack unit. Several racks often share one Modbus
+# gateway (same host/port, distinct unit_id).
+
+listen: 127.0.0.1:9200        # /v1 contract for the ftw_plant driver
+poll_interval_ms: 1000
+control_interval_ms: 1000
+default_lease_ttl_ms: 10000   # setpoints without an explicit TTL
+stale_after_ms: 5000          # unpolled unit counts as offline
+
+units:
+  - {id: rack-1, host: 192.168.1.60, port: 502, unit_id: 1}
+  - {id: rack-2, host: 192.168.1.60, port: 502, unit_id: 2}
+  - {id: rack-3, host: 192.168.1.60, port: 502, unit_id: 3}
+  - {id: rack-4, host: 192.168.1.60, port: 502, unit_id: 4}

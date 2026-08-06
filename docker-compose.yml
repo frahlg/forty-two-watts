@@ -84,6 +84,21 @@ services:
     volumes:
       - optimizer-ipc:/run/ftw-optimizer
 
+  # ftw-plant — OPTIONAL multi-rack battery plant module (C&I sites).
+  # Presents N PCS/rack units as one logical battery on 127.0.0.1:9200,
+  # consumed by core through the ftw_plant driver. Host networking for
+  # the same reason core uses it: Modbus TCP to the PCS LAN. Safe to
+  # leave commented out — core behaves identically without it.
+  # Uncomment and drop a plant.yaml into ./data to enable:
+  #
+  # ftw-plant:
+  #   image: ghcr.io/srcfl/ftw-plant:${FTW_PLANT_IMAGE_TAG:-latest}
+  #   container_name: ftw-plant
+  #   restart: unless-stopped
+  #   network_mode: host
+  #   volumes:
+  #     - ./data:/app/data
+
   ftw-updater:
     # Normally follows :latest. The separate variable is only needed for
     # bootstrapping a beta pair before the installed stable updater
