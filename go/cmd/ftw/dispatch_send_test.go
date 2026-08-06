@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 )
@@ -68,4 +69,64 @@ func TestSendDriverCommandLogsButSwallowsErrors(t *testing.T) {
 	s := &recordingSender{err: errors.New("boom")}
 	// Must not panic or propagate: recovery belongs to watchdog/staleness.
 	sendDriverCommand(context.Background(), s, "bat1", "driver", []byte(`{}`))
+}
+
+// slowSender delays each Send by a fixed amount (or until ctx expires) and
+// records which drivers were reached.
+type slowSender struct {
+	delay time.Duration
+
+	mu   sync.Mutex
+	seen []string
+}
+
+func (s *slowSender) Send(ctx context.Context, name string, payload []byte) error {
+	select {
+	case <-time.After(s.delay):
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	s.mu.Lock()
+	s.seen = append(s.seen, name)
+	s.mu.Unlock()
+	return nil
+}
+
+func TestDispatchCommandsRunsConcurrently(t *testing.T) {
+	s := &slowSender{delay: 200 * time.Millisecond}
+	sends := []driverSend{
+		{name: "a", kind: "driver", payload: []byte(`{}`)},
+		{name: "b", kind: "driver", payload: []byte(`{}`)},
+		{name: "c", kind: "driver", payload: []byte(`{}`)},
+		{name: "d", kind: "driver", payload: []byte(`{}`)},
+	}
+	start := time.Now()
+	dispatchCommands(context.Background(), s, sends)
+	elapsed := time.Since(start)
+	// Serial would take 4×200 ms; concurrent should be close to one delay.
+	if elapsed > 3*s.delay {
+		t.Fatalf("dispatch took %v; sends appear serialized", elapsed)
+	}
+	if len(s.seen) != len(sends) {
+		t.Fatalf("reached %d drivers, want %d", len(s.seen), len(sends))
+	}
+}
+
+func TestDispatchCommandsHonorsTickBudget(t *testing.T) {
+	// Delay far beyond both the per-command timeout and the tick budget.
+	s := &slowSender{delay: time.Minute}
+	sends := []driverSend{
+		{name: "stuck1", kind: "driver", payload: []byte(`{}`)},
+		{name: "stuck2", kind: "driver", payload: []byte(`{}`)},
+	}
+	start := time.Now()
+	dispatchCommands(context.Background(), s, sends)
+	elapsed := time.Since(start)
+	if elapsed > dispatchTickBudget+time.Second {
+		t.Fatalf("dispatch took %v, budget is %v", elapsed, dispatchTickBudget)
+	}
+}
+
+func TestDispatchCommandsEmptyIsNoop(t *testing.T) {
+	dispatchCommands(context.Background(), &recordingSender{}, nil)
 }

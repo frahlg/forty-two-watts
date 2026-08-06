@@ -2641,13 +2641,15 @@ func main() {
 			}
 
 			// ---- Dispatch to drivers ----
+			var batterySends []driverSend
 			for _, t := range finalTargets {
 				if observeOnlySnap[t.Driver] {
 					continue
 				}
 				payload, _ := json.Marshal(map[string]any{"action": "battery", "power_w": t.TargetW})
-				sendDriverCommand(ctx, reg, t.Driver, "driver", payload)
+				batterySends = append(batterySends, driverSend{name: t.Driver, kind: "driver", payload: payload})
 			}
+			dispatchCommands(ctx, reg, batterySends)
 
 			// ---- PV curtailment dispatch ----
 			// MPC's annotateCurtailment sets pv_limit_w on slots where
@@ -2660,6 +2662,7 @@ func main() {
 			ctrlMu.Lock()
 			curtailTargets := control.ComputePVCurtail(ctrl, tel)
 			ctrlMu.Unlock()
+			var curtailSends []driverSend
 			for _, c := range curtailTargets {
 				var payload []byte
 				if c.LimitW > 0 {
@@ -2672,8 +2675,9 @@ func main() {
 						"action": "curtail_disable",
 					})
 				}
-				sendDriverCommand(ctx, reg, c.Driver, "pv curtail", payload)
+				curtailSends = append(curtailSends, driverSend{name: c.Driver, kind: "pv curtail", payload: payload})
 			}
+			dispatchCommands(ctx, reg, curtailSends)
 
 			// LP dispatch ran at the top of this tick — see the
 			// "EV dispatch first" block above.
