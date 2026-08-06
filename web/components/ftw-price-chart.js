@@ -823,27 +823,47 @@ class FtwPriceChart extends FtwElement {
     const maxP = prices[hi];
     const meanP = prices.reduce((a, p) => a + p, 0) / n;
 
-    // SVG geometry. Width = 100 % via viewBox. Height of the viewBox
-    // is doubled on phones so bars get more vertical room — bumping
-    // the box AT THE VIEWBOX level (not via a mismatched CSS
-    // aspect-ratio + preserveAspectRatio="none") keeps text scaled
-    // uniformly. preserveAspectRatio="none" is harmless when the box
-    // and viewBox match.
+    // Y scale: include 0 so a negative-spot day still renders, and
+    // pad the top so the peak's marker doesn't kiss the edge.
+    const yMin = Math.min(0, minP);
+    const yMax = Math.max(maxP * 1.08, 1);
+    // The axis is labelled here rather than beside its <text>, because the
+    // longest of these three strings is what decides how wide the left
+    // gutter has to be, and the gutter is part of the layout below.
+    const axisUnit = unitFor(this._currency);
+    const axisTick = (v) => roundOre(toDisplay(v, this._currency)) + " " + axisUnit.axis;
+    const yTicks = [
+      { at: yMax,  text: axisTick(yMax) },
+      { at: meanP, text: axisTick(meanP) },
+      { at: yMin,  text: axisTick(yMin) },
+    ];
+
+    // SVG geometry. Width = 100 % via viewBox. Everything below is in
+    // viewBox units, and the element renders at W over its CSS width, so
+    // that one scale governs every font size and padding here — which is
+    // why the box is stretched AT THE VIEWBOX level rather than with a
+    // mismatched CSS aspect-ratio, and why preserveAspectRatio="none" is
+    // harmless: the box and the viewBox always match.
     const W = 1000;
     const small = typeof window !== "undefined" && window.matchMedia &&
       window.matchMedia("(max-width: 600px)").matches;
-    const H = small ? 720 : 240;
-    // Wider left padding so the y-axis öre labels have breathing
-    // room between the SVG edge and the plot's first bar (was 36 →
-    // labels rendered too close to the card's left border).
-    // Phones get bigger fonts AND more padding so the larger labels
-    // stay inside the SVG box and below the NOW pill clears its top.
-    // +4 px left padding so 3-digit öre prices (e.g. "234 ö") clear the
-    // SVG edge — the label is text-anchored "end" at `pad.l - 4` and
-    // extends left from there, so a tighter pad.l clipped large prices.
-    const pad = small
-      ? { t: 26, r: 16, b: 40, l: 84 }
-      : { t: 16, r: 16, b: 28, l: 60 };
+    // A phone gets a taller box than a desktop so the bars have somewhere
+    // to go once the chart is only a few hundred pixels wide.
+    //
+    // How much taller depends on what the chart is inside of. The
+    // dashboard's Energy tab is a page about prices and the chart is the
+    // thing you came for. The app's Plan screen is a page about the day —
+    // a sentence, the mode choice, this chart, then the hour-by-hour
+    // timeline — and at the dashboard's height the price block filled 57 %
+    // of a 375×812 phone, so the timeline under it was never on screen with
+    // it. `fed` is how this file already knows it is the app rather than
+    // the dashboard.
+    //
+    // Only H moves. The rendered scale comes from W, so a shorter box
+    // lowers the bars' ceiling and changes the size of nothing else: the
+    // axis figures, the NOW pill and the peak markers all come out at the
+    // same pixel size they do at 720.
+    const H = small ? (this.hasAttribute("fed") ? 440 : 720) : 240;
     // Phone sizes bumped per operator request (2026-05): axis labels
     // were readable but the NOW marker felt thin and crowded against
     // the bars. +50 % on axes, +33 % on NOW + thicker stroke so the
@@ -856,6 +876,23 @@ class FtwPriceChart extends FtwElement {
     // bigger labels don't overlap each other across a 48 h chart.
     const tickStepMs = (small ? 6 : 3) * 3600_000;
     const tickLabelDy = small ? 26 : 16;
+    // The left gutter is the wider of what the design wants and what the
+    // labels need. Each is anchored "end" four units inside it and grows
+    // leftwards, so a gutter narrower than the longest label cuts that
+    // label's first character off at the SVG edge: on a phone, where the
+    // axis font is nearly three times the desktop one, "0.00 ö" came out
+    // as ".00 ö" and even "335 ö" lost a hairline. No fixed number can be
+    // right for every font size, currency and price range at once —
+    // "-12.34 lei" is four characters longer than "24 c" — so the labels
+    // are measured. Monospace, so that is the character count times the
+    // font's advance, with enough slack for the widest face the --mono
+    // stack can fall back to.
+    const MONO_ADVANCE_EM = 0.62;
+    const gutter = 4 + Math.ceil(
+      Math.max(...yTicks.map((t) => t.text.length)) * MONO_ADVANCE_EM * fsAxis);
+    const pad = small
+      ? { t: 26, r: 16, b: 40, l: Math.max(84, gutter) }
+      : { t: 16, r: 16, b: 28, l: Math.max(60, gutter) };
     const plotW = W - pad.l - pad.r;
     const plotH = H - pad.t - pad.b;
     const barW = plotW / n;
@@ -863,10 +900,6 @@ class FtwPriceChart extends FtwElement {
     // scrubbing — touchmove targets stay anchored to the touchstart
     // element, so we can't lean on data-idx like the mouse path does.
     this._geom = { padL: pad.l, plotW, n, W };
-    // Y scale: include 0 so a negative-spot day still renders, and
-    // pad the top so the peak's marker doesn't kiss the edge.
-    const yMin = Math.min(0, minP);
-    const yMax = Math.max(maxP * 1.08, 1);
     const yToPx = (v) => pad.t + plotH - ((v - yMin) / (yMax - yMin)) * plotH;
     const zeroY = yToPx(0);
     const meanY = yToPx(meanP);
@@ -935,15 +968,11 @@ class FtwPriceChart extends FtwElement {
                      </text>`);
       }
     }
-    // Y-axis labels — min / mean / max.
-    const axisUnit = unitFor(this._currency);
-    const axisTick = (v) => roundOre(toDisplay(v, this._currency)) + " " + axisUnit.axis;
-    const yLabels = [
-      { y: yToPx(yMax), text: axisTick(yMax) },
-      { y: meanY,       text: axisTick(meanP) },
-      { y: yToPx(yMin), text: axisTick(yMin) },
-    ].map((l) => `<text x="${pad.l - 4}" y="${l.y + 3}" text-anchor="end"
-                       fill="var(--fg-label)" font-family="var(--mono)" font-size="${fsAxis}">${l.text}</text>`).join("");
+    // Y-axis labels — min / mean / max, written above where the gutter
+    // that has to hold them is worked out.
+    const yLabels = yTicks
+      .map((t) => `<text x="${pad.l - 4}" y="${yToPx(t.at) + 3}" text-anchor="end"
+                       fill="var(--fg-label)" font-family="var(--mono)" font-size="${fsAxis}">${t.text}</text>`).join("");
 
     // "Now" marker — vertical line plus a "now" pill.
     let nowMarker = "";
