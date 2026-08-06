@@ -1504,7 +1504,16 @@ func main() {
 				RequestActive: reqActive,
 			}, true
 		}
-		lpController = loadpoint.NewController(lpMgr, planAdapter, telAdapter, reg.Send)
+		// Bound every loadpoint send the same way the battery/curtail
+		// dispatch is bounded: the controller passes long-lived (or
+		// background) contexts, and an unbounded Registry.Send on a
+		// wedged driver would stall the EV tick.
+		lpSend := func(ctx context.Context, name string, payload []byte) error {
+			cmdCtx, cancel := context.WithTimeout(ctx, driverCommandTimeout)
+			defer cancel()
+			return reg.Send(cmdCtx, name, payload)
+		}
+		lpController = loadpoint.NewController(lpMgr, planAdapter, telAdapter, lpSend)
 		// Wire the site fuse so the per-phase EV clamp and the
 		// phase-split derivation can use the actual site voltage and
 		// breaker rating instead of hard-coding 230 V × 16 A.
@@ -2637,9 +2646,7 @@ func main() {
 					continue
 				}
 				payload, _ := json.Marshal(map[string]any{"action": "battery", "power_w": t.TargetW})
-				if err := reg.Send(ctx, t.Driver, payload); err != nil {
-					slog.Warn("driver send", "name", t.Driver, "err", err)
-				}
+				sendDriverCommand(ctx, reg, t.Driver, "driver", payload)
 			}
 
 			// ---- PV curtailment dispatch ----
@@ -2665,9 +2672,7 @@ func main() {
 						"action": "curtail_disable",
 					})
 				}
-				if err := reg.Send(ctx, c.Driver, payload); err != nil {
-					slog.Warn("pv curtail send", "name", c.Driver, "err", err)
-				}
+				sendDriverCommand(ctx, reg, c.Driver, "pv curtail", payload)
 			}
 
 			// LP dispatch ran at the top of this tick — see the
