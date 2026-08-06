@@ -1030,6 +1030,18 @@ func (s *Store) migrate() error {
 			ts_ms      INTEGER NOT NULL,
 			PRIMARY KEY(asset_id, flow, cursor_kind)
 		) WITHOUT ROWID, STRICT`,
+
+		// ---- Local user accounts (api.auth.mode) ----
+		// Argon2id password hashes in PHC string format. Sessions are
+		// in-memory (go/internal/localauth) on purpose: a restart logs
+		// everyone out, which is the safe failure for a control system.
+		`CREATE TABLE IF NOT EXISTS users (
+			username      TEXT PRIMARY KEY,
+			role          TEXT NOT NULL CHECK(role IN ('operator', 'viewer')),
+			password_hash TEXT NOT NULL,
+			created_ms    INTEGER NOT NULL,
+			disabled      INTEGER NOT NULL DEFAULT 0 CHECK(disabled IN (0, 1))
+		) STRICT`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.Exec(stmt); err != nil {
