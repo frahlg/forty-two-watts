@@ -592,6 +592,20 @@ type State struct {
 	// directly-constructed State behaves unchanged.
 	DefaultCommandW float64
 
+	// NMDImportCeilingW is the Notified Maximum Demand converted to real
+	// power (nmd_kva × 1000 × assumed power factor). A contractual
+	// import limit: exceeding it triggers utility penalties. Enforced as
+	// a third import ceiling alongside the fuse and PeakImportCeilingW.
+	// 0 = not declared.
+	NMDImportCeilingW float64
+
+	// BackupReserveWh holds aggregate battery energy back for grid-
+	// outage ride-through (load shedding). Enforced as a per-battery
+	// SoC discharge floor in clampWithSoC — belt-and-braces under the
+	// planner's own backup constraint, so a plan (or manual hold) can
+	// never drain through the reserve. 0 = disabled.
+	BackupReserveWh float64
+
 	// FuseHold* — hysteresis state from applyFuseGuard. After a clamp
 	// fires, the latched maximum aggregate-battery magnitude (for the
 	// direction that tripped) is held for ~30 s so the planner can't
@@ -959,6 +973,10 @@ type batteryInfo struct {
 	maxChargeW    float64 // per-driver cap; 0 = use the site/global default (#145)
 	maxDischargeW float64 // per-driver cap; 0 = use the site/global default (#145)
 	defaultCapW   float64 // site-level default cap; 0 = MaxCommandW constant
+	// reserveFloorSoC is the load-shedding backup floor as an SoC
+	// fraction (site.backup_reserve spread capacity-weighted across the
+	// fleet). Discharge is blocked at or below it. 0 = no reserve.
+	reserveFloorSoC float64
 
 	// Per-direction blocks the driver reports this cycle. A battery that
 	// can't move in the demanded direction (e.g. a Ferroamp ESO floored at
@@ -1353,6 +1371,19 @@ func ComputeDispatch(
 	}
 
 	// ---- Gather online batteries ----
+	// Backup reserve → per-battery SoC discharge floor. The reserve is a
+	// site-level energy figure; holding the same SoC fraction on every
+	// battery sums (capacity-weighted) back to exactly the reserve.
+	reserveFloorSoC := 0.0
+	if state.BackupReserveWh > 0 {
+		var totalCapWh float64
+		for _, cap := range driverCapacities {
+			totalCapWh += cap
+		}
+		if totalCapWh > 0 {
+			reserveFloorSoC = math.Min(0.95, state.BackupReserveWh/totalCapWh)
+		}
+	}
 	batteries := make([]batteryInfo, 0, len(driverCapacities))
 	for name, cap := range driverCapacities {
 		r := store.Get(name, telemetry.DerBattery)
@@ -1379,6 +1410,7 @@ func ComputeDispatch(
 			maxChargeW:       lim.MaxChargeW,
 			maxDischargeW:    lim.MaxDischargeW,
 			defaultCapW:      state.DefaultCommandW,
+			reserveFloorSoC:  reserveFloorSoC,
 			dischargeBlocked: dischargeBlocked,
 			chargeBlocked:    chargeBlocked,
 		})
@@ -3334,8 +3366,13 @@ func chargeAll(store *telemetry.Store, capacities map[string]float64, limits map
 func clampWithSoC(target float64, b batteryInfo) (float64, bool) {
 	clamped := target
 	wasClamped := false
-	// Block discharge when the battery is empty.
-	if b.soc < 0.05 && target < 0 {
+	// Block discharge when the battery is empty, or at/below the
+	// load-shedding backup floor. The floor is belt-and-braces under
+	// the planner's own backup constraint: no plan, manual hold or
+	// fallback mode may drain through the reserve. Charging toward
+	// recovery stays allowed.
+	dischargeFloor := math.Max(0.05, b.reserveFloorSoC)
+	if b.soc < dischargeFloor && target < 0 {
 		clamped = 0
 		wasClamped = true
 	}
@@ -3614,6 +3651,9 @@ func (s *State) effectiveImportCeilingW(fuseMaxW float64) float64 {
 	}
 	if s != nil && s.PeakImportCeilingW > 0 && s.PeakImportCeilingW < eff {
 		eff = s.PeakImportCeilingW
+	}
+	if s != nil && s.NMDImportCeilingW > 0 && s.NMDImportCeilingW < eff {
+		eff = s.NMDImportCeilingW
 	}
 	return eff
 }
@@ -3941,6 +3981,29 @@ func forceFuseDischarge(
 		return targets
 	}
 
+	// Discharge-floor hierarchy: a genuine fuse overage (breaker
+	// territory, margin-adjusted, or a per-phase trip) may draw the
+	// fleet down to the empty floor — hardware beats everything. An
+	// overage that only exists because of a billing ceiling (peak /
+	// NMD) must NOT drain through the load-shedding backup reserve:
+	// exceeding NMD costs money, an outage with an empty battery costs
+	// the site its ride-through.
+	hardCeilingW := fuseMaxW - state.fuseSafetyMarginW()
+	fuseEmergency := predicted-hardCeilingW > 0
+	if currentGrid >= 0 && perPhaseOverageW(store, state)*3.0 > 0 {
+		fuseEmergency = true
+	}
+	minSoC := 0.05
+	if !fuseEmergency && state.BackupReserveWh > 0 {
+		var totalCapWh float64
+		for _, cap := range driverCapacities {
+			totalCapWh += cap
+		}
+		if totalCapWh > 0 {
+			minSoC = math.Max(minSoC, math.Min(0.95, state.BackupReserveWh/totalCapWh))
+		}
+	}
+
 	type slot struct {
 		idx      int
 		headroom float64
@@ -3960,13 +4023,13 @@ func forceFuseDischarge(
 		if r.SoC != nil {
 			soc = *r.SoC
 		}
-		if soc < 0.05 {
-			continue // empty pack — can't draw on it
+		if soc < minSoC {
+			continue // empty pack — or holding the backup reserve
 		}
 		lim := state.DriverLimits[t.Driver]
 		dCap := lim.MaxDischargeW
 		if dCap <= 0 {
-			dCap = MaxCommandW
+			dCap = state.defaultCommandCap()
 		}
 		var alreadyDischarging float64
 		if t.TargetW < 0 {

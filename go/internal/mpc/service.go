@@ -179,6 +179,13 @@ type Service struct {
 	// Wired from main.go (cfg.Site.MaxExportW).
 	MaxExportW float64
 
+	// NMDImportW is the Notified Maximum Demand as real power (W,
+	// nmd_kva × 1000 × assumed power factor). When > 0 every slot's
+	// import limit is tightened to it (feasibility-guarded per slot) so
+	// both the champion and the DP fallback plan demand under the
+	// contractual ceiling. 0 = not declared.
+	NMDImportW float64
+
 	lastReplanAt time.Time
 	lastReason   string // "scheduled" | "reactive-pv" | "reactive-load" | "manual"
 
@@ -978,6 +985,8 @@ func (s *Service) replan(ctx context.Context) *Plan {
 	// 14:45 slot grid=-14.2 kW past an 11 kW fuse.
 	clampSlotGridLimits(slots, s.FuseMaxW, s.MaxExportW)
 	clampSlotGridLimits(fallbackSlots, s.FuseMaxW, s.MaxExportW)
+	applyNMDImportCeiling(slots, s.NMDImportW)
+	applyNMDImportCeiling(fallbackSlots, s.NMDImportW)
 
 	s.mu.RLock()
 	p := s.Defaults

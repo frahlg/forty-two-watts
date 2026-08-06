@@ -45,5 +45,13 @@ func newControlStateFromConfig(cfg *config.Config) *control.State {
 	// Site-level fallback command cap. 0 = keep the 5 kW MaxCommandW
 	// constant; >5 kW requires profile: commercial (config validation).
 	ctrl.DefaultCommandW = cfg.Site.MaxCommandW
+	// C&I: NMD as a contractual import ceiling (kVA → W via the assumed
+	// power factor) and the load-shedding backup reserve floor.
+	if cfg.Site.NMDkVA > 0 {
+		ctrl.NMDImportCeilingW = cfg.Site.NMDkVA * 1000 * cfg.Site.EffectivePowerFactor()
+	}
+	if br := cfg.Site.BackupReserve; br != nil {
+		ctrl.BackupReserveWh = br.MinUsableEnergyWh
+	}
 	return ctrl
 }

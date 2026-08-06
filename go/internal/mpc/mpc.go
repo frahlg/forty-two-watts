@@ -517,6 +517,15 @@ func Optimize(slots []Slot, p Params) Plan {
 	if p.DischargeEfficiency <= 0 {
 		p.DischargeEfficiency = 0.95
 	}
+	// Load-shedding backup reserve: the DP fallback honors the floor by
+	// raising its SoC lower bound — crude next to the champion's explicit
+	// constraint, but the fallback's job is safe, not optimal.
+	if p.Commercial != nil && p.Commercial.BackupMinUsableEnergyWh > 0 {
+		floorPct := p.Commercial.BackupMinUsableEnergyWh / p.CapacityWh * 100
+		if floorPct > p.SoCMinPct {
+			p.SoCMinPct = math.Min(95, floorPct)
+		}
+	}
 	N := len(slots)
 	S := p.SoCLevels
 	if S < 3 {

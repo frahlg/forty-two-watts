@@ -76,3 +76,24 @@ func clampSlotGridLimits(slots []Slot, fuseMaxW, maxExportW float64) {
 		}
 	}
 }
+
+// applyNMDImportCeiling caps each slot's import at the Notified Maximum
+// Demand (contractual, real-power W) so the planner schedules battery to
+// shave demand under it. Feasibility guard: a slot whose forecast load
+// already exceeds NMD keeps a ceiling of its own load — the site is in
+// violation territory regardless, and an unsatisfiable bound would just
+// wreck the whole plan. Never loosens an existing tighter limit.
+func applyNMDImportCeiling(slots []Slot, nmdW float64) {
+	if nmdW <= 0 {
+		return
+	}
+	for i := range slots {
+		ceiling := nmdW
+		if slots[i].LoadW > ceiling {
+			ceiling = slots[i].LoadW
+		}
+		if slots[i].Limits.MaxImportW <= 0 || ceiling < slots[i].Limits.MaxImportW {
+			slots[i].Limits.MaxImportW = ceiling
+		}
+	}
+}

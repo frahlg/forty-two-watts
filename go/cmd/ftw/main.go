@@ -786,6 +786,14 @@ func main() {
 			ctrl.SiteFuseSafetyA = newCfg.Fuse.EffectiveSafetyMarginA()
 			ctrl.MaxExportW = newCfg.Site.MaxExportW
 			ctrl.DefaultCommandW = newCfg.Site.MaxCommandW
+			ctrl.NMDImportCeilingW = 0
+			if newCfg.Site.NMDkVA > 0 {
+				ctrl.NMDImportCeilingW = newCfg.Site.NMDkVA * 1000 * newCfg.Site.EffectivePowerFactor()
+			}
+			ctrl.BackupReserveWh = 0
+			if br := newCfg.Site.BackupReserve; br != nil {
+				ctrl.BackupReserveWh = br.MinUsableEnergyWh
+			}
 			ctrlMu.Unlock()
 
 			// Keep the loadpoint controller's per-phase EV fuse clamp in
@@ -1113,6 +1121,9 @@ func main() {
 	// ---- Start MPC planner (optional) ----
 	mpcSvc = buildMPC(cfg, st, tel, capacities)
 	wireCommercialSpec(mpcSvc, cfg, demandSched, demandTracker)
+	if mpcSvc != nil && cfg.Site.NMDkVA > 0 {
+		mpcSvc.NMDImportW = cfg.Site.NMDkVA * 1000 * cfg.Site.EffectivePowerFactor()
+	}
 	if mpcSvc != nil {
 		// Plumb the site fuse so the DP joint-plans battery + EV under
 		// the fuse from the start (instead of producing plans that
