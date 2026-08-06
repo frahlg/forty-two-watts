@@ -14,6 +14,7 @@ import (
 	"github.com/srcfl/ftw/go/internal/config"
 	"github.com/srcfl/ftw/go/internal/control"
 	"github.com/srcfl/ftw/go/internal/mpc"
+	"github.com/srcfl/ftw/go/internal/prices"
 	"github.com/srcfl/ftw/go/internal/state"
 	"github.com/srcfl/ftw/go/internal/telemetry"
 )
@@ -282,6 +283,55 @@ func (a *appHistory) Series(
 	return out, nil
 }
 
+// appPrices serves the app's price window from the price service.
+//
+// Nothing is rounded here. The service holds minor units per kWh as floats and
+// appproto turns them into integers at the wire, once — two roundings would be
+// two answers to what 18.7 öre costs.
+type appPrices struct {
+	svc *prices.Service
+}
+
+// maxPriceSlotMin is the longest slot any provider publishes — the ENTSOE
+// reader refuses anything longer. It is how far back a query has to look to
+// catch the slot already running when the window opens.
+const maxPriceSlotMin = 120
+
+func (a *appPrices) Zone() string     { return a.svc.Zone }
+func (a *appPrices) Currency() string { return a.svc.Currency }
+
+func (a *appPrices) Slots(_ context.Context, fromMs, toMs int64) ([]appproto.PricePoint, error) {
+	// The store selects on slot start, inclusive at both ends. Widening the
+	// lower bound by one slot catches the slot in progress at fromMs — the
+	// price right now, which a window starting at "now" would otherwise miss —
+	// and toMs-1 keeps the upper end half-open, so a slot beginning exactly
+	// where this window closes belongs to the next one.
+	lookbackMs := (maxPriceSlotMin * time.Minute).Milliseconds()
+	rows, err := a.svc.Load(fromMs-lookbackMs, toMs-1)
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]appproto.PricePoint, 0, len(rows))
+	for _, r := range rows {
+		if r.SlotLenMin <= 0 {
+			// A slot with no length is a row nobody can draw or price.
+			continue
+		}
+		slotEnd := time.UnixMilli(r.SlotTsMs).Add(time.Duration(r.SlotLenMin) * time.Minute)
+		if slotEnd.UnixMilli() <= fromMs {
+			continue // the lookback overshot: this slot ended before the window
+		}
+		out = append(out, appproto.PricePoint{
+			StartMs:    r.SlotTsMs,
+			LenMin:     r.SlotLenMin,
+			SpotMinor:  r.SpotOreKwh,
+			TotalMinor: r.TotalOreKwh,
+		})
+	}
+	return out, nil
+}
+
 // appPlans hands over the planner's current output.
 type appPlans struct {
 	planner *mpc.Service
@@ -342,6 +392,7 @@ func startAppLink(
 	st *state.Store,
 	tel *telemetry.Store,
 	planner *mpc.Service,
+	priceSvc *prices.Service,
 	ctrl *control.State,
 	ctrlMu *sync.Mutex,
 	revision *control.Revision,
@@ -384,6 +435,15 @@ func startAppLink(
 		)
 	}
 
+	// Prices ride on the price service, and only when it has a zone and a
+	// store to have fetched into. With either missing there is nothing to
+	// serve, so the capability stays unsaid rather than advertised and empty.
+	var priceReader appproto.PriceReader
+	if priceSvc != nil && priceSvc.Zone != "" && priceSvc.Store != nil {
+		priceReader = &appPrices{svc: priceSvc}
+		caps = append(caps, appproto.CapPriceSpot)
+	}
+
 	uplink, err := appuplink.New(appuplink.Options{
 		Enroll: enroll,
 		Handler: func(sender appproto.Sender) (*appproto.Handler, error) {
@@ -397,6 +457,7 @@ func startAppLink(
 				Modes:   modes,
 				Plans:   plans,
 				History: history,
+				Prices:  priceReader,
 				Caps:    caps,
 				Codec:   appuplink.Codec(),
 				Sender:  sender,

@@ -18,6 +18,8 @@ const (
 	MsgEvent            = "event"
 	MsgError            = "error"
 	MsgSessionTerminate = "session.terminate"
+	MsgPriceGet         = "price.get"
+	MsgPrice            = "price"
 	MsgHistQuery        = "hist.query"
 	MsgHistChunk        = "hist.chunk"
 	MsgHistEnd          = "hist.end"
@@ -354,6 +356,47 @@ type Plan struct {
 	Stale bool `cbor:"stale"`
 	// CeilingW is the import ceiling being defended, nil when there is none.
 	CeilingW *int64 `cbor:"ceilingW"`
+}
+
+// --------------------------------------------------------------------------
+// Prices
+// --------------------------------------------------------------------------
+
+// PriceGet asks for the price slots covering a window.
+type PriceGet struct {
+	// FromMs and ToMs are wall clock: prices are about hours a person plans
+	// around, not about box uptime.
+	FromMs int64 `cbor:"fromMs"`
+	ToMs   int64 `cbor:"toMs"`
+}
+
+// PriceSlot is one settlement slot's price.
+//
+// Minor units per kWh (öre, cents) as integers, because a price is money and
+// money in a float is a rounding argument waiting to happen. Spot is the raw
+// market price; Total is what the household actually pays, tariff and tax
+// included — the box computes it because the box holds the configuration.
+type PriceSlot struct {
+	StartMs    int64 `cbor:"startMs"`
+	DurationMs int64 `cbor:"durationMs"`
+	SpotMinor  int64 `cbor:"spotMinor"`
+	TotalMinor int64 `cbor:"totalMinor"`
+}
+
+// Price is the answer to PriceGet.
+type Price struct {
+	// Zone and Currency label the numbers. Without them the app would have to
+	// guess whether 45 is öre or cents.
+	Zone     string      `cbor:"zone"`
+	Currency string      `cbor:"currency"`
+	Slots    []PriceSlot `cbor:"slots"`
+	// Stale means these slots do not cover the window that was asked for:
+	// they begin after its start, stop short of its end, or there is a hole
+	// in the middle. Nothing in this path knows whether a refresh failed,
+	// only whether the window came back whole. Tomorrow's rates arrive in the
+	// afternoon, so a window asked for at breakfast genuinely ends early, and
+	// saying so beats drawing a cliff the market did not have.
+	Stale bool `cbor:"stale"`
 }
 
 // --------------------------------------------------------------------------

@@ -77,6 +77,7 @@ const (
 	CapDerV2x          = "der.v2x"
 	CapPlanDispatch    = "plan.dispatch"
 	CapNetWebrtc       = "net.webrtc"
+	CapPriceSpot       = "price.spot"
 )
 
 // AllCapabilities is every capability name the registry defines.
@@ -95,6 +96,7 @@ var AllCapabilities = []string{
 	CapDerV2x,
 	CapPlanDispatch,
 	CapNetWebrtc,
+	CapPriceSpot,
 }
 
 // Scopes are one object axis and two verb axes. Roles are a projection over

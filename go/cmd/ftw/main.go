@@ -2125,7 +2125,7 @@ func main() {
 	}
 	appEnroll, appUplink, appLinkEnabled, appLinkErr := startAppLink(
 		ctx, cfg, identityKeyPath, boxID, Version,
-		st, tel, mpcSvc, ctrl, ctrlMu, controlRev, appLinkWatchdog,
+		st, tel, mpcSvc, priceSvc, ctrl, ctrlMu, controlRev, appLinkWatchdog,
 	)
 	switch {
 	case appLinkErr != nil:

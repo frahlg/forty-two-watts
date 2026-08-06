@@ -7,6 +7,13 @@
 // Inputs (none — autonomous). The component renders its own header
 // (label + price-mode toggle) and the SVG chart underneath.
 //
+// Unless it is told otherwise: the `fed` attribute turns both the fetch
+// and the poll off and hands the data question to the caller, which then
+// pushes windows in with setPrices(). The FTW app draws this chart over
+// its encrypted session to the box and has no HTTP origin at all, so a
+// request from here would be a 404 every five minutes for the life of the
+// page. Without the attribute nothing about this file changes.
+//
 // Data shape from /api/prices:
 //   { zone: "SE4", enabled: true, items: [
 //       { slot_ts_ms, slot_len_min, spot_ore_kwh, total_ore_kwh, ... }
@@ -448,9 +455,11 @@ class FtwPriceChart extends FtwElement {
 
   connectedCallback() {
     super.connectedCallback();
-    this._loadConfig();
-    this._loadPrices();
-    this._refreshTimer = setInterval(() => this._loadPrices(), 5 * 60 * 1000);
+    if (!this.hasAttribute("fed")) {
+      this._loadConfig();
+      this._loadPrices();
+      this._refreshTimer = setInterval(() => this._loadPrices(), 5 * 60 * 1000);
+    }
     // Re-render when the viewport crosses the small-screen breakpoint
     // — render() picks a different viewBox H per side, so a rotation
     // or window-resize over the 600 px line needs a redraw.
@@ -545,16 +554,58 @@ class FtwPriceChart extends FtwElement {
     }
   }
 
+  // Hand the chart a window of prices instead of it fetching one. Pairs
+  // with the `fed` attribute — without it the next poll overwrites this.
+  //
+  // slots are { tsMs, lenMin, spot, total }, spot and total in minor units
+  // per kWh: the component's own vocabulary, so nothing about the caller's
+  // transport reaches in here. `total` is optional and is what the slot
+  // costs to import with tariff and tax added. Supply it when whoever
+  // holds those numbers is the same place the prices came from; leave it
+  // out and the Total toggle computes it from /api/config as before.
+  //
+  // `stale` is the caller saying "our numbers stop here", which is the
+  // same sentence the fetch path's own stale state carries.
+  setPrices({ zone = "", currency = "", slots = [], stale = false } = {}) {
+    const items = (Array.isArray(slots) ? slots : [])
+      .filter((s) => s && Number.isFinite(s.tsMs))
+      .map((s) => ({
+        tsMs: s.tsMs,
+        lenMin: Number(s.lenMin) > 0 ? Number(s.lenMin) : 60,
+        spot: Number(s.spot) || 0,
+        total: s.total,
+      }))
+      .sort((a, b) => a.tsMs - b.tsMs);
+    this._data = { zone, items };
+    if (currency) this._currency = setActiveCurrency(currency);
+    this._priceState = stale ? "stale" : "ready";
+    this.update();
+  }
+
   // Resolved minor units/kWh per slot for the active toggle. "Total" is
   // what the slot actually costs to import: (spot + grid tariff) × (1 + VAT/100).
+  // A slot that arrived with its own total is believed rather than recomputed:
+  // whoever fed it holds the tariff and the VAT, and a fed instance never
+  // fetched either — it would quietly answer with a 0 öre grid tariff.
   _priceFor(item) {
     if (!this._totalOn) return item.spot;
+    if (Number.isFinite(item.total)) return item.total;
     return consumerTotalOre(item.spot, this._gridTariff, this._vatPct);
   }
 
   // Breakdown of the consumer total for one slot, in minor units/kWh.
   _partsFor(item) {
     return priceParts(item.spot, this._gridTariff, this._vatPct);
+  }
+
+  // Name what the numbers include. "incl. VAT" alone was read as "this is
+  // what I pay", which it wasn't while the grid tariff sat outside it — and
+  // a fed total is added up wherever the prices came from, so this instance
+  // can name the whole but never its parts.
+  _totalLabel(items) {
+    if (!this._totalOn) return "spot only";
+    if ((items || []).some((it) => Number.isFinite(it.total))) return "total to import";
+    return this._gridTariff > 0 ? "incl. grid tariff + VAT" : "incl. VAT";
   }
 
   render() {
@@ -566,11 +617,7 @@ class FtwPriceChart extends FtwElement {
     // the stored preference. The stored value is kept untouched so the
     // user's choice re-applies once tomorrow's prices publish.
     const effectiveHorizon = hasTomorrow ? this._horizon : "today";
-    // Name what the numbers include. "incl. VAT" alone was read as "this
-    // is what I pay", which it wasn't while the grid tariff sat outside it.
-    const modeLabel = this._totalOn
-      ? (this._gridTariff > 0 ? "incl. grid tariff + VAT" : "incl. VAT")
-      : "spot only";
+    const modeLabel = this._totalLabel(data && data.items);
     const horizonLabel =
       effectiveHorizon === "today"    ? "today" :
       effectiveHorizon === "tomorrow" ? "tomorrow" :
@@ -707,9 +754,7 @@ class FtwPriceChart extends FtwElement {
     const lowTime = cheapBlock
       ? `${formatPriceSlotLabel(cheapBlock.startMs)}–${fmtClock(cheapBlock.endMs)}`
       : "No 2 h window published";
-    const vatLabel = this._totalOn
-      ? (this._gridTariff > 0 ? "incl. grid tariff + VAT" : "incl. VAT")
-      : "spot only";
+    const vatLabel = this._totalLabel(data && data.items);
     const stale = view.stale
       ? `<span class="compact-stale">Last update failed</span>`
       : "";
@@ -1132,10 +1177,13 @@ class FtwPriceChart extends FtwElement {
     const shown = (v) => roundOre(toDisplay(v, this._currency));
     priceEl.textContent = `${shown(price)} ${unitFor(this._currency).label}`;
     // Breakdown line — only in Total mode, and only when there is
-    // something beyond spot to break out.
+    // something beyond spot to break out. A fed total arrives already added
+    // up and cannot be taken apart here; printing "grid 0 + VAT 25 %" over
+    // it would invent a breakdown rather than show one.
     const partsEl = tip.querySelector("[data-tip-parts]");
     if (partsEl) {
-      const showParts = this._totalOn && (this._gridTariff > 0 || this._vatPct > 0);
+      const showParts = this._totalOn && !Number.isFinite(item.total) &&
+        (this._gridTariff > 0 || this._vatPct > 0);
       if (showParts) {
         const p = this._partsFor(item);
         partsEl.textContent =

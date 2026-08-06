@@ -51,6 +51,9 @@ capabilities:
   - der.v2x
   - plan.dispatch
   - net.webrtc
+  # Electricity prices, when the box has a zone configured and rows stored.
+  # Absent means the app draws no price view rather than an empty one.
+  - price.spot
 
 # ---------------------------------------------------------------------------
 # Scopes. One object axis, two verb axes: <object>.<read|write>.

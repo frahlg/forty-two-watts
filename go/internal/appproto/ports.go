@@ -148,6 +148,42 @@ type PlanReader interface {
 	CeilingW() *int64
 }
 
+// PricePoint is one stored price slot as the box holds it.
+//
+// Still float, and still per kWh, because that is what the store keeps. The
+// rounding to integer minor units happens once, on the way to the wire.
+type PricePoint struct {
+	// StartMs is the slot start, wall clock: prices are about hours a person
+	// plans around, not about box uptime.
+	StartMs int64
+	// LenMin is the slot length in minutes. Fifteen across most of Europe's
+	// day-ahead market since 2025 and sixty on the older hourly one — never
+	// assume either.
+	LenMin int
+	// SpotMinor is the raw market price and TotalMinor what the household
+	// actually pays, tariff and tax included, both in minor units per kWh.
+	SpotMinor  float64
+	TotalMinor float64
+}
+
+// PriceReader answers windows of stored prices.
+//
+// An interface so appproto never touches the price service or its SQL, and so
+// tests can serve a synthetic day. A nil reader means the box has no prices,
+// which it says once in its capabilities and again if asked anyway.
+type PriceReader interface {
+	// Zone is the bidding zone the prices belong to.
+	Zone() string
+	// Currency is the ISO code their minor units are in. Without it the app
+	// would have to guess whether 45 is öre or cents.
+	Currency() string
+	// Slots returns every stored slot overlapping [fromMs, toMs), oldest
+	// first. Overlapping, not contained: the slot in progress at fromMs is
+	// the price right now, and a window starting at "now" that left it out
+	// would leave the app unable to say what the house is paying.
+	Slots(ctx context.Context, fromMs, toMs int64) ([]PricePoint, error)
+}
+
 // Sender delivers an encoded frame to the carrier.
 type Sender interface {
 	Send(frame []byte) error

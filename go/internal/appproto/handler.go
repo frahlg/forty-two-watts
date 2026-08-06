@@ -31,6 +31,10 @@ type Config struct {
 	// and an advertised-but-broken feature is worse than an absent one.
 	History HistoryProvider
 
+	// Prices serves stored electricity prices, or nil on a box with no price
+	// service or no zone to fetch one for. Optional for the same reason.
+	Prices PriceReader
+
 	// Caps is what this box advertises. Names must come from the generated
 	// contract constants; a typo is refused at construction rather than
 	// silently hiding a feature in the app.
@@ -186,6 +190,8 @@ func (h *Handler) dispatch(ctx context.Context, env Envelope) error {
 		return h.onCmd(ctx, env)
 	case MsgPlanGet:
 		return h.onPlanGet(env.ID)
+	case MsgPriceGet:
+		return h.onPriceGet(ctx, env)
 	case MsgHistQuery:
 		return h.onHistQuery(ctx, env)
 	default:
