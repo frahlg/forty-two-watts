@@ -1,6 +1,6 @@
 {
   "name": "ftw",
-  "version": "1.14.0",
+  "version": "1.16.1",
   "private": true,
   "type": "module",
   "description": "FTW — local-first home energy coordination. Version metadata only; the runtime is Go and the mathematical planner is Python/CVXPY.",
@@ -9,6 +9,6 @@
     "version-packages": "changeset version && npm install --package-lock-only --ignore-scripts --no-audit --no-fund"
   },
   "devDependencies": {
-    "@changesets/cli": "^2.27.10"
+    "@changesets/cli": "^2.31.1"
   }
 }

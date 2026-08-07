@@ -78,7 +78,7 @@ func TestRestartRequiredFor_BootSections(t *testing.T) {
 		{"price provider", func(c *Config) { c.Price = &Price{Provider: "entsoe"} }, "price"},
 		{"planner toggled", func(c *Config) { c.Planner = &Planner{Enabled: true} }, "planner"},
 		{"nova toggled", func(c *Config) { c.Nova = &Nova{Enabled: true, URL: "https://x"} }, "nova"},
-		{"home link toggled", func(c *Config) { c.HomeLink = &HomeLink{Enabled: true} }, "home_link"},
+		{"app link toggled", func(c *Config) { c.AppLink = &AppLink{Enabled: true} }, "app_link"},
 		{"ev_charger added", func(c *Config) {
 			c.EVCharger = &EVCharger{Provider: "easee", Username: "a@b.c"}
 		}, "ev_charger"},
@@ -89,8 +89,9 @@ func TestRestartRequiredFor_BootSections(t *testing.T) {
 			c.Weather = &Weather{Provider: "open_meteo", Latitude: 59, Longitude: 18}
 		}, "weather"},
 		{"weather pv_arrays added", func(c *Config) {
+			tilt, azimuth := 30.0, 180.0
 			c.Weather = &Weather{Provider: "met_no", Latitude: 59, Longitude: 18,
-				PVArrays: []PVArray{{KWp: 5, TiltDeg: 30, AzimuthDeg: 180}}}
+				PVArrays: []PVArray{{KWp: 5, TiltDeg: &tilt, AzimuthDeg: &azimuth}}}
 		}, "weather"},
 		{"weather heating coefficient", func(c *Config) {
 			c.Weather.HeatingWPerDegC = 250

@@ -23,11 +23,11 @@ var sensitiveMutations = []sensitiveMutation{
 	{name: "restart", path: "/api/restart"},
 }
 
-func TestSecureMutationsBlocksBrowserCrossSiteSensitiveRoutes(t *testing.T) {
+func TestAuthenticateBlocksBrowserCrossSiteSensitiveRoutes(t *testing.T) {
 	for _, endpoint := range sensitiveMutations {
 		t.Run(endpoint.name, func(t *testing.T) {
 			called := false
-			h := SecureMutations(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			h := Authenticate(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				called = true
 				w.WriteHeader(http.StatusNoContent)
 			}), MutationPolicy{})
@@ -51,7 +51,7 @@ func TestSecureMutationsBlocksBrowserCrossSiteSensitiveRoutes(t *testing.T) {
 	}
 }
 
-func TestSecureMutationsTreatsEveryUnsafeHTTPMethodAsMutation(t *testing.T) {
+func TestAuthenticateTreatsEveryUnsafeHTTPMethodAsMutation(t *testing.T) {
 	for _, method := range []string{
 		http.MethodPost,
 		http.MethodPut,
@@ -67,7 +67,7 @@ func TestSecureMutationsTreatsEveryUnsafeHTTPMethodAsMutation(t *testing.T) {
 			req.Header.Set("Origin", "https://attacker.example")
 			req.Header.Set("Sec-Fetch-Site", "cross-site")
 			rr := httptest.NewRecorder()
-			SecureMutations(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			Authenticate(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				called = true
 				w.WriteHeader(http.StatusNoContent)
 			}), MutationPolicy{}).ServeHTTP(rr, req)
@@ -82,7 +82,7 @@ func TestSecureMutationsTreatsEveryUnsafeHTTPMethodAsMutation(t *testing.T) {
 	}
 }
 
-func TestSecureMutationsGuardsSemanticallyActiveReads(t *testing.T) {
+func TestAuthenticateGuardsSemanticallyActiveReads(t *testing.T) {
 	guarded := []struct {
 		name   string
 		method string
@@ -104,7 +104,7 @@ func TestSecureMutationsGuardsSemanticallyActiveReads(t *testing.T) {
 			req.Header.Set("Origin", "https://attacker.example")
 			req.Header.Set("Sec-Fetch-Site", "cross-site")
 			rr := httptest.NewRecorder()
-			SecureMutations(statusHandler(http.StatusNoContent), MutationPolicy{}).ServeHTTP(rr, req)
+			Authenticate(statusHandler(http.StatusNoContent), MutationPolicy{}).ServeHTTP(rr, req)
 			if rr.Code != http.StatusForbidden {
 				t.Fatalf("status = %d, want 403 (body=%s)", rr.Code, rr.Body.String())
 			}
@@ -116,7 +116,7 @@ func TestSecureMutationsGuardsSemanticallyActiveReads(t *testing.T) {
 			req.Header.Set("Origin", "http://ftw.local:8080")
 			req.Header.Set("Sec-Fetch-Site", "same-origin")
 			rr := httptest.NewRecorder()
-			SecureMutations(statusHandler(http.StatusNoContent), MutationPolicy{RequireTokenForRemote: true}).ServeHTTP(rr, req)
+			Authenticate(statusHandler(http.StatusNoContent), MutationPolicy{RequireTokenForRemote: true}).ServeHTTP(rr, req)
 			if rr.Code != http.StatusNoContent {
 				t.Fatalf("status = %d, want 204 (body=%s)", rr.Code, rr.Body.String())
 			}
@@ -124,7 +124,7 @@ func TestSecureMutationsGuardsSemanticallyActiveReads(t *testing.T) {
 	}
 }
 
-func TestSecureMutationsLeavesOrdinaryReadsAndOAuthCallbackCompatible(t *testing.T) {
+func TestAuthenticateLeavesOrdinaryReadsAndOAuthCallbackCompatible(t *testing.T) {
 	for _, tc := range []struct {
 		method string
 		path   string
@@ -141,7 +141,7 @@ func TestSecureMutationsLeavesOrdinaryReadsAndOAuthCallbackCompatible(t *testing
 			req.Header.Set("Origin", "https://identity.example")
 			req.Header.Set("Sec-Fetch-Site", "cross-site")
 			rr := httptest.NewRecorder()
-			SecureMutations(statusHandler(http.StatusNoContent), MutationPolicy{}).ServeHTTP(rr, req)
+			Authenticate(statusHandler(http.StatusNoContent), MutationPolicy{}).ServeHTTP(rr, req)
 			if rr.Code != http.StatusNoContent {
 				t.Fatalf("status = %d, want 204 (body=%s)", rr.Code, rr.Body.String())
 			}
@@ -149,7 +149,7 @@ func TestSecureMutationsLeavesOrdinaryReadsAndOAuthCallbackCompatible(t *testing
 	}
 }
 
-func TestSecureMutationsRequiresRemoteTokenForSemanticallyActiveRead(t *testing.T) {
+func TestAuthenticateRequiresRemoteTokenForSemanticallyActiveRead(t *testing.T) {
 	policy := MutationPolicy{RequireTokenForRemote: true, Token: testMutationToken}
 	request := func(auth string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodGet, "https://ftw.example.com/api/scan", nil)
@@ -160,7 +160,7 @@ func TestSecureMutationsRequiresRemoteTokenForSemanticallyActiveRead(t *testing.
 			req.Header.Set("Authorization", auth)
 		}
 		rr := httptest.NewRecorder()
-		SecureMutations(statusHandler(http.StatusNoContent), policy).ServeHTTP(rr, req)
+		Authenticate(statusHandler(http.StatusNoContent), policy).ServeHTTP(rr, req)
 		return rr
 	}
 
@@ -172,10 +172,10 @@ func TestSecureMutationsRequiresRemoteTokenForSemanticallyActiveRead(t *testing.
 	}
 }
 
-func TestSecureMutationsAllowsSameOriginAndLocalCLIFlows(t *testing.T) {
+func TestAuthenticateAllowsSameOriginAndLocalCLIFlows(t *testing.T) {
 	for _, endpoint := range sensitiveMutations {
 		t.Run(endpoint.name+" same-origin browser", func(t *testing.T) {
-			h := SecureMutations(statusHandler(http.StatusNoContent), MutationPolicy{RequireTokenForRemote: true})
+			h := Authenticate(statusHandler(http.StatusNoContent), MutationPolicy{RequireTokenForRemote: true})
 			req := mutationRequest(endpoint, "http://ftw.local:8080")
 			req.Header.Set("Origin", "http://ftw.local:8080")
 			req.Header.Set("Sec-Fetch-Site", "same-origin")
@@ -187,7 +187,7 @@ func TestSecureMutationsAllowsSameOriginAndLocalCLIFlows(t *testing.T) {
 		})
 
 		t.Run(endpoint.name+" private-address CLI", func(t *testing.T) {
-			h := SecureMutations(statusHandler(http.StatusNoContent), MutationPolicy{RequireTokenForRemote: true})
+			h := Authenticate(statusHandler(http.StatusNoContent), MutationPolicy{RequireTokenForRemote: true})
 			req := mutationRequest(endpoint, "http://192.168.1.42:8080")
 			rr := httptest.NewRecorder()
 			h.ServeHTTP(rr, req)
@@ -198,7 +198,7 @@ func TestSecureMutationsAllowsSameOriginAndLocalCLIFlows(t *testing.T) {
 	}
 }
 
-func TestSecureMutationsRequiresBearerTokenForRemoteHost(t *testing.T) {
+func TestAuthenticateRequiresBearerTokenForRemoteHost(t *testing.T) {
 	policy := MutationPolicy{RequireTokenForRemote: true, Token: testMutationToken}
 	request := func(auth string) *httptest.ResponseRecorder {
 		req := mutationRequest(sensitiveMutations[0], "https://ftw.example.com")
@@ -208,7 +208,7 @@ func TestSecureMutationsRequiresBearerTokenForRemoteHost(t *testing.T) {
 			req.Header.Set("Authorization", auth)
 		}
 		rr := httptest.NewRecorder()
-		SecureMutations(statusHandler(http.StatusNoContent), policy).ServeHTTP(rr, req)
+		Authenticate(statusHandler(http.StatusNoContent), policy).ServeHTTP(rr, req)
 		return rr
 	}
 
@@ -226,23 +226,23 @@ func TestSecureMutationsRequiresBearerTokenForRemoteHost(t *testing.T) {
 	req := mutationRequest(sensitiveMutations[0], "https://ftw.example.com")
 	req.Header.Set("Origin", "https://ftw.example.com")
 	rr := httptest.NewRecorder()
-	SecureMutations(statusHandler(http.StatusNoContent), locked).ServeHTTP(rr, req)
+	Authenticate(statusHandler(http.StatusNoContent), locked).ServeHTTP(rr, req)
 	if rr.Code != http.StatusForbidden {
 		t.Fatalf("unconfigured remote policy status = %d, want 403", rr.Code)
 	}
 }
 
-func TestSecureMutationsRemoteClientCannotSpoofLocalHost(t *testing.T) {
+func TestAuthenticateRemoteClientCannotSpoofLocalHost(t *testing.T) {
 	req := mutationRequest(sensitiveMutations[4], "http://192.168.1.42:8080")
 	req.RemoteAddr = "203.0.113.10:43210"
 	rr := httptest.NewRecorder()
-	SecureMutations(statusHandler(http.StatusNoContent), MutationPolicy{RequireTokenForRemote: true}).ServeHTTP(rr, req)
+	Authenticate(statusHandler(http.StatusNoContent), MutationPolicy{RequireTokenForRemote: true}).ServeHTTP(rr, req)
 	if rr.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403 (body=%s)", rr.Code, rr.Body.String())
 	}
 }
 
-func TestSecureMutationsRequiresJSONContentTypeForBodies(t *testing.T) {
+func TestAuthenticateRequiresJSONContentTypeForBodies(t *testing.T) {
 	for _, endpoint := range sensitiveMutations {
 		if endpoint.body == "" {
 			continue
@@ -250,7 +250,7 @@ func TestSecureMutationsRequiresJSONContentTypeForBodies(t *testing.T) {
 		t.Run(endpoint.name, func(t *testing.T) {
 			req := httptest.NewRequest(http.MethodPost, "http://ftw.local:8080"+endpoint.path, strings.NewReader(endpoint.body))
 			rr := httptest.NewRecorder()
-			SecureMutations(statusHandler(http.StatusNoContent), MutationPolicy{}).ServeHTTP(rr, req)
+			Authenticate(statusHandler(http.StatusNoContent), MutationPolicy{}).ServeHTTP(rr, req)
 			if rr.Code != http.StatusUnsupportedMediaType {
 				t.Fatalf("missing Content-Type status = %d, want 415", rr.Code)
 			}
@@ -258,7 +258,7 @@ func TestSecureMutationsRequiresJSONContentTypeForBodies(t *testing.T) {
 			req = mutationRequest(endpoint, "http://ftw.local:8080")
 			req.Header.Set("Content-Type", "application/json; charset=utf-8")
 			rr = httptest.NewRecorder()
-			SecureMutations(statusHandler(http.StatusNoContent), MutationPolicy{}).ServeHTTP(rr, req)
+			Authenticate(statusHandler(http.StatusNoContent), MutationPolicy{}).ServeHTTP(rr, req)
 			if rr.Code != http.StatusNoContent {
 				t.Fatalf("JSON Content-Type status = %d, want 204", rr.Code)
 			}
@@ -266,18 +266,18 @@ func TestSecureMutationsRequiresJSONContentTypeForBodies(t *testing.T) {
 	}
 }
 
-func TestSecureMutationsRejectsOriginMismatchEvenWhenFetchSiteClaimsSameOrigin(t *testing.T) {
+func TestAuthenticateRejectsOriginMismatchEvenWhenFetchSiteClaimsSameOrigin(t *testing.T) {
 	req := mutationRequest(sensitiveMutations[1], "http://192.168.1.42:8080")
 	req.Header.Set("Origin", "http://192.168.1.99:8080")
 	req.Header.Set("Sec-Fetch-Site", "same-origin")
 	rr := httptest.NewRecorder()
-	SecureMutations(statusHandler(http.StatusNoContent), MutationPolicy{}).ServeHTTP(rr, req)
+	Authenticate(statusHandler(http.StatusNoContent), MutationPolicy{}).ServeHTTP(rr, req)
 	if rr.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403", rr.Code)
 	}
 }
 
-func TestSecureMutationsRejectsInvalidHostAndFetchMetadata(t *testing.T) {
+func TestAuthenticateRejectsInvalidHostAndFetchMetadata(t *testing.T) {
 	tests := []struct {
 		name       string
 		host       string
@@ -301,7 +301,7 @@ func TestSecureMutationsRejectsInvalidHostAndFetchMetadata(t *testing.T) {
 				req.Header.Set("Sec-Fetch-Site", tc.fetchSite)
 			}
 			rr := httptest.NewRecorder()
-			SecureMutations(statusHandler(http.StatusNoContent), MutationPolicy{}).ServeHTTP(rr, req)
+			Authenticate(statusHandler(http.StatusNoContent), MutationPolicy{}).ServeHTTP(rr, req)
 			if rr.Code != tc.wantStatus {
 				t.Fatalf("status = %d, want %d", rr.Code, tc.wantStatus)
 			}
