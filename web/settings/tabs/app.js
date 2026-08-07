@@ -15,6 +15,10 @@
   var S = (window.FTWSettings = window.FTWSettings || { tabs: {} });
   S.tabs = S.tabs || {};
 
+  // The tab context, kept so the callbacks below can read the live config
+  // without threading it through every handler.
+  var pairingCtx = null;
+
   function setStatus(text) {
     var el = document.getElementById("app-link-status");
     if (el) el.textContent = text;
@@ -26,7 +30,82 @@
     return n + " phones paired.";
   }
 
-  function refreshStatus() {
+  // What the checkbox says and what the box is doing are two different
+  // things, because the uplink is connected at startup. Between saving and
+  // restarting they disagree, and that gap is the whole reason this says
+  // anything at all: a checkbox that goes quiet after Save leaves someone
+  // pressing a pairing button that cannot work yet.
+  //
+  // `saved` is the checkbox, read from the config the Save button will post.
+  // `running` is /api/app-link/status, which reports the process.
+  function describe(saved, running) {
+    if (running) {
+      if (!saved) return "Running. It stops at the next restart.";
+      return null; // The caller shows the pairing count instead.
+    }
+    if (saved) return "Saved. Press Save, then restart, to finish turning it on.";
+    return "Off. Turn it on above, save, and restart.";
+  }
+
+  function agoText(ms) {
+    if (!ms) return "never seen";
+    var d = Date.now() - ms;
+    if (d < 90 * 1000) return "just now";
+    if (d < 90 * 60 * 1000) return Math.round(d / 60000) + " min ago";
+    if (d < 36 * 3600 * 1000) return Math.round(d / 3600000) + " h ago";
+    return Math.round(d / 86400000) + " d ago";
+  }
+
+  // The device list is what makes "remove" possible at all. Rows carry a
+  // short key prefix and two timestamps — the phone in daily use shows a
+  // fresh "last seen" and floats to the top; a key that paired once and
+  // vanished (a test run, a mistake, a stranger) sinks and is the one to
+  // remove. Removal is immediate: the box drops any live session too.
+  function refreshDevices() {
+    var list = document.getElementById("app-link-devices");
+    if (!list) return;
+    fetch("/api/app-link/devices")
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (body) {
+        list.textContent = "";
+        var devices = (body && body.devices) || [];
+        if (devices.length === 0) return;
+
+        devices.forEach(function (d) {
+          var row = document.createElement("div");
+          row.className = "app-device-row";
+
+          var name = document.createElement("span");
+          name.className = "mono";
+          name.textContent = "Phone " + d.id;
+          row.appendChild(name);
+
+          var seen = document.createElement("span");
+          seen.className = "hint";
+          seen.textContent = d.last_seen_ms ? "seen " + agoText(d.last_seen_ms) : "never connected";
+          row.appendChild(seen);
+
+          var btn = document.createElement("button");
+          btn.type = "button";
+          btn.textContent = "Remove";
+          btn.addEventListener("click", function () {
+            if (!confirm("Remove this phone? It loses access immediately and must scan a new code to come back.")) return;
+            btn.disabled = true;
+            fetch("/api/app-link/devices/" + encodeURIComponent(d.id), { method: "DELETE" })
+              .then(function () { refreshDevices(); refreshStatus(pairingCtx); })
+              .catch(function () { btn.disabled = false; });
+          });
+          row.appendChild(btn);
+
+          list.appendChild(row);
+        });
+      })
+      .catch(function () {});
+  }
+
+  function refreshStatus(ctx) {
+    var saved = !!(ctx && ctx.config.app_link && ctx.config.app_link.enabled);
+
     fetch("/api/app-link/status")
       .then(function (r) {
         return r.ok ? r.json() : null;
@@ -38,16 +117,37 @@
           if (button) button.disabled = true;
           return;
         }
-        if (!s.enabled) {
-          setStatus("The app link is off. Set app_link.enabled in your configuration and restart.");
-          if (button) button.disabled = true;
-          return;
-        }
-        setStatus(pairedText(s.paired_devices));
+        var note = describe(saved, s.enabled);
+        setStatus(note === null ? pairedText(s.paired_devices) : note);
+        if (button) button.disabled = !s.enabled;
+        if (s.enabled) refreshDevices();
       })
       .catch(function () {
         setStatus("Could not reach the box.");
       });
+  }
+
+  // drawQR paints qrMatrix(text) into a canvas. Same shape as the calendar
+  // tab's, because /vendor/qrcode.js hands back a boolean matrix and leaves
+  // the painting to the caller — there is no constructor to call.
+  function drawQR(qrMatrix, text, target) {
+    var matrix = qrMatrix(text);
+    var n = matrix.length, quiet = 4, total = n + 2 * quiet;
+    var px = Math.max(2, Math.floor((target || 260) / total));
+    var size = total * px;
+    var canvas = document.createElement("canvas");
+    canvas.width = size; canvas.height = size;
+    var ctx = canvas.getContext("2d");
+    // Dark on light whatever the page theme. An inverted QR is one many phone
+    // cameras will not read.
+    ctx.fillStyle = "#ffffff"; ctx.fillRect(0, 0, size, size);
+    ctx.fillStyle = "#000000";
+    for (var r = 0; r < n; r++) {
+      for (var c = 0; c < n; c++) {
+        if (matrix[r][c]) ctx.fillRect((c + quiet) * px, (r + quiet) * px, px, px);
+      }
+    }
+    return canvas;
   }
 
   function showCode(pairing) {
@@ -55,25 +155,11 @@
     if (!slot) return;
     slot.textContent = "";
 
-    var box = document.createElement("div");
-    box.id = "app-link-qr";
-    slot.appendChild(box);
-
     // Loaded on demand: this tab is opened once per phone, and every other
-    // page would otherwise carry the library for nothing.
+    // page would otherwise carry the encoder for nothing.
     import("/vendor/qrcode.js")
       .then(function (m) {
-        var QR = m.default || m.QRCode || window.QRCode;
-        new QR(box, {
-          text: pairing.url,
-          width: 260,
-          height: 260,
-          // Dark modules on light, whatever the page theme. An inverted QR is
-          // one many phone cameras will not read.
-          colorDark: "#000000",
-          colorLight: "#ffffff",
-          correctLevel: (QR.CorrectLevel && QR.CorrectLevel.M) || 0,
-        });
+        slot.appendChild(drawQR(m.qrMatrix, pairing.url, 260));
 
         var note = document.createElement("p");
         note.className = "hint";
@@ -119,27 +205,47 @@
       .then(function () {
         button.disabled = false;
         button.textContent = "Show a new code";
-        refreshStatus();
+        refreshStatus(pairingCtx);
       });
   }
 
   S.tabs.app = {
-    render: function () {
+    render: function (ctx) {
+      if (!ctx.config.app_link) ctx.config.app_link = { enabled: false };
+      var enabled = !!ctx.config.app_link.enabled;
+      pairingCtx = ctx;
+
       // Wired after this string becomes the DOM.
       setTimeout(function () {
         var button = document.getElementById("app-link-pair");
         if (button) button.addEventListener("click", requestCode);
-        refreshStatus();
+
+        // The shared data-checkbox-path handler writes the config; this only
+        // repaints the line underneath, so the wording follows the checkbox
+        // before anyone presses Save.
+        var toggle = document.getElementById("app-link-enabled");
+        if (toggle) toggle.addEventListener("change", function () { refreshStatus(ctx); });
+
+        refreshStatus(ctx);
       }, 0);
 
       return (
         "<fieldset><legend>The FTW app</legend>" +
-        '<p class="hint">Scan this with the FTW app to add a phone. The code works ' +
-        "once and expires in a few minutes, so ask for a new one when you need it. " +
-        "Everything the app needs is in the code itself — none of it passes through " +
-        "Sourceful, which is why the app can be sure it is talking to this box.</p>" +
+        '<p class="hint">The FTW app talks to this box directly. Turning this on ' +
+        "lets it reach you when you are away from home; nothing readable passes " +
+        "through Sourceful either way.</p>" +
+        '<label><input type="checkbox" id="app-link-enabled" ' +
+        'data-checkbox-path="app_link.enabled"' + (enabled ? " checked" : "") +
+        "> Let the FTW app connect to this box</label>" +
+        '<p class="hint">Takes effect after a restart — the box offers one when ' +
+        "you save.</p>" +
         '<p id="app-link-status" class="hint">checking…</p>' +
-        '<button type="button" id="app-link-pair">Show pairing code</button>' +
+        '<div id="app-link-devices"></div>' +
+        '<button type="button" id="app-link-pair" disabled>Show pairing code</button>' +
+        '<p class="hint">Scan the code with the FTW app to add a phone. It works ' +
+        "once and expires in a few minutes, so ask for a new one when you need it. " +
+        "Everything the app needs is in the code itself, which is why the app can " +
+        "be sure it is talking to this box.</p>" +
         '<div id="app-link-slot"></div>' +
         "</fieldset>"
       );

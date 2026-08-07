@@ -13,7 +13,8 @@ import "reflect"
 //   - Site control scalars (grid_target, tolerance, slew, min_dispatch),
 //     fuse params, drivers, capacities, inverter groups, driver limits,
 //     loadpoints, notifications, MPC capacity, the Weather subset
-//     {pv_rated_w, latitude, longitude}, and home_assistant.* reload live.
+//     {pv_rated_w, latitude, longitude}, fleet_ping.enabled, and
+//     home_assistant.* reload live.
 //   - Everything else (api.port, state.path, price.*, planner.*, nova.*,
 //     ev_charger.*, caldav.*, weather.provider/arrays,
 //     site.control_interval_s, site.watchdog_timeout_s, site.smoothing_alpha,
@@ -67,6 +68,14 @@ func RestartRequiredFor(oldCfg, newCfg *Config) []string {
 	}
 	if !pointerEqual(oldCfg.AppLink, newCfg.AppLink) {
 		reasons = append(reasons, "app_link — the app uplink is connected at startup")
+	}
+	// fleet_ping.enabled is read at each send, so the switch takes effect at
+	// once. The endpoint is resolved when the sender is built, so only that
+	// field is worth a prompt — and it is compared resolved, or a posted
+	// config with no fleet_ping section would look like a move away from the
+	// default and prompt for a restart that changes nothing.
+	if oldCfg.FleetPing.Resolved() != newCfg.FleetPing.Resolved() {
+		reasons = append(reasons, "fleet_ping.endpoint — the sender resolves its endpoint at startup")
 	}
 	if !pointerEqual(oldCfg.EVCharger, newCfg.EVCharger) {
 		reasons = append(reasons, "ev_charger — EV charger client is constructed once at startup")

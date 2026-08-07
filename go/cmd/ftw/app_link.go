@@ -14,6 +14,7 @@ import (
 	"github.com/srcfl/ftw/go/internal/config"
 	"github.com/srcfl/ftw/go/internal/control"
 	"github.com/srcfl/ftw/go/internal/mpc"
+	"github.com/srcfl/ftw/go/internal/prices"
 	"github.com/srcfl/ftw/go/internal/state"
 	"github.com/srcfl/ftw/go/internal/telemetry"
 )
@@ -132,6 +133,18 @@ func (a *appSite) Snapshot() appproto.Snapshot {
 		snap.BatterySoC = socTotal / float64(socCount)
 	}
 
+	// EV chargers. Known means the site has one at all — an idle charger
+	// is a real 0 W reading, a site without one sends no field 10 and the
+	// app draws no EV node. Positive while charging: a charger consumes
+	// like any other load.
+	for _, reading := range a.tel.ReadingsByType(telemetry.DerEV) {
+		addSource(reading.Driver)
+		snap.EVWKnown = true
+		if health := a.tel.DriverHealth(reading.Driver); health != nil && health.IsOnline() {
+			snap.EVW += reading.SmoothedW
+		}
+	}
+
 	// grid = load + battery + pv, all site-signed. Rearranged, not
 	// re-derived: a second formula here would be a second thing to keep in
 	// step with docs/site-convention.md.
@@ -183,7 +196,18 @@ func (a *appModes) SetMode(ctx context.Context, m control.Mode) error {
 		}
 	}
 	if mm, ok := control.PlannerMPCMode(m); ok && a.mpc != nil {
-		a.mpc.SetMode(ctx, mm)
+		// Forced replan, off this goroutine. mpc.SetMode replans before it
+		// returns, and the Python optimizer can take longer than the app
+		// waits for a command result — so a mode change that had already
+		// been applied and read back was reported "unconfirmed" purely
+		// because the planner was slow. The mode itself is already set and
+		// persisted above; the plan push that follows the replan reaches
+		// the app on its own.
+		//
+		// WithoutCancel: the replan belongs to the mode change, not to the
+		// session that asked for it. A phone that drops its socket right
+		// after tapping must not abort the planner mid-run.
+		go a.mpc.SetMode(context.WithoutCancel(ctx), mm)
 	}
 	return nil
 }
@@ -192,6 +216,120 @@ func (a *appModes) ObservedMode() (control.Mode, bool) {
 	a.ctrlMu.Lock()
 	defer a.ctrlMu.Unlock()
 	return a.ctrl.Mode, true
+}
+
+// appHistory serves the app's history tiles from the energy ledger.
+//
+// The ledger stores energy per flow per bucket; the wire wants mean power per
+// signed series. The mapping below is the site convention and nothing else:
+// positive watts flow into the site, so import minus export is the grid, and
+// PV is generation negated. W = Wh × 3 600 000 / bucket, no other arithmetic.
+type appHistory struct {
+	st *state.Store
+}
+
+func (a *appHistory) Series(
+	_ context.Context, name string, stepMs, fromMs, toMs int64,
+) ([]appproto.HistorySample, error) {
+	type term struct {
+		flow state.EnergyFlow
+		sign float64
+	}
+	var terms []term
+	switch name {
+	case "grid_w":
+		terms = []term{{state.FlowGridImport, 1}, {state.FlowGridExport, -1}}
+	case "pv_w":
+		terms = []term{{state.FlowPVGeneration, -1}}
+	case "battery_w":
+		terms = []term{{state.FlowBatteryCharge, 1}, {state.FlowBatteryDischarge, -1}}
+	case "load_w":
+		terms = []term{{state.FlowConsumerUse, 1}}
+	default:
+		// A series this box does not keep has no data. That is already a
+		// thing the wire can say, and it beats refusing the whole query
+		// because one series in it was unknown.
+		return nil, nil
+	}
+
+	points, _, err := a.st.LoadEnergyHistory(state.EnergyHistoryQuery{
+		SinceMS:  fromMs,
+		UntilMS:  toMs,
+		BucketMS: stepMs,
+		// One tile is at most 168 buckets; the ledger's own cap is 2000.
+		Limit: 2000,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	// A bucket exists on the wire only if some term reported it. A bucket
+	// where nothing was metered stays absent and becomes MISSING, which is
+	// the honest answer — zero would claim the house used no power at all.
+	byStart := map[int64]float64{}
+	for _, p := range points {
+		for _, t := range terms {
+			if p.Flow != t.flow {
+				continue
+			}
+			byStart[p.BucketStartMS] += t.sign * p.EnergyWh * 3_600_000 / float64(p.BucketLenMS)
+		}
+	}
+
+	out := make([]appproto.HistorySample, 0, len(byStart))
+	for start, w := range byStart {
+		out = append(out, appproto.HistorySample{StartMs: start, W: w})
+	}
+	return out, nil
+}
+
+// appPrices serves the app's price window from the price service.
+//
+// Nothing is rounded here. The service holds minor units per kWh as floats and
+// appproto turns them into integers at the wire, once — two roundings would be
+// two answers to what 18.7 öre costs.
+type appPrices struct {
+	svc *prices.Service
+}
+
+// maxPriceSlotMin is the longest slot any provider publishes — the ENTSOE
+// reader refuses anything longer. It is how far back a query has to look to
+// catch the slot already running when the window opens.
+const maxPriceSlotMin = 120
+
+func (a *appPrices) Zone() string     { return a.svc.Zone }
+func (a *appPrices) Currency() string { return a.svc.Currency }
+
+func (a *appPrices) Slots(_ context.Context, fromMs, toMs int64) ([]appproto.PricePoint, error) {
+	// The store selects on slot start, inclusive at both ends. Widening the
+	// lower bound by one slot catches the slot in progress at fromMs — the
+	// price right now, which a window starting at "now" would otherwise miss —
+	// and toMs-1 keeps the upper end half-open, so a slot beginning exactly
+	// where this window closes belongs to the next one.
+	lookbackMs := (maxPriceSlotMin * time.Minute).Milliseconds()
+	rows, err := a.svc.Load(fromMs-lookbackMs, toMs-1)
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]appproto.PricePoint, 0, len(rows))
+	for _, r := range rows {
+		if r.SlotLenMin <= 0 {
+			// A slot with no length is a row nobody can draw or price.
+			continue
+		}
+		slotEnd := time.UnixMilli(r.SlotTsMs).Add(time.Duration(r.SlotLenMin) * time.Minute)
+		if slotEnd.UnixMilli() <= fromMs {
+			continue // the lookback overshot: this slot ended before the window
+		}
+		out = append(out, appproto.PricePoint{
+			StartMs:    r.SlotTsMs,
+			LenMin:     r.SlotLenMin,
+			SpotMinor:  r.SpotOreKwh,
+			TotalMinor: r.TotalOreKwh,
+		})
+	}
+	return out, nil
 }
 
 // appPlans hands over the planner's current output.
@@ -254,19 +392,20 @@ func startAppLink(
 	st *state.Store,
 	tel *telemetry.Store,
 	planner *mpc.Service,
+	priceSvc *prices.Service,
 	ctrl *control.State,
 	ctrlMu *sync.Mutex,
 	revision *control.Revision,
 	siteMeterStale time.Duration,
-) (*appenroll.Identity, bool, error) {
+) (*appenroll.Identity, *appuplink.Uplink, bool, error) {
 	enabled := cfg != nil && cfg.AppLink != nil && cfg.AppLink.Enabled
 
 	enroll, err := appenroll.LoadOrCreate(identityKeyPath)
 	if err != nil {
-		return nil, enabled, err
+		return nil, nil, enabled, err
 	}
 	if !enabled {
-		return enroll, false, nil
+		return enroll, nil, false, nil
 	}
 
 	// The box's own zone, read from the host. The app renders plan slot times
@@ -282,6 +421,29 @@ func startAppLink(
 	modes := &appModes{ctrl: ctrl, ctrlMu: ctrlMu, state: st, mpc: planner}
 	plans := &appPlans{planner: planner, ctrl: ctrl, ctrlMu: ctrlMu}
 
+	// History rides on the energy ledger, so it exists exactly when state
+	// does. The capability is advertised in the same breath: a capability the
+	// box advertises but cannot answer is worse than one it never mentions.
+	var history appproto.HistoryProvider
+	caps := appproto.DefaultCaps()
+	if st != nil {
+		history = &appHistory{st: st}
+		caps = append(caps,
+			appproto.CapHistory5m,
+			appproto.CapHistory1h,
+			appproto.CapHistoryEtag,
+		)
+	}
+
+	// Prices ride on the price service, and only when it has a zone and a
+	// store to have fetched into. With either missing there is nothing to
+	// serve, so the capability stays unsaid rather than advertised and empty.
+	var priceReader appproto.PriceReader
+	if priceSvc != nil && priceSvc.Zone != "" && priceSvc.Store != nil {
+		priceReader = &appPrices{svc: priceSvc}
+		caps = append(caps, appproto.CapPriceSpot)
+	}
+
 	uplink, err := appuplink.New(appuplink.Options{
 		Enroll: enroll,
 		Handler: func(sender appproto.Sender) (*appproto.Handler, error) {
@@ -289,13 +451,16 @@ func startAppLink(
 			// are read-only apart from the mode, and the mode goes through
 			// control's own validation.
 			return appproto.New(appproto.Config{
-				Clock:  appproto.SystemClock{StartedAt: site.started, Source: "ntp"},
-				Site:   site,
-				Info:   info,
-				Modes:  modes,
-				Plans:  plans,
-				Codec:  appuplink.Codec(),
-				Sender: sender,
+				Clock:   appproto.SystemClock{StartedAt: site.started, Source: "ntp"},
+				Site:    site,
+				Info:    info,
+				Modes:   modes,
+				Plans:   plans,
+				History: history,
+				Prices:  priceReader,
+				Caps:    caps,
+				Codec:   appuplink.Codec(),
+				Sender:  sender,
 				// The three frozen power fields point at the source whose
 				// freshness governs them. The site meter is the only one the
 				// box can name without knowing the site's hardware.
@@ -306,7 +471,7 @@ func startAppLink(
 		},
 	})
 	if err != nil {
-		return enroll, enabled, err
+		return enroll, nil, enabled, err
 	}
 
 	go func() {
@@ -315,13 +480,57 @@ func startAppLink(
 		}
 	}()
 
-	return enroll, true, nil
+	return enroll, uplink, true, nil
 }
 
 func siteMeterName(ctrl *control.State, ctrlMu *sync.Mutex) string {
 	ctrlMu.Lock()
 	defer ctrlMu.Unlock()
 	return ctrl.SiteMeterDriver
+}
+
+// appLinkAPI is the API's view of enrollment: the identity plus, when the
+// uplink runs, the ability to tear a revoked phone's sessions down at once
+// rather than at its next reconnect.
+type appLinkAPI struct {
+	enroll *appenroll.Identity
+	uplink *appuplink.Uplink
+}
+
+func (a *appLinkAPI) MintPairingCode() ([]byte, time.Time, error) {
+	return a.enroll.MintPairingCode()
+}
+
+func (a *appLinkAPI) EnrollmentURL(code []byte, lanHint string) (string, error) {
+	return a.enroll.EnrollmentURL(code, lanHint)
+}
+
+func (a *appLinkAPI) AuthorisedCount() int { return a.enroll.AuthorisedCount() }
+
+func (a *appLinkAPI) Devices() []api.AppDevice {
+	infos := a.enroll.Devices()
+	out := make([]api.AppDevice, 0, len(infos))
+	for _, d := range infos {
+		out = append(out, api.AppDevice{ID: d.ID, AddedAtMs: d.AddedAtMs, LastSeenMs: d.LastSeenMs})
+	}
+	return out
+}
+
+func (a *appLinkAPI) RevokeDevice(id string) error {
+	key, err := a.enroll.Revoke(id)
+	if err != nil {
+		if errors.Is(err, appenroll.ErrUnknownDevice) {
+			return api.ErrUnknownAppDevice
+		}
+		return err
+	}
+	// Forgetting the key locks the next handshake out; dropping the live
+	// sessions locks out the one running now. Both, or "remove" quietly
+	// means "remove within the hour".
+	if a.uplink != nil && key != nil {
+		a.uplink.DropSessionsByAppKey(key)
+	}
+	return nil
 }
 
 // appEnrollForAPI hands the enroller to the API, or nothing.
@@ -331,9 +540,9 @@ func siteMeterName(ctrl *control.State, ctrlMu *sync.Mutex) string {
 // panics on first use. Returning an untyped nil is the difference between
 // "pairing is off" and a crash on the one screen someone reaches for when
 // nothing else works.
-func appEnrollForAPI(enroll *appenroll.Identity, enabled bool) api.AppEnroller {
+func appEnrollForAPI(enroll *appenroll.Identity, uplink *appuplink.Uplink, enabled bool) api.AppEnroller {
 	if !enabled || enroll == nil {
 		return nil
 	}
-	return enroll
+	return &appLinkAPI{enroll: enroll, uplink: uplink}
 }

@@ -18,6 +18,8 @@ const (
 	MsgEvent            = "event"
 	MsgError            = "error"
 	MsgSessionTerminate = "session.terminate"
+	MsgPriceGet         = "price.get"
+	MsgPrice            = "price"
 	MsgHistQuery        = "hist.query"
 	MsgHistChunk        = "hist.chunk"
 	MsgHistEnd          = "hist.end"
@@ -355,6 +357,115 @@ type Plan struct {
 	// CeilingW is the import ceiling being defended, nil when there is none.
 	CeilingW *int64 `cbor:"ceilingW"`
 }
+
+// --------------------------------------------------------------------------
+// Prices
+// --------------------------------------------------------------------------
+
+// PriceGet asks for the price slots covering a window.
+type PriceGet struct {
+	// FromMs and ToMs are wall clock: prices are about hours a person plans
+	// around, not about box uptime.
+	FromMs int64 `cbor:"fromMs"`
+	ToMs   int64 `cbor:"toMs"`
+}
+
+// PriceSlot is one settlement slot's price.
+//
+// Minor units per kWh (öre, cents) as integers, because a price is money and
+// money in a float is a rounding argument waiting to happen. Spot is the raw
+// market price; Total is what the household actually pays, tariff and tax
+// included — the box computes it because the box holds the configuration.
+type PriceSlot struct {
+	StartMs    int64 `cbor:"startMs"`
+	DurationMs int64 `cbor:"durationMs"`
+	SpotMinor  int64 `cbor:"spotMinor"`
+	TotalMinor int64 `cbor:"totalMinor"`
+}
+
+// Price is the answer to PriceGet.
+type Price struct {
+	// Zone and Currency label the numbers. Without them the app would have to
+	// guess whether 45 is öre or cents.
+	Zone     string      `cbor:"zone"`
+	Currency string      `cbor:"currency"`
+	Slots    []PriceSlot `cbor:"slots"`
+	// Stale means these slots do not cover the window that was asked for:
+	// they begin after its start, stop short of its end, or there is a hole
+	// in the middle. Nothing in this path knows whether a refresh failed,
+	// only whether the window came back whole. Tomorrow's rates arrive in the
+	// afternoon, so a window asked for at breakfast genuinely ends early, and
+	// saying so beats drawing a cliff the market did not have.
+	Stale bool `cbor:"stale"`
+}
+
+// --------------------------------------------------------------------------
+// History
+// --------------------------------------------------------------------------
+
+// HistQuery asks for stored series over a window.
+type HistQuery struct {
+	// Series are frozen field names — grid_w, pv_w, battery_w, load_w.
+	Series []string `cbor:"series"`
+	// Res is the resolution asked for. The box may serve coarser and says so
+	// in HistEnd.ResActual.
+	Res Resolution `cbor:"res"`
+	// FromMs and ToMs are wall clock: history is a question about days people
+	// remember, not about box uptime.
+	FromMs int64 `cbor:"fromMs"`
+	ToMs   int64 `cbor:"toMs"`
+	// Have names tiles the app already caches, so an unchanged tile is never
+	// resent. That is the entire transfer model on a metered connection.
+	Have []HistTileRef `cbor:"have,omitempty"`
+	// MaxPoints caps the answer; the box widens the step to stay under it.
+	MaxPoints *int64 `cbor:"maxPoints,omitempty"`
+}
+
+// HistTileRef names a cached tile.
+type HistTileRef struct {
+	TileID string `cbor:"tileId"`
+	Etag   string `cbor:"etag"`
+}
+
+// HistChunk is one tile of column-packed samples.
+type HistChunk struct {
+	TileID  string     `cbor:"tileId"`
+	Etag    string     `cbor:"etag"`
+	Res     Resolution `cbor:"res"`
+	StartMs int64      `cbor:"startMs"`
+	// StepMs is the point spacing after aggregation. Res says which store the
+	// data came from; the two answer different questions.
+	StepMs int64 `cbor:"stepMs"`
+	// Series names the columns, in Data order.
+	Series []string `cbor:"series"`
+	// Data is int32 LE, one contiguous block per series. MISSING is
+	// math.MinInt32 — distinct from zero, which is a real reading.
+	Data []byte `cbor:"data"`
+	// Partial marks the trailing tile that is still filling. Never cached.
+	Partial bool `cbor:"partial"`
+}
+
+// HistEnd closes a query.
+type HistEnd struct {
+	ResActual Resolution `cbor:"resActual"`
+	// Gaps are ranges the box knows it cannot serve, and why. The app says
+	// "evicted" or "no data" instead of drawing a hole and guessing.
+	Gaps []HistGap `cbor:"gaps"`
+}
+
+// HistGap is one such range.
+type HistGap struct {
+	FromMs int64  `cbor:"fromMs"`
+	ToMs   int64  `cbor:"toMs"`
+	Reason string `cbor:"reason"`
+}
+
+// Gap reasons, as the app spells them.
+const (
+	GapNoData  = "no_data"
+	GapEvicted = "evicted"
+	GapBoxDown = "box_down"
+)
 
 // --------------------------------------------------------------------------
 // Errors, events, teardown

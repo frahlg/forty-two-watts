@@ -40,6 +40,7 @@ type Config struct {
 	V2X              *V2XPolicy         `yaml:"v2x,omitempty" json:"v2x,omitempty"`
 	Notifications    *Notifications     `yaml:"notifications,omitempty" json:"notifications,omitempty"`
 	AppLink          *AppLink           `yaml:"app_link,omitempty" json:"app_link,omitempty"`
+	FleetPing        *FleetPing         `yaml:"fleet_ping,omitempty" json:"fleet_ping,omitempty"`
 	Nova             *Nova              `yaml:"nova,omitempty" json:"nova,omitempty"`
 	DeviceRepository *DeviceRepository  `yaml:"device_repository,omitempty" json:"device_repository,omitempty"`
 }
@@ -50,6 +51,90 @@ type Config struct {
 // cannot answer is the wrong question.
 type AppLink struct {
 	Enabled bool `yaml:"enabled" json:"enabled"`
+}
+
+// FleetPing configures the once-a-day count of how many boxes run FTW, on
+// which version and with which drivers. On by default, because the numbers
+// are what decide where engineering effort goes and a fleet nobody can see is
+// a fleet guessed about instead.
+//
+// It can be on by default because what it carries is a shape rather than an
+// identity: no id, no key, no counter and no timestamp. Not because it is
+// beyond reproach — the fields still describe a household and the endpoint
+// sees the source IP. Settings renders the exact payload and says both, so
+// this can be weighed rather than believed. See go/internal/fleetping.
+type FleetPing struct {
+	Enabled bool `yaml:"enabled" json:"enabled"`
+	// Endpoint is where the ping goes. Configurable so a deployment can point
+	// it at itself or at nothing, and because a hard-coded address in a
+	// package that sends data out is worth being able to see and change.
+	Endpoint string `yaml:"endpoint,omitempty" json:"endpoint,omitempty"`
+}
+
+// DefaultFleetPingEndpoint is Sourceful's collector. Nothing answers there
+// yet, which is the normal case the box is built for: a failed ping is
+// forgotten, never retried.
+const DefaultFleetPingEndpoint = "https://telemetry.sourceful.energy/v1/fleet"
+
+// On reports whether the ping is switched on, and is the only place that
+// answers it.
+//
+// Nil means never configured, which is the state every existing box is in, and
+// applyDefaults reads it as on. Config posted to /api/config does not pass
+// through applyDefaults — configreload.Apply swaps it in as it arrives — so a
+// second reading of nil here would silently stop the ping the first time a
+// household saved settings from a screen that never sent the section.
+func (f *FleetPing) On() bool {
+	if f == nil {
+		return true
+	}
+	return f.Enabled
+}
+
+// Resolved is where the ping goes.
+//
+// The fallback lives here rather than in applyDefaults, so the address is never
+// written into a household's config.yaml. A baked-in copy would keep posting to
+// this address after Sourceful moved the collector, and the aggregate would
+// quietly lose every box that had ever saved its settings.
+func (f *FleetPing) Resolved() string {
+	if f == nil || f.Endpoint == "" {
+		return DefaultFleetPingEndpoint
+	}
+	return f.Endpoint
+}
+
+// Validate rejects an endpoint that would undo what the payload is careful
+// about. Nil-safe: an absent section is a valid one.
+func (f *FleetPing) Validate() error {
+	if f == nil || f.Endpoint == "" {
+		return nil
+	}
+	return ValidateFleetPingEndpoint(f.Endpoint)
+}
+
+// ValidateFleetPingEndpoint refuses anything that is not a plain HTTPS URL.
+//
+// Plain HTTP would put the site's shape in the clear for every network between
+// the house and Sourceful — a worse leak than the ones the payload is designed
+// around. Credentials, a query and a fragment are refused because none of them
+// addresses a collector: a URL carrying one is far more likely a mistake than a
+// choice, and credentials in a config field are a mistake whatever they are for.
+// The path is not policed, because a path is how a collector names its own
+// endpoint. None of this makes the address secret — Settings shows the endpoint
+// this box will post to, whatever it is.
+func ValidateFleetPingEndpoint(endpoint string) error {
+	u, err := url.Parse(strings.TrimSpace(endpoint))
+	if err != nil {
+		return fmt.Errorf("fleet_ping.endpoint %q is not a URL", endpoint)
+	}
+	if u.Scheme != "https" || u.Host == "" {
+		return fmt.Errorf("fleet_ping.endpoint must be an https URL, got %q", endpoint)
+	}
+	if u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return errors.New("fleet_ping.endpoint must carry no credentials, query or fragment")
+	}
+	return nil
 }
 
 // DeviceRepository configures independently distributed Lua drivers. Remote
@@ -1344,6 +1429,15 @@ func applyDefaults(c *Config) {
 			}}
 		}
 	}
+	if c.FleetPing == nil {
+		// Absent means never configured, which is the state every existing
+		// box is in. Enabled is the owner's call; an explicit
+		// `fleet_ping: {enabled: false}` block is the opt-out and survives
+		// this because only a missing section is filled in.
+		c.FleetPing = &FleetPing{Enabled: true}
+	}
+	// Endpoint is deliberately left blank: Resolved() supplies the default at
+	// use, so the collector's address is never written into a household's YAML.
 	if c.Site.ControlIntervalS == 0 {
 		// 2 s matches Ferroamp's ehub MQTT cadence (~1 Hz) without
 		// dispatching twice on the same telemetry sample, and halves
@@ -1537,6 +1631,9 @@ func (c *Config) Validate() error {
 		}
 	}
 	if err := c.CalDAV.Validate(); err != nil {
+		return err
+	}
+	if err := c.FleetPing.Validate(); err != nil {
 		return err
 	}
 

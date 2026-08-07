@@ -25,6 +25,12 @@ frozen_fields:
   7: { name: src_grid, kind: source_ref, unit: null }
   8: { name: src_pv, kind: source_ref, unit: null }
   9: { name: src_battery, kind: source_ref, unit: null }
+  # Frozen means the id's meaning never changes — not that the field is
+  # always present. Like battery_soc, ev_w is sent only when the box has
+  # a charger to measure; a site without one sends nothing, and the app
+  # draws no EV node rather than a dead one. Positive while charging,
+  # by the site convention: the charger consumes like any other load.
+  10: { name: ev_w, kind: power, unit: W }
 
 # ---------------------------------------------------------------------------
 # Capabilities. A set of names, not version numbers. Absent means the box does
@@ -45,6 +51,9 @@ capabilities:
   - der.v2x
   - plan.dispatch
   - net.webrtc
+  # Electricity prices, when the box has a zone configured and rows stored.
+  # Absent means the app draws no price view rather than an empty one.
+  - price.spot
 
 # ---------------------------------------------------------------------------
 # Scopes. One object axis, two verb axes: <object>.<read|write>.

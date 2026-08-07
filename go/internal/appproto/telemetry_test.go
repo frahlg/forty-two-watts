@@ -420,3 +420,35 @@ func TestAChangedControlRevResendsTheSnapshot(t *testing.T) {
 		t.Fatal("the snapshot went out again with nothing changed")
 	}
 }
+
+// Field 10 is frozen like the rest, but conditional like battery_soc: a site
+// without a charger sends nothing, and the app draws no EV node rather than a
+// dead one holding an invented zero.
+func TestEvFieldIsSentOnlyWhenAChargerExists(t *testing.T) {
+	without := fieldValues(Snapshot{}, nil)
+	if _, ok := without[fidKey(FidEvW)]; ok {
+		t.Fatal("a site with no charger sent field 10")
+	}
+
+	idle := fieldValues(Snapshot{EVWKnown: true}, nil)
+	if got, ok := idle[fidKey(FidEvW)]; !ok || got != 0 {
+		t.Fatalf("an idle charger is a real 0 W reading; got %v, present=%v", got, ok)
+	}
+
+	charging := fieldValues(Snapshot{EVWKnown: true, EVW: 7360.4}, nil)
+	if got := charging[fidKey(FidEvW)]; got != 7360 {
+		t.Fatalf("ev_w = %d, want 7360", got)
+	}
+
+	// And the dictionary names it, with no source of its own — several
+	// chargers can feed the sum, so absence of the value, not a per-driver
+	// age, is the freshness story.
+	dict := fieldDict("meter.p1", "inv", "bat")
+	def, ok := dict[fidKey(FidEvW)]
+	if !ok {
+		t.Fatal("field 10 missing from the dictionary")
+	}
+	if def.Name != "ev_w" || def.SrcID != nil {
+		t.Fatalf("field 10 = %+v, want name ev_w and no source", def)
+	}
+}

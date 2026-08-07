@@ -813,6 +813,12 @@ func (s *Store) migrate() error {
 		// Independently installed Lua drivers. Content lives on disk; SQLite
 		// records activation history and the exact previous artifact used for
 		// one-click rollback.
+		//
+		// ftw_signed is written once, at install, and never recomputed: it
+		// records that the manifest naming this artifact could only have been
+		// verified against FTW's own signing key, which is compiled into the
+		// binary. It is history, not a setting — editing the config afterwards
+		// cannot make it true or false.
 		`CREATE TABLE IF NOT EXISTS driver_repo_installs (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			repo_url TEXT NOT NULL,
@@ -824,7 +830,8 @@ func (s *Store) migrate() error {
 			installed_path TEXT NOT NULL,
 			previous_installed_path TEXT NOT NULL DEFAULT '',
 			installed_at_ms INTEGER NOT NULL,
-			active INTEGER NOT NULL DEFAULT 0
+			active INTEGER NOT NULL DEFAULT 0,
+			ftw_signed INTEGER NOT NULL DEFAULT 0
 		) STRICT`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_driver_repo_artifact
 			ON driver_repo_installs(repo_id, driver_id, version, sha256)`,
@@ -961,6 +968,16 @@ func (s *Store) migrate() error {
 			return fmt.Errorf("migration %q: %w", stmt[:40]+"…", err)
 		}
 	}
+	// Columns added to tables that already exist on shipped boxes. CREATE TABLE
+	// IF NOT EXISTS above covers a fresh install; this covers an upgrade, and
+	// the default is what an install predating the column truthfully says.
+	// A box that installed a driver before FTW recorded provenance has no
+	// record that it was signed, so it reports 0 and the driver's name stays
+	// out of the fleet ping until it is installed again.
+	if err := s.addColumn("driver_repo_installs", "ftw_signed",
+		"INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
 	if err := s.ensureEnergyLedgerVersion(); err != nil {
 		return err
 	}
@@ -998,6 +1015,30 @@ func (s *Store) migrate() error {
 		if _, err := s.cache.Exec(stmt); err != nil {
 			return fmt.Errorf("cache migration %q: %w", stmt[:40]+"…", err)
 		}
+	}
+	return nil
+}
+
+// addColumn adds a column to an existing table, and does nothing if it is
+// already there. ALTER TABLE has no IF NOT EXISTS, so the question is asked of
+// the schema rather than read back out of an error string.
+//
+// All three arguments are literals written in this file — SQLite takes no
+// parameter in a DDL statement, so they are pasted in, and nothing reaches
+// here from a config or a request.
+func (s *Store) addColumn(table, column, decl string) error {
+	var present int
+	err := s.db.QueryRow(
+		`SELECT count(*) FROM pragma_table_info(?) WHERE name = ?`, table, column).Scan(&present)
+	if err != nil {
+		return fmt.Errorf("migration: read %s columns: %w", table, err)
+	}
+	if present > 0 {
+		return nil
+	}
+	stmt := `ALTER TABLE ` + sqliteIdent(table) + ` ADD COLUMN ` + sqliteIdent(column) + ` ` + decl
+	if _, err := s.db.Exec(stmt); err != nil {
+		return fmt.Errorf("migration: add %s.%s: %w", table, column, err)
 	}
 	return nil
 }

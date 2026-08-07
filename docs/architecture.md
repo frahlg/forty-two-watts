@@ -198,6 +198,77 @@ The properties that matter:
   and dispatch. An unavailable relay leaves local control and local recovery
   intact.
 
+## Fleet ping
+
+The box's other outbound path to Sourceful, and the only one that carries
+readable content: once a day it posts its FTW version and channel, the driver
+types in use, a battery-capacity bucket, its price zone and an install-age
+bucket. It answers how many boxes exist and what they run, which is what sizes
+engineering bets.
+
+It goes straight to the endpoint over HTTPS and never through the relay,
+because the relay's claim is that it holds nothing and routing a readable
+message through it would make that false.
+
+The constraint is the one above: Sourceful must not be able to follow a
+household. So the message carries no gateway ID, no key, no serial, no site
+name, no counter and no timestamp — nothing in it says which box sent it —
+values are bucketed rather than reported, the version travels only when it is a
+release tag so a developer's build reports as unknown, and the send time is
+drawn fresh each day rather than sitting in one slot.
+
+Driver names get their own rule, because a driver file's name is whatever the
+thing that installed it called it, and a household can install its own. A name
+travels only if it is on one of two lists, and neither list is the contents of
+a directory:
+
+- the drivers this build ships with, generated from
+  `drivers/BUNDLED_SOURCE.json` into `fleetping.ShippedCatalogue` when the
+  binary is built. Every box on a release carries the same list, and nothing
+  on a running box can add to it;
+- the box's own install history, asked per file: does the row `driverrepo`
+  wrote when it installed this exact filename say the manifest verified
+  against FTW's own signing key — the one compiled into the binary?
+
+The first list used to be a scan of the directory the bundled drivers sit in,
+which was wrong, because `device_repository.root_dir` says where installed
+drivers are kept and a config can point it inside that directory. Discovering
+the shipped catalogue at boot is asking the config what shipped; fixing it at
+build time is not asking. The same reasoning is why the second list is asked
+per file. The active directory is still listed, but only to drop records whose
+file has gone: a listing can take a name off that list and never put one on it,
+so where `root_dir` points does not matter, and an install record is not
+something a config writes.
+
+Everything else reports as `other`: a driver somebody wrote, a file copied into
+place, a file renamed after it was installed, one from any repository but FTW's
+however carefully it signs its own manifests, and one that was installed before
+FTW started recording where drivers come from. The last two are what this
+costs: a driver another publisher ships is counted but not named, and a box's
+existing drivers go unnamed until they are next installed.
+
+The rule is deliberately not asked of the config. The config belongs to the
+household and can be rewritten after the fact — an entry can claim the id the
+binary pins for the beta channel, be switched off, be deleted outright while
+the file it installed stays where it is, or move `root_dir` under the bundled
+drivers. What happened during the install is not theirs to rewrite, so that is
+what the box records and what the ping reads. This is a rule about names, not
+about code: it stops nobody from running the drivers they like, and the one way
+left through it is writing an FTW-signed row into the box's own `state.db` by
+hand, which this design does not claim to stop.
+
+Two things this does not fix, and both are said on the Settings screen rather
+than only here. The fields still describe a household, so the payload remains a
+quasi-identifier: a beta box in a small price zone with a big battery may be
+the only one like it, and coarse buckets with a small field set are what keep
+that population large rather than a proof that it is. And the endpoint sees the
+source IP. The design makes the payload useless as an identifier, not the
+connection anonymous.
+
+A failed send is forgotten, never retried. Settings → Fleet ping renders the
+exact payload from the same call the sender uses, so the claim is checkable
+rather than promised. See [`go/internal/fleetping`](../go/internal/fleetping).
+
 ## Releases
 
 There are two channels:
