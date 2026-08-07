@@ -33,6 +33,7 @@ import (
 	"github.com/srcfl/ftw/go/internal/drivers"
 	"github.com/srcfl/ftw/go/internal/evcloud"
 	"github.com/srcfl/ftw/go/internal/events"
+	"github.com/srcfl/ftw/go/internal/fleetping"
 	"github.com/srcfl/ftw/go/internal/forecast"
 	"github.com/srcfl/ftw/go/internal/ha"
 	"github.com/srcfl/ftw/go/internal/loadmodel"
@@ -72,23 +73,37 @@ type Deps struct {
 	Tel            *telemetry.Store
 	// LogRing is the in-memory log buffer wired in main.go. Nil makes
 	// /api/drivers/{name}/logs and /api/support/dump return 503.
-	LogRing           *telemetry.LogRing
-	Ctrl              *control.State
-	CtrlMu            *sync.Mutex
-	State             *state.Store
-	CapMu             *sync.RWMutex
-	Capacities           map[string]float64 // driver → battery_capacity_wh (controllable pool)
-	TelemetryCapacities  map[string]float64 // all site batteries incl. observe_only (SoC weighting)
-	CfgMu             *sync.RWMutex
-	Cfg               *config.Config
-	ConfigPath        string
-	DriverDir         string // where to scan for Lua drivers (default: <config-dir>/drivers)
-	UserDriverDir     string // persistent user-drivers overlay; searched before DriverDir
-	Models            map[string]*battery.Model
-	ModelsMu          *sync.Mutex
-	SelfTune          *selftune.Coordinator
-	DtS               float64                                   // control interval seconds (for model τ / age displays)
-	SaveConfig        func(path string, c *config.Config) error // injection for testability
+	LogRing             *telemetry.LogRing
+	Ctrl                *control.State
+	CtrlMu              *sync.Mutex
+	State               *state.Store
+	CapMu               *sync.RWMutex
+	Capacities          map[string]float64 // driver → battery_capacity_wh (controllable pool)
+	TelemetryCapacities map[string]float64 // all site batteries incl. observe_only (SoC weighting)
+
+	// BatteryIdentity resolves the live driver to its current hardware.
+	BatteryIdentity func(driver string) (deviceID string, ok bool)
+
+	// AppEnroll mints pairing codes for the FTW app. Nil when app_link is off,
+	// which the pairing routes report rather than hiding.
+	AppEnroll AppEnroller
+
+	// FleetPing is the once-a-day anonymous count. Held so Settings can render
+	// the exact payload the sender would post, rather than a second rendering
+	// that could quietly disagree with it. Nil in tests and minimal
+	// embeddings; GET /api/fleet-ping then says so.
+	FleetPing *fleetping.Pinger
+
+	CfgMu         *sync.RWMutex
+	Cfg           *config.Config
+	ConfigPath    string
+	DriverDir     string // where to scan for Lua drivers (default: <config-dir>/drivers)
+	UserDriverDir string // persistent user-drivers overlay; searched before DriverDir
+	Models        map[string]*battery.Model
+	ModelsMu      *sync.Mutex
+	SelfTune      *selftune.Coordinator
+	DtS           float64                                   // control interval seconds (for model τ / age displays)
+	SaveConfig    func(path string, c *config.Config) error // injection for testability
 	// ConfigApplier is main.go's config-applied callback — the same
 	// closure the configreload watcher runs (registry reload with SoC
 	// bounds, capacities, inverter groups, fuse and mpc/loadmodel
@@ -96,13 +111,13 @@ type Deps struct {
 	// config exactly like a file edit would. Nil (tests, minimal
 	// embeddings) still applies control-level fields via
 	// configreload.Apply; only the callback's extras are skipped.
-	ConfigApplier configreload.Applier
-	WebDir            string                                    // static assets root (default "web")
-	ColdDir           string                                    // cold-storage root for parquet rolloff; empty disables cold fallback
-	DataDir           string                                    // complete persistent-data root used by portable backups
-	StatePath         string                                    // absolute primary SQLite path used by portable backups
-	BackupDir         string                                    // full .ftwbak output; may be an externally mounted path
-	DataMaintenanceMu *sync.Mutex                               // excludes Parquet rolloff/pruning while a full backup is captured
+	ConfigApplier     configreload.Applier
+	WebDir            string      // static assets root (default "web")
+	ColdDir           string      // cold-storage root for parquet rolloff; empty disables cold fallback
+	DataDir           string      // complete persistent-data root used by portable backups
+	StatePath         string      // absolute primary SQLite path used by portable backups
+	BackupDir         string      // full .ftwbak output; may be an externally mounted path
+	DataMaintenanceMu *sync.Mutex // excludes Parquet rolloff/pruning while a full backup is captured
 	// SnapshotDir is where pre-update snapshots of state.db + config.yaml
 	// are written by the self-update flow. Defaults to
 	// `<cold_dir_parent>/snapshots`; main.go is responsible for passing
@@ -139,11 +154,6 @@ type Deps struct {
 
 	// Optional: HA MQTT bridge (nil if disabled).
 	HA *ha.Bridge
-
-	// HomeLink owns local-only pairing, passkey enrollment, revocation and
-	// status. Nil reports that this host has no safe Home Link identity.
-	HomeLink        HomeLinkAdmin
-	HomeLinkEnabled bool
 
 	// Driver registry — used by lifecycle endpoints (restart/disable/enable)
 	// and EV command dispatch. Nil disables those endpoints (returns 503).
@@ -206,6 +216,25 @@ type Server struct {
 	savingsCacheMu sync.Mutex
 	savingsCache   map[string]daySavings
 
+	// controlStates serializes command dispatch, default dispatch, and hold
+	// transitions per driver. Process-lifetime only, deliberately: a restart
+	// should leave no device held by a setting nobody remembers making.
+	controlStateMu sync.Mutex
+	controlStates  map[string]*controlDriverState
+
+	// beforeDriverControlSend is a package-test seam for reproducing a
+	// lifecycle change between request validation and registry dispatch. It is
+	// nil in production; SendWithGeneration still binds every real dispatch to
+	// the selected running generation.
+	beforeDriverControlSend func()
+	// beforeDriverControlStateLock is a package-test seam for the narrower
+	// lookup-to-lock lifecycle race. It runs after the state map lookup while
+	// the map lock is still held, before the per-driver state lock is taken.
+	beforeDriverControlStateLock func()
+	// beforeDriverDefaultStateLock is a package-test seam for the default path's
+	// lookup-to-lock lifecycle race. It is nil in production.
+	beforeDriverDefaultStateLock func()
+
 	versionUpdateMu sync.Mutex
 	driverUpdateMu  sync.Mutex
 	backupMu        sync.Mutex
@@ -225,10 +254,16 @@ func New(deps *Deps) *Server {
 		deps.WebDir = "web"
 	}
 	s := &Server{
-		deps:       deps,
-		mux:        http.NewServeMux(),
-		dailyCache: make(map[string]state.DayEnergy),
-		drafts:     newDriverDrafts(),
+		deps:          deps,
+		mux:           http.NewServeMux(),
+		dailyCache:    make(map[string]state.DayEnergy),
+		controlStates: make(map[string]*controlDriverState),
+		drafts:        newDriverDrafts(),
+	}
+	if deps.Registry != nil {
+		// Registry removal is the lifecycle boundary for a driver generation.
+		// Clear the API hold before a replacement instance can be added.
+		deps.Registry.SetLifecycleHook(s.clearDriverControl)
 	}
 	s.routes()
 	// A draft's timer died with the previous process, so anything left behind
@@ -256,6 +291,11 @@ func (s *Server) routes() {
 	s.handle("GET /api/oauth/myuplink/callback", s.handleMyUplinkOAuthCallback)
 	s.handle("POST /api/oauth/myuplink/exchange", s.handleMyUplinkOAuthExchange)
 	s.handle("GET  /api/mode", s.handleGetMode)
+	s.handle("GET  /api/app-link/status", s.handleAppLinkStatus)
+	s.handle("POST /api/app-link/pairing", s.handleAppLinkPairing)
+	s.handle("GET  /api/app-link/devices", s.handleAppLinkDevices)
+	s.handle("DELETE /api/app-link/devices/{id}", s.handleAppLinkDeviceRevoke)
+	s.handle("GET  /api/fleet-ping", s.handleFleetPing)
 	s.handle("POST /api/mode", s.handleSetMode)
 	s.handle("GET  /api/modes", s.handleModes)
 	s.handle("POST /api/target", s.handleSetTarget)
@@ -278,6 +318,8 @@ func (s *Server) routes() {
 	s.handle("GET  /api/logs", s.handleGlobalLogs)
 	s.handle("GET  /api/support/dump", s.handleSupportDump)
 	s.handle("GET  /api/support/report", s.handleSupportReport)
+	s.handle("POST   /api/drivers/{name}/control", s.handleDriverControl)
+	s.handle("DELETE /api/drivers/{name}/control", s.handleDriverControlRelease)
 	s.handle("POST /api/drivers/{name}/restart", s.handleDriverRestart)
 	s.handle("POST /api/drivers/{name}/disable", s.handleDriverDisable)
 	s.handle("POST /api/drivers/{name}/enable", s.handleDriverEnable)
@@ -295,9 +337,6 @@ func (s *Server) routes() {
 	s.handle("POST /api/components/optimizer/rollback", s.handleOptimizerComponentRollback)
 	s.handle("POST /api/components/optimizer/channel", s.handleOptimizerComponentChannel)
 	s.handle("GET  /api/ha/status", s.handleHAStatus)
-	s.handle("GET  /api/home-link/status", s.handleHomeLinkStatus)
-	s.handle("POST /api/home-link/pairing", s.handleHomeLinkPairing)
-	s.handle("POST /api/home-link/passkeys/revoke", s.handleHomeLinkPasskeyRevoke)
 	s.handle("GET  /api/caldav/status", s.handleCalDAVStatus)
 	s.handle("GET  /api/caldav/credentials", s.handleCalDAVCredentials)
 	s.handle("GET  /api/notifications/status", s.handleNotificationsStatus)
@@ -1328,23 +1367,16 @@ func (s *Server) handleSetMode(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]string{"error": "unknown mode: " + req.Mode})
 		return
 	}
+	// control.ApplyMode is the one door into a mode change: it drops any
+	// active manual hold and resets the PI integrator along with setting the
+	// mode. See its comment for what leaving either out has already cost.
 	s.deps.CtrlMu.Lock()
-	s.deps.Ctrl.Mode = m
-	// An explicit mode change is a reset signal: drop any active
-	// battery manual hold so the new mode takes effect on the very
-	// next dispatch tick. Mirrors the loadpoint manual_hold UX.
-	s.deps.Ctrl.ClearBatteryManualHold()
-	// Reset the PI integrator. The integral accumulated under the
-	// previous mode's error signal is meaningless to the new mode
-	// — keeping it caused integrator windup → wrong-direction stuck
-	// output across the 2026-05-24 evening mode switch (live
-	// regression: discharged the fleet to 7 % overnight while the
-	// PI integral was pinned in the wrong direction). Mode change
-	// is a discrete event; start the new regime from a clean PI.
-	if s.deps.Ctrl.PI != nil {
-		s.deps.Ctrl.PI.Reset()
-	}
+	applyErr := s.deps.Ctrl.ApplyMode(m)
 	s.deps.CtrlMu.Unlock()
+	if applyErr != nil {
+		writeJSON(w, 400, map[string]string{"error": applyErr.Error()})
+		return
+	}
 	if err := s.deps.State.SaveConfig("mode", req.Mode); err != nil {
 		slog.Warn("failed to persist mode", "err", err)
 	}
@@ -1381,7 +1413,11 @@ func (s *Server) handleSetTarget(w http.ResponseWriter, r *http.Request) {
 }
 
 // ---- /api/peak_limit ----
-
+//
+// Peak-shaving mode's import threshold. Validated against the site's
+// fuse — a limit above the breaker can never bind, and a negative one
+// would order export. See control.State.SetPeakLimit for the rules and
+// why 0 stays a real threshold here rather than "disabled".
 func (s *Server) handleSetPeakLimit(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		PeakLimitW float64 `json:"peak_limit_w"`
@@ -1391,8 +1427,13 @@ func (s *Server) handleSetPeakLimit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.deps.CtrlMu.Lock()
-	s.deps.Ctrl.PeakLimitW = req.PeakLimitW
+	err := s.deps.Ctrl.SetPeakLimit(req.PeakLimitW)
 	s.deps.CtrlMu.Unlock()
+	if err != nil {
+		writeJSON(w, 400, map[string]string{"error": err.Error()})
+		return
+	}
+	slog.Info("peak limit changed", "w", req.PeakLimitW)
 	writeJSON(w, 200, map[string]any{"status": "ok", "peak_limit_w": req.PeakLimitW})
 }
 

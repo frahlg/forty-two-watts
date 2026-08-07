@@ -13,7 +13,9 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/srcfl/ftw/go/internal/optimizercontract"
@@ -37,16 +39,102 @@ type Config struct {
 	Loadpoints       []Loadpoint        `yaml:"loadpoints,omitempty" json:"loadpoints,omitempty"`
 	V2X              *V2XPolicy         `yaml:"v2x,omitempty" json:"v2x,omitempty"`
 	Notifications    *Notifications     `yaml:"notifications,omitempty" json:"notifications,omitempty"`
-	HomeLink         *HomeLink          `yaml:"home_link,omitempty" json:"home_link,omitempty"`
+	AppLink          *AppLink           `yaml:"app_link,omitempty" json:"app_link,omitempty"`
+	FleetPing        *FleetPing         `yaml:"fleet_ping,omitempty" json:"fleet_ping,omitempty"`
 	Nova             *Nova              `yaml:"nova,omitempty" json:"nova,omitempty"`
 	DeviceRepository *DeviceRepository  `yaml:"device_repository,omitempty" json:"device_repository,omitempty"`
 }
 
-// HomeLink enables the outbound-only encrypted remote read service. The relay
-// and browser origins are fixed by the protocol and cannot be changed in site
-// config.
-type HomeLink struct {
+// AppLink enables the outbound connection the FTW app reaches this box
+// through. One switch: the relay is blind and fixed by the protocol, so there
+// is no endpoint to choose and no transport to pick. A question the site owner
+// cannot answer is the wrong question.
+type AppLink struct {
 	Enabled bool `yaml:"enabled" json:"enabled"`
+}
+
+// FleetPing configures the once-a-day count of how many boxes run FTW, on
+// which version and with which drivers. On by default, because the numbers
+// are what decide where engineering effort goes and a fleet nobody can see is
+// a fleet guessed about instead.
+//
+// It can be on by default because what it carries is a shape rather than an
+// identity: no id, no key, no counter and no timestamp. Not because it is
+// beyond reproach — the fields still describe a household and the endpoint
+// sees the source IP. Settings renders the exact payload and says both, so
+// this can be weighed rather than believed. See go/internal/fleetping.
+type FleetPing struct {
+	Enabled bool `yaml:"enabled" json:"enabled"`
+	// Endpoint is where the ping goes. Configurable so a deployment can point
+	// it at itself or at nothing, and because a hard-coded address in a
+	// package that sends data out is worth being able to see and change.
+	Endpoint string `yaml:"endpoint,omitempty" json:"endpoint,omitempty"`
+}
+
+// DefaultFleetPingEndpoint is Sourceful's collector. Nothing answers there
+// yet, which is the normal case the box is built for: a failed ping is
+// forgotten, never retried.
+const DefaultFleetPingEndpoint = "https://telemetry.sourceful.energy/v1/fleet"
+
+// On reports whether the ping is switched on, and is the only place that
+// answers it.
+//
+// Nil means never configured, which is the state every existing box is in, and
+// applyDefaults reads it as on. Config posted to /api/config does not pass
+// through applyDefaults — configreload.Apply swaps it in as it arrives — so a
+// second reading of nil here would silently stop the ping the first time a
+// household saved settings from a screen that never sent the section.
+func (f *FleetPing) On() bool {
+	if f == nil {
+		return true
+	}
+	return f.Enabled
+}
+
+// Resolved is where the ping goes.
+//
+// The fallback lives here rather than in applyDefaults, so the address is never
+// written into a household's config.yaml. A baked-in copy would keep posting to
+// this address after Sourceful moved the collector, and the aggregate would
+// quietly lose every box that had ever saved its settings.
+func (f *FleetPing) Resolved() string {
+	if f == nil || f.Endpoint == "" {
+		return DefaultFleetPingEndpoint
+	}
+	return f.Endpoint
+}
+
+// Validate rejects an endpoint that would undo what the payload is careful
+// about. Nil-safe: an absent section is a valid one.
+func (f *FleetPing) Validate() error {
+	if f == nil || f.Endpoint == "" {
+		return nil
+	}
+	return ValidateFleetPingEndpoint(f.Endpoint)
+}
+
+// ValidateFleetPingEndpoint refuses anything that is not a plain HTTPS URL.
+//
+// Plain HTTP would put the site's shape in the clear for every network between
+// the house and Sourceful — a worse leak than the ones the payload is designed
+// around. Credentials, a query and a fragment are refused because none of them
+// addresses a collector: a URL carrying one is far more likely a mistake than a
+// choice, and credentials in a config field are a mistake whatever they are for.
+// The path is not policed, because a path is how a collector names its own
+// endpoint. None of this makes the address secret — Settings shows the endpoint
+// this box will post to, whatever it is.
+func ValidateFleetPingEndpoint(endpoint string) error {
+	u, err := url.Parse(strings.TrimSpace(endpoint))
+	if err != nil {
+		return fmt.Errorf("fleet_ping.endpoint %q is not a URL", endpoint)
+	}
+	if u.Scheme != "https" || u.Host == "" {
+		return fmt.Errorf("fleet_ping.endpoint must be an https URL, got %q", endpoint)
+	}
+	if u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return errors.New("fleet_ping.endpoint must carry no credentials, query or fragment")
+	}
+	return nil
 }
 
 // DeviceRepository configures independently distributed Lua drivers. Remote
@@ -978,9 +1066,10 @@ type Weather struct {
 	// predictions when each plane is described separately than when
 	// everything is averaged into a single tilt/azimuth.
 	//
-	// When set, PVArrays overrides the legacy single-array fields.
-	// Providers that can't use site geometry (met_no, open_meteo)
-	// ignore this entirely and just use PVRatedW.
+	// When set, PVArrays overrides the legacy single-array fields for
+	// geometry-aware providers. GHI providers such as open_meteo project
+	// radiation onto these planes; incomplete entries are ignored and the
+	// provider falls back to its flat estimate.
 	PVArrays []PVArray `yaml:"pv_arrays,omitempty" json:"pv_arrays,omitempty"`
 
 	// HeatingWPerDegC adds load proportional to max(18°C − outdoor_temp, 0).
@@ -995,10 +1084,27 @@ type Weather struct {
 // + east roof + garage) with different tilt/azimuth. The sum of all
 // KWp values should match the total PV nameplate at the site.
 type PVArray struct {
-	Name       string  `yaml:"name,omitempty" json:"name,omitempty"`
-	KWp        float64 `yaml:"kwp" json:"kwp"`
-	TiltDeg    float64 `yaml:"tilt_deg" json:"tilt_deg"`
-	AzimuthDeg float64 `yaml:"azimuth_deg" json:"azimuth_deg"`
+	Name       string   `yaml:"name,omitempty" json:"name,omitempty"`
+	KWp        float64  `yaml:"kwp" json:"kwp"`
+	TiltDeg    *float64 `yaml:"tilt_deg" json:"tilt_deg"`
+	AzimuthDeg *float64 `yaml:"azimuth_deg" json:"azimuth_deg"`
+}
+
+// CompleteGeometry returns one usable PV plane. Tilt and azimuth are
+// pointers so an omitted field cannot be confused with a valid 0° value.
+// Invalid or partial entries are intentionally not fatal: callers use the
+// flat forecast path when no complete plane remains.
+func (a PVArray) CompleteGeometry() (tiltDeg, azimuthDeg, kWp float64, ok bool) {
+	if a.KWp <= 0 || math.IsNaN(a.KWp) || math.IsInf(a.KWp, 0) ||
+		a.TiltDeg == nil || a.AzimuthDeg == nil {
+		return 0, 0, 0, false
+	}
+	tiltDeg, azimuthDeg = *a.TiltDeg, *a.AzimuthDeg
+	if math.IsNaN(tiltDeg) || math.IsInf(tiltDeg, 0) || tiltDeg < 0 || tiltDeg > 90 ||
+		math.IsNaN(azimuthDeg) || math.IsInf(azimuthDeg, 0) || azimuthDeg < 0 || azimuthDeg > 360 {
+		return 0, 0, 0, false
+	}
+	return tiltDeg, azimuthDeg, a.KWp, true
 }
 
 // Battery is per-battery overrides (keyed by driver name in the top-level map).
@@ -1323,6 +1429,15 @@ func applyDefaults(c *Config) {
 			}}
 		}
 	}
+	if c.FleetPing == nil {
+		// Absent means never configured, which is the state every existing
+		// box is in. Enabled is the owner's call; an explicit
+		// `fleet_ping: {enabled: false}` block is the opt-out and survives
+		// this because only a missing section is filled in.
+		c.FleetPing = &FleetPing{Enabled: true}
+	}
+	// Endpoint is deliberately left blank: Resolved() supplies the default at
+	// use, so the collector's address is never written into a household's YAML.
 	if c.Site.ControlIntervalS == 0 {
 		// 2 s matches Ferroamp's ehub MQTT cadence (~1 Hz) without
 		// dispatching twice on the same telemetry sample, and halves
@@ -1516,6 +1631,9 @@ func (c *Config) Validate() error {
 		}
 	}
 	if err := c.CalDAV.Validate(); err != nil {
+		return err
+	}
+	if err := c.FleetPing.Validate(); err != nil {
 		return err
 	}
 
@@ -1871,8 +1989,51 @@ func (c *Config) SiteMeterDriver() string {
 	return ""
 }
 
-// SaveAtomic writes config to disk via tmp-file + rename. Safe from partial writes.
+// configFileMode is owner-only because config.yaml carries MQTT passwords,
+// API keys and OAuth refresh tokens. Rename replaces the destination inode, so
+// whatever mode the temp file has is the mode the saved config ends up with.
+const configFileMode os.FileMode = 0o600
+
+// saveMu serializes config saves. The settings handlers do not hold a write
+// lock across a save, so two overlapping requests would otherwise both write
+// the shared temp path and rename half of each other's bytes over config.yaml.
+var saveMu sync.Mutex
+
+// durableWriter holds the two sync calls that make a save survive power loss.
+// They are fields so a test can prove the ordering and force a sync failure;
+// production always uses defaultDurableWriter.
+type durableWriter struct {
+	syncFile func(*os.File) error
+	syncDir  func(string) error
+}
+
+var defaultDurableWriter = durableWriter{
+	syncFile: (*os.File).Sync,
+	syncDir:  syncDir,
+}
+
+// syncDir fsyncs a directory so a completed rename survives power loss.
+// Best-effort on platforms where directories can't be fsynced (Windows).
+func syncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	if err := d.Sync(); err != nil && runtime.GOOS != "windows" {
+		return err
+	}
+	return nil
+}
+
+// SaveAtomic writes config to disk via tmp-file + rename. Safe from partial
+// writes and from power loss: the temp file is fsynced before the rename and
+// the containing directory is fsynced after it.
 func SaveAtomic(path string, c *Config) error {
+	return saveAtomic(defaultDurableWriter, path, c)
+}
+
+func saveAtomic(w durableWriter, path string, c *Config) error {
 	// Driver paths are resolved to absolute-ish paths at Load() time.
 	// Convert them back to config-relative before writing so that
 	// repeated save cycles don't accumulate extra "../" prefixes.
@@ -1890,11 +2051,50 @@ func SaveAtomic(path string, c *Config) error {
 	if err != nil {
 		return fmt.Errorf("yaml marshal: %w", err)
 	}
+	saveMu.Lock()
+	defer saveMu.Unlock()
+
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0644); err != nil {
+	// Clear any temp left by an interrupted save, then create with O_EXCL.
+	// OpenFile only applies the mode when it creates the file, so reusing a
+	// stale 0644 temp would hand the secrets in config.yaml to every user on
+	// the box; O_EXCL also refuses to follow a symlink planted at that path.
+	if err := os.Remove(tmp); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("clear stale tmp: %w", err)
+	}
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, configFileMode)
+	if err != nil {
+		return fmt.Errorf("create tmp: %w", err)
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		os.Remove(tmp)
 		return fmt.Errorf("write tmp: %w", err)
 	}
-	return os.Rename(tmp, path)
+	// fsync before rename: a rename is only atomic for bytes that have already
+	// reached the disk. Without this, a power cut mid-save can publish a
+	// truncated or zero-length config.yaml — the file the gateway boots from,
+	// on a device that is expected to come back up unattended.
+	if err := w.syncFile(f); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return fmt.Errorf("sync tmp: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmp)
+		return fmt.Errorf("close tmp: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return fmt.Errorf("rename tmp: %w", err)
+	}
+	// fsync the directory so the rename itself survives power loss. The
+	// caller's contract is "the config is now saved", so this failure is
+	// reported rather than swallowed.
+	if err := w.syncDir(filepath.Dir(path)); err != nil {
+		return fmt.Errorf("sync config dir: %w", err)
+	}
+	return nil
 }
 
 func relDriverPath(baseDir, p string) string {

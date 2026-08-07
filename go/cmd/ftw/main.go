@@ -34,6 +34,7 @@ import (
 	_ "time/tzdata"
 
 	"github.com/srcfl/ftw/go/internal/api"
+	"github.com/srcfl/ftw/go/internal/appuplink"
 	"github.com/srcfl/ftw/go/internal/arp"
 	"github.com/srcfl/ftw/go/internal/battery"
 	"github.com/srcfl/ftw/go/internal/caldavserver"
@@ -71,10 +72,16 @@ import (
 // local runs.
 var Version = "dev"
 
+// siteIdentityLoad is the machine's own identity, not a user's.
+//
+// Bound is set when nova.key has been adopted into a hardware-protected
+// binding. It outlived Home Link, which is what first needed it: the binding
+// is what stops a box from quietly minting a replacement key and losing its
+// Nova claim when the sidecar state is incomplete.
 type siteIdentityLoad struct {
-	Nova     *nova.Identity
-	HomeLink gatewayidentity.Identity
-	Binding  gatewayidentity.SoftwareBinding
+	Nova    *nova.Identity
+	Bound   gatewayidentity.Identity
+	Binding gatewayidentity.SoftwareBinding
 }
 
 func loadSiteIdentity(keyPath string) (siteIdentityLoad, error) {
@@ -96,7 +103,7 @@ func loadSiteIdentityWith(
 	switch {
 	case err == nil:
 		if identity == nil {
-			return siteIdentityLoad{}, errors.New("bound home link identity is nil")
+			return siteIdentityLoad{}, errors.New("bound gateway identity is nil")
 		}
 		existing, loadErr := loadNovaExisting(keyPath)
 		if loadErr != nil {
@@ -107,14 +114,14 @@ func loadSiteIdentityWith(
 		}
 		publicKey := identity.PublicKey()
 		if existing.PublicKeyHex() != hex.EncodeToString(publicKey) {
-			return siteIdentityLoad{}, errors.New("nova and home link identities use different keys")
+			return siteIdentityLoad{}, errors.New("nova and bound gateway identities use different keys")
 		}
 		publicHash := sha256.Sum256(publicKey)
 		if binding.PublicKeySHA256 != hex.EncodeToString(publicHash[:]) {
-			return siteIdentityLoad{}, errors.New("home link binding key hash changed")
+			return siteIdentityLoad{}, errors.New("gateway binding key hash changed")
 		}
 		return siteIdentityLoad{
-			Nova: existing, HomeLink: identity, Binding: binding,
+			Nova: existing, Bound: identity, Binding: binding,
 		}, nil
 	case errors.Is(err, gatewayidentity.ErrBindingNotAdopted),
 		errors.Is(err, gatewayidentity.ErrUnsupportedBinding),
@@ -142,33 +149,38 @@ func loadSiteIdentityWith(
 	}
 }
 
-func runHomeLinkAdopt(args []string) {
-	if err := adoptHomeLinkIdentity(args, os.Stdout); err != nil {
-		slog.Error("home link identity adoption failed", "err", err)
+func runGatewayIdentityAdopt(args []string) {
+	if err := adoptGatewayIdentity(args, os.Stdout); err != nil {
+		slog.Error("gateway identity adoption failed", "err", err)
 		os.Exit(2)
 	}
 }
 
-func adoptHomeLinkIdentity(args []string, out io.Writer) error {
-	return adoptHomeLinkIdentityWith(
+func adoptGatewayIdentity(args []string, out io.Writer) error {
+	return adoptGatewayIdentityWith(
 		args,
 		out,
 		gatewayidentity.PreviewSoftwareBinding,
 		gatewayidentity.ApplySoftwareBinding,
 		gatewayidentity.LoadBoundSoftwareIdentity,
-		gatewayidentity.RouteHandle,
 	)
 }
 
-func adoptHomeLinkIdentityWith(
+// adoptGatewayIdentityWith binds an existing nova.key to this machine.
+//
+// The sidecar files it writes are still called nova.key.home-link.{state,json}
+// and the confirmation is still domain-separated as home-link adoption. Those
+// names are on disk on shipped boxes, so renaming them would orphan every
+// gateway already adopted. The subcommand is not: it was only ever named after
+// the first feature that needed a bound identity.
+func adoptGatewayIdentityWith(
 	args []string,
 	out io.Writer,
 	preview func(context.Context, string) (gatewayidentity.SoftwareBindingPreview, error),
 	apply func(context.Context, string, string) (gatewayidentity.SoftwareBinding, error),
 	load func(string) (gatewayidentity.Identity, gatewayidentity.SoftwareBinding, error),
-	routeHandle func([]byte) (string, error),
 ) error {
-	flags := flag.NewFlagSet("home-link-adopt", flag.ContinueOnError)
+	flags := flag.NewFlagSet("gateway-identity-adopt", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	keyPath := flags.String("key", "", "Path to the existing canonical nova.key")
 	confirmation := flags.String("confirm", "", "Exact confirmation from a fresh preview")
@@ -176,7 +188,7 @@ func adoptHomeLinkIdentityWith(
 		return err
 	}
 	if flags.NArg() != 0 || strings.TrimSpace(*keyPath) == "" {
-		return errors.New("home-link-adopt requires --key=<existing nova.key>")
+		return errors.New("gateway-identity-adopt requires --key=<existing nova.key>")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -204,14 +216,10 @@ func adoptHomeLinkIdentityWith(
 		return err
 	}
 	if loaded != binding {
-		return errors.New("adopted home link identity changed while reopening")
+		return errors.New("adopted gateway identity changed while reopening")
 	}
 	if identity == nil {
-		return errors.New("adopted home link identity is nil")
-	}
-	handle, err := routeHandle(identity.PublicKey())
-	if err != nil {
-		return err
+		return errors.New("adopted gateway identity is nil")
 	}
 	name, err := gatewayidentity.ThreeWordName(binding.GatewayID)
 	if err != nil {
@@ -219,8 +227,8 @@ func adoptHomeLinkIdentityWith(
 	}
 	_, err = fmt.Fprintf(
 		out,
-		"gateway_id=%s\nthree_word_name=%s\nkey_fingerprint_sha256=%s\nroute_handle=%s\n",
-		binding.GatewayID, name, binding.PublicKeySHA256, handle,
+		"gateway_id=%s\nthree_word_name=%s\nkey_fingerprint_sha256=%s\n",
+		binding.GatewayID, name, binding.PublicKeySHA256,
 	)
 	return err
 }
@@ -231,8 +239,8 @@ func main() {
 	// Everything else is the long-running service.
 	if len(os.Args) > 1 && !strings.HasPrefix(os.Args[1], "-") {
 		switch os.Args[1] {
-		case "home-link-adopt":
-			runHomeLinkAdopt(os.Args[2:])
+		case "gateway-identity-adopt":
+			runGatewayIdentityAdopt(os.Args[2:])
 			return
 		case "nova-claim":
 			// Shift os.Args so the subcommand's flag.FlagSet sees its own flags.
@@ -545,6 +553,18 @@ func main() {
 		}
 	}
 	defer reg.ShutdownAll()
+	batteryIdentity := func(name string) (string, bool) {
+		return runningDeviceID(reg, name)
+	}
+	ctrl.BatteryHoldTargetValid = func(name, deviceID string) bool {
+		currentID, ok := batteryIdentity(name)
+		if !ok || currentID != deviceID {
+			return false
+		}
+		health := tel.DriverHealth(name)
+		reading := tel.Get(name, telemetry.DerBattery)
+		return health != nil && health.IsOnline() && reading != nil && reading.SoC != nil
+	}
 
 	// ---- Identity bootstrap ----
 	// Drivers report make/serial inside driver_init via host.set_make / set_sn,
@@ -564,6 +584,13 @@ func main() {
 
 	// ---- Shared mutexes for API/control/models ----
 	ctrlMu := &sync.Mutex{}
+	// The revision of controllable state. The app sends the revision a
+	// command expected to act against and the box refuses the command when
+	// they differ, so this has to move whenever the mode, the targets or the
+	// ceilings do. It is derived from the state rather than incremented at
+	// each mutation site, because control is written from four places and a
+	// counter every one of them had to remember would be wrong within a month.
+	controlRev := &control.Revision{}
 	capMu := &sync.RWMutex{}
 	cfgMu := &sync.RWMutex{}
 	modelsMu := &sync.Mutex{}
@@ -795,7 +822,20 @@ func main() {
 		// explicit 0 → disabled. See EffectiveSafetyMarginA.
 		ctrl.SiteFuseSafetyA = newCfg.Fuse.EffectiveSafetyMarginA()
 		ctrl.MaxExportW = newCfg.Site.MaxExportW
+		// Lowering the fuse can strand a peak limit that was legal when it
+		// was set. SetPeakLimit refuses to create that state; only a reload
+		// can arrive at it from the other side, and it is silent — the
+		// threshold simply stops being the first thing to bind. Say so
+		// while the operator is still looking at the config they just saved.
+		// Peak shaving only: in every other mode the threshold is unread,
+		// so warning about it would be noise.
+		peakCeilingW, peakDead := ctrl.PeakLimitIsDead()
+		peakLimitW, peakMode := ctrl.PeakLimitW, ctrl.Mode == control.ModePeakShaving
 		ctrlMu.Unlock()
+		if peakDead && peakMode {
+			slog.Warn("peak limit is now above the site's import ceiling and cannot bind",
+				"peak_limit_w", peakLimitW, "import_ceiling_w", peakCeilingW)
+		}
 
 		// Keep the loadpoint controller's per-phase EV fuse clamp in
 		// sync with hot-reloaded fuse params — previously startup-only,
@@ -1468,6 +1508,13 @@ func main() {
 		}()
 	}
 
+	// One tracker for every dispatch path: storage, PV curtail and EV all
+	// report refused commands here, and it walks a driver that cannot
+	// actuate to its declared default. Built before the loadpoint
+	// controller because that controller needs it. See
+	// driver_failure_default.go.
+	actuation := newDriverActuationTracker(tel)
+
 	// ---- EV loadpoint controller ----
 	// loadpoint.Controller owns per-tick EV dispatch, including the
 	// energy-allocation contract, snapping and phase transitions.
@@ -1516,6 +1563,12 @@ func main() {
 			}, true
 		}
 		lpController = loadpoint.NewController(lpMgr, planAdapter, telAdapter, reg.Send)
+		// A charger that answers every poll and refuses every setpoint is
+		// the storage bug of #800 on the EV wire: it holds its last
+		// current and the plan keeps counting the load. Only the periodic
+		// ev_set_current is reported — see loadpoint.DispatchOutcomeFunc
+		// for the sends that are deliberately not.
+		lpController.SetDispatchOutcome(actuation.recordCommandOutcome)
 		// Wire the site fuse so the per-phase EV clamp and the
 		// phase-split derivation can use the actual site voltage and
 		// breaker rating instead of hard-coding 230 V × 16 A.
@@ -2051,32 +2104,60 @@ func main() {
 	case identityErr != nil:
 		// Binding and platform checks fail closed. Never create a replacement
 		// key when state is incomplete or this host cannot protect it.
-		slog.Warn("home link identity disabled", "err", identityErr, "path", identityKeyPath)
-	case identityState.HomeLink != nil:
-		handle, handleErr := gatewayidentity.RouteHandle(identityState.HomeLink.PublicKey())
-		if handleErr != nil {
-			slog.Warn("home link identity disabled", "err", handleErr, "path", identityKeyPath)
-		} else {
-			slog.Info("home link identity ready",
-				"gateway_id", identityState.Binding.GatewayID,
-				"route_handle", handle,
-			)
-		}
+		slog.Warn("site identity disabled", "err", identityErr, "path", identityKeyPath)
+	case identityState.Bound != nil:
+		slog.Info("site identity ready (hardware-bound)",
+			"gateway_id", identityState.Binding.GatewayID,
+		)
 	case identityState.Nova != nil:
 		slog.Info("site identity ready", "pubkey_prefix", identityState.Nova.PublicKeyHex()[:16])
 	}
-	homeLinkAdmin, homeLinkEnabled, homeLinkErr := startHomeLink(
-		ctx, cfg, identityState, st, tel, mpcSvc, ctrl, ctrlMu,
+
+	// The FTW app's uplink. It speaks the app's own protocol end to end and
+	// reaches the box through a relay that holds no keys.
+	appLinkWatchdog := time.Duration(cfg.Site.WatchdogTimeoutS) * time.Second
+	if appLinkWatchdog <= 0 {
+		appLinkWatchdog = 60 * time.Second
+	}
+	boxID := ""
+	if identityState.Nova != nil {
+		boxID = identityState.Nova.PublicKeyHex()[:16]
+	}
+	appEnroll, appUplink, appLinkEnabled, appLinkErr := startAppLink(
+		ctx, cfg, identityKeyPath, boxID, Version,
+		st, tel, mpcSvc, priceSvc, ctrl, ctrlMu, controlRev, appLinkWatchdog,
 	)
-	if homeLinkErr != nil {
-		slog.Warn("Home Link unavailable")
+	switch {
+	case appLinkErr != nil:
+		slog.Warn("app link unavailable", "err", appLinkErr)
+	case appLinkEnabled:
+		slog.Info("app link connected", "relay", appuplink.Endpoint,
+			"paired_devices", appEnroll.AuthorisedCount())
+	default:
+		slog.Info("app link disabled — set app_link.enabled to turn it on")
+	}
+
+	// The anonymous fleet ping: how many boxes, which versions, which drivers.
+	// Straight to Sourceful over HTTPS and never through the relay, which
+	// carries opaque bytes and holds nothing.
+	// The bundled drivers dir is deliberately not passed: which drivers this
+	// build ships with is compiled in, not discovered on disk. See
+	// fleetCatalogue for what that buys.
+	fleetPinger, fleetPingErr := startFleetPing(
+		ctx, cfg, cfgMu, st, Version, config.ManagedDriversDirOverride,
+	)
+	if fleetPingErr != nil {
+		slog.Warn("fleet ping unavailable", "err", fleetPingErr)
 	}
 
 	deps = &api.Deps{
 		Tel: tel, LogRing: logRing, Ctrl: ctrl, CtrlMu: ctrlMu,
 		State: st,
 		CapMu: capMu, Capacities: capacities, TelemetryCapacities: telemetryCapacities,
-		CfgMu: cfgMu, Cfg: cfg, ConfigPath: *configPath,
+		BatteryIdentity: batteryIdentity,
+		AppEnroll:       appEnrollForAPI(appEnroll, appUplink, appLinkEnabled),
+		FleetPing:       fleetPinger,
+		CfgMu:           cfgMu, Cfg: cfg, ConfigPath: *configPath,
 		ConfigApplier:       applyConfigChange,
 		DriverDir:           resolveDriverDir(),
 		UserDriverDir:       *userDriversDirFlag,
@@ -2114,8 +2195,6 @@ func main() {
 		Notifications:    notifSvc,
 		SelfUpdate:       selfUpdater,
 		OptimizerUpdate:  optimizerUpdater,
-		HomeLink:         homeLinkAdmin,
-		HomeLinkEnabled:  homeLinkEnabled,
 		Restart: func(reqCtx context.Context) error {
 			// Prefer the docker-compose sidecar path when wired up: the
 			// updater container does docker compose up -d --force-recreate,
@@ -2331,6 +2410,9 @@ func main() {
 	// the configreload watcher updates those fields directly, so a
 	// startup snapshot here would go stale on the first hot-reload.
 	dtS := float64(cfg.Site.ControlIntervalS)
+	// Every dispatch command carries its own deadline — see
+	// driverCommandTimeout for the stall it bounds.
+	driverCmdTimeout := driverCommandTimeout(controlInterval)
 
 	// Graceful shutdown
 	sigc := make(chan os.Signal, 1)
@@ -2442,13 +2524,22 @@ func main() {
 				if !tr.Online {
 					slog.Warn("driver telemetry stale — marking offline + reverting to autonomous",
 						"name", tr.Name, "timeout", watchdogTimeout)
-					sendDriverDefault(ctx, reg, tr.Name, "watchdog", observeOnlySnap)
+					sendDriverDefault(ctx, srv, tr.Name, "watchdog", observeOnlySnap)
 					watchdogDefaulted[tr.Name] = struct{}{}
 					bus.Publish(events.DriverLost{Driver: tr.Name, At: time.Now()})
 				} else {
 					slog.Info("driver telemetry recovered — back online", "name", tr.Name)
 					bus.Publish(events.DriverRecovered{Driver: tr.Name, At: time.Now()})
 				}
+			}
+			// Same law for a driver that is answering but cannot actuate,
+			// whether it says so itself or core found out by having its
+			// commands refused. Joins watchdogDefaulted so the freshness
+			// gate below doesn't send it a second default this tick. See
+			// driver_failure_default.go.
+			for _, name := range actuation.update(tickNow, observeOnlySnap) {
+				sendDriverDefault(ctx, srv, name, driverCannotActuateReason, observeOnlySnap)
+				watchdogDefaulted[name] = struct{}{}
 			}
 			// Fire a HealthTick so subscribers that track user-level
 			// thresholds (e.g. notifications) can evaluate their own
@@ -2488,7 +2579,7 @@ func main() {
 				if _, alreadyDefaulted := watchdogDefaulted[name]; alreadyDefaulted {
 					continue
 				}
-				sendDriverDefault(ctx, reg, name, freshness.Reason, observeOnlySnap)
+				sendDriverDefault(ctx, srv, name, freshness.Reason, observeOnlySnap)
 			}
 
 			// Loadpoint observation and schedule rolling stay live while the
@@ -2524,6 +2615,10 @@ func main() {
 			}
 
 			if !freshness.Allowed() {
+				// Clear before persisting: persistTelemetryTick snapshots
+				// ctrl, so the stored tick has to show the hold already
+				// released rather than one the blocked tick never executed.
+				clearBatteryManualHoldForDispatchBlock(ctrl, ctrlMu)
 				sampleCount, err := persistTelemetryTick(st, tel, ctrl, nowMs, watchdogTimeout)
 				if err != nil {
 					slog.Warn("tick persistence failed", "samples", sampleCount, "err", err)
@@ -2649,9 +2744,7 @@ func main() {
 					continue
 				}
 				payload, _ := json.Marshal(map[string]any{"action": "battery", "power_w": t.TargetW})
-				if err := reg.Send(ctx, t.Driver, payload); err != nil {
-					slog.Warn("driver send", "name", t.Driver, "err", err)
-				}
+				actuation.dispatchCommand(ctx, reg, "driver send", t.Driver, payload, driverCmdTimeout, tickNow)
 			}
 
 			// ---- PV curtailment dispatch ----
@@ -2665,22 +2758,9 @@ func main() {
 			ctrlMu.Lock()
 			curtailTargets := control.ComputePVCurtail(ctrl, tel)
 			ctrlMu.Unlock()
-			for _, c := range curtailTargets {
-				var payload []byte
-				if c.LimitW > 0 {
-					payload, _ = json.Marshal(map[string]any{
-						"action":  "curtail",
-						"power_w": c.LimitW,
-					})
-				} else {
-					payload, _ = json.Marshal(map[string]any{
-						"action": "curtail_disable",
-					})
-				}
-				if err := reg.Send(ctx, c.Driver, payload); err != nil {
-					slog.Warn("pv curtail send", "name", c.Driver, "err", err)
-				}
-			}
+			// The cap is a dispatch command and its outcome is counted; the
+			// release is not. See pv_curtail_dispatch.go.
+			dispatchPVCurtail(ctx, reg, actuation, curtailTargets, driverCmdTimeout, tickNow)
 
 			// LP dispatch ran at the top of this tick — see the
 			// "EV dispatch first" block above.
@@ -2965,15 +3045,37 @@ func registerAllDevices(st *state.Store, reg *drivers.Registry) {
 	}
 }
 
+func runningDeviceID(reg *drivers.Registry, name string) (string, bool) {
+	if reg == nil || name == "" {
+		return "", false
+	}
+	env := reg.Env(name)
+	if env == nil {
+		return "", false
+	}
+	makeName, serial, mac, endpoint := env.FullIdentity()
+	id := state.ResolveDeviceID(makeName, serial, mac, endpoint)
+	return id, id != ""
+}
+
+func clearBatteryManualHoldForDispatchBlock(ctrl *control.State, ctrlMu *sync.Mutex) {
+	if ctrl == nil || ctrlMu == nil {
+		return
+	}
+	ctrlMu.Lock()
+	ctrl.ClearBatteryManualHold()
+	ctrlMu.Unlock()
+}
+
 const driverDefaultTimeout = 2 * time.Second
 
-func sendDriverDefault(ctx context.Context, reg *drivers.Registry, name, reason string, observeOnly map[string]bool) {
+func sendDriverDefault(ctx context.Context, srv *api.Server, name, reason string, observeOnly map[string]bool) {
 	if observeOnly[name] {
 		return
 	}
 	cmdCtx, cancel := context.WithTimeout(ctx, driverDefaultTimeout)
 	defer cancel()
-	if err := reg.SendDefault(cmdCtx, name); err != nil {
+	if err := srv.SendDriverDefault(cmdCtx, name); err != nil {
 		slog.Warn("driver default command failed",
 			"name", name, "reason", reason, "timeout", driverDefaultTimeout, "err", err)
 	}
@@ -3844,11 +3946,16 @@ func haCallbacks(ctx context.Context, ctrl *control.State, ctrlMu *sync.Mutex, s
 			ctrl.SetGridTarget(w)
 			return st.SaveConfig("grid_target_w", strconv.FormatFloat(w, 'f', 1, 64))
 		},
+		// Same validation as POST /api/peak_limit — an HA number can be
+		// dragged past the site's fuse just as easily as an API caller can
+		// post past it, and the two setters must not diverge (#mode-drift
+		// again, one field down). The returned error reaches the bridge,
+		// which logs it; HA's own state topic republishes the value FTW
+		// actually holds, so the operator sees the number snap back.
 		SetPeakLimit: func(w float64) error {
 			ctrlMu.Lock()
 			defer ctrlMu.Unlock()
-			ctrl.PeakLimitW = w
-			return nil
+			return ctrl.SetPeakLimit(w)
 		},
 		SetEVCharging: func(w float64, active bool) error {
 			ctrlMu.Lock()

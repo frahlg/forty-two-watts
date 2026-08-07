@@ -155,74 +155,119 @@ listener and selected integration transports. Normal device and control
 configuration is reloaded through
 [`go/internal/configreload`](../go/internal/configreload).
 
-## Future remote access boundary
+## Remote access boundary
 
-Remote Sourceful access is not implemented by the LAN/API hardening layer. The
-central request policy in [`go/internal/api`](../go/internal/api) is the expansion point: a future
-protected remote request must present a locally verifiable principal and access
-proof there before an API handler runs.
+Remote access is the FTW app and nothing else. The box holds one outbound WSS
+connection to `wss://relay.ftw.energy`; there is no inbound listener, no
+NAT-traversal layer, no cloud account and no browser-managed site directory.
+See [ADR 0006](adr/0006-app-uplink.md) for why Home Link was removed rather
+than kept alongside it.
 
-The machine identity has one compatibility contract regardless of where its
-private key lives:
+The path is four packages:
 
-- a gateway name is never operator-selected. It is derived deterministically
-  as adjective-color-animal from the stable gateway ID, using exactly the
-  existing Sourceful Energy Gateway mapping;
-- on compatible hardware, the existing hardware-protected P-256 key and its
-  normalized 18-hex serial number are the gateway/site-controller identity.
-  The private key never leaves the secure element;
-- without that hardware, FTW creates and persists a P-256 identity with the
-  same public-key and signature wire contract and a stable ID in the same
-  format;
-- remote-access policy and composition depend only on the public identity and
-  a narrow signing interface. They must not depend on a key path, exported
-  private-key bytes, or a particular private-key encoding.
+- [`go/internal/appenroll`](../go/internal/appenroll) — the Noise static key,
+  the rotatable rendezvous secret, the single-use pairing code, the QR payload
+  and the list of app keys that have been let in. All of it is boot-time
+  material stored beside `nova.key`, not in SQLite;
+- [`go/internal/appwire`](../go/internal/appwire) — frames, the Noise IK
+  responder and the transport;
+- [`go/internal/appproto`](../go/internal/appproto) — the message layer;
+- [`go/internal/appuplink`](../go/internal/appuplink) — the outbound
+  connection, the per-epoch rendezvous handle and session demultiplexing.
 
-The three-word name is a derived display label and the DNS alias is a rotatable
-convenience; neither is an authenticator or secret. Local passkeys authenticate
-users; the resolved machine identity authenticates the tunnel endpoint.
+The properties that matter:
 
-The intended authentication and transport remain deliberately separate:
+- the app's trust anchor arrives optically. The QR payload is a URL fragment,
+  which is never sent in an HTTP request, so a hostile or compelled
+  `app.ftw.energy` can deny service but cannot impersonate a box;
+- the box is not a WebAuthn relying party and stores no user credential. It
+  authorises a first connection by the pairing code inside the Noise handshake
+  and later ones by the app's pinned static key;
+- the relay forwards encrypted frames and holds no keys. The handle the box
+  joins under is derived per epoch from the rendezvous secret, so it rotates
+  hourly and gives the relay operator nothing stable to key a household on;
+- the machine identity in [`go/internal/gatewayidentity`](../go/internal/gatewayidentity)
+  is separate and does not authenticate this connection. It resolves to a
+  hardware-protected P-256 key where the hardware exists and a bound software
+  key with the same public-key and signature wire contract otherwise, with a
+  deterministic adjective-color-animal display name derived from the stable
+  18-hex gateway ID. The name is a label, never an authenticator;
+- authority is unchanged by the transport. A command carries an expiry and
+  preconditions, and core revalidates against fresh state before acting. Core
+  remains authoritative for telemetry freshness, validation, clamps, planning
+  and dispatch. An unavailable relay leaves local control and local recovery
+  intact.
 
-- the resolved, permanent site/machine identity is authoritative for the
-  gateway;
-- FTW authenticates its tunnel by signing a fresh challenge with that key, not
-  with a long-lived bearer or shared tunnel secret;
-- FTW initiates one long-lived, outbound-only TLS connection to the relay;
-- a small versioned multiplexing contract carries concurrent browser request,
-  passkey ceremony, and event streams over that connection;
-- passkey authentication terminates on the local FTW instance. FTW stores only
-  the WebAuthn verification material needed for enrolled credentials:
-  credential ID, public key, counter, and operator-visible name. The private
-  passkey never leaves its authenticator, and the relay stores no user
-  credential;
-- first enrollment starts from the LAN with a single-use, high-entropy QR/link
-  secret that FTW validates locally. It does not use a PIN;
-- the recommended address is `<alias>.home.sourceful.energy`. The rotatable
-  alias is only a convenience; relay state maps it to the public site identity
-  and is limited to routing, status, and timestamps.
+## Fleet ping
 
-For this future flow, no password or shared access key is retained by FTW or
-the relay. The single-use enrollment secret exists only to authorize the
-initial local ceremony and cannot become a standing login credential.
+The box's other outbound path to Sourceful, and the only one that carries
+readable content: once a day it posts its FTW version and channel, the driver
+types in use, a battery-capacity bucket, its price zone and an install-age
+bucket. It answers how many boxes exist and what they run, which is what sizes
+engineering bets.
 
-After local passkey verification, FTW issues short-lived access proofs bound to
-the site and allowed scopes and verifies them at the central request policy.
-Read-only scopes come first. Later mutation scopes must still enter through the
-same policy and ordinary Core handlers. Core remains authoritative for
-telemetry freshness, validation, clamps, planning, and hardware dispatch; no
-remote principal or transport can bypass those checks. Expired or invalid
-proofs fail closed, and an unavailable remote connection leaves local control
-and local recovery intact. The target has no cloud account authentication,
-peer-to-peer or NAT-traversal layer, inbound remote listener, or
-browser-managed site directory or secrets.
+It goes straight to the endpoint over HTTPS and never through the relay,
+because the relay's claim is that it holds nothing and routing a readable
+message through it would make that false.
 
-Before remote implementation, a focused identity ADR must freeze the existing
-gateway-name mapping, stable-ID normalization and fallback derivation, P-256
-public-key/signature encodings, and identity recovery/rotation rules as
-versioned compatibility contracts. This LAN/API change only preserves the
-central policy expansion point; it does not choose or implement an identity
-provider.
+The constraint is the one above: Sourceful must not be able to follow a
+household. So the message carries no gateway ID, no key, no serial, no site
+name, no counter and no timestamp — nothing in it says which box sent it —
+values are bucketed rather than reported, the version travels only when it is a
+release tag so a developer's build reports as unknown, and the send time is
+drawn fresh each day rather than sitting in one slot.
+
+Driver names get their own rule, because a driver file's name is whatever the
+thing that installed it called it, and a household can install its own. A name
+travels only if it is on one of two lists, and neither list is the contents of
+a directory:
+
+- the drivers this build ships with, generated from
+  `drivers/BUNDLED_SOURCE.json` into `fleetping.ShippedCatalogue` when the
+  binary is built. Every box on a release carries the same list, and nothing
+  on a running box can add to it;
+- the box's own install history, asked per file: does the row `driverrepo`
+  wrote when it installed this exact filename say the manifest verified
+  against FTW's own signing key — the one compiled into the binary?
+
+The first list used to be a scan of the directory the bundled drivers sit in,
+which was wrong, because `device_repository.root_dir` says where installed
+drivers are kept and a config can point it inside that directory. Discovering
+the shipped catalogue at boot is asking the config what shipped; fixing it at
+build time is not asking. The same reasoning is why the second list is asked
+per file. The active directory is still listed, but only to drop records whose
+file has gone: a listing can take a name off that list and never put one on it,
+so where `root_dir` points does not matter, and an install record is not
+something a config writes.
+
+Everything else reports as `other`: a driver somebody wrote, a file copied into
+place, a file renamed after it was installed, one from any repository but FTW's
+however carefully it signs its own manifests, and one that was installed before
+FTW started recording where drivers come from. The last two are what this
+costs: a driver another publisher ships is counted but not named, and a box's
+existing drivers go unnamed until they are next installed.
+
+The rule is deliberately not asked of the config. The config belongs to the
+household and can be rewritten after the fact — an entry can claim the id the
+binary pins for the beta channel, be switched off, be deleted outright while
+the file it installed stays where it is, or move `root_dir` under the bundled
+drivers. What happened during the install is not theirs to rewrite, so that is
+what the box records and what the ping reads. This is a rule about names, not
+about code: it stops nobody from running the drivers they like, and the one way
+left through it is writing an FTW-signed row into the box's own `state.db` by
+hand, which this design does not claim to stop.
+
+Two things this does not fix, and both are said on the Settings screen rather
+than only here. The fields still describe a household, so the payload remains a
+quasi-identifier: a beta box in a small price zone with a big battery may be
+the only one like it, and coarse buckets with a small field set are what keep
+that population large rather than a proof that it is. And the endpoint sees the
+source IP. The design makes the payload useless as an identifier, not the
+connection anonymous.
+
+A failed send is forgotten, never retried. Settings → Fleet ping renders the
+exact payload from the same call the sender uses, so the claim is checkable
+rather than promised. See [`go/internal/fleetping`](../go/internal/fleetping).
 
 ## Releases
 

@@ -7,6 +7,13 @@
 // Inputs (none — autonomous). The component renders its own header
 // (label + price-mode toggle) and the SVG chart underneath.
 //
+// Unless it is told otherwise: the `fed` attribute turns both the fetch
+// and the poll off and hands the data question to the caller, which then
+// pushes windows in with setPrices(). The FTW app draws this chart over
+// its encrypted session to the box and has no HTTP origin at all, so a
+// request from here would be a 404 every five minutes for the life of the
+// page. Without the attribute nothing about this file changes.
+//
 // Data shape from /api/prices:
 //   { zone: "SE4", enabled: true, items: [
 //       { slot_ts_ms, slot_len_min, spot_ore_kwh, total_ore_kwh, ... }
@@ -448,9 +455,11 @@ class FtwPriceChart extends FtwElement {
 
   connectedCallback() {
     super.connectedCallback();
-    this._loadConfig();
-    this._loadPrices();
-    this._refreshTimer = setInterval(() => this._loadPrices(), 5 * 60 * 1000);
+    if (!this.hasAttribute("fed")) {
+      this._loadConfig();
+      this._loadPrices();
+      this._refreshTimer = setInterval(() => this._loadPrices(), 5 * 60 * 1000);
+    }
     // Re-render when the viewport crosses the small-screen breakpoint
     // — render() picks a different viewBox H per side, so a rotation
     // or window-resize over the 600 px line needs a redraw.
@@ -545,16 +554,58 @@ class FtwPriceChart extends FtwElement {
     }
   }
 
+  // Hand the chart a window of prices instead of it fetching one. Pairs
+  // with the `fed` attribute — without it the next poll overwrites this.
+  //
+  // slots are { tsMs, lenMin, spot, total }, spot and total in minor units
+  // per kWh: the component's own vocabulary, so nothing about the caller's
+  // transport reaches in here. `total` is optional and is what the slot
+  // costs to import with tariff and tax added. Supply it when whoever
+  // holds those numbers is the same place the prices came from; leave it
+  // out and the Total toggle computes it from /api/config as before.
+  //
+  // `stale` is the caller saying "our numbers stop here", which is the
+  // same sentence the fetch path's own stale state carries.
+  setPrices({ zone = "", currency = "", slots = [], stale = false } = {}) {
+    const items = (Array.isArray(slots) ? slots : [])
+      .filter((s) => s && Number.isFinite(s.tsMs))
+      .map((s) => ({
+        tsMs: s.tsMs,
+        lenMin: Number(s.lenMin) > 0 ? Number(s.lenMin) : 60,
+        spot: Number(s.spot) || 0,
+        total: s.total,
+      }))
+      .sort((a, b) => a.tsMs - b.tsMs);
+    this._data = { zone, items };
+    if (currency) this._currency = setActiveCurrency(currency);
+    this._priceState = stale ? "stale" : "ready";
+    this.update();
+  }
+
   // Resolved minor units/kWh per slot for the active toggle. "Total" is
   // what the slot actually costs to import: (spot + grid tariff) × (1 + VAT/100).
+  // A slot that arrived with its own total is believed rather than recomputed:
+  // whoever fed it holds the tariff and the VAT, and a fed instance never
+  // fetched either — it would quietly answer with a 0 öre grid tariff.
   _priceFor(item) {
     if (!this._totalOn) return item.spot;
+    if (Number.isFinite(item.total)) return item.total;
     return consumerTotalOre(item.spot, this._gridTariff, this._vatPct);
   }
 
   // Breakdown of the consumer total for one slot, in minor units/kWh.
   _partsFor(item) {
     return priceParts(item.spot, this._gridTariff, this._vatPct);
+  }
+
+  // Name what the numbers include. "incl. VAT" alone was read as "this is
+  // what I pay", which it wasn't while the grid tariff sat outside it — and
+  // a fed total is added up wherever the prices came from, so this instance
+  // can name the whole but never its parts.
+  _totalLabel(items) {
+    if (!this._totalOn) return "spot only";
+    if ((items || []).some((it) => Number.isFinite(it.total))) return "total to import";
+    return this._gridTariff > 0 ? "incl. grid tariff + VAT" : "incl. VAT";
   }
 
   render() {
@@ -566,11 +617,7 @@ class FtwPriceChart extends FtwElement {
     // the stored preference. The stored value is kept untouched so the
     // user's choice re-applies once tomorrow's prices publish.
     const effectiveHorizon = hasTomorrow ? this._horizon : "today";
-    // Name what the numbers include. "incl. VAT" alone was read as "this
-    // is what I pay", which it wasn't while the grid tariff sat outside it.
-    const modeLabel = this._totalOn
-      ? (this._gridTariff > 0 ? "incl. grid tariff + VAT" : "incl. VAT")
-      : "spot only";
+    const modeLabel = this._totalLabel(data && data.items);
     const horizonLabel =
       effectiveHorizon === "today"    ? "today" :
       effectiveHorizon === "tomorrow" ? "tomorrow" :
@@ -707,9 +754,7 @@ class FtwPriceChart extends FtwElement {
     const lowTime = cheapBlock
       ? `${formatPriceSlotLabel(cheapBlock.startMs)}–${fmtClock(cheapBlock.endMs)}`
       : "No 2 h window published";
-    const vatLabel = this._totalOn
-      ? (this._gridTariff > 0 ? "incl. grid tariff + VAT" : "incl. VAT")
-      : "spot only";
+    const vatLabel = this._totalLabel(data && data.items);
     const stale = view.stale
       ? `<span class="compact-stale">Last update failed</span>`
       : "";
@@ -778,27 +823,47 @@ class FtwPriceChart extends FtwElement {
     const maxP = prices[hi];
     const meanP = prices.reduce((a, p) => a + p, 0) / n;
 
-    // SVG geometry. Width = 100 % via viewBox. Height of the viewBox
-    // is doubled on phones so bars get more vertical room — bumping
-    // the box AT THE VIEWBOX level (not via a mismatched CSS
-    // aspect-ratio + preserveAspectRatio="none") keeps text scaled
-    // uniformly. preserveAspectRatio="none" is harmless when the box
-    // and viewBox match.
+    // Y scale: include 0 so a negative-spot day still renders, and
+    // pad the top so the peak's marker doesn't kiss the edge.
+    const yMin = Math.min(0, minP);
+    const yMax = Math.max(maxP * 1.08, 1);
+    // The axis is labelled here rather than beside its <text>, because the
+    // longest of these three strings is what decides how wide the left
+    // gutter has to be, and the gutter is part of the layout below.
+    const axisUnit = unitFor(this._currency);
+    const axisTick = (v) => roundOre(toDisplay(v, this._currency)) + " " + axisUnit.axis;
+    const yTicks = [
+      { at: yMax,  text: axisTick(yMax) },
+      { at: meanP, text: axisTick(meanP) },
+      { at: yMin,  text: axisTick(yMin) },
+    ];
+
+    // SVG geometry. Width = 100 % via viewBox. Everything below is in
+    // viewBox units, and the element renders at W over its CSS width, so
+    // that one scale governs every font size and padding here — which is
+    // why the box is stretched AT THE VIEWBOX level rather than with a
+    // mismatched CSS aspect-ratio, and why preserveAspectRatio="none" is
+    // harmless: the box and the viewBox always match.
     const W = 1000;
     const small = typeof window !== "undefined" && window.matchMedia &&
       window.matchMedia("(max-width: 600px)").matches;
-    const H = small ? 720 : 240;
-    // Wider left padding so the y-axis öre labels have breathing
-    // room between the SVG edge and the plot's first bar (was 36 →
-    // labels rendered too close to the card's left border).
-    // Phones get bigger fonts AND more padding so the larger labels
-    // stay inside the SVG box and below the NOW pill clears its top.
-    // +4 px left padding so 3-digit öre prices (e.g. "234 ö") clear the
-    // SVG edge — the label is text-anchored "end" at `pad.l - 4` and
-    // extends left from there, so a tighter pad.l clipped large prices.
-    const pad = small
-      ? { t: 26, r: 16, b: 40, l: 84 }
-      : { t: 16, r: 16, b: 28, l: 60 };
+    // A phone gets a taller box than a desktop so the bars have somewhere
+    // to go once the chart is only a few hundred pixels wide.
+    //
+    // How much taller depends on what the chart is inside of. The
+    // dashboard's Energy tab is a page about prices and the chart is the
+    // thing you came for. The app's Plan screen is a page about the day —
+    // a sentence, the mode choice, this chart, then the hour-by-hour
+    // timeline — and at the dashboard's height the price block filled 57 %
+    // of a 375×812 phone, so the timeline under it was never on screen with
+    // it. `fed` is how this file already knows it is the app rather than
+    // the dashboard.
+    //
+    // Only H moves. The rendered scale comes from W, so a shorter box
+    // lowers the bars' ceiling and changes the size of nothing else: the
+    // axis figures, the NOW pill and the peak markers all come out at the
+    // same pixel size they do at 720.
+    const H = small ? (this.hasAttribute("fed") ? 440 : 720) : 240;
     // Phone sizes bumped per operator request (2026-05): axis labels
     // were readable but the NOW marker felt thin and crowded against
     // the bars. +50 % on axes, +33 % on NOW + thicker stroke so the
@@ -811,17 +876,37 @@ class FtwPriceChart extends FtwElement {
     // bigger labels don't overlap each other across a 48 h chart.
     const tickStepMs = (small ? 6 : 3) * 3600_000;
     const tickLabelDy = small ? 26 : 16;
+    // The left gutter is the wider of what the design wants and what the
+    // labels need. Each is anchored "end" four units inside it and grows
+    // leftwards, so a gutter narrower than the longest label cuts that
+    // label's first character off at the SVG edge: on a phone, where the
+    // axis font is nearly three times the desktop one, "0.00 ö" came out
+    // as ".00 ö" and even "335 ö" lost a hairline. No fixed number can be
+    // right for every font size, currency and price range at once —
+    // "-12.34 lei" is four characters longer than "24 c" — so the labels
+    // are measured. Monospace, so that is the character count times the
+    // font's advance, with enough slack for the widest face the --mono
+    // stack can fall back to.
+    const MONO_ADVANCE_EM = 0.62;
+    const gutter = 4 + Math.ceil(
+      Math.max(...yTicks.map((t) => t.text.length)) * MONO_ADVANCE_EM * fsAxis);
+    const pad = small
+      ? { t: 26, r: 16, b: 40, l: Math.max(84, gutter) }
+      : { t: 16, r: 16, b: 28, l: Math.max(60, gutter) };
     const plotW = W - pad.l - pad.r;
     const plotH = H - pad.t - pad.b;
     const barW = plotW / n;
     // Geometry stash for hit-testing from raw clientX during touch
     // scrubbing — touchmove targets stay anchored to the touchstart
     // element, so we can't lean on data-idx like the mouse path does.
-    this._geom = { padL: pad.l, plotW, n, W };
-    // Y scale: include 0 so a negative-spot day still renders, and
-    // pad the top so the peak's marker doesn't kiss the edge.
-    const yMin = Math.min(0, minP);
-    const yMax = Math.max(maxP * 1.08, 1);
+    // The drawn slots ride along with the geometry. The tooltip used to look
+    // its slot up in this._data.items, which is every slot the box sent —
+    // both days — while the bars come from the filtered horizon. With
+    // TOMORROW selected, bar 79 is tomorrow's 19:45 and items[79] is today's,
+    // so the tooltip printed the right clock time (both days start at
+    // midnight) over the wrong day's price. It read as a chart that disagreed
+    // with itself under your thumb.
+    this._geom = { padL: pad.l, plotW, n, W, items };
     const yToPx = (v) => pad.t + plotH - ((v - yMin) / (yMax - yMin)) * plotH;
     const zeroY = yToPx(0);
     const meanY = yToPx(meanP);
@@ -890,15 +975,11 @@ class FtwPriceChart extends FtwElement {
                      </text>`);
       }
     }
-    // Y-axis labels — min / mean / max.
-    const axisUnit = unitFor(this._currency);
-    const axisTick = (v) => roundOre(toDisplay(v, this._currency)) + " " + axisUnit.axis;
-    const yLabels = [
-      { y: yToPx(yMax), text: axisTick(yMax) },
-      { y: meanY,       text: axisTick(meanP) },
-      { y: yToPx(yMin), text: axisTick(yMin) },
-    ].map((l) => `<text x="${pad.l - 4}" y="${l.y + 3}" text-anchor="end"
-                       fill="var(--fg-label)" font-family="var(--mono)" font-size="${fsAxis}">${l.text}</text>`).join("");
+    // Y-axis labels — min / mean / max, written above where the gutter
+    // that has to hold them is worked out.
+    const yLabels = yTicks
+      .map((t) => `<text x="${pad.l - 4}" y="${yToPx(t.at) + 3}" text-anchor="end"
+                       fill="var(--fg-label)" font-family="var(--mono)" font-size="${fsAxis}">${t.text}</text>`).join("");
 
     // "Now" marker — vertical line plus a "now" pill.
     let nowMarker = "";
@@ -1122,7 +1203,9 @@ class FtwPriceChart extends FtwElement {
 
   _showTipAt(idx, localX, localY) {
     const tip = this.shadowRoot.querySelector("[data-tip]");
-    const item = this._data && this._data.items[idx];
+    // The slots actually on screen, not every slot held. See _geom.
+    const drawn = (this._geom && this._geom.items) || (this._data && this._data.items) || [];
+    const item = drawn[idx];
     if (!tip || !item) return;
     const price = this._priceFor(item);
     const tEnd = item.tsMs + item.lenMin * 60_000;
@@ -1132,10 +1215,13 @@ class FtwPriceChart extends FtwElement {
     const shown = (v) => roundOre(toDisplay(v, this._currency));
     priceEl.textContent = `${shown(price)} ${unitFor(this._currency).label}`;
     // Breakdown line — only in Total mode, and only when there is
-    // something beyond spot to break out.
+    // something beyond spot to break out. A fed total arrives already added
+    // up and cannot be taken apart here; printing "grid 0 + VAT 25 %" over
+    // it would invent a breakdown rather than show one.
     const partsEl = tip.querySelector("[data-tip-parts]");
     if (partsEl) {
-      const showParts = this._totalOn && (this._gridTariff > 0 || this._vatPct > 0);
+      const showParts = this._totalOn && !Number.isFinite(item.total) &&
+        (this._gridTariff > 0 || this._vatPct > 0);
       if (showParts) {
         const p = this._partsFor(item);
         partsEl.textContent =
