@@ -14,14 +14,27 @@ export function buildPriceSummary(items, {
   gridTariffOre = 0,
   vatPercent = 25,
 } = {}) {
-  const resolve = (spot) => (totalOn
-    ? consumerTotalOre(spot, gridTariffOre, vatPercent)
-    : spot);
+  // A slot that carries its own total is believed rather than recomputed.
+  // Whoever fed the chart from outside holds the tariff and the VAT where the
+  // prices came from; recomputing from the defaults here would put a different
+  // number under the same slot on the compact card than on the full chart.
+  //
+  // The test is Number.isFinite(item.total), the same expression the chart's
+  // own _priceFor uses. Coercing first read `total: null` as a supplied 0 and
+  // `"109"` as a supplied 109, so the card and the chart disagreed about what
+  // counts as fed — which is the one divergence a fed chart exists to prevent.
+  const resolve = (item) => {
+    const spot = Number(item && item.spot) || 0;
+    if (!totalOn) return spot;
+    return Number.isFinite(item && item.total)
+      ? item.total
+      : consumerTotalOre(spot, gridTariffOre, vatPercent);
+  };
   const normalized = (Array.isArray(items) ? items : [])
     .map((item) => ({
       tsMs: Number(item && item.tsMs),
       lenMin: Number(item && item.lenMin) || 60,
-      ore: resolve(Number(item && item.spot) || 0),
+      ore: resolve(item),
     }))
     .filter((item) => Number.isFinite(item.tsMs))
     .sort((a, b) => a.tsMs - b.tsMs);

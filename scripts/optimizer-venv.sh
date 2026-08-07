@@ -12,8 +12,8 @@
 # Order of preference:
 #   1. $PYTHON -- the interpreter the old recipe used, so a box where that
 #      already worked keeps building exactly the venv it built before.
-#   2. A python3.N on PATH, starting with the version the container image and
-#      CI use, so a local venv resolves the same wheels they do.
+#   2. A python3.N on PATH, starting with the container runtime version, so a
+#      local venv resolves the same production wheels.
 #   3. uv, which can fetch an interpreter when the machine has none. Optional
 #      throughout: it is used when nothing else works, never required.
 # Nothing usable is an error that names both ways out.
@@ -31,10 +31,10 @@ FLOOR="${FLOOR:-3.11}"
 FLOOR_MAJOR="${FLOOR%%.*}"
 FLOOR_MINOR="${FLOOR#*.}"
 
-# The version Dockerfile.optimizer and the CI optimizer job run. Preferred so a
-# developer resolves the same wheels production does, but not required: any
-# interpreter at or above the floor is accepted.
-PREFERRED="3.12"
+# The version Dockerfile.optimizer runs. Preferred so a developer resolves the
+# same wheels production does, but not required: any interpreter at or above
+# the floor is accepted. CI also tests an older supported interpreter.
+PREFERRED="3.14"
 
 satisfies_floor() {
   local py="$1"
@@ -72,7 +72,7 @@ else
   fi
 
   CHOSEN=""
-  for candidate in "${PYTHON:-}" "python${PREFERRED}" python3.13 python3.14 python3.11 python3; do
+  for candidate in "${PYTHON:-}" "python${PREFERRED}" python3.13 python3.12 python3.11 python3; do
     [ -n "${candidate}" ] || continue
     if satisfies_floor "${candidate}"; then
       CHOSEN="${candidate}"
