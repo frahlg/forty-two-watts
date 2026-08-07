@@ -1,6 +1,8 @@
 package pcs
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -109,5 +111,35 @@ func TestPlantRoutesUnitIDsAndWrites(t *testing.T) {
 	bad := &modbus.HoldingRegistersRequest{UnitId: 1, Addr: RegSoC, IsWrite: true, Args: []uint16{0}}
 	if _, err := p.HandleHoldingRegisters(bad); err == nil {
 		t.Fatal("soc must not be writable")
+	}
+}
+
+func TestPlantEvenRackSpreadIsCentered(t *testing.T) {
+	p := NewPlant(4, DefaultRack())
+	want := []float64{0.47, 0.49, 0.51, 0.53}
+	for i, rack := range p.Racks() {
+		if got := rack.Snapshot().SoC; got != want[i] {
+			t.Fatalf("rack %d SoC %v, want %v", i+1, got, want[i])
+		}
+	}
+}
+
+func TestPlantCapsRackCountAtUnitIDLimit(t *testing.T) {
+	if got := len(NewPlant(MaxRacks+1, DefaultRack()).Racks()); got != MaxRacks {
+		t.Fatalf("rack count %d, want %d", got, MaxRacks)
+	}
+}
+
+func TestControlMuxRejectsRackIDOverflow(t *testing.T) {
+	p := NewPlant(3, DefaultRack())
+	req := httptest.NewRequest(http.MethodPost, "/rack/257/fault?on=1", nil)
+	res := httptest.NewRecorder()
+	p.ControlMux().ServeHTTP(res, req)
+
+	if res.Code != http.StatusBadRequest {
+		t.Fatalf("status %d, want %d", res.Code, http.StatusBadRequest)
+	}
+	if p.Racks()[0].Snapshot().Faulted {
+		t.Fatal("overflowing rack ID changed rack 1")
 	}
 }

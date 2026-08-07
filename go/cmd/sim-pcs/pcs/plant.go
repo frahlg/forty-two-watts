@@ -15,16 +15,23 @@ type Plant struct {
 	racks []*Rack // index 0 = unit ID 1
 }
 
+// MaxRacks is the largest fleet that can be addressed by a Modbus uint8 unit ID.
+const MaxRacks = 255
+
 func NewPlant(n int, cfg RackConfig) *Plant {
 	if n < 1 {
 		n = 1
+	}
+	if n > MaxRacks {
+		n = MaxRacks
 	}
 	p := &Plant{}
 	for i := 0; i < n; i++ {
 		rc := cfg
 		// Slight per-rack SoC spread so allocation/balancing logic has
 		// something real to balance from the first tick.
-		rc.InitialSoC = clamp01(cfg.InitialSoC + float64(i-(n-1)/2)*0.02)
+		offset := float64(i) - float64(n-1)/2
+		rc.InitialSoC = clamp01(cfg.InitialSoC + offset*0.02)
 		p.racks = append(p.racks, NewRack(rc))
 	}
 	return p
@@ -110,6 +117,9 @@ func (p *Plant) ControlMux() *http.ServeMux {
 		n, err := strconv.Atoi(r.PathValue("n"))
 		if err != nil {
 			return nil, fmt.Errorf("bad rack %q", r.PathValue("n"))
+		}
+		if n < 1 || n > MaxRacks {
+			return nil, fmt.Errorf("no rack %d", n)
 		}
 		rack, ok := p.rack(uint8(n))
 		if !ok {

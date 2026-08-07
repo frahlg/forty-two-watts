@@ -5,7 +5,8 @@
 //
 // Run:    go run ./cmd/sim-pcs -racks 4
 // Poke:   curl localhost:5610/state
-//         curl -X POST 'localhost:5610/rack/2/fault?on=1'
+//
+//	curl -X POST 'localhost:5610/rack/2/fault?on=1'
 package main
 
 import (
@@ -35,6 +36,10 @@ func main() {
 	flag.Parse()
 
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	if *racks < 1 || *racks > pcs.MaxRacks {
+		slog.Error("invalid rack count", "racks", *racks, "min", 1, "max", pcs.MaxRacks)
+		os.Exit(2)
+	}
 
 	cfg := pcs.DefaultRack()
 	cfg.CapacityWh = *capWh
