@@ -149,6 +149,7 @@ func TestNewRefusesACapabilityNotInTheRegistry(t *testing.T) {
 	_, err := New(Config{
 		Clock: clock, Site: box, Info: box, Modes: box, Plans: box,
 		Codec: testCodec{}, Sender: rec,
+		Caller: ownerCaller(), Grants: newGrants(),
 		Caps: []string{"status.core", "status.kore"},
 	})
 	if err == nil {

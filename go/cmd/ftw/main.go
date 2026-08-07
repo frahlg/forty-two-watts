@@ -349,7 +349,7 @@ func main() {
 	apiHandler := newSwappableHandler(bootPhaseHandler())
 	httpSrv := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.API.Port),
-		Handler:           api.SecureMutations(apiHandler, apiMutationPolicy()),
+		Handler:           api.Authenticate(apiHandler, apiMutationPolicy()),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	go func() {
@@ -2123,9 +2123,13 @@ func main() {
 	if identityState.Nova != nil {
 		boxID = identityState.Nova.PublicKeyHex()[:16]
 	}
-	appEnroll, appLinkEnabled, appLinkErr := startAppLink(
+	// The app's window onto this box's own HTTP API. Handed to the uplink
+	// now and filled in below, once the API server exists.
+	appAPI := &lateAPI{}
+	appEnroll, appUplink, appLinkEnabled, appLinkErr := startAppLink(
 		ctx, cfg, identityKeyPath, boxID, Version,
-		st, tel, mpcSvc, ctrl, ctrlMu, controlRev, appLinkWatchdog,
+		st, tel, mpcSvc, priceSvc, ctrl, ctrlMu, controlRev, appLinkWatchdog,
+		appAPI,
 	)
 	switch {
 	case appLinkErr != nil:
@@ -2137,12 +2141,26 @@ func main() {
 		slog.Info("app link disabled — set app_link.enabled to turn it on")
 	}
 
+	// The anonymous fleet ping: how many boxes, which versions, which drivers.
+	// Straight to Sourceful over HTTPS and never through the relay, which
+	// carries opaque bytes and holds nothing.
+	// The bundled drivers dir is deliberately not passed: which drivers this
+	// build ships with is compiled in, not discovered on disk. See
+	// fleetCatalogue for what that buys.
+	fleetPinger, fleetPingErr := startFleetPing(
+		ctx, cfg, cfgMu, st, Version, config.ManagedDriversDirOverride,
+	)
+	if fleetPingErr != nil {
+		slog.Warn("fleet ping unavailable", "err", fleetPingErr)
+	}
+
 	deps = &api.Deps{
 		Tel: tel, LogRing: logRing, Ctrl: ctrl, CtrlMu: ctrlMu,
 		State: st,
 		CapMu: capMu, Capacities: capacities, TelemetryCapacities: telemetryCapacities,
 		BatteryIdentity: batteryIdentity,
-		AppEnroll:       appEnrollForAPI(appEnroll, appLinkEnabled),
+		AppEnroll:       appEnrollForAPI(appEnroll, appUplink, appLinkEnabled),
+		FleetPing:       fleetPinger,
 		CfgMu:           cfgMu, Cfg: cfg, ConfigPath: *configPath,
 		ConfigApplier:       applyConfigChange,
 		DriverDir:           resolveDriverDir(),
@@ -2208,6 +2226,9 @@ func main() {
 		Version: Version,
 	}
 	srv := api.New(deps)
+	// From here an app session reaches the same handler the LAN does, with
+	// the same trust boundary, carrying the enrolled device's identity.
+	appAPI.bind(srv)
 	// Dev-mode proxy: when FTW_PROXY_UPSTREAM is set (e.g.
 	// http://192.168.1.139:8080), /api/* is forwarded to that instance so
 	// the local UI renders live data without owning the control loop.

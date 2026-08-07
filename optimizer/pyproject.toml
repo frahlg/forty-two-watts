@@ -13,7 +13,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-test = ["pytest==8.4.2"]
+test = ["pytest==9.1.1"]
 
 [project.scripts]
 ftw-optimizer = "ftw_optimizer.worker:main"

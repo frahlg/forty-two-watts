@@ -3,6 +3,7 @@ package api
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -10,26 +11,86 @@ import (
 // A stub enroller. Pairing is the one surface that hands out a credential, so
 // what matters here is who is allowed to ask, not what comes back.
 type stubEnroller struct {
-	minted int
-	err    error
+	minted     int
+	spoken     int
+	revoked    int
+	mintedRole string
+	roleSet    string
+	err        error
+	// lastOwner makes the stub refuse to remove or demote its one row, the
+	// way appenroll does when it is the only owner left.
+	lastOwner bool
 }
 
-func (s *stubEnroller) MintPairingCode() ([]byte, time.Time, error) {
+func (s *stubEnroller) MintPairingCode(role string) ([]byte, time.Time, error) {
 	if s.err != nil {
 		return nil, time.Time{}, s.err
 	}
+	if role != "owner" && role != "viewer" {
+		return nil, time.Time{}, ErrUnknownAppRole
+	}
 	s.minted++
+	s.mintedRole = role
 	return make([]byte, 16), time.Now().Add(10 * time.Minute), nil
+}
+
+func (s *stubEnroller) MintSpokenCode(role string) (string, time.Time, error) {
+	if s.err != nil {
+		return "", time.Time{}, s.err
+	}
+	if role != "owner" && role != "viewer" {
+		return "", time.Time{}, ErrUnknownAppRole
+	}
+	s.spoken++
+	s.mintedRole = role
+	return "ABCD-EFGH", time.Now().Add(5 * time.Minute), nil
 }
 
 func (s *stubEnroller) EnrollmentURL(code []byte, lanHint string) (string, error) {
 	return "https://app.ftw.energy/p#v2.aaa.bbb.ccc.ddd", nil
 }
 
+func (s *stubEnroller) Devices() []AppDevice {
+	return []AppDevice{{ID: "aaaa1111", AddedAtMs: 1, LastSeenMs: 2, Role: "owner"}}
+}
+
+func (s *stubEnroller) SetDeviceRole(id, role string) error {
+	if id != "aaaa1111" {
+		return ErrUnknownAppDevice
+	}
+	if role != "owner" && role != "viewer" {
+		return ErrUnknownAppRole
+	}
+	if s.lastOwner {
+		return ErrLastAppOwnerProtected
+	}
+	s.roleSet = role
+	return nil
+}
+
+func (s *stubEnroller) RevokeDevice(id string) error {
+	if id != "aaaa1111" {
+		return ErrUnknownAppDevice
+	}
+	if s.lastOwner {
+		return ErrLastAppOwnerProtected
+	}
+	s.revoked++
+	return nil
+}
+
 func (s *stubEnroller) AuthorisedCount() int { return 2 }
 
+// pairingRequest asks for an owner's QR code, which is what the box's own page
+// asks for when somebody presses "pair my phone".
+//
+// The role is named rather than left out. It has to be: a request that names
+// none is refused now, because a default at this endpoint decides who owns a
+// house.
 func pairingRequest(host, remote string, headers map[string]string) *http.Request {
-	r := httptest.NewRequest(http.MethodPost, "/api/app-link/pairing", nil)
+	r := httptest.NewRequest(http.MethodPost, "/api/app-link/pairing",
+		strings.NewReader(`{"role":"owner"}`))
+	r.Header.Set("Content-Type", "application/json")
 	r.Host = host
 	r.RemoteAddr = remote
 	for k, v := range headers {

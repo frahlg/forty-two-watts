@@ -98,6 +98,9 @@ func fieldValues(snap Snapshot, modes []ModeInfo) map[string]int64 {
 	if snap.BatterySoCKnown {
 		f[fidKey(FidBatterySoc)] = int64(math.Round(snap.BatterySoC * 1000))
 	}
+	if snap.EVWKnown {
+		f[fidKey(FidEvW)] = roundW(snap.EVW)
+	}
 	return f
 }
 
@@ -144,6 +147,10 @@ func fieldDict(srcGrid, srcPV, srcBattery string) map[string]FieldDef {
 		// Load is derived at the meter boundary, so it is only as fresh as
 		// the meter.
 		fidKey(FidLoadW): def(FidLoadW, srcGrid),
+		// The charger sum has no single source — a site can hold several —
+		// so it carries none, like the mode. The value's absence, not a
+		// per-driver age, is what says the site has no charger.
+		fidKey(FidEvW): def(FidEvW, ""),
 	}
 }
 

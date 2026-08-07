@@ -183,6 +183,34 @@ func officialBetaRepository(configured []config.DriverRepositorySource) config.D
 	}
 }
 
+// ftwSigned reports whether an artifact taken from repo can only have arrived
+// under a signature made with FTW's own key.
+//
+// Read against the repository as it stands during the install, and recorded on
+// the install row, so it is a fact about what happened rather than a claim the
+// config can restate afterwards.
+//
+// Three conditions, and each rules out a different way a household could put a
+// name of its own choosing in front of the box:
+//
+//   - allow_unsigned means no signature was demanded at all;
+//   - allow_insecure drops the transport and URL rules the manifest is fetched
+//     under, so what arrived is not what the rules describe;
+//   - exactly one trusted key, and that key FTW's, is what makes the
+//     verification unambiguous. With a second key listed, the manifest may
+//     have been signed by whoever holds it — including the household — and the
+//     key id alone cannot say which, because a config names its own key ids.
+//
+// The public key is a build-time constant. Claiming a repository id, renaming
+// a channel or editing an entry cannot reach it.
+func ftwSigned(repo config.DriverRepositorySource) bool {
+	if repo.AllowUnsigned || repo.AllowInsecure || len(repo.TrustedKeys) != 1 {
+		return false
+	}
+	return repo.TrustedKeys[config.DefaultDriverRepositorySigningKeyID] ==
+		config.DefaultDriverRepositoryPublicKey
+}
+
 func (m *Manager) ActiveDir() string { return filepath.Join(m.root, "active") }
 
 // reconcileActive closes the tiny crash window between the SQLite activation
@@ -581,6 +609,8 @@ func (m *Manager) installResolved(ctx context.Context, repo config.DriverReposit
 	installed := state.DriverRepoInstall{
 		RepoURL: manifest.Repository, RepoID: repo.ID, DriverID: entry.ID,
 		LogicalPath: logical, Version: entry.Version, SHA256: strings.ToLower(entry.SHA256), InstalledPath: installPath,
+		// Recorded here and nowhere else, because here is where it happened.
+		FTWSigned: ftwSigned(repo),
 	}
 	commitSymlink, cleanupSymlink, err := m.prepareSymlink(logical, installPath)
 	if err != nil {

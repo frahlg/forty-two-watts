@@ -87,7 +87,13 @@ jobs:
 
   build:
     name: build RPi installer image
-    if: github.event_name != 'pull_request'
+    # The schedule is upstream's refresh cadence, not the fork's: a fork that
+    # syncs master would otherwise spend an hour of runner time every month
+    # publishing an installer release nobody asked its owner for. Pushes and
+    # manual dispatches on a fork are deliberate, so those still build.
+    if: >-
+      github.event_name != 'pull_request' &&
+      (github.event_name != 'schedule' || github.repository == 'srcfl/ftw')
     # Native arm64. pi-gen debootstraps an arm64 rootfs and then runs every
     # stage's scripts inside it, so on an x86 runner the whole build executes
     # under qemu-user-static instruction emulation — which is what made this

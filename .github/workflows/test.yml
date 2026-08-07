@@ -57,7 +57,12 @@ jobs:
             while IFS= read -r file; do
               [ -n "${file}" ] || continue
               case "${file}" in
-                go/*|drivers/*|config*.yaml|Dockerfile|Dockerfile.updater|.dockerignore)
+                # contract/ is here because the Go suite is what checks the
+                # generated constants against the registry. Without it, a pull
+                # request touching only contract/registry.yaml selected no
+                # suite at all — and TestContractGenIsCurrent, the one test
+                # that catches a stale contract_gen.go, never ran.
+                go/*|contract/*|drivers/*|config*.yaml|Dockerfile|Dockerfile.updater|.dockerignore)
                   core=true
                   ;;
                 optimizer/*|Dockerfile.optimizer|go/internal/mpc/*|go/cmd/ftw/main.go)
@@ -396,6 +401,74 @@ jobs:
       - uses: actions/checkout@v5
       - run: make compose-migration-test container-boundary-test
 
+  # contract/registry.yaml is one file that lives in this repository and in
+  # srcfl/ftw-webapp, and only a job with both checked out can tell whether it
+  # still is one file. The header has always claimed CI fails when the two
+  # drift; nothing compared them, and they drifted three ways — a code each
+  # side had that the other had never heard of, and a retryable flag that
+  # disagreed in the direction that decides what a phone offers a user.
+  #
+  # Not gated on changed paths. The whole failure was a check that ran only
+  # sometimes, and the app can change its copy without a file here moving.
+  contract:
+    name: the registry has not drifted from the app
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # A change that lands in both repositories at once cannot be compared
+      # against the other one's default branch: the counterpart is not there
+      # yet, and each side would wait for the other forever. A pull request
+      # that names where its pair lives is compared against that instead.
+      # Everything else — a stray edit, a rename, a copy someone forgot — still
+      # meets the default branch, which is the case this job exists for.
+      - name: Which copy of the app to compare against
+        id: pair
+        env:
+          # Read live rather than from github.event: that payload is a snapshot
+          # taken when the run was queued, so a pair declared after the last
+          # push would be invisible and the job would compare against the wrong
+          # branch while looking like it had worked.
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          BODY=$(gh pr view "${{ github.event.pull_request.number }}" \
+                   --repo "${{ github.repository }}" --json body -q .body)
+          REF=$(printf '%s\n' "$BODY" | sed -n 's|^Contract-pair: *srcfl/ftw-webapp@||p' | head -1 | tr -d '\r')
+          echo "ref=${REF:-main}" >> "$GITHUB_OUTPUT"
+          echo "comparing against srcfl/ftw-webapp@${REF:-main}"
+
+      # One file, not the app's whole history.
+      - name: Check out the app
+        uses: actions/checkout@v5
+        with:
+          repository: srcfl/ftw-webapp
+          ref: ${{ steps.pair.outputs.ref }}
+          path: .app
+          token: ${{ secrets.FTW_CONTRACT_TOKEN || github.token }}
+          sparse-checkout: contract/registry.yaml
+          sparse-checkout-cone-mode: false
+
+      - name: Compare the two copies
+        run: |
+          set -euo pipefail
+          # A missing checkout is not agreement. Said out loud here because the
+          # obvious way to write this step — diff and hope — passes silently
+          # when the path is wrong, which is exactly how the last guard failed.
+          if [ ! -f .app/contract/registry.yaml ]; then
+            echo "the app's copy is not at .app/contract/registry.yaml."
+            echo "the checkout above failed or moved; this check will not guess."
+            exit 1
+          fi
+          if ! diff -u contract/registry.yaml .app/contract/registry.yaml; then
+            echo
+            echo "This file is one file in two repositories. Decide which side"
+            echo "is right by reading what each side's code does, then change"
+            echo "both copies in the same pair of pull requests — and rerun"
+            echo "go generate ./internal/... here."
+            exit 1
+          fi
+          echo "byte for byte the same file"
+
   e2e:
     name: full stack
     needs: changes
@@ -417,7 +490,8 @@ jobs:
   test:
     name: go test + vet
     if: always()
-    needs: [changes, core, optimizer, web, drivers, device-support-contract, compose, e2e]
+    needs:
+      [changes, core, optimizer, web, drivers, device-support-contract, compose, e2e, contract]
     runs-on: ubuntu-latest
     env:
       RESULTS: >-
@@ -425,7 +499,7 @@ jobs:
         ${{ needs.optimizer.result }} ${{ needs.web.result }}
         ${{ needs.drivers.result }} ${{ needs.device-support-contract.result }}
         ${{ needs.compose.result }}
-        ${{ needs.e2e.result }}
+        ${{ needs.e2e.result }} ${{ needs.contract.result }}
     steps:
       - name: Require every selected suite to pass
         run: |

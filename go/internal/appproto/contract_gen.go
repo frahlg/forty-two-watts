@@ -28,6 +28,8 @@ const (
 	FidSrcPv Fid = 8
 	// FidSrcBattery — source_ref, unit none.
 	FidSrcBattery Fid = 9
+	// FidEvW — power, unit W.
+	FidEvW Fid = 10
 )
 
 // FrozenFieldNames maps a frozen field id to its registry name.
@@ -41,6 +43,7 @@ var FrozenFieldNames = map[Fid]string{
 	FidSrcGrid:    "src_grid",
 	FidSrcPv:      "src_pv",
 	FidSrcBattery: "src_battery",
+	FidEvW:        "ev_w",
 }
 
 // FrozenFieldUnits maps a frozen field id to its unit, empty when it has none.
@@ -54,6 +57,7 @@ var FrozenFieldUnits = map[Fid]string{
 	FidSrcGrid:    "",
 	FidSrcPv:      "",
 	FidSrcBattery: "",
+	FidEvW:        "W",
 }
 
 // Capabilities are presence, not levels. An app hides what is absent and
@@ -73,6 +77,8 @@ const (
 	CapDerV2x          = "der.v2x"
 	CapPlanDispatch    = "plan.dispatch"
 	CapNetWebrtc       = "net.webrtc"
+	CapPriceSpot       = "price.spot"
+	CapApiPassthrough  = "api.passthrough"
 )
 
 // AllCapabilities is every capability name the registry defines.
@@ -91,6 +97,8 @@ var AllCapabilities = []string{
 	CapDerV2x,
 	CapPlanDispatch,
 	CapNetWebrtc,
+	CapPriceSpot,
+	CapApiPassthrough,
 }
 
 // Scopes are one object axis and two verb axes. Roles are a projection over
@@ -116,6 +124,13 @@ const (
 	ScopeMembersWrite = "ftw.members.write"
 )
 
+// WriteScopes is every scope that changes something.
+var WriteScopes = []string{
+	ScopeDispatchWrite,
+	ScopeModeWrite,
+	ScopeMembersWrite,
+}
+
 // Error codes. The box sends the code and machine-readable args; the app
 // owns every word of prose, in every language it ships.
 const (
@@ -139,6 +154,16 @@ const (
 	ErrRangeTooLarge = "E_RANGE_TOO_LARGE"
 	// ErrUnavailable — Source or subsystem is down.
 	ErrUnavailable = "E_UNAVAILABLE"
+	// ErrNeedsStepUp — Request needs a fresh passkey ceremony.
+	ErrNeedsStepUp = "E_NEEDS_STEP_UP"
+	// ErrUseCmd — Route moves energy and belongs on cmd.
+	ErrUseCmd = "E_USE_CMD"
+	// ErrUnsupportedMedia — Answer is not a kind the session carries.
+	ErrUnsupportedMedia = "E_UNSUPPORTED_MEDIA"
+	// ErrWholeDocument — Route replaces a whole document rather than part of one.
+	ErrWholeDocument = "E_WHOLE_DOCUMENT"
+	// ErrLocalOnly — Route is served only on the box's own page.
+	ErrLocalOnly = "E_LOCAL_ONLY"
 )
 
 // ErrorRetryable reports whether the app should offer a retry for a code.
@@ -153,6 +178,11 @@ var ErrorRetryable = map[string]bool{
 	ErrLastOwnerProtected: false,
 	ErrRangeTooLarge:      false,
 	ErrUnavailable:        true,
+	ErrNeedsStepUp:        true,
+	ErrUseCmd:             false,
+	ErrUnsupportedMedia:   false,
+	ErrWholeDocument:      false,
+	ErrLocalOnly:          false,
 }
 
 // SourceState says whether a device is answering. It is orthogonal to the

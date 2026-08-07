@@ -1,12 +1,29 @@
 # FTW shared contract registry.
 #
-# The single source for every name shared between this app and the box.
-# Generates TypeScript (src/lib/contract/generated.ts) and Go constants in
-# srcfl/ftw. CI fails when the two drift.
+# The single source for every name shared between this app and the box, and
+# the same file in both repositories — byte for byte.
+#
+# In srcfl/ftw it generates Go constants: go/internal/appproto/contract_gen.go
+# and go/internal/apiauth/contract_gen.go, from `go generate ./internal/...`.
+# In srcfl/ftw-webapp there is no generator — src/lib/protocol/contract.ts and
+# the error table in src/lib/protocol/messages.ts are written by hand and read
+# back against this file by tests/registry-contract.test.ts.
+#
+# The two copies are compared in CI on both sides: the app runs
+# scripts/check-contract-drift.mjs against a checkout of the box, and the box's
+# test workflow runs the same comparison against a checkout of the app. Neither
+# passes when the other repository is missing. Change one copy and change the
+# other in the same pair of pull requests.
 #
 # Never hand-write one of these names in either language. Three separate
 # namespaces for authorisation already exist in the codebase; this file is
 # what stops that from happening again.
+#
+# One YAML trap, learned the hard way: a `desc` is a flow-mapping value, so an
+# unquoted comma ends it. Go read `Route replaces a whole document, not part of
+# one` as `Route replaces a whole document` and generated a truncated comment
+# while the app's line-based reader saw the whole sentence. Keep commas out of
+# a desc, or quote it.
 
 version: 1
 
@@ -25,6 +42,12 @@ frozen_fields:
   7: { name: src_grid, kind: source_ref, unit: null }
   8: { name: src_pv, kind: source_ref, unit: null }
   9: { name: src_battery, kind: source_ref, unit: null }
+  # Frozen means the id's meaning never changes — not that the field is
+  # always present. Like battery_soc, ev_w is sent only when the box has
+  # a charger to measure; a site without one sends nothing, and the app
+  # draws no EV node rather than a dead one. Positive while charging,
+  # by the site convention: the charger consumes like any other load.
+  10: { name: ev_w, kind: power, unit: W }
 
 # ---------------------------------------------------------------------------
 # Capabilities. A set of names, not version numbers. Absent means the box does
@@ -45,6 +68,14 @@ capabilities:
   - der.v2x
   - plan.dispatch
   - net.webrtc
+  # Electricity prices, when the box has a zone configured and rows stored.
+  # Absent means the app draws no price view rather than an empty one.
+  - price.spot
+  # The box's own HTTP API, carried over the session. Absent means the app
+  # hides every view that needs it and never crashes — the same rule as
+  # history.5m. Present does not mean every path is reachable: reads and
+  # configuration go through, anything that moves energy stays on cmd.
+  - api.passthrough
 
 # ---------------------------------------------------------------------------
 # Scopes. One object axis, two verb axes: <object>.<read|write>.
@@ -100,8 +131,8 @@ modes:
   - { key: weighted, tier: hidden }
 
 # ---------------------------------------------------------------------------
-# Error codes. The box sends the code and args; this app owns all prose.
-# retryable tells the client whether to offer a retry at all.
+# Error codes the box sends. The box sends the code and args; this app owns all
+# prose. retryable tells the client whether to offer a retry at all.
 # ---------------------------------------------------------------------------
 errors:
   - { code: E_BOOTING, retryable: true, desc: Box is starting up }
@@ -114,6 +145,43 @@ errors:
   - { code: E_LAST_OWNER_PROTECTED, retryable: false, desc: Cannot remove the only owner }
   - { code: E_RANGE_TOO_LARGE, retryable: false, desc: History window exceeds the limit }
   - { code: E_UNAVAILABLE, retryable: true, desc: Source or subsystem is down }
+  # The passthrough's refusals. Each is a different sentence to a user, which
+  # is why none of them reuses a code above: a shared name that means two
+  # things is what this file exists to prevent.
+  #
+  # E_NEEDS_STEP_UP is the one retryable refusal here, and it is retryable
+  # because the very same request goes through once the passkey ceremony has
+  # run — the box refuses on `!req.StepUp` alone and the app sends it again
+  # itself. The others are the box's answer about the route, and asking a
+  # second time gets the same answer.
+  - { code: E_NEEDS_STEP_UP, retryable: true, desc: Request needs a fresh passkey ceremony }
+  - { code: E_USE_CMD, retryable: false, desc: Route moves energy and belongs on cmd }
+  - { code: E_UNSUPPORTED_MEDIA, retryable: false, desc: Answer is not a kind the session carries }
+  - { code: E_WHOLE_DOCUMENT, retryable: false, desc: Route replaces a whole document rather than part of one }
+  # A route the session does not carry at all: its answer holds a credential,
+  # or doing it needs somebody standing at the box. Not a permission the owner
+  # is missing, so neither a role nor a ceremony changes the answer.
+  - { code: E_LOCAL_ONLY, retryable: false, desc: Route is served only on the box's own page }
+
+# ---------------------------------------------------------------------------
+# Error codes the client raises for itself.
+#
+# These never cross the wire. The box generates nothing from this block and
+# must never send one of them; the app raises them locally and they meet the
+# same prose and retry rules as everything above.
+#
+# They are written down here rather than in the app alone because the app's
+# error table is checked against this file in full. A code with no home here
+# would need an exemption in that check, and an exemption list is exactly the
+# thing this file exists to avoid.
+# ---------------------------------------------------------------------------
+client_errors:
+  # A cut-off answer is not an error on the wire: by the time the box knows it
+  # has run out of room, a status has gone out and the app is committed to it,
+  # so the box reports it as `truncated: true` on api.end. The app turns that
+  # into a code because half a document is not an answer and a view needs one
+  # thing to catch.
+  - { code: E_RESPONSE_TOO_LARGE, retryable: false, desc: The answer arrived cut off }
 
 # ---------------------------------------------------------------------------
 # Source states. Orthogonal to carrier state — see docs/protocol.md. Merging

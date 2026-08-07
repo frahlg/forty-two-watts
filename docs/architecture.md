@@ -163,8 +163,11 @@ NAT-traversal layer, no cloud account and no browser-managed site directory.
 See [ADR 0006](adr/0006-app-uplink.md) for why Home Link was removed rather
 than kept alongside it.
 
-The path is four packages:
+The path is five packages:
 
+- [`go/internal/apiauth`](../go/internal/apiauth) — who is asking. One value,
+  one context key and a scope set, importing nothing of the box so that every
+  source of callers can produce one;
 - [`go/internal/appenroll`](../go/internal/appenroll) — the Noise static key,
   the rotatable rendezvous secret, the single-use pairing code, the QR payload
   and the list of app keys that have been let in. All of it is boot-time
@@ -197,6 +200,249 @@ The properties that matter:
   remains authoritative for telemetry freshness, validation, clamps, planning
   and dispatch. An unavailable relay leaves local control and local recovery
   intact.
+
+### Who is let in, and as what
+
+An enrolment carries a role from `contract/registry.yaml`: `owner`, which may
+change things, or `viewer`, which may only look. It is stamped by the box when
+a pairing code is spent, and it is stamped from the role the box minted that
+code for — never from anything the app sends, because a role a holder can edit
+is not a role.
+
+An invite is therefore not a new cryptographic object. It is the same
+single-use pairing code with a different role behind it, so the QR payload does
+not change shape and the app's scanner needs to know nothing about sharing. A
+guest scans what an owner scans and learns what they are from `hello_ok`. What
+stops a code being replayed is unchanged and holds for both: it is spent at the
+first success, it expires, it survives five wrong guesses and is then burned,
+and it rides encrypted inside Noise handshake message 1, so the relay carrying
+it never sees it.
+
+Two rules protect a household from locking itself out, and both live in
+`appenroll` rather than in the API layer — otherwise the box's own web UI could
+do what the app cannot:
+
+- **the first enrolment on a box is an owner**, whatever code it used. A box
+  with no owner cannot be administered by anybody, from anywhere, ever again;
+- **the last owner cannot be removed or stepped down.** A household can always
+  pair a second owner first and then remove the first.
+
+Sharing has no screen of its own. A guest's phone is a paired phone, so it is a
+row in the same device list, with the same Remove button: locking out a stray
+key and taking a guest's access away are one action, not two with two sets of
+bugs. Changing a role takes effect on a session that is already open, because
+both doors re-read the grant on every privileged request.
+
+The routes behind that list have two doors, and what each one PROVES decides
+what it opens:
+
+- **the LAN proves presence.** Somebody is in the building. That is the whole
+  authority behind a printed square, a guest pass and a spoken code, so it is
+  the only door that admits a new owner — by minting an owner's code or by
+  promoting a row — and the only one that mints a code to read aloud;
+- **an app session proves enrolment.** This is a phone the box already trusts,
+  authenticated by its Noise static key, carrying a role re-read on every
+  request. It proves nothing about where the phone is. It may see the roster,
+  invite a viewer and lock a phone out, gated on `ftw.members.read` and
+  `ftw.members.write`, which a viewer's grant does not carry.
+
+The role is never a default. A request that names none is refused rather than
+filled in for: the fallback used to be `owner`, so a caller whose role went
+missing — the app put it in a query string the box does not read — asked to
+share a view and was handed a house. What a caller did not say is a question,
+and the answer is 400.
+
+### The code that can be read aloud
+
+A phone with no printed QR and no other paired device still has to be able to
+get back into its home. The floor is somebody standing at the box, reading
+eight characters down a phone: `XXXX-XXXX`, forty bits from `crypto/rand`, in
+Crockford base32 so that I, L and O fold back to 1 and 0 for a listener who
+wrote down what they heard.
+
+It is redeemed exactly where a scanned code is, in Noise handshake message 1,
+so there is no new endpoint and no new carrier. The wire does not change: the
+app decodes the characters back to five bytes and sends those.
+
+**What it cannot do, and the box's page says so on the screen:** it does not
+let in a phone that has never seen this box. The typed characters are the
+pairing code and nothing else, while the box's static key and its rendezvous
+secret travel only in the QR payload — so a phone with no record of this box
+has no way to find it and no way to be sure the box answering is the right one.
+A typed code re-admits a phone that already holds those, from its own site
+record or from a recovery copy. Closing that gap would mean putting a key in a
+code somebody reads aloud, or trusting the relay to hand one over, and the
+second gives up the property the optical anchor exists for.
+
+Forty bits is safe to say out loud because of what surrounds it, not because of
+its size:
+
+- it is minted only through `POST /api/app-link/pairing`, and only from the
+  LAN. An app session reaches that route to invite a viewer by QR and is
+  refused a spoken code whatever role it asks for, because this bullet is the
+  argument that makes forty bits enough and a code mintable from anywhere in
+  the world would take it away. A forwarding header is grounds for refusal
+  rather than something to parse. Every minting costs somebody a walk to the
+  box;
+- it is shown only on the box's own page, it is spent on first use, and it
+  lives five minutes rather than a scanned code's ten;
+- **five wrong guesses burn it.** The counter is on the code, not on the
+  caller: an address-keyed counter would inherit the relay's own limiter bug,
+  where the documented TLS terminator makes the whole fleet one address. So a
+  guesser gets five tries per minting, and each minting needs a person standing
+  at the box;
+- a wrong guess costs a full Noise handshake and returns nothing at all.
+
+The cost is real and accepted: anyone who can reach the box can burn a live
+code by guessing at it, and the household has to ask for another. Denying
+somebody a code they can re-mint in a second is a far smaller harm than a code
+that can be ground down at leisure.
+
+### The app's window onto the HTTP API
+
+The app can ask the message layer for a handful of things; the box's own web UI
+asks its HTTP API for 124. Rather than grow the message layer one view at a
+time, an app session can carry an ordinary HTTP request: `api.req` in,
+`api.head`, `api.chunk` and `api.end` back, all on the bulk lane because every
+one of those varies in length with what was asked.
+
+It runs in process — no socket, no port, no TLS — through
+`api.Server.ServeHTTP`, which is the same handler the LAN listener serves,
+trust boundary included. This is a security improvement rather than a
+relaxation: that API is already served on the home LAN with no authentication
+at all, and this door is pinned to an enrolled device, gated by role and tier,
+and refused outright for anything that moves energy.
+
+Every route names its own tier, beside the handler it governs, in
+`api.routes`. The tier is a fact about what the handler DOES, and the request's
+method is never consulted:
+
+- **`Read`** answers a question, changes nothing, and hands back nothing that
+  could be replayed as authority. A shared viewer may ask for it;
+- **`Configure`** changes a setting. Owner role, and `stepUp` on the request. A
+  late execution is the same instruction, only later. `POST /api/config` also
+  carries `api.ReplacesAll` and is refused with `E_WHOLE_DOCUMENT`, because it
+  writes the whole document and a phone a year behind the box would drop every
+  field it never knew about;
+- **`Actuate`** moves energy, or takes control of what is moving it. Refused
+  with `E_USE_CMD` for everybody. Actuation has one door and it is `cmd`: a
+  command carries an expiry and the box revalidates against fresh state, and an
+  HTTP request carries neither. `api.Via(op)` names the command that does it,
+  where one exists;
+- **`Local`** is served only on the box's own page, at home. Either the answer
+  holds a credential or a whole file, or doing it needs somebody standing at
+  the box. Refused with `E_LOCAL_ONLY`, and neither a role nor a ceremony
+  changes that.
+
+The method used to decide this, and it was wrong twice. `GET
+/api/caldav/credentials` was priced as a read and handed a shared viewer a
+password that is a write channel back into dispatch. `POST
+/api/self_tune/start` was priced as ordinary configuration while it pauses
+control and drives every battery through ±3000 W for minutes. A verb cannot
+know what a handler does, so it is no longer asked.
+
+The cost is one line per route and no free reads: a view written in the app
+next year needs the box to have named the path. Two things make that the right
+direction to be wrong in. `api.handle` takes the tier as a required argument,
+so leaving it out does not compile and an unknown value panics at startup. And
+a route that reaches the gate with no tier the gate knows — registered any
+other way — is refused as `Local` rather than served. Allow-list over
+deny-list, one level up.
+
+The gate itself is one switch in `appproto.gateAPI`, with a branch for every
+tier and a closed default. That shape is deliberate: it replaced a chain of
+cases with no read branch at all, which is why a route the router happened to
+call a read met no check to fail.
+
+The honest limits, which belong here rather than in a comment nobody reads:
+
+- **step-up is a client-side gate.** `api.req` carries `stepUp`, and the box
+  cannot verify that a passkey ceremony happened — it has no relationship with
+  the authenticator, and being a WebAuthn relying party would need an origin,
+  which the box deliberately never has. It stops a phone left unlocked on a
+  table from being used to reconfigure the site. It stops nothing that a
+  modified client on an enrolled device could not already do through `cmd`;
+- **revocation is immediate at the box.** Three layers: the session is torn
+  down and the call it was making is cancelled, the grant is re-read from
+  `appenroll` on every privileged request so a socket cannot outlive a revoke,
+  and the next handshake fails. Nothing can un-send bytes already in a phone's
+  cache;
+- **the LAN is still unauthenticated.** `api.Authenticate` mints a local owner
+  for anything that arrives without a caller. That writes down what the LAN
+  already is rather than changing it, and it is the one branch that has to
+  change to authenticate the LAN later — every handler downstream reads its
+  caller from `apiauth.From`.
+
+## Fleet ping
+
+The box's other outbound path to Sourceful, and the only one that carries
+readable content: once a day it posts its FTW version and channel, the driver
+types in use, a battery-capacity bucket, its price zone and an install-age
+bucket. It answers how many boxes exist and what they run, which is what sizes
+engineering bets.
+
+It goes straight to the endpoint over HTTPS and never through the relay,
+because the relay's claim is that it holds nothing and routing a readable
+message through it would make that false.
+
+The constraint is the one above: Sourceful must not be able to follow a
+household. So the message carries no gateway ID, no key, no serial, no site
+name, no counter and no timestamp — nothing in it says which box sent it —
+values are bucketed rather than reported, the version travels only when it is a
+release tag so a developer's build reports as unknown, and the send time is
+drawn fresh each day rather than sitting in one slot.
+
+Driver names get their own rule, because a driver file's name is whatever the
+thing that installed it called it, and a household can install its own. A name
+travels only if it is on one of two lists, and neither list is the contents of
+a directory:
+
+- the drivers this build ships with, generated from
+  `drivers/BUNDLED_SOURCE.json` into `fleetping.ShippedCatalogue` when the
+  binary is built. Every box on a release carries the same list, and nothing
+  on a running box can add to it;
+- the box's own install history, asked per file: does the row `driverrepo`
+  wrote when it installed this exact filename say the manifest verified
+  against FTW's own signing key — the one compiled into the binary?
+
+The first list used to be a scan of the directory the bundled drivers sit in,
+which was wrong, because `device_repository.root_dir` says where installed
+drivers are kept and a config can point it inside that directory. Discovering
+the shipped catalogue at boot is asking the config what shipped; fixing it at
+build time is not asking. The same reasoning is why the second list is asked
+per file. The active directory is still listed, but only to drop records whose
+file has gone: a listing can take a name off that list and never put one on it,
+so where `root_dir` points does not matter, and an install record is not
+something a config writes.
+
+Everything else reports as `other`: a driver somebody wrote, a file copied into
+place, a file renamed after it was installed, one from any repository but FTW's
+however carefully it signs its own manifests, and one that was installed before
+FTW started recording where drivers come from. The last two are what this
+costs: a driver another publisher ships is counted but not named, and a box's
+existing drivers go unnamed until they are next installed.
+
+The rule is deliberately not asked of the config. The config belongs to the
+household and can be rewritten after the fact — an entry can claim the id the
+binary pins for the beta channel, be switched off, be deleted outright while
+the file it installed stays where it is, or move `root_dir` under the bundled
+drivers. What happened during the install is not theirs to rewrite, so that is
+what the box records and what the ping reads. This is a rule about names, not
+about code: it stops nobody from running the drivers they like, and the one way
+left through it is writing an FTW-signed row into the box's own `state.db` by
+hand, which this design does not claim to stop.
+
+Two things this does not fix, and both are said on the Settings screen rather
+than only here. The fields still describe a household, so the payload remains a
+quasi-identifier: a beta box in a small price zone with a big battery may be
+the only one like it, and coarse buckets with a small field set are what keep
+that population large rather than a proof that it is. And the endpoint sees the
+source IP. The design makes the payload useless as an identifier, not the
+connection anonymous.
+
+A failed send is forgotten, never retried. Settings → Fleet ping renders the
+exact payload from the same call the sender uses, so the claim is checkable
+rather than promised. See [`go/internal/fleetping`](../go/internal/fleetping).
 
 ## Releases
 
