@@ -27,6 +27,11 @@ concurrency:
 jobs:
   behind:
     name: pin follows device-drivers
+    # Forks inherit this schedule as soon as they sync master, and the run can
+    # only misfire there: the tracking issue belongs on srcfl/ftw, and a fork
+    # with issues disabled turns every quiet morning into a failure email for
+    # its owner. A manual dispatch is someone asking, so that still runs.
+    if: github.repository == 'srcfl/ftw' || github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

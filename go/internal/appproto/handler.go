@@ -10,8 +10,10 @@ import (
 	"sort"
 	"strconv"
 	"sync"
+	"sync/atomic"
 
 	"github.com/google/uuid"
+	"github.com/srcfl/ftw/go/internal/apiauth"
 	"github.com/srcfl/ftw/go/internal/control"
 )
 
@@ -25,6 +27,29 @@ type Config struct {
 	Plans  PlanReader
 	Codec  FrameCodec
 	Sender Sender
+
+	// History serves stored series, or nil on a box that keeps none. Optional
+	// on purpose: the capability is only advertised when a provider exists,
+	// and an advertised-but-broken feature is worse than an absent one.
+	History HistoryProvider
+
+	// Prices serves stored electricity prices, or nil on a box with no price
+	// service or no zone to fetch one for. Optional for the same reason.
+	Prices PriceReader
+
+	// API is the box's own HTTP API, served in process. Nil on a box that
+	// does not offer it; the capability then stays unsaid and the app hides
+	// every view that needs it, exactly like history.
+	API APIGateway
+
+	// Caller is whose session this is. Required: a session always belongs to
+	// one enrolled device, and a handler that does not know which one cannot
+	// refuse anything.
+	Caller apiauth.Caller
+
+	// Grants is that enrolment as it stands right now, re-read on every
+	// privileged request. Required, because revocation is not optional.
+	Grants GrantReader
 
 	// Caps is what this box advertises. Names must come from the generated
 	// contract constants; a typo is refused at construction rather than
@@ -57,6 +82,14 @@ type Handler struct {
 	cmds  *cmdLog
 	// ops is this handler's own copy of the operation table.
 	ops map[string]opSpec
+
+	// ctx is the session's lifetime and cancel ends it. A passthrough
+	// request derives from this, so Close stops a call already in flight
+	// rather than only the next one.
+	ctx    context.Context
+	cancel context.CancelFunc
+	// apiBusy is the passthrough queue, and its depth is one.
+	apiBusy atomic.Bool
 
 	mu         sync.Mutex
 	proto      int
@@ -108,6 +141,15 @@ func New(cfg Config) (*Handler, error) {
 		return nil, errors.New("appproto: Codec is required")
 	case cfg.Sender == nil:
 		return nil, errors.New("appproto: Sender is required")
+	case cfg.Grants == nil:
+		return nil, errors.New("appproto: Grants is required")
+	}
+
+	// A role nobody recognises carries nothing, and a handler that would
+	// refuse everything is a bug worth failing at construction rather than
+	// one session at a time.
+	if _, known := apiauth.RoleScopes[cfg.Caller.Role]; !known {
+		return nil, fmt.Errorf("appproto: %q is not a role in contract/registry.yaml", cfg.Caller.Role)
 	}
 
 	if cfg.Caps == nil {
@@ -130,6 +172,7 @@ func New(cfg Config) (*Handler, error) {
 		cfg.Logger = slog.Default()
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
 	return &Handler{
 		cfg:      cfg,
 		log:      cfg.Logger.With("component", "appproto"),
@@ -137,10 +180,58 @@ func New(cfg Config) (*Handler, error) {
 		dict:     fieldDict(cfg.SrcGrid, cfg.SrcPV, cfg.SrcBattery),
 		cmds:     newCmdLog(),
 		ops:      defaultOps(),
+		ctx:      ctx,
+		cancel:   cancel,
 		proto:    ProtoMax,
 		bucket:   512,
 		lastSent: map[string]int64{},
 	}, nil
+}
+
+// Close ends the handler's own work when the session goes.
+//
+// The one thing it must do is stop a passthrough request that is running now:
+// a device locked out mid-call must not finish the call it is making. Safe to
+// call more than once, and safe to call on a session that never used the
+// passthrough.
+func (h *Handler) Close() {
+	h.cancel()
+}
+
+// ScopesForRole expands a registry role into the scopes it carries.
+//
+// The expansion lives here, once, because a role is a projection over scopes
+// and a second projection somewhere else is how a codebase ends up with three
+// authorisation namespaces. A role the registry does not define expands to
+// nothing, so an unrecognised name can do nothing rather than everything.
+func ScopesForRole(role string) apiauth.ScopeSet {
+	return apiauth.NewScopeSet(apiauth.RoleScopes[role]...)
+}
+
+// liveCaller is whose session this is, as the box's records stand this second.
+//
+// Not the snapshot the handshake took. A socket outlives a revoke, and it
+// outlives a role change too: an owner demoted to a viewer while their phone
+// is in their hand must lose their writes at the next request, not at the next
+// reconnect. Both doors — cmd and the passthrough — ask this, and neither
+// trusts Config.Caller for anything that can change underneath it.
+//
+// The second result is false only when the enrolment is gone, which is a
+// revoke and ends the session. A role that merely changed is not a revoke and
+// must not be reported as one: the session carries on under the new role. The
+// buttons the app drew from hello_ok are then wrong until it reconnects, and
+// that is the right way round — the app drawing a button is presentation, and
+// the box refusing it is the enforcement.
+func (h *Handler) liveCaller() (apiauth.Caller, bool) {
+	role, epoch, ok := h.cfg.Grants.Grant()
+	if !ok {
+		return apiauth.Caller{}, false
+	}
+	caller := h.cfg.Caller
+	caller.Role = role
+	caller.Epoch = epoch
+	caller.Scopes = ScopesForRole(role)
+	return caller, true
 }
 
 // Subscribed reports whether the client asked for the telemetry stream.
@@ -181,18 +272,12 @@ func (h *Handler) dispatch(ctx context.Context, env Envelope) error {
 		return h.onCmd(ctx, env)
 	case MsgPlanGet:
 		return h.onPlanGet(env.ID)
+	case MsgPriceGet:
+		return h.onPriceGet(ctx, env)
 	case MsgHistQuery:
-		// Not built yet. Answering the request it belongs to is the whole
-		// point of a request id: the app narrows one chart instead of
-		// raising a session-wide banner.
-		if env.ID != nil {
-			return h.sendError(env.ID, ErrorBody{
-				Code:      ErrUnavailable,
-				Retryable: ErrorRetryable[ErrUnavailable],
-				Args:      map[string]any{"subsystem": "history"},
-			})
-		}
-		return nil
+		return h.onHistQuery(ctx, env)
+	case MsgAPIReq:
+		return h.onAPIReq(env)
 	default:
 		// Unknown types are ignored, never fatal. That rule in both
 		// directions is what lets a newer app talk to an older box and a
@@ -236,6 +321,8 @@ func (h *Handler) onHello(env Envelope) error {
 		mode = BoxModeBooting
 	case proto == ProtoFloor:
 		mode = BoxModeFloor
+	case !h.canWrite():
+		mode = BoxModeReadonly
 	}
 
 	caps := h.cfg.Caps
@@ -264,6 +351,8 @@ func (h *Handler) onHello(env Envelope) error {
 		Modes:    h.modes,
 		Boot:     boot,
 		Hint:     hint,
+		Role:     h.cfg.Caller.Role,
+		Scopes:   h.cfg.Caller.Scopes.Names(),
 	}
 
 	h.mu.Lock()
@@ -274,6 +363,20 @@ func (h *Handler) onHello(env Envelope) error {
 	// catalogue, both of which vary in size with what the box supports, and
 	// lane 0 exists so that its frames vary in size with nothing.
 	return h.sendBulk(MsgHelloOK, nil, body)
+}
+
+// canWrite reports whether this grant carries any scope that changes
+// something. A grant with none is a session the app should draw without its
+// buttons — which is presentation, not the enforcement. The enforcement is at
+// every door: onCmd checks the operation's scope and the passthrough checks
+// the role.
+func (h *Handler) canWrite() bool {
+	for _, scope := range WriteScopes {
+		if h.cfg.Caller.Scopes.Has(scope) {
+			return true
+		}
+	}
+	return false
 }
 
 // capsHash lets the app cache a capability set across sessions and notice when
@@ -590,6 +693,47 @@ func (h *Handler) onCmd(ctx context.Context, env Envelope) error {
 		})
 	}
 
+	// Who is asking, as the box's records stand right now — the same question
+	// the passthrough asks, answered the same way. A phone revoked or demoted
+	// mid-session must not get one last command through on the strength of
+	// what its handshake said.
+	caller, enrolled := h.liveCaller()
+	if !enrolled {
+		if err := h.sendCmdResult(CmdResult{
+			CmdID: cmd.CmdID,
+			State: CmdRejected,
+			Error: &ErrorBody{
+				Code:      ErrGrantRevoked,
+				Retryable: ErrorRetryable[ErrGrantRevoked],
+			},
+		}); err != nil {
+			return err
+		}
+		return h.Terminate(TerminateRevoked)
+	}
+
+	// The scope the operation declares, checked against the scope this
+	// session holds. defaultOps has declared a scope for every op since the
+	// day it was written and nothing ever read it, which meant a viewer's
+	// command was refused by nothing at all. This is the line that makes a
+	// role real on the command lane; the passthrough's role gate is the same
+	// property on the other one.
+	if !caller.Scopes.Has(spec.scope) {
+		return h.sendCmdResult(CmdResult{
+			CmdID: cmd.CmdID,
+			State: CmdRejected,
+			Error: &ErrorBody{
+				Code:      ErrScopeDenied,
+				Retryable: ErrorRetryable[ErrScopeDenied],
+				Args: map[string]any{
+					"op":        cmd.Op,
+					"needScope": spec.scope,
+					"role":      caller.Role,
+				},
+			},
+		})
+	}
+
 	// Fresh state, read here and not before: this is the dispatch boundary,
 	// and a guard checked against the state the user was looking at is not a
 	// guard.
@@ -761,7 +905,31 @@ func (h *Handler) sendPlan(id *uint32) error {
 		h.cfg.Clock.UptimeMs(),
 		h.cfg.Clock.Now(),
 	)
-	return h.sendBulk(MsgPlan, id, body)
+
+	// The optimizer plans further than the wire carries: 193 fifteen-minute
+	// slots encode to ~17 kB and the largest bulk bucket is 16 kB. Send the
+	// nearest slots that fit and drop the far tail — the app shows twelve
+	// hours, and slots two days out are a guess about a guess. What must
+	// never happen is the alternative: an encode error here used to kill the
+	// whole session, which the app experienced as "the box hangs up whenever
+	// I open the plan".
+	for {
+		env, err := newEnvelope(MsgPlan, id, body)
+		if err != nil {
+			return err
+		}
+		raw, err := EncodeEnvelope(env)
+		if err != nil {
+			return err
+		}
+		if bulkBucketFor(len(raw)) != 0 {
+			return h.send(Frame{Lane: LaneBulk, Bucket: bulkBucketFor(len(raw)), Envelope: env})
+		}
+		if len(body.Slots) <= 1 {
+			return fmt.Errorf("appproto: a single plan slot does not fit any bulk bucket")
+		}
+		body.Slots = body.Slots[:len(body.Slots)*3/4]
+	}
 }
 
 // --------------------------------------------------------------------------

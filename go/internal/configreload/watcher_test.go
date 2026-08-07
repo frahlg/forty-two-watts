@@ -1,10 +1,8 @@
 package configreload
 
 import (
-	"bytes"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -40,22 +38,13 @@ func writeConfig(t *testing.T, path, content string) {
 	}
 }
 
-func watcherLoopCount() int {
-	buf := make([]byte, 1<<20)
-	n := runtime.Stack(buf, true)
-	return bytes.Count(buf[:n], []byte("configreload.(*Watcher).loop"))
-}
-
-func waitForWatcherLoop(t *testing.T, baseline int) {
+func waitForWatcherStart(t *testing.T, w *Watcher) {
 	t.Helper()
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		if watcherLoopCount() > baseline {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
+	select {
+	case <-w.started:
+	case <-time.After(time.Second):
+		t.Fatal("watcher loop did not start")
 	}
-	t.Fatal("watcher loop did not start")
 }
 
 // newTestWatcher creates a Watcher wired to track applier invocations.
@@ -94,6 +83,7 @@ func TestWatcherFiresOnChange(t *testing.T) {
 
 	w, _, applyCh := newTestWatcher(t, cfgPath, cfg)
 	w.Start()
+	waitForWatcherStart(t, w)
 	defer w.Stop()
 
 	// Modify the config: change grid_target_w from 0 to 100.
@@ -113,8 +103,6 @@ drivers:
 api:
   port: 8080
 `
-	// Small delay to let the watcher goroutine start and register.
-	time.Sleep(100 * time.Millisecond)
 	writeConfig(t, cfgPath, updatedYAML)
 
 	select {
@@ -140,10 +128,8 @@ func TestWatcherIgnoresInvalidYAML(t *testing.T) {
 
 	w, calls, _ := newTestWatcher(t, cfgPath, cfg)
 	w.Start()
+	waitForWatcherStart(t, w)
 	defer w.Stop()
-
-	// Let the watcher start.
-	time.Sleep(100 * time.Millisecond)
 
 	// Write invalid YAML — config.Load will fail, reload() returns early,
 	// and the applier should NOT be called.
@@ -188,8 +174,8 @@ func TestWatcherUpdatesSiteMeterDriverOnReload(t *testing.T) {
 		t.Fatal(err)
 	}
 	w.Start()
+	waitForWatcherStart(t, w)
 	defer w.Stop()
-	time.Sleep(100 * time.Millisecond) // let watcher subscribe
 
 	// Two-driver YAML with the site-meter flag moved to zap-p1.
 	updatedYAML := `
@@ -243,12 +229,50 @@ func TestWatcherStopIsIdempotent(t *testing.T) {
 
 	w, _, _ := newTestWatcher(t, cfgPath, cfg)
 	w.Start()
+	waitForWatcherStart(t, w)
 
 	// First Stop should succeed normally.
 	w.Stop()
+	select {
+	case <-w.done:
+	default:
+		t.Fatal("Stop returned before watcher loop exited")
+	}
 
 	// Second Stop must not panic (guarded by sync.Once).
 	w.Stop()
+}
+
+func TestWatcherStopBeforeStart(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	writeConfig(t, cfgPath, minimalYAML)
+
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	w, _, _ := newTestWatcher(t, cfgPath, cfg)
+	stopped := make(chan struct{})
+	go func() {
+		w.Stop()
+		close(stopped)
+	}()
+
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("Stop blocked before watcher started")
+	}
+
+	w.Start()
+	w.lifecycleMu.Lock()
+	loopStarted := w.loopStarted
+	w.lifecycleMu.Unlock()
+	if loopStarted {
+		t.Fatal("Start launched watcher after Stop")
+	}
 }
 
 func TestWatcherStartIsIdempotent(t *testing.T) {
@@ -262,16 +286,10 @@ func TestWatcherStartIsIdempotent(t *testing.T) {
 	}
 
 	w, calls, applyCh := newTestWatcher(t, cfgPath, cfg)
-	baselineLoops := watcherLoopCount()
 	w.Start()
-	waitForWatcherLoop(t, baselineLoops)
+	waitForWatcherStart(t, w)
 	w.Start()
 	defer w.Stop()
-
-	time.Sleep(100 * time.Millisecond)
-	if loops := watcherLoopCount() - baselineLoops; loops != 1 {
-		t.Errorf("Start launched %d watcher loops; expected exactly 1", loops)
-	}
 
 	updatedYAML := `
 site:
@@ -290,7 +308,6 @@ api:
   port: 8080
 `
 
-	time.Sleep(100 * time.Millisecond)
 	writeConfig(t, cfgPath, updatedYAML)
 
 	select {
@@ -303,7 +320,11 @@ api:
 		t.Fatal("applier not called within 3 s after config change")
 	}
 
-	time.Sleep(1500 * time.Millisecond)
+	select {
+	case <-applyCh:
+		t.Fatal("applier called more than once after duplicate Start")
+	case <-time.After(750 * time.Millisecond):
+	}
 	if n := calls.Load(); n != 1 {
 		t.Fatalf("applier called %d times after duplicate Start; expected exactly 1", n)
 	}

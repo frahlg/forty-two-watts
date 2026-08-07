@@ -2,14 +2,19 @@ package appuplink
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"log/slog"
+	"net/http"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/srcfl/ftw/go/internal/apiauth"
 	"github.com/srcfl/ftw/go/internal/appenroll"
 	"github.com/srcfl/ftw/go/internal/appproto"
 	"github.com/srcfl/ftw/go/internal/appwire"
@@ -106,6 +111,13 @@ type rig struct {
 
 func newRig(t *testing.T, epoch int64) *rig {
 	t.Helper()
+	return newRigWith(t, epoch, newHandler)
+}
+
+// newRigWith is newRig for a test that needs its own handler — one wired to a
+// gateway it can hold open, so a revoke can land while a call is running.
+func newRigWith(t *testing.T, epoch int64, build HandlerBuilder) *rig {
+	t.Helper()
 
 	relay := newFakeRelay(epoch)
 	t.Cleanup(relay.close)
@@ -119,7 +131,7 @@ func newRig(t *testing.T, epoch int64) *rig {
 	uplink, err := New(Options{
 		Endpoint: relay.url(),
 		Enroll:   enroll,
-		Handler:  func(s appproto.Sender) (*appproto.Handler, error) { return newHandler(s) },
+		Handler:  build,
 		Logger:   slog.New(slog.DiscardHandler),
 		Now:      func() time.Time { return now },
 		Random:   func() float64 { return 0 },
@@ -187,7 +199,7 @@ func waitForBinary(t *testing.T, conn *websocket.Conn) []byte {
 func TestAPairedAppGetsASessionAndTelemetry(t *testing.T) {
 	r := newRig(t, 481234)
 
-	code, _, err := r.enroll.MintPairingCode()
+	code, _, err := r.enroll.MintPairingCode(apiauth.RoleOwner, appenroll.PairingTTL)
 	if err != nil {
 		t.Fatalf("MintPairingCode: %v", err)
 	}
@@ -272,7 +284,7 @@ func TestAnUnpairedAppGetsNoReply(t *testing.T) {
 
 func TestAWrongPairingCodeIsRefused(t *testing.T) {
 	r := newRig(t, 481234)
-	if _, _, err := r.enroll.MintPairingCode(); err != nil {
+	if _, _, err := r.enroll.MintPairingCode(apiauth.RoleOwner, appenroll.PairingTTL); err != nil {
 		t.Fatalf("MintPairingCode: %v", err)
 	}
 
@@ -374,7 +386,7 @@ func TestRotationIsNotFollowedInstantly(t *testing.T) {
 	u, err := New(Options{
 		Endpoint: relay.url(),
 		Enroll:   enroll,
-		Handler:  func(s appproto.Sender) (*appproto.Handler, error) { return newHandler(s) },
+		Handler:  newHandler,
 		Logger:   slog.New(slog.DiscardHandler),
 		Now:      func() time.Time { return now },
 		// The largest draw the jitter can make, so the assertion is about
@@ -416,7 +428,7 @@ func TestAnEpochCorrectionRetriesImmediately(t *testing.T) {
 	u, err := New(Options{
 		Endpoint: relay.url(),
 		Enroll:   enroll,
-		Handler:  func(s appproto.Sender) (*appproto.Handler, error) { return newHandler(s) },
+		Handler:  newHandler,
 		Logger:   slog.New(slog.DiscardHandler),
 		Now:      func() time.Time { return now },
 		Random:   func() float64 { return 1 },
@@ -442,7 +454,7 @@ func TestARelayOriginWithAPathIsRefused(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadOrCreate: %v", err)
 	}
-	handler := func(s appproto.Sender) (*appproto.Handler, error) { return newHandler(s) }
+	handler := HandlerBuilder(newHandler)
 
 	for _, endpoint := range []string{
 		"wss://relay.ftw.energy/r/1/abc/box",
@@ -497,7 +509,9 @@ func (stubPlans) Latest() *mpc.Plan { return nil }
 func (stubPlans) Rev() uint64       { return 0 }
 func (stubPlans) CeilingW() *int64  { return nil }
 
-func newHandler(s appproto.Sender) (*appproto.Handler, error) {
+func newHandler(
+	s appproto.Sender, caller apiauth.Caller, grants appproto.GrantReader,
+) (*appproto.Handler, error) {
 	return appproto.New(appproto.Config{
 		Clock:      appproto.SystemClock{StartedAt: time.Now(), Source: "ntp"},
 		Site:       stubSite{},
@@ -506,6 +520,8 @@ func newHandler(s appproto.Sender) (*appproto.Handler, error) {
 		Plans:      stubPlans{},
 		Codec:      codec{},
 		Sender:     s,
+		Caller:     caller,
+		Grants:     grants,
 		SrcGrid:    "meter",
 		SrcPV:      "meter",
 		SrcBattery: "meter",
@@ -515,15 +531,25 @@ func newHandler(s appproto.Sender) (*appproto.Handler, error) {
 
 func send(t *testing.T, conn *websocket.Conn, app *appClient, msgType string, bucket int, body any) {
 	t.Helper()
+	sendOn(t, conn, app, appwire.LaneControl, msgType, bucket, nil, body)
+}
+
+// sendOn is send for a message that belongs on the bulk lane, where a request
+// carries an id and a frame's length is allowed to follow its content.
+func sendOn(
+	t *testing.T, conn *websocket.Conn, app *appClient,
+	lane uint8, msgType string, bucket int, id *uint32, body any,
+) {
+	t.Helper()
 
 	raw, err := appproto.Marshal(body)
 	if err != nil {
 		t.Fatalf("marshalling %s: %v", msgType, err)
 	}
 	frame, err := appwire.EncodeFrame(appwire.Frame{
-		Lane:     appwire.LaneControl,
+		Lane:     lane,
 		Bucket:   bucket,
-		Envelope: appwire.Envelope{T: msgType, B: raw},
+		Envelope: appwire.Envelope{T: msgType, ID: id, B: raw},
 	})
 	if err != nil {
 		t.Fatalf("encoding %s: %v", msgType, err)
@@ -549,4 +575,137 @@ func receive(t *testing.T, conn *websocket.Conn, app *appClient) appwire.Frame {
 		t.Fatalf("decoding: %v", err)
 	}
 	return frame
+}
+
+// --------------------------------------------------------------------------
+// Revocation, end to end
+// --------------------------------------------------------------------------
+
+// heldAPI is a gateway that answers nothing until its request is cancelled.
+type heldAPI struct {
+	started   chan struct{}
+	cancelled chan struct{}
+	once      sync.Once
+}
+
+func (h *heldAPI) Route(*http.Request) apiauth.RouteFacts {
+	return apiauth.RouteFacts{Tier: apiauth.TierRead}
+}
+
+func (h *heldAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	h.once.Do(func() { close(h.started) })
+	<-r.Context().Done()
+	close(h.cancelled)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(`{"late":true}`))
+}
+
+// enrolOwner pairs a throwaway owner phone, so a test can then share the box
+// with a guest. The first enrolment on any box is an owner whatever its code
+// said, and the only owner cannot be revoked — both deliberate, and both in
+// the way of a test that wants a removable guest.
+func enrolOwner(t *testing.T, enroll *appenroll.Identity) {
+	t.Helper()
+	code, _, err := enroll.MintPairingCode(apiauth.RoleOwner, appenroll.PairingTTL)
+	if err != nil {
+		t.Fatalf("MintPairingCode: %v", err)
+	}
+	pub := make([]byte, 32)
+	if _, err := rand.Read(pub); err != nil {
+		t.Fatalf("rand: %v", err)
+	}
+	if _, err := enroll.Authorise(pub, code); err != nil {
+		t.Fatalf("enrolling the first owner: %v", err)
+	}
+}
+
+// Revoking a shared phone must stop the call it is making, not only the next
+// one — and it must be the same action as locking any other phone out, not a
+// second gesture with its own bugs.
+//
+// The three layers are the session dying, the enrolment epoch and the next
+// handshake failing; this is the first, over a real relay and a real Noise
+// session.
+func TestARevokedShareStopsACallAlreadyInFlight(t *testing.T) {
+	gateway := &heldAPI{started: make(chan struct{}), cancelled: make(chan struct{})}
+	r := newRigWith(t, 481234, func(
+		s appproto.Sender, caller apiauth.Caller, grants appproto.GrantReader,
+	) (*appproto.Handler, error) {
+		return appproto.New(appproto.Config{
+			Clock:      appproto.SystemClock{StartedAt: time.Now(), Source: "ntp"},
+			Site:       stubSite{},
+			Info:       stubInfo{},
+			Modes:      stubModes{},
+			Plans:      stubPlans{},
+			Codec:      codec{},
+			Sender:     s,
+			API:        gateway,
+			Caller:     caller,
+			Grants:     grants,
+			Caps:       append(appproto.DefaultCaps(), appproto.CapApiPassthrough),
+			SrcGrid:    "meter",
+			SrcPV:      "meter",
+			SrcBattery: "meter",
+			Logger:     slog.New(slog.DiscardHandler),
+		})
+	})
+
+	// The household's own phone, so the guest below is removable.
+	enrolOwner(t, r.enroll)
+
+	code, _, err := r.enroll.MintPairingCode(apiauth.RoleViewer, appenroll.InviteTTL)
+	if err != nil {
+		t.Fatalf("MintPairingCode: %v", err)
+	}
+	conn := r.dialApp(t, 481234)
+	app, err := newAppClient()
+	if err != nil {
+		t.Fatalf("newAppClient: %v", err)
+	}
+	message1, err := app.message1(r.enroll.StaticKey().Public(), code)
+	if err != nil {
+		t.Fatalf("message1: %v", err)
+	}
+	if err := conn.WriteMessage(websocket.BinaryMessage, message1); err != nil {
+		t.Fatalf("sending message 1: %v", err)
+	}
+	if err := app.readMessage2(waitForBinary(t, conn)); err != nil {
+		t.Fatalf("readMessage2: %v", err)
+	}
+
+	// A read, which is all a guest may do and which must work until the
+	// moment it is taken away.
+	id := uint32(1)
+	sendOn(t, conn, app, appwire.LaneBulk, appproto.MsgAPIReq, 16384, &id, appproto.APIReq{
+		Method: appproto.APIGet, Path: "/api/logs",
+	})
+	select {
+	case <-gateway.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the request never reached the box's API")
+	}
+
+	// What the settings page does: forget the key, then tear down whatever
+	// it is running right now.
+	key, err := r.enroll.Revoke(deviceIDOf(app.staticPublic()))
+	if err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
+	if dropped := r.uplink.DropSessionsByAppKey(key); dropped != 1 {
+		t.Fatalf("dropped %d sessions, want 1", dropped)
+	}
+
+	select {
+	case <-gateway.cancelled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the revoked phone's call was still running inside the box")
+	}
+}
+
+// deviceIDOf is how appenroll names a row: the first eight characters of the
+// base64 key. Spelled out here so the test revokes by the id a person would
+// click, not by a handle the test invented.
+func deviceIDOf(pub []byte) string {
+	return base64.RawURLEncoding.EncodeToString(pub)[:8]
 }

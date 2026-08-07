@@ -28,7 +28,7 @@ func TestContractGenIsCurrent(t *testing.T) {
 		t.Fatalf("read generated file: %v", err)
 	}
 	if string(got) != string(want) {
-		t.Fatalf("contract_gen.go is stale; run: go generate ./internal/appproto/...\n"+
+		t.Fatalf("contract_gen.go is stale; run: go generate ./internal/...\n"+
 			"(registry: %s)", filepath.Clean(registryPath))
 	}
 }
@@ -66,6 +66,10 @@ func TestFrozenFieldIdsAreFrozen(t *testing.T) {
 		7: "src_grid",
 		8: "src_pv",
 		9: "src_battery",
+		// Extended deliberately on 2026-08-05 for EV charging. The freeze
+		// covers the id's meaning, not its presence: like battery_soc,
+		// ev_w is sent only when the hardware exists.
+		10: "ev_w",
 	}
 	for fid, name := range want {
 		if got := FrozenFieldNames[fid]; got != name {

@@ -18,9 +18,15 @@ const (
 	MsgEvent            = "event"
 	MsgError            = "error"
 	MsgSessionTerminate = "session.terminate"
+	MsgPriceGet         = "price.get"
+	MsgPrice            = "price"
 	MsgHistQuery        = "hist.query"
 	MsgHistChunk        = "hist.chunk"
 	MsgHistEnd          = "hist.end"
+	MsgAPIReq           = "api.req"
+	MsgAPIHead          = "api.head"
+	MsgAPIChunk         = "api.chunk"
+	MsgAPIEnd           = "api.end"
 )
 
 // Operations a client may ask for. Each maps to a scope.
@@ -94,6 +100,15 @@ type HelloOK struct {
 	// take minutes; saying so beats a spinner that looks hung.
 	Boot *BootProgress `cbor:"boot,omitempty"`
 	Hint string        `cbor:"hint,omitempty"`
+	// Role and Scopes are what this enrolment holds. The app uses them for
+	// one thing: deciding what to draw. The app hiding a button is
+	// presentation — if the app is wrong and shows it, the box refuses it.
+	//
+	// Both are sent, and the redundancy is deliberate. Role alone would make
+	// the app read a role table it has no reason to hold; the expanded list
+	// alone would leave the app unable to say "viewer" in a sentence.
+	Role   string   `cbor:"role"`
+	Scopes []string `cbor:"scopes"`
 }
 
 // HintAppUpdate tells the app it is behind. It is a hint, not an error: the
@@ -354,6 +369,198 @@ type Plan struct {
 	Stale bool `cbor:"stale"`
 	// CeilingW is the import ceiling being defended, nil when there is none.
 	CeilingW *int64 `cbor:"ceilingW"`
+}
+
+// --------------------------------------------------------------------------
+// Prices
+// --------------------------------------------------------------------------
+
+// PriceGet asks for the price slots covering a window.
+type PriceGet struct {
+	// FromMs and ToMs are wall clock: prices are about hours a person plans
+	// around, not about box uptime.
+	FromMs int64 `cbor:"fromMs"`
+	ToMs   int64 `cbor:"toMs"`
+}
+
+// PriceSlot is one settlement slot's price.
+//
+// Minor units per kWh (öre, cents) as integers, because a price is money and
+// money in a float is a rounding argument waiting to happen. Spot is the raw
+// market price; Total is what the household actually pays, tariff and tax
+// included — the box computes it because the box holds the configuration.
+type PriceSlot struct {
+	StartMs    int64 `cbor:"startMs"`
+	DurationMs int64 `cbor:"durationMs"`
+	SpotMinor  int64 `cbor:"spotMinor"`
+	TotalMinor int64 `cbor:"totalMinor"`
+}
+
+// Price is the answer to PriceGet.
+type Price struct {
+	// Zone and Currency label the numbers. Without them the app would have to
+	// guess whether 45 is öre or cents.
+	Zone     string      `cbor:"zone"`
+	Currency string      `cbor:"currency"`
+	Slots    []PriceSlot `cbor:"slots"`
+	// Stale means these slots do not cover the window that was asked for:
+	// they begin after its start, stop short of its end, or there is a hole
+	// in the middle. Nothing in this path knows whether a refresh failed,
+	// only whether the window came back whole. Tomorrow's rates arrive in the
+	// afternoon, so a window asked for at breakfast genuinely ends early, and
+	// saying so beats drawing a cliff the market did not have.
+	Stale bool `cbor:"stale"`
+}
+
+// --------------------------------------------------------------------------
+// History
+// --------------------------------------------------------------------------
+
+// HistQuery asks for stored series over a window.
+type HistQuery struct {
+	// Series are frozen field names — grid_w, pv_w, battery_w, load_w.
+	Series []string `cbor:"series"`
+	// Res is the resolution asked for. The box may serve coarser and says so
+	// in HistEnd.ResActual.
+	Res Resolution `cbor:"res"`
+	// FromMs and ToMs are wall clock: history is a question about days people
+	// remember, not about box uptime.
+	FromMs int64 `cbor:"fromMs"`
+	ToMs   int64 `cbor:"toMs"`
+	// Have names tiles the app already caches, so an unchanged tile is never
+	// resent. That is the entire transfer model on a metered connection.
+	Have []HistTileRef `cbor:"have,omitempty"`
+	// MaxPoints caps the answer; the box widens the step to stay under it.
+	MaxPoints *int64 `cbor:"maxPoints,omitempty"`
+}
+
+// HistTileRef names a cached tile.
+type HistTileRef struct {
+	TileID string `cbor:"tileId"`
+	Etag   string `cbor:"etag"`
+}
+
+// HistChunk is one tile of column-packed samples.
+type HistChunk struct {
+	TileID  string     `cbor:"tileId"`
+	Etag    string     `cbor:"etag"`
+	Res     Resolution `cbor:"res"`
+	StartMs int64      `cbor:"startMs"`
+	// StepMs is the point spacing after aggregation. Res says which store the
+	// data came from; the two answer different questions.
+	StepMs int64 `cbor:"stepMs"`
+	// Series names the columns, in Data order.
+	Series []string `cbor:"series"`
+	// Data is int32 LE, one contiguous block per series. MISSING is
+	// math.MinInt32 — distinct from zero, which is a real reading.
+	Data []byte `cbor:"data"`
+	// Partial marks the trailing tile that is still filling. Never cached.
+	Partial bool `cbor:"partial"`
+}
+
+// HistEnd closes a query.
+type HistEnd struct {
+	ResActual Resolution `cbor:"resActual"`
+	// Gaps are ranges the box knows it cannot serve, and why. The app says
+	// "evicted" or "no data" instead of drawing a hole and guessing.
+	Gaps []HistGap `cbor:"gaps"`
+}
+
+// HistGap is one such range.
+type HistGap struct {
+	FromMs int64  `cbor:"fromMs"`
+	ToMs   int64  `cbor:"toMs"`
+	Reason string `cbor:"reason"`
+}
+
+// Gap reasons, as the app spells them.
+const (
+	GapNoData  = "no_data"
+	GapEvicted = "evicted"
+	GapBoxDown = "box_down"
+)
+
+// --------------------------------------------------------------------------
+// The box's own HTTP API, over the session
+// --------------------------------------------------------------------------
+
+// APIReq asks the box to run one request against its own HTTP API.
+//
+// All four api.* messages ride the bulk lane and carry the request id. Never
+// lane 0: every field here varies in length with what was asked and answered,
+// and lane 0's constant size is a privacy control rather than a budget.
+type APIReq struct {
+	// Method is one of the six the passthrough accepts. Anything else is
+	// refused before a handler runs.
+	Method string `cbor:"method"`
+	// Path must start "/api/". The box's static handler is unreachable on
+	// purpose: serving HTML through the session would be a second origin
+	// under another name, which docs/architecture.md rejected.
+	Path string `cbor:"path"`
+	// Query is parsed, not a raw string. Two reasons: the tier gate keys on
+	// the path, and a tier decided over a string that can carry "?" is a
+	// parser bug that becomes a privilege bug — and this way the app never
+	// handles encoding, because the box rebuilds the URL itself.
+	Query map[string]string `cbor:"query,omitempty"`
+	// Body is opaque. The box sets Content-Type: application/json when one
+	// is present, and sets nothing else.
+	Body []byte `cbor:"body,omitempty"`
+	// MaxBytes is the app's own ceiling, clamped by the box's APIMaxBytes.
+	// The app learns the real figure from APIEnd.
+	MaxBytes int64 `cbor:"maxBytes,omitempty"`
+	// StepUp says the app ran a passkey ceremony for this request. Read the
+	// note above the check in passthrough.go before believing it means more
+	// than it does.
+	StepUp bool `cbor:"stepUp,omitempty"`
+
+	// There is deliberately no headers field. There is no path by which a
+	// client byte becomes a caller claim: identity rides on the request
+	// context inside the box process, and nothing about the caller is on the
+	// wire. Adding headers later would open exactly that hole.
+}
+
+// Methods the passthrough carries.
+const (
+	APIGet    = "GET"
+	APIHead   = "HEAD"
+	APIPost   = "POST"
+	APIPut    = "PUT"
+	APIPatch  = "PATCH"
+	APIDelete = "DELETE"
+)
+
+// APIHeadMsg is the answer's status line.
+//
+// Its arrival is what tells the two error kinds apart, and it needs no body
+// inspection: if api.head arrived, the box's HTTP layer answered and Status
+// is the answer — a 403 or a 500 from a box handler is a status, never an
+// E_ code. If an error arrived on that id instead, the passthrough refused
+// and no handler ran.
+type APIHeadMsg struct {
+	Status int `cbor:"status"`
+	// Headers is a short allowlist, not the handler's full set. Everything
+	// the app needs to read an answer and nothing that describes the box's
+	// LAN.
+	Headers map[string]string `cbor:"headers"`
+	// Len is the declared length, absent when the handler did not declare
+	// one — which is the usual case in process. A guessed number here would
+	// be a progress bar that lies.
+	Len *int64 `cbor:"len"`
+}
+
+// APIChunk is one piece of the answer, in order.
+type APIChunk struct {
+	Seq  uint32 `cbor:"seq"`
+	Data []byte `cbor:"data"`
+}
+
+// APIEnd closes an answer.
+type APIEnd struct {
+	Bytes int64 `cbor:"bytes"`
+	// Truncated means the answer ran past the ceiling and stops here. The
+	// app treats it as a failure rather than showing a partial answer as a
+	// whole one.
+	Truncated bool `cbor:"truncated"`
 }
 
 // --------------------------------------------------------------------------

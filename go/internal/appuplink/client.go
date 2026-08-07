@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/srcfl/ftw/go/internal/apiauth"
 	"github.com/srcfl/ftw/go/internal/appenroll"
 	"github.com/srcfl/ftw/go/internal/appproto"
 )
@@ -112,7 +113,7 @@ type Options struct {
 	// Handler builds one message-layer handler per app session. The caller
 	// supplies it so this package needs to know nothing about telemetry,
 	// control or the planner.
-	Handler func(appproto.Sender) (*appproto.Handler, error)
+	Handler HandlerBuilder
 
 	Logger *slog.Logger
 
@@ -121,6 +122,16 @@ type Options struct {
 	Now    func() time.Time
 	Random func() float64
 }
+
+// HandlerBuilder makes one message-layer handler for one app session.
+//
+// The caller is passed in rather than looked up later, because the handshake
+// has just authenticated the device and that is the only moment the answer is
+// certain. The grant reader is passed beside it because the caller is a
+// snapshot and a revoke can land a second afterwards: the handler re-reads
+// the enrolment on every privileged request, and refuses one whose epoch has
+// moved.
+type HandlerBuilder func(appproto.Sender, apiauth.Caller, appproto.GrantReader) (*appproto.Handler, error)
 
 // Uplink maintains the connection and the sessions on it.
 type Uplink struct {
@@ -138,6 +149,24 @@ type Uplink struct {
 	epochOffset int64
 	attempt     int
 	corrections int
+
+	// liveMu guards live, the sessions of the current relay connection.
+	// Kept on the uplink so a revoke can reach into whatever connection is
+	// up right now; nil between connections, when there is nothing to drop.
+	liveMu sync.Mutex
+	live   *sessions
+}
+
+// DropSessionsByAppKey tears down every live session a revoked key holds.
+// Returns how many went; zero is normal when the phone is not connected.
+func (u *Uplink) DropSessionsByAppKey(pub []byte) int {
+	u.liveMu.Lock()
+	live := u.live
+	u.liveMu.Unlock()
+	if live == nil {
+		return 0
+	}
+	return live.dropByAppKey(pub)
 }
 
 // New builds an uplink.
@@ -301,7 +330,15 @@ func (u *Uplink) serve(ctx context.Context, conn *websocket.Conn) (int, string, 
 		write:  write,
 		log:    u.log,
 	}
-	defer live.closeAll()
+	u.liveMu.Lock()
+	u.live = live
+	u.liveMu.Unlock()
+	defer func() {
+		u.liveMu.Lock()
+		u.live = nil
+		u.liveMu.Unlock()
+		live.closeAll()
+	}()
 
 	conn.SetReadLimit(maxFrameBytes)
 	_ = conn.SetReadDeadline(time.Now().Add(readTimeout))

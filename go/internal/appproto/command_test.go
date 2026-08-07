@@ -4,6 +4,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/srcfl/ftw/go/internal/apiauth"
 	"github.com/srcfl/ftw/go/internal/control"
 )
 
@@ -362,5 +363,124 @@ func TestAStaleMeterDoesNotBlockAModeChange(t *testing.T) {
 	res := body[CmdResult](t, rec.only(t, MsgCmdResult))
 	if res.State != CmdApplied {
 		t.Fatalf("state = %q, want applied", res.State)
+	}
+}
+
+// A viewer's command is refused, and the mode controller is never called.
+//
+// The scope every operation declares had been declared since defaultOps was
+// written and read by nothing, so a guest's command was refused by nothing at
+// all. This is that check, pinned in the package the check lives in.
+//
+// It asserts on the box and not on the error. A test that only read the
+// refusal would pass just as happily with the check deleted and the error left
+// in place, which is the shape of test this project has already lost rounds
+// to.
+func TestAViewersCommandNeverReachesTheModeController(t *testing.T) {
+	h, box, rec, _ := newRig(t)
+	h.cfg.Caller = viewerCaller()
+	h.cfg.Grants = newViewerGrants()
+	subscribe(t, h, rec)
+
+	before := box.mode
+	deliver(t, h, MsgCmd, nil, cmdSetMode(string(control.ModeCharge), 7, 200_000, nil))
+
+	res := body[CmdResult](t, rec.only(t, MsgCmdResult))
+	if res.State != CmdRejected {
+		t.Fatalf("state = %q, want rejected", res.State)
+	}
+	if res.Error == nil || res.Error.Code != ErrScopeDenied {
+		t.Fatalf("refusal = %+v, want %s", res.Error, ErrScopeDenied)
+	}
+	if res.Error.Args["needScope"] != ScopeModeWrite {
+		t.Fatalf("refusal args = %v, want the scope it needs", res.Error.Args)
+	}
+
+	if box.setModeCalls != 0 {
+		t.Fatalf("the mode controller was called %d times by a viewer", box.setModeCalls)
+	}
+	if box.mode != before {
+		t.Fatalf("a viewer moved the box to %q", box.mode)
+	}
+	if rec.has(MsgCmdAck) {
+		t.Fatal("a refused command was acked, so the app was told a lease exists")
+	}
+}
+
+// The same command from the phone that paired the box, so the test above
+// cannot pass on a handler that refuses everything.
+func TestAnOwnersCommandStillReachesTheModeController(t *testing.T) {
+	h, box, rec, _ := newRig(t)
+	subscribe(t, h, rec)
+
+	deliver(t, h, MsgCmd, nil, cmdSetMode(string(control.ModeCharge), 7, 200_000, nil))
+
+	if res := body[CmdResult](t, rec.only(t, MsgCmdResult)); res.State != CmdApplied {
+		t.Fatalf("state = %q (%+v), want applied", res.State, res.Error)
+	}
+	if box.setModeCalls != 1 {
+		t.Fatalf("the mode controller was called %d times, want once", box.setModeCalls)
+	}
+}
+
+// A grant that changed while the phone was connected is obeyed as it now
+// reads, on the command lane as well as the HTTP one.
+//
+// The handshake said owner and the app still believes it — the buttons it drew
+// from hello_ok are wrong until it reconnects, and that is the right way
+// round: the app drawing a button is presentation and the box refusing it is
+// the enforcement. Without this, onCmd could go back to trusting the caller
+// its handshake built and no test would notice.
+func TestADemotedOwnersCommandNeverReachesTheModeController(t *testing.T) {
+	h, box, rec, _ := newRig(t)
+	grants := h.cfg.Grants.(*fakeGrants)
+	subscribe(t, h, rec)
+
+	grants.setRole(apiauth.RoleViewer)
+	deliver(t, h, MsgCmd, nil, cmdSetMode(string(control.ModeCharge), 7, 200_000, nil))
+
+	res := body[CmdResult](t, rec.only(t, MsgCmdResult))
+	if res.State != CmdRejected {
+		t.Fatalf("state = %q, want rejected", res.State)
+	}
+	if res.Error == nil || res.Error.Code != ErrScopeDenied {
+		t.Fatalf("refusal = %+v, want %s", res.Error, ErrScopeDenied)
+	}
+	if res.Error.Args["role"] != apiauth.RoleViewer {
+		t.Fatalf("refusal args = %v, want the role on file now", res.Error.Args)
+	}
+	if box.setModeCalls != 0 {
+		t.Fatalf("a demoted owner called the mode controller %d times", box.setModeCalls)
+	}
+	// A demotion is not a revoke. Ending the session here would tell its
+	// holder their access was withdrawn, which is not what happened.
+	if rec.has(MsgSessionTerminate) {
+		t.Fatal("a demotion ended the session")
+	}
+}
+
+// A phone locked out mid-session gets no last command through on the strength
+// of what its handshake said.
+func TestARevokedDevicesCommandIsRefusedAndTheSessionEnds(t *testing.T) {
+	h, box, rec, _ := newRig(t)
+	grants := h.cfg.Grants.(*fakeGrants)
+	subscribe(t, h, rec)
+
+	grants.revoke()
+	deliver(t, h, MsgCmd, nil, cmdSetMode(string(control.ModeCharge), 7, 200_000, nil))
+
+	res := body[CmdResult](t, rec.only(t, MsgCmdResult))
+	if res.State != CmdRejected {
+		t.Fatalf("state = %q, want rejected", res.State)
+	}
+	if res.Error == nil || res.Error.Code != ErrGrantRevoked {
+		t.Fatalf("refusal = %+v, want %s", res.Error, ErrGrantRevoked)
+	}
+	if box.setModeCalls != 0 {
+		t.Fatalf("a revoked phone called the mode controller %d times", box.setModeCalls)
+	}
+	term := body[SessionTerminate](t, rec.only(t, MsgSessionTerminate))
+	if term.Reason != TerminateRevoked {
+		t.Fatalf("termination reason %q, want %q", term.Reason, TerminateRevoked)
 	}
 }

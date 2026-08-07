@@ -1,11 +1,13 @@
 package appuplink
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"log/slog"
 	"sync"
 
+	"github.com/srcfl/ftw/go/internal/apiauth"
 	"github.com/srcfl/ftw/go/internal/appenroll"
 	"github.com/srcfl/ftw/go/internal/appproto"
 	"github.com/srcfl/ftw/go/internal/appwire"
@@ -30,6 +32,18 @@ type session struct {
 	// appStatic is the app's static key as the handshake authenticated it,
 	// never as it was claimed. Logged as a prefix and nothing more.
 	appStatic []byte
+}
+
+// close ends one session for good.
+//
+// Both halves matter and neither is enough alone: closing the transport stops
+// anything further being encrypted onto the socket, and closing the handler
+// cancels work already running inside the box — a passthrough request in
+// flight, which must not be allowed to finish for a phone that has just been
+// locked out.
+func (s *session) close() {
+	s.handler.Close()
+	s.transport.Close()
 }
 
 // sender encrypts one session's frames onto the shared socket.
@@ -57,7 +71,7 @@ func (s sender) Send(frame []byte) error {
 type sessions struct {
 	mu    sync.Mutex
 	live  []*session
-	build func(appproto.Sender) (*appproto.Handler, error)
+	build HandlerBuilder
 
 	enroll *appenroll.Identity
 	static appwire.KeyPair
@@ -146,12 +160,29 @@ func (s *sessions) open(message []byte) error {
 	// The payload is the pairing code from the QR. A device that has already
 	// paired presents nothing and is recognised by its static key, which is
 	// what makes the code single-use without breaking reconnects.
-	if err := s.enroll.Authorise(noise.RemoteStatic, payload); err != nil {
+	grant, err := s.enroll.Authorise(noise.RemoteStatic, payload)
+	if err != nil {
 		transport.Close()
 		return err
 	}
 
-	handler, err := s.build(sender{transport: transport, write: s.write})
+	// The grant becomes a caller here, and this is the only place it is
+	// built. Everything the box later decides about this phone — which
+	// commands it may send, which routes it may reach — is decided from this
+	// value, and nothing the phone sends can add to it.
+	caller := apiauth.Caller{
+		Subject: apiauth.KindApp + ":" + grant.DeviceID,
+		Kind:    apiauth.KindApp,
+		Role:    grant.Role,
+		Scopes:  appproto.ScopesForRole(grant.Role),
+		Epoch:   grant.Epoch,
+	}
+
+	handler, err := s.build(
+		sender{transport: transport, write: s.write},
+		caller,
+		liveGrant{enroll: s.enroll, deviceID: grant.DeviceID},
+	)
 	if err != nil {
 		transport.Close()
 		return err
@@ -182,9 +213,34 @@ func (s *sessions) admit(sess *session) {
 
 	s.live = append(s.live, sess)
 	for len(s.live) > MaxSessions {
-		s.live[0].transport.Close()
+		s.live[0].close()
 		s.live = s.live[1:]
 	}
+}
+
+// dropByAppKey terminates and forgets every session a revoked key is
+// running. Termination is best-effort — the socket may already be gone —
+// but the forget is not: a frame from a dropped session no longer
+// authenticates against anything.
+func (s *sessions) dropByAppKey(pub []byte) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	dropped := 0
+	kept := s.live[:0]
+	for _, live := range s.live {
+		if bytes.Equal(live.appStatic, pub) {
+			// The reason the app already knows how to say: its terminated
+			// screen reads "your access was withdrawn by its owner".
+			_ = live.handler.Terminate(appproto.TerminateRevoked)
+			live.close()
+			dropped++
+			continue
+		}
+		kept = append(kept, live)
+	}
+	s.live = kept
+	return dropped
 }
 
 func (s *sessions) drop(sess *session) {
@@ -193,7 +249,7 @@ func (s *sessions) drop(sess *session) {
 
 	for i, live := range s.live {
 		if live == sess {
-			live.transport.Close()
+			live.close()
 			s.live = append(s.live[:i], s.live[i+1:]...)
 			return
 		}
@@ -210,8 +266,26 @@ func (s *sessions) closeAll() {
 	s.mu.Unlock()
 
 	for _, sess := range live {
-		sess.transport.Close()
+		sess.close()
 	}
+}
+
+// liveGrant is one session's view of its own enrolment, as it stands now.
+//
+// The device id and not the key, because that is what the settings page
+// revokes by and what an audit line names — one identifier for the phone
+// across every place the box talks about it.
+type liveGrant struct {
+	enroll   *appenroll.Identity
+	deviceID string
+}
+
+func (g liveGrant) Grant() (string, uint64, bool) {
+	grant, ok := g.enroll.GrantFor(g.deviceID)
+	if !ok {
+		return "", 0, false
+	}
+	return grant.Role, grant.Epoch, true
 }
 
 func (s *sessions) count() int {
