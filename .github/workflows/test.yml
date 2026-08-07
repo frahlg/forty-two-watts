@@ -425,8 +425,14 @@ jobs:
       - name: Which copy of the app to compare against
         id: pair
         env:
-          BODY: ${{ github.event.pull_request.body }}
+          # Read live rather than from github.event: that payload is a snapshot
+          # taken when the run was queued, so a pair declared after the last
+          # push would be invisible and the job would compare against the wrong
+          # branch while looking like it had worked.
+          GH_TOKEN: ${{ github.token }}
         run: |
+          BODY=$(gh pr view "${{ github.event.pull_request.number }}" \
+                   --repo "${{ github.repository }}" --json body -q .body)
           REF=$(printf '%s\n' "$BODY" | sed -n 's|^Contract-pair: *srcfl/ftw-webapp@||p' | head -1 | tr -d '\r')
           echo "ref=${REF:-main}" >> "$GITHUB_OUTPUT"
           echo "comparing against srcfl/ftw-webapp@${REF:-main}"
