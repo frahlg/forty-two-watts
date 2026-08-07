@@ -1804,6 +1804,49 @@ footer {
   color: var(--text-dim);
 }
 
+/* ---- Fleet ping settings tab ---- */
+/* What the message cannot hide is a second thought, not the tail of the first
+   one. .hint carries no margin, so two of them in a row set as one slab of
+   text — and a slab is what somebody deciding about this feature skips. */
+.fleet-ping-limits {
+  margin-top: 8px;
+}
+/* The payload table. Label left, value right, and the value wraps: a site
+   with several driver types produces a long line, and it must not widen the
+   settings modal past a phone screen. */
+.fleet-ping-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.82rem;
+}
+.fleet-ping-label {
+  flex: 0 0 14ch;
+  color: var(--text-dim);
+}
+.fleet-ping-value {
+  flex: 1 1 12ch;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text);
+}
+/* The literal message. Scrolls inside itself rather than pushing the modal
+   sideways. */
+.fleet-ping-json {
+  margin: 10px 0 0;
+  padding: 8px;
+  overflow-x: auto;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-family: var(--mono, monospace);
+  font-size: 0.75rem;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+
 /* Collapse the generic two-column settings rows to a single column on phones,
    so inputs aren't squeezed to unusable widths. */
 @media (max-width: 560px) {

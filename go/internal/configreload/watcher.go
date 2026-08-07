@@ -28,10 +28,15 @@ type Watcher struct {
 	ctrl    *control.State
 	applier Applier
 
-	fsw       *fsnotify.Watcher
-	stop      chan struct{}
-	startOnce sync.Once
-	stopOnce  sync.Once
+	fsw         *fsnotify.Watcher
+	stop        chan struct{}
+	started     chan struct{}
+	done        chan struct{}
+	lifecycleMu sync.Mutex
+	loopStarted bool
+	stopped     bool
+	startOnce   sync.Once
+	stopOnce    sync.Once
 }
 
 // New creates a watcher. `applier` is called with (new, old) after a
@@ -58,22 +63,44 @@ func New(
 		path: path, cfgMu: cfgMu, cfg: cfg,
 		ctrlMu: ctrlMu, ctrl: ctrl,
 		applier: applier, fsw: fsw,
-		stop: make(chan struct{}),
+		stop:    make(chan struct{}),
+		started: make(chan struct{}),
+		done:    make(chan struct{}),
 	}, nil
 }
 
 // Start runs the watcher loop (goroutine).
 func (w *Watcher) Start() {
 	w.startOnce.Do(func() {
-		go w.loop()
+		w.lifecycleMu.Lock()
+		if w.stopped {
+			w.lifecycleMu.Unlock()
+			return
+		}
+		w.loopStarted = true
+		w.lifecycleMu.Unlock()
+
+		go func() {
+			defer close(w.done)
+			w.loop()
+		}()
 	})
 }
 
-// Stop terminates the watcher. It is safe to call multiple times.
+// Stop terminates the watcher and waits for its goroutine to exit. It is safe
+// to call multiple times, including before Start.
 func (w *Watcher) Stop() {
 	w.stopOnce.Do(func() {
+		w.lifecycleMu.Lock()
+		w.stopped = true
+		loopStarted := w.loopStarted
+		w.lifecycleMu.Unlock()
+
 		close(w.stop)
 		w.fsw.Close()
+		if loopStarted {
+			<-w.done
+		}
 	})
 }
 
@@ -82,6 +109,7 @@ func (w *Watcher) loop() {
 	debounce := time.NewTimer(time.Hour)
 	debounce.Stop()
 	target := filepath.Base(w.path)
+	close(w.started)
 	for {
 		select {
 		case <-w.stop:

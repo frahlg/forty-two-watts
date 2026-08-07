@@ -51,12 +51,18 @@ dev-data/
 
 # State DB
 *.db
+*.db.clean
+*.db.snapshot
+# SnapshotState writes here first and removes it once the snapshot is
+# promoted; a run interrupted in between leaves the file behind.
+*.db.snapshot.tmp
 *.db-journal
 *.db-wal
 *.db-shm
 bin/
 artifacts/
 .cache/
+/go/driver-repository/cache/
 
 # Changesets / Node — devtool surface only. package.json + the
 # committed package-lock.json are tracked (reproducible installs in

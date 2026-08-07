@@ -1,0 +1,548 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"log/slog"
+	"sync"
+	"time"
+
+	"github.com/srcfl/ftw/go/internal/api"
+	"github.com/srcfl/ftw/go/internal/appenroll"
+	"github.com/srcfl/ftw/go/internal/appproto"
+	"github.com/srcfl/ftw/go/internal/appuplink"
+	"github.com/srcfl/ftw/go/internal/config"
+	"github.com/srcfl/ftw/go/internal/control"
+	"github.com/srcfl/ftw/go/internal/mpc"
+	"github.com/srcfl/ftw/go/internal/prices"
+	"github.com/srcfl/ftw/go/internal/state"
+	"github.com/srcfl/ftw/go/internal/telemetry"
+)
+
+// The FTW app's uplink, wired to the box.
+//
+// Everything in this file is adapters: appproto asks narrow questions and this
+// answers them from telemetry, control and the planner. No safety decision is
+// made here. The dispatch gate stays in control, the mode change goes through
+// control.ApplyMode, and the planner's output is never handed to hardware from
+// this path.
+
+// processStarted anchors every age the app is shown.
+//
+// Initialised at load, not when the uplink is wired, because a driver that
+// last answered during startup would otherwise report a negative age — which
+// appproto reads as "has never answered", and the freshness display is the one
+// thing this protocol exists to get right.
+var processStarted = time.Now()
+
+// appSite is the box's live state as the message layer wants it.
+type appSite struct {
+	tel      *telemetry.Store
+	ctrl     *control.State
+	ctrlMu   *sync.Mutex
+	revision *control.Revision
+	started  time.Time
+	// siteMeterStale is how long a site-meter reading stays current. It is
+	// the watchdog timeout, so the app's freshness claim and the box's own
+	// dispatch gate are answering from the same number.
+	siteMeterStale time.Duration
+}
+
+func (a *appSite) Snapshot() appproto.Snapshot {
+	a.ctrlMu.Lock()
+	mode := a.ctrl.Mode
+	siteMeterDriver := a.ctrl.SiteMeterDriver
+	rev := a.revision.Observe(a.ctrl)
+	a.ctrlMu.Unlock()
+
+	snap := appproto.Snapshot{Mode: mode, ControlRev: rev}
+
+	uptimeMs := time.Since(a.started).Milliseconds()
+	seen := map[string]bool{}
+	addSource := func(driver string) {
+		if driver == "" || seen[driver] {
+			return
+		}
+		seen[driver] = true
+
+		src := appproto.Source{ID: driver, Kind: "driver", Name: driver, LastOkUptimeMs: -1}
+		health := a.tel.DriverHealth(driver)
+		if health == nil {
+			snap.Sources = append(snap.Sources, src)
+			return
+		}
+		stale := a.siteMeterStale
+		if health.WatchdogTimeoutOverride > 0 {
+			// A cloud-polled inverter and a P1 meter are not comparable, so
+			// the driver's own cadence decides when its reading goes stale
+			// rather than one number for the whole site.
+			stale = health.WatchdogTimeoutOverride
+		}
+		src.StaleAfterMs = stale.Milliseconds()
+		src.Offline = !health.IsOnline()
+		if health.LastSuccess != nil {
+			src.LastOkUptimeMs = uptimeMs - time.Since(*health.LastSuccess).Milliseconds()
+		}
+		snap.Sources = append(snap.Sources, src)
+	}
+
+	if siteMeterDriver != "" {
+		addSource(siteMeterDriver)
+		if health := a.tel.DriverHealth(siteMeterDriver); health != nil && health.IsOnline() {
+			if reading := a.tel.Get(siteMeterDriver, telemetry.DerMeter); reading != nil {
+				snap.GridW = reading.SmoothedW
+			}
+		} else {
+			// The invariant is that stale site-meter data stops dispatch.
+			// Saying which source is responsible is what lets the app tell
+			// the user why nothing is happening instead of looking broken.
+			snap.DispatchBlockedBy = append(snap.DispatchBlockedBy, siteMeterDriver)
+		}
+	}
+
+	for _, reading := range a.tel.ReadingsByType(telemetry.DerPV) {
+		addSource(reading.Driver)
+		if health := a.tel.DriverHealth(reading.Driver); health != nil && health.IsOnline() {
+			// Site convention: positive watts flow into the site, so PV is
+			// negative while generating. No sign conversion happens here —
+			// the driver boundary already did it, and doing it twice is how
+			// a solar panel starts consuming power.
+			snap.PVW += reading.SmoothedW
+		}
+	}
+
+	var socTotal float64
+	var socCount int
+	for _, reading := range a.tel.ReadingsByType(telemetry.DerBattery) {
+		addSource(reading.Driver)
+		health := a.tel.DriverHealth(reading.Driver)
+		if health == nil || !health.IsOnline() {
+			continue
+		}
+		snap.BatteryW += reading.SmoothedW
+		if reading.SoC != nil {
+			socTotal += *reading.SoC
+			socCount++
+		}
+	}
+	if socCount > 0 {
+		snap.BatterySoCKnown = true
+		// Already a fraction in [0,1] — telemetry stores battery SoC that
+		// way, and the wire carries permille, converted at the edge of
+		// appproto. Scaling here would put the battery at 5 % of its charge.
+		snap.BatterySoC = socTotal / float64(socCount)
+	}
+
+	// EV chargers. Known means the site has one at all — an idle charger
+	// is a real 0 W reading, a site without one sends no field 10 and the
+	// app draws no EV node. Positive while charging: a charger consumes
+	// like any other load.
+	for _, reading := range a.tel.ReadingsByType(telemetry.DerEV) {
+		addSource(reading.Driver)
+		snap.EVWKnown = true
+		if health := a.tel.DriverHealth(reading.Driver); health != nil && health.IsOnline() {
+			snap.EVW += reading.SmoothedW
+		}
+	}
+
+	// grid = load + battery + pv, all site-signed. Rearranged, not
+	// re-derived: a second formula here would be a second thing to keep in
+	// step with docs/site-convention.md.
+	snap.LoadW = snap.GridW - snap.BatteryW - snap.PVW -
+		a.tel.SumOnlineEVW() - a.tel.SumOnlineV2XW()
+
+	return snap
+}
+
+// appBoxInfo is what the box calls itself.
+type appBoxInfo struct {
+	id    string
+	build string
+	tz    string
+}
+
+func (a appBoxInfo) Identity() appproto.Identity {
+	return appproto.Identity{ID: a.id, Build: a.build, TZ: a.tz}
+}
+
+// Boot returns nil because by the time the uplink is running the box can serve
+// telemetry. A box still starting has not reached this code, so claiming
+// otherwise would be a spinner that never resolves.
+func (a appBoxInfo) Boot() *appproto.BootProgress { return nil }
+
+// appModes applies a mode and reads it back.
+//
+// SetMode and ObservedMode are deliberately different questions: the first is
+// what was asked for, the second is what the box is running. cmd.result
+// reports the read-back, so a mode the box refused never appears as applied.
+type appModes struct {
+	ctrl   *control.State
+	ctrlMu *sync.Mutex
+	state  *state.Store
+	mpc    *mpc.Service
+}
+
+func (a *appModes) SetMode(ctx context.Context, m control.Mode) error {
+	a.ctrlMu.Lock()
+	err := a.ctrl.ApplyMode(m)
+	a.ctrlMu.Unlock()
+	if err != nil {
+		return err
+	}
+
+	if a.state != nil {
+		if err := a.state.SaveConfig("mode", string(m)); err != nil {
+			slog.Warn("app uplink could not persist the mode", "err", err)
+		}
+	}
+	if mm, ok := control.PlannerMPCMode(m); ok && a.mpc != nil {
+		// Forced replan, off this goroutine. mpc.SetMode replans before it
+		// returns, and the Python optimizer can take longer than the app
+		// waits for a command result — so a mode change that had already
+		// been applied and read back was reported "unconfirmed" purely
+		// because the planner was slow. The mode itself is already set and
+		// persisted above; the plan push that follows the replan reaches
+		// the app on its own.
+		//
+		// WithoutCancel: the replan belongs to the mode change, not to the
+		// session that asked for it. A phone that drops its socket right
+		// after tapping must not abort the planner mid-run.
+		go a.mpc.SetMode(context.WithoutCancel(ctx), mm)
+	}
+	return nil
+}
+
+func (a *appModes) ObservedMode() (control.Mode, bool) {
+	a.ctrlMu.Lock()
+	defer a.ctrlMu.Unlock()
+	return a.ctrl.Mode, true
+}
+
+// appHistory serves the app's history tiles from the energy ledger.
+//
+// The ledger stores energy per flow per bucket; the wire wants mean power per
+// signed series. The mapping below is the site convention and nothing else:
+// positive watts flow into the site, so import minus export is the grid, and
+// PV is generation negated. W = Wh × 3 600 000 / bucket, no other arithmetic.
+type appHistory struct {
+	st *state.Store
+}
+
+func (a *appHistory) Series(
+	_ context.Context, name string, stepMs, fromMs, toMs int64,
+) ([]appproto.HistorySample, error) {
+	type term struct {
+		flow state.EnergyFlow
+		sign float64
+	}
+	var terms []term
+	switch name {
+	case "grid_w":
+		terms = []term{{state.FlowGridImport, 1}, {state.FlowGridExport, -1}}
+	case "pv_w":
+		terms = []term{{state.FlowPVGeneration, -1}}
+	case "battery_w":
+		terms = []term{{state.FlowBatteryCharge, 1}, {state.FlowBatteryDischarge, -1}}
+	case "load_w":
+		terms = []term{{state.FlowConsumerUse, 1}}
+	default:
+		// A series this box does not keep has no data. That is already a
+		// thing the wire can say, and it beats refusing the whole query
+		// because one series in it was unknown.
+		return nil, nil
+	}
+
+	points, _, err := a.st.LoadEnergyHistory(state.EnergyHistoryQuery{
+		SinceMS:  fromMs,
+		UntilMS:  toMs,
+		BucketMS: stepMs,
+		// One tile is at most 168 buckets; the ledger's own cap is 2000.
+		Limit: 2000,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	// A bucket exists on the wire only if some term reported it. A bucket
+	// where nothing was metered stays absent and becomes MISSING, which is
+	// the honest answer — zero would claim the house used no power at all.
+	byStart := map[int64]float64{}
+	for _, p := range points {
+		for _, t := range terms {
+			if p.Flow != t.flow {
+				continue
+			}
+			byStart[p.BucketStartMS] += t.sign * p.EnergyWh * 3_600_000 / float64(p.BucketLenMS)
+		}
+	}
+
+	out := make([]appproto.HistorySample, 0, len(byStart))
+	for start, w := range byStart {
+		out = append(out, appproto.HistorySample{StartMs: start, W: w})
+	}
+	return out, nil
+}
+
+// appPrices serves the app's price window from the price service.
+//
+// Nothing is rounded here. The service holds minor units per kWh as floats and
+// appproto turns them into integers at the wire, once — two roundings would be
+// two answers to what 18.7 öre costs.
+type appPrices struct {
+	svc *prices.Service
+}
+
+// maxPriceSlotMin is the longest slot any provider publishes — the ENTSOE
+// reader refuses anything longer. It is how far back a query has to look to
+// catch the slot already running when the window opens.
+const maxPriceSlotMin = 120
+
+func (a *appPrices) Zone() string     { return a.svc.Zone }
+func (a *appPrices) Currency() string { return a.svc.Currency }
+
+func (a *appPrices) Slots(_ context.Context, fromMs, toMs int64) ([]appproto.PricePoint, error) {
+	// The store selects on slot start, inclusive at both ends. Widening the
+	// lower bound by one slot catches the slot in progress at fromMs — the
+	// price right now, which a window starting at "now" would otherwise miss —
+	// and toMs-1 keeps the upper end half-open, so a slot beginning exactly
+	// where this window closes belongs to the next one.
+	lookbackMs := (maxPriceSlotMin * time.Minute).Milliseconds()
+	rows, err := a.svc.Load(fromMs-lookbackMs, toMs-1)
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]appproto.PricePoint, 0, len(rows))
+	for _, r := range rows {
+		if r.SlotLenMin <= 0 {
+			// A slot with no length is a row nobody can draw or price.
+			continue
+		}
+		slotEnd := time.UnixMilli(r.SlotTsMs).Add(time.Duration(r.SlotLenMin) * time.Minute)
+		if slotEnd.UnixMilli() <= fromMs {
+			continue // the lookback overshot: this slot ended before the window
+		}
+		out = append(out, appproto.PricePoint{
+			StartMs:    r.SlotTsMs,
+			LenMin:     r.SlotLenMin,
+			SpotMinor:  r.SpotOreKwh,
+			TotalMinor: r.TotalOreKwh,
+		})
+	}
+	return out, nil
+}
+
+// appPlans hands over the planner's current output.
+type appPlans struct {
+	planner *mpc.Service
+	ctrl    *control.State
+	ctrlMu  *sync.Mutex
+	rev     uint64
+	revMu   sync.Mutex
+	lastGen int64
+}
+
+func (a *appPlans) Latest() *mpc.Plan {
+	if a.planner == nil {
+		return nil
+	}
+	return a.planner.Latest()
+}
+
+// Rev moves when the planner replans, so the app can tell a fresh plan from a
+// redelivery of the same one. Derived from the plan's own timestamp because
+// mpc has no revision of its own and inventing one there would be a field two
+// packages had to keep in step.
+func (a *appPlans) Rev() uint64 {
+	plan := a.Latest()
+	if plan == nil {
+		return 0
+	}
+
+	a.revMu.Lock()
+	defer a.revMu.Unlock()
+	if plan.GeneratedAtMs != a.lastGen {
+		a.lastGen = plan.GeneratedAtMs
+		a.rev++
+	}
+	return a.rev
+}
+
+func (a *appPlans) CeilingW() *int64 {
+	a.ctrlMu.Lock()
+	defer a.ctrlMu.Unlock()
+	if a.ctrl.PeakImportCeilingW <= 0 {
+		return nil
+	}
+	ceiling := int64(a.ctrl.PeakImportCeilingW)
+	return &ceiling
+}
+
+// startAppLink connects the box to the app relay, if the site asked for it.
+//
+// It returns the enrollment identity whether or not the uplink runs, because
+// the QR code on the lid is minted from it and a box with the link switched
+// off still has to be pairable before anyone can switch it on.
+func startAppLink(
+	ctx context.Context,
+	cfg *config.Config,
+	identityKeyPath string,
+	boxID string,
+	build string,
+	st *state.Store,
+	tel *telemetry.Store,
+	planner *mpc.Service,
+	priceSvc *prices.Service,
+	ctrl *control.State,
+	ctrlMu *sync.Mutex,
+	revision *control.Revision,
+	siteMeterStale time.Duration,
+) (*appenroll.Identity, *appuplink.Uplink, bool, error) {
+	enabled := cfg != nil && cfg.AppLink != nil && cfg.AppLink.Enabled
+
+	enroll, err := appenroll.LoadOrCreate(identityKeyPath)
+	if err != nil {
+		return nil, nil, enabled, err
+	}
+	if !enabled {
+		return enroll, nil, false, nil
+	}
+
+	// The box's own zone, read from the host. The app renders plan slot times
+	// in it, so a box in Stockholm and a phone abroad still agree on when
+	// tonight's cheap hours are.
+	tz := time.Now().Location().String()
+
+	site := &appSite{
+		tel: tel, ctrl: ctrl, ctrlMu: ctrlMu, revision: revision,
+		started: processStarted, siteMeterStale: siteMeterStale,
+	}
+	info := appBoxInfo{id: boxID, build: build, tz: tz}
+	modes := &appModes{ctrl: ctrl, ctrlMu: ctrlMu, state: st, mpc: planner}
+	plans := &appPlans{planner: planner, ctrl: ctrl, ctrlMu: ctrlMu}
+
+	// History rides on the energy ledger, so it exists exactly when state
+	// does. The capability is advertised in the same breath: a capability the
+	// box advertises but cannot answer is worse than one it never mentions.
+	var history appproto.HistoryProvider
+	caps := appproto.DefaultCaps()
+	if st != nil {
+		history = &appHistory{st: st}
+		caps = append(caps,
+			appproto.CapHistory5m,
+			appproto.CapHistory1h,
+			appproto.CapHistoryEtag,
+		)
+	}
+
+	// Prices ride on the price service, and only when it has a zone and a
+	// store to have fetched into. With either missing there is nothing to
+	// serve, so the capability stays unsaid rather than advertised and empty.
+	var priceReader appproto.PriceReader
+	if priceSvc != nil && priceSvc.Zone != "" && priceSvc.Store != nil {
+		priceReader = &appPrices{svc: priceSvc}
+		caps = append(caps, appproto.CapPriceSpot)
+	}
+
+	uplink, err := appuplink.New(appuplink.Options{
+		Enroll: enroll,
+		Handler: func(sender appproto.Sender) (*appproto.Handler, error) {
+			// One handler per app session. They share the ports above, which
+			// are read-only apart from the mode, and the mode goes through
+			// control's own validation.
+			return appproto.New(appproto.Config{
+				Clock:   appproto.SystemClock{StartedAt: site.started, Source: "ntp"},
+				Site:    site,
+				Info:    info,
+				Modes:   modes,
+				Plans:   plans,
+				History: history,
+				Prices:  priceReader,
+				Caps:    caps,
+				Codec:   appuplink.Codec(),
+				Sender:  sender,
+				// The three frozen power fields point at the source whose
+				// freshness governs them. The site meter is the only one the
+				// box can name without knowing the site's hardware.
+				SrcGrid:    siteMeterName(ctrl, ctrlMu),
+				SrcPV:      siteMeterName(ctrl, ctrlMu),
+				SrcBattery: siteMeterName(ctrl, ctrlMu),
+			})
+		},
+	})
+	if err != nil {
+		return enroll, nil, enabled, err
+	}
+
+	go func() {
+		if err := uplink.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			slog.Warn("app uplink stopped")
+		}
+	}()
+
+	return enroll, uplink, true, nil
+}
+
+func siteMeterName(ctrl *control.State, ctrlMu *sync.Mutex) string {
+	ctrlMu.Lock()
+	defer ctrlMu.Unlock()
+	return ctrl.SiteMeterDriver
+}
+
+// appLinkAPI is the API's view of enrollment: the identity plus, when the
+// uplink runs, the ability to tear a revoked phone's sessions down at once
+// rather than at its next reconnect.
+type appLinkAPI struct {
+	enroll *appenroll.Identity
+	uplink *appuplink.Uplink
+}
+
+func (a *appLinkAPI) MintPairingCode() ([]byte, time.Time, error) {
+	return a.enroll.MintPairingCode()
+}
+
+func (a *appLinkAPI) EnrollmentURL(code []byte, lanHint string) (string, error) {
+	return a.enroll.EnrollmentURL(code, lanHint)
+}
+
+func (a *appLinkAPI) AuthorisedCount() int { return a.enroll.AuthorisedCount() }
+
+func (a *appLinkAPI) Devices() []api.AppDevice {
+	infos := a.enroll.Devices()
+	out := make([]api.AppDevice, 0, len(infos))
+	for _, d := range infos {
+		out = append(out, api.AppDevice{ID: d.ID, AddedAtMs: d.AddedAtMs, LastSeenMs: d.LastSeenMs})
+	}
+	return out
+}
+
+func (a *appLinkAPI) RevokeDevice(id string) error {
+	key, err := a.enroll.Revoke(id)
+	if err != nil {
+		if errors.Is(err, appenroll.ErrUnknownDevice) {
+			return api.ErrUnknownAppDevice
+		}
+		return err
+	}
+	// Forgetting the key locks the next handshake out; dropping the live
+	// sessions locks out the one running now. Both, or "remove" quietly
+	// means "remove within the hour".
+	if a.uplink != nil && key != nil {
+		a.uplink.DropSessionsByAppKey(key)
+	}
+	return nil
+}
+
+// appEnrollForAPI hands the enroller to the API, or nothing.
+//
+// A typed nil in an interface is not nil, so a disabled app link would give
+// the pairing routes something that passes their `== nil` check and then
+// panics on first use. Returning an untyped nil is the difference between
+// "pairing is off" and a crash on the one screen someone reaches for when
+// nothing else works.
+func appEnrollForAPI(enroll *appenroll.Identity, uplink *appuplink.Uplink, enabled bool) api.AppEnroller {
+	if !enabled || enroll == nil {
+		return nil
+	}
+	return &appLinkAPI{enroll: enroll, uplink: uplink}
+}
