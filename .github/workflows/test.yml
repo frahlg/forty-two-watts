@@ -416,12 +416,27 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # A change that lands in both repositories at once cannot be compared
+      # against the other one's default branch: the counterpart is not there
+      # yet, and each side would wait for the other forever. A pull request
+      # that names where its pair lives is compared against that instead.
+      # Everything else — a stray edit, a rename, a copy someone forgot — still
+      # meets the default branch, which is the case this job exists for.
+      - name: Which copy of the app to compare against
+        id: pair
+        env:
+          BODY: ${{ github.event.pull_request.body }}
+        run: |
+          REF=$(printf '%s\n' "$BODY" | sed -n 's|^Contract-pair: *srcfl/ftw-webapp@||p' | head -1 | tr -d '\r')
+          echo "ref=${REF:-main}" >> "$GITHUB_OUTPUT"
+          echo "comparing against srcfl/ftw-webapp@${REF:-main}"
+
       # One file, not the app's whole history.
       - name: Check out the app
         uses: actions/checkout@v5
         with:
           repository: srcfl/ftw-webapp
-          ref: main
+          ref: ${{ steps.pair.outputs.ref }}
           path: .app
           token: ${{ secrets.FTW_CONTRACT_TOKEN || github.token }}
           sparse-checkout: contract/registry.yaml
