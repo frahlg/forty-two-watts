@@ -33,6 +33,8 @@ type linuxBindingStorage struct {
 	root       *os.Root
 	ownerUID   uint32
 	ops        bindingFileOps
+	// transactionLockHeld means Lock owns the directory lock until Close.
+	transactionLockHeld bool
 }
 
 func defaultBindingFileOps() bindingFileOps {
@@ -165,15 +167,29 @@ func openBindingStorage(paths BindingPaths, ops bindingFileOps) (bindingStorage,
 }
 
 func (s *linuxBindingStorage) Lock() error {
+	if s.transactionLockHeld {
+		return s.Revalidate()
+	}
 	if err := lockLinuxBindingDirectory(s.dir); err != nil {
 		return fmt.Errorf("lock binding directory: %w", err)
 	}
+	s.transactionLockHeld = true
 	return s.Revalidate()
 }
 
 func lockLinuxBindingDirectory(dir *os.File) error {
 	for {
 		err := syscall.Flock(int(dir.Fd()), syscall.LOCK_EX)
+		if errors.Is(err, syscall.EINTR) {
+			continue
+		}
+		return err
+	}
+}
+
+func unlockLinuxBindingDirectory(dir *os.File) error {
+	for {
+		err := syscall.Flock(int(dir.Fd()), syscall.LOCK_UN)
 		if errors.Is(err, syscall.EINTR) {
 			continue
 		}
@@ -500,6 +516,22 @@ func (s *linuxBindingStorage) ReplaceExact(
 	name string,
 	oldData, newData []byte,
 ) (returnErr error) {
+	// High-level binding changes hold this lock across all binding files.
+	// Direct callers still need the marker read, check and rename to act as one
+	// transition, but they must not release a lock owned by Lock.
+	if !s.transactionLockHeld {
+		if err := lockLinuxBindingDirectory(s.dir); err != nil {
+			return fmt.Errorf("lock binding directory for transition: %w", err)
+		}
+		defer func() {
+			if err := unlockLinuxBindingDirectory(s.dir); err != nil {
+				returnErr = errors.Join(
+					returnErr,
+					fmt.Errorf("unlock binding directory after transition: %w", err),
+				)
+			}
+		}()
+	}
 	if err := validBindingName(name); err != nil {
 		return err
 	}
@@ -877,7 +909,7 @@ func linuxBindingNoFollow() (int, error) {
 	case "386", "amd64", "loong64", "mips", "mips64", "mips64le", "mipsle", "riscv64", "s390x":
 		return 0x20000, nil
 	default:
-		return 0, fmt.Errorf("home link binding does not support linux/%s", runtime.GOARCH)
+		return 0, fmt.Errorf("gateway identity binding does not support linux/%s", runtime.GOARCH)
 	}
 }
 

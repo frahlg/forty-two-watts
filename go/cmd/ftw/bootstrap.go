@@ -184,7 +184,7 @@ func runBootstrap(configPath, webDir, driverDir string) {
 }
 
 func secureBootstrapMutations(next http.Handler) http.Handler {
-	return api.SecureMutations(next, apiMutationPolicy())
+	return api.Authenticate(next, apiMutationPolicy())
 }
 
 func serveStatic(w http.ResponseWriter, r *http.Request, webDir string) {

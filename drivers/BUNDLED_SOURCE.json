@@ -17,13 +17,14 @@
     "for coverage. Run scripts/sync-bundled-drivers.sh to update."
   ],
   "repository": "srcfl/device-drivers",
-  "commit": "76c968bd888193cc9362da951ec9bcca7488b256",
+  "commit": "cf8894c7e17997315e21aa126cab3c7a37d224a1",
   "source_dir": "drivers/lua",
   "drivers": [
     "ambibox_v2x", "ctek", "ctek_hybrid", "ctek_v2", "deye", "easee_cloud",
     "esphome_dsmr", "ferroamp", "ferroamp_dc2_v2x", "ferroamp_modbus",
-    "fronius", "fronius_smart_meter", "goodwe", "growatt", "heishamon",
-    "huawei", "kostal", "myuplink", "nibe_local", "pixii", "pixii_pv",
+    "foxess_h3_smart", "fronius", "fronius_smart_meter", "goodwe",
+    "growatt", "heishamon", "huawei", "kostal", "myuplink", "nibe_local",
+    "pixii", "pixii_pv",
     "sdm630", "sma", "sma_pv", "sofar", "solaredge", "solaredge_legacy",
     "solaredge_pv", "solis", "solis_string", "sonnen", "sungrow",
     "tesla_vehicle", "tibber", "victron", "zap", "zuidwijk_p1"

@@ -77,6 +77,45 @@ describe("compact price summary", () => {
     assert.equal(summary.current.ore.toFixed(1), "109.3");
   });
 
+  it("believes a slot's own total over the local tariff and VAT", () => {
+    // A fed chart gets its totals from wherever its prices came from, and
+    // never fetched /api/config. Recomputing here would answer 21.75 — spot
+    // plus VAT with a 0 öre tariff — for a slot that costs 109.3.
+    const summary = buildPriceSummary(
+      [{ ...slot(0, 10, 17.4), total: 109.3 }],
+      { now: at(0, 10, 15), totalOn: true, gridTariffOre: 0, vatPercent: 25 },
+    );
+
+    assert.equal(summary.current.ore, 109.3);
+  });
+
+  it("counts a total as supplied exactly when the chart does", () => {
+    // The chart's own _priceFor tests Number.isFinite(item.total). Coercing
+    // first read a null as a supplied 0 and a string as a supplied number, so
+    // the compact card and the chart above it priced the same slot
+    // differently — which is the one thing a fed chart exists to prevent.
+    const fed = (total) => buildPriceSummary(
+      [{ ...slot(0, 10, 20), total }],
+      { now: at(0, 10, 15), totalOn: true, gridTariffOre: 70, vatPercent: 25 },
+    ).current.ore;
+
+    // Not supplied: fall back to the local tariff and VAT, (20 + 70) × 1.25.
+    assert.equal(fed(null), 112.5);
+    assert.equal(fed(undefined), 112.5);
+    assert.equal(fed("109"), 112.5);
+    // Supplied.
+    assert.equal(fed(109.3), 109.3);
+  });
+
+  it("still shows raw spot for a fed slot when the total is switched off", () => {
+    const summary = buildPriceSummary(
+      [{ ...slot(0, 10, 17.4), total: 109.3 }],
+      { now: at(0, 10, 15), totalOn: false, gridTariffOre: 0, vatPercent: 25 },
+    );
+
+    assert.equal(summary.current.ore, 17.4);
+  });
+
   it("shows raw spot when the total is switched off", () => {
     const summary = buildPriceSummary(
       [slot(0, 10, 17.4)],

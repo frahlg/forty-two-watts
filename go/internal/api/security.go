@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+
+	"github.com/srcfl/ftw/go/internal/apiauth"
 )
 
 // MutationPolicy is the trust boundary for protected HTTP requests.
@@ -17,12 +19,32 @@ type MutationPolicy struct {
 	Token                 string
 }
 
-// SecureMutations rejects browser cross-site writes, non-JSON request bodies,
-// malformed Host/Origin metadata, and unauthenticated protected requests
-// addressed through non-local hostnames. Semantically active and secret-bearing
-// GET/HEAD requests are protected too; ordinary reads remain unaffected.
-func SecureMutations(next http.Handler, policy MutationPolicy) http.Handler {
+// Authenticate names the caller and guards state-changing requests.
+//
+// Naming the caller is the new half. This is the one place in the box that
+// decides who is asking:
+//
+//   - a Caller already on the context was put there by whoever authenticated
+//     the request — today the app session, which proved possession of an
+//     enrolled device's Noise static key before a byte of this request
+//     existed. It is kept as it is.
+//   - anything else arrived on the LAN listener and is minted as a local
+//     owner. That is not a weakening. It writes down what the LAN already is:
+//     124 endpoints served with no authentication whatsoever. Every handler
+//     from here on is written against apiauth.From, so the whole future job
+//     of authenticating the LAN API is changing this one branch.
+//
+// The guarding half rejects browser cross-site writes, non-JSON request
+// bodies, malformed Host/Origin metadata and unauthenticated protected
+// requests addressed through non-local hostnames. Semantically active and
+// secret-bearing GET/HEAD requests are protected too; ordinary reads remain
+// unaffected.
+func Authenticate(next http.Handler, policy MutationPolicy) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := apiauth.From(r.Context()); !ok {
+			r = r.WithContext(apiauth.WithCaller(r.Context(), localCaller(r)))
+		}
+
 		if !requiresMutationProtection(r) {
 			next.ServeHTTP(w, r)
 			return
@@ -59,6 +81,25 @@ func SecureMutations(next http.Handler, policy MutationPolicy) http.Handler {
 
 		next.ServeHTTP(w, r)
 	})
+}
+
+// localCaller is what a request off the LAN listener carries.
+//
+// Full authority, because that is the truth of the deployment as it stands
+// today: anyone who can reach the box's port can already do all of this with
+// curl. The Subject records the address so an audit line can say where a
+// change came from, which is more than the box could say before.
+func localCaller(r *http.Request) apiauth.Caller {
+	host := r.RemoteAddr
+	if h, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		host = h
+	}
+	return apiauth.Caller{
+		Subject: apiauth.KindLAN + ":" + host,
+		Kind:    apiauth.KindLAN,
+		Role:    apiauth.RoleOwner,
+		Scopes:  apiauth.EveryScope(),
+	}
 }
 
 func requiresMutationProtection(r *http.Request) bool {

@@ -24,14 +24,22 @@ import (
 	"sync"
 	"time"
 
+	"github.com/srcfl/ftw/go/internal/apiauth"
+	// appproto for one constant: the name of the command that changes the
+	// site mode, so Via can tell the app what to send instead of
+	// POST /api/mode. The dependency runs this way only — appproto reaches
+	// this package through an interface and must never import it.
+	"github.com/srcfl/ftw/go/internal/appproto"
 	"github.com/srcfl/ftw/go/internal/battery"
 	"github.com/srcfl/ftw/go/internal/calendar"
 	"github.com/srcfl/ftw/go/internal/config"
+	"github.com/srcfl/ftw/go/internal/configreload"
 	"github.com/srcfl/ftw/go/internal/control"
 	"github.com/srcfl/ftw/go/internal/driverrepo"
 	"github.com/srcfl/ftw/go/internal/drivers"
 	"github.com/srcfl/ftw/go/internal/evcloud"
 	"github.com/srcfl/ftw/go/internal/events"
+	"github.com/srcfl/ftw/go/internal/fleetping"
 	"github.com/srcfl/ftw/go/internal/forecast"
 	"github.com/srcfl/ftw/go/internal/ha"
 	"github.com/srcfl/ftw/go/internal/loadmodel"
@@ -71,29 +79,51 @@ type Deps struct {
 	Tel            *telemetry.Store
 	// LogRing is the in-memory log buffer wired in main.go. Nil makes
 	// /api/drivers/{name}/logs and /api/support/dump return 503.
-	LogRing           *telemetry.LogRing
-	Ctrl              *control.State
-	CtrlMu            *sync.Mutex
-	State             *state.Store
-	CapMu             *sync.RWMutex
-	Capacities           map[string]float64 // driver → battery_capacity_wh (controllable pool)
-	TelemetryCapacities  map[string]float64 // all site batteries incl. observe_only (SoC weighting)
-	CfgMu             *sync.RWMutex
-	Cfg               *config.Config
-	ConfigPath        string
-	DriverDir         string // where to scan for Lua drivers (default: <config-dir>/drivers)
-	UserDriverDir     string // persistent user-drivers overlay; searched before DriverDir
-	Models            map[string]*battery.Model
-	ModelsMu          *sync.Mutex
-	SelfTune          *selftune.Coordinator
-	DtS               float64                                   // control interval seconds (for model τ / age displays)
-	SaveConfig        func(path string, c *config.Config) error // injection for testability
-	WebDir            string                                    // static assets root (default "web")
-	ColdDir           string                                    // cold-storage root for parquet rolloff; empty disables cold fallback
-	DataDir           string                                    // complete persistent-data root used by portable backups
-	StatePath         string                                    // absolute primary SQLite path used by portable backups
-	BackupDir         string                                    // full .ftwbak output; may be an externally mounted path
-	DataMaintenanceMu *sync.Mutex                               // excludes Parquet rolloff/pruning while a full backup is captured
+	LogRing             *telemetry.LogRing
+	Ctrl                *control.State
+	CtrlMu              *sync.Mutex
+	State               *state.Store
+	CapMu               *sync.RWMutex
+	Capacities          map[string]float64 // driver → battery_capacity_wh (controllable pool)
+	TelemetryCapacities map[string]float64 // all site batteries incl. observe_only (SoC weighting)
+
+	// BatteryIdentity resolves the live driver to its current hardware.
+	BatteryIdentity func(driver string) (deviceID string, ok bool)
+
+	// AppEnroll mints pairing codes for the FTW app. Nil when app_link is off,
+	// which the pairing routes report rather than hiding.
+	AppEnroll AppEnroller
+
+	// FleetPing is the once-a-day anonymous count. Held so Settings can render
+	// the exact payload the sender would post, rather than a second rendering
+	// that could quietly disagree with it. Nil in tests and minimal
+	// embeddings; GET /api/fleet-ping then says so.
+	FleetPing *fleetping.Pinger
+
+	CfgMu         *sync.RWMutex
+	Cfg           *config.Config
+	ConfigPath    string
+	DriverDir     string // where to scan for Lua drivers (default: <config-dir>/drivers)
+	UserDriverDir string // persistent user-drivers overlay; searched before DriverDir
+	Models        map[string]*battery.Model
+	ModelsMu      *sync.Mutex
+	SelfTune      *selftune.Coordinator
+	DtS           float64                                   // control interval seconds (for model τ / age displays)
+	SaveConfig    func(path string, c *config.Config) error // injection for testability
+	// ConfigApplier is main.go's config-applied callback — the same
+	// closure the configreload watcher runs (registry reload with SoC
+	// bounds, capacities, inverter groups, fuse and mpc/loadmodel
+	// site-meter sync). Injected so POST /api/config applies a saved
+	// config exactly like a file edit would. Nil (tests, minimal
+	// embeddings) still applies control-level fields via
+	// configreload.Apply; only the callback's extras are skipped.
+	ConfigApplier     configreload.Applier
+	WebDir            string      // static assets root (default "web")
+	ColdDir           string      // cold-storage root for parquet rolloff; empty disables cold fallback
+	DataDir           string      // complete persistent-data root used by portable backups
+	StatePath         string      // absolute primary SQLite path used by portable backups
+	BackupDir         string      // full .ftwbak output; may be an externally mounted path
+	DataMaintenanceMu *sync.Mutex // excludes Parquet rolloff/pruning while a full backup is captured
 	// SnapshotDir is where pre-update snapshots of state.db + config.yaml
 	// are written by the self-update flow. Defaults to
 	// `<cold_dir_parent>/snapshots`; main.go is responsible for passing
@@ -130,11 +160,6 @@ type Deps struct {
 
 	// Optional: HA MQTT bridge (nil if disabled).
 	HA *ha.Bridge
-
-	// HomeLink owns local-only pairing, passkey enrollment, revocation and
-	// status. Nil reports that this host has no safe Home Link identity.
-	HomeLink        HomeLinkAdmin
-	HomeLinkEnabled bool
 
 	// Driver registry — used by lifecycle endpoints (restart/disable/enable)
 	// and EV command dispatch. Nil disables those endpoints (returns 503).
@@ -197,6 +222,25 @@ type Server struct {
 	savingsCacheMu sync.Mutex
 	savingsCache   map[string]daySavings
 
+	// controlStates serializes command dispatch, default dispatch, and hold
+	// transitions per driver. Process-lifetime only, deliberately: a restart
+	// should leave no device held by a setting nobody remembers making.
+	controlStateMu sync.Mutex
+	controlStates  map[string]*controlDriverState
+
+	// beforeDriverControlSend is a package-test seam for reproducing a
+	// lifecycle change between request validation and registry dispatch. It is
+	// nil in production; SendWithGeneration still binds every real dispatch to
+	// the selected running generation.
+	beforeDriverControlSend func()
+	// beforeDriverControlStateLock is a package-test seam for the narrower
+	// lookup-to-lock lifecycle race. It runs after the state map lookup while
+	// the map lock is still held, before the per-driver state lock is taken.
+	beforeDriverControlStateLock func()
+	// beforeDriverDefaultStateLock is a package-test seam for the default path's
+	// lookup-to-lock lifecycle race. It is nil in production.
+	beforeDriverDefaultStateLock func()
+
 	versionUpdateMu sync.Mutex
 	driverUpdateMu  sync.Mutex
 	backupMu        sync.Mutex
@@ -205,6 +249,11 @@ type Server struct {
 	// window. The record on disk is what survives a restart; these only make
 	// the revert prompt while the process lives.
 	drafts *driverDrafts
+
+	// marks is what a route says about itself beyond its method and path,
+	// keyed by the mux pattern. Written once at registration and read-only
+	// afterwards. See RouteMark.
+	marks map[string]routeMark
 }
 
 // New creates a new API server.
@@ -216,10 +265,17 @@ func New(deps *Deps) *Server {
 		deps.WebDir = "web"
 	}
 	s := &Server{
-		deps:       deps,
-		mux:        http.NewServeMux(),
-		dailyCache: make(map[string]state.DayEnergy),
-		drafts:     newDriverDrafts(),
+		deps:          deps,
+		mux:           http.NewServeMux(),
+		dailyCache:    make(map[string]state.DayEnergy),
+		controlStates: make(map[string]*controlDriverState),
+		drafts:        newDriverDrafts(),
+		marks:         make(map[string]routeMark),
+	}
+	if deps.Registry != nil {
+		// Registry removal is the lifecycle boundary for a driver generation.
+		// Clear the API hold before a replacement instance can be added.
+		deps.Registry.SetLifecycleHook(s.clearDriverControl)
 	}
 	s.routes()
 	// A draft's timer died with the previous process, so anything left behind
@@ -231,153 +287,304 @@ func New(deps *Deps) *Server {
 
 // Handler returns the http.Handler suitable for http.ListenAndServe.
 func (s *Server) Handler() http.Handler {
-	return SecureMutations(s.mux, s.deps.MutationPolicy)
+	return Authenticate(s.mux, s.deps.MutationPolicy)
 }
 
+// ServeHTTP runs one request through the same handler the listener serves,
+// trust boundary included.
+//
+// It exists so an in-process caller — the app session's passthrough — reaches
+// the API by the same door as everything else. Reaching past it to the bare
+// mux would be a second door with fewer checks on the same handlers.
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	s.Handler().ServeHTTP(w, r)
+}
+
+// Route says what a route costs before it runs.
+//
+// The tier is read off the route's own registration and nowhere else. The
+// method is not consulted: a GET can hand out a password and a POST can drive
+// a battery, and both did. See apiauth.Tier.
+//
+// A path with no tier — registered past handle(), or matched by nothing at
+// all — comes back TierLocal, which the passthrough refuses. That is the
+// wrong-safe direction: the cost of getting it wrong is a view the app cannot
+// draw until somebody names the path, not a control a stranger can reach.
+//
+// The caller is the passthrough, which needs the answer before it runs
+// anything. Nothing on the LAN path consults it: the LAN is served with no
+// authentication at all, and pretending otherwise here would be a claim the
+// deployment does not support.
+func (s *Server) Route(r *http.Request) apiauth.RouteFacts {
+	facts := apiauth.RouteFacts{Tier: apiauth.TierLocal}
+
+	// The mux is asked which pattern matched rather than a second matcher
+	// being written here. A route marked "actuate" that a hand-rolled matcher
+	// failed to recognise would be an actuation the passthrough let through,
+	// so the only acceptable matcher is the one that also picks the handler.
+	if _, pattern := s.mux.Handler(r); pattern != "" {
+		if mark, ok := s.marks[pattern]; ok {
+			if mark.tier.Known() {
+				facts.Tier = mark.tier
+			}
+			facts.CmdOp = mark.cmdOp
+			facts.ReplacesAll = mark.replacesAll
+			facts.Static = mark.static
+		}
+	}
+	return facts
+}
+
+// routes is the whole route table, and every line names what its route costs.
+//
+// The tier is a fact about the HANDLER, never about the verb. Ask what the
+// code on the other side does:
+//
+//	Read      answers a question, changes nothing, and hands back nothing that
+//	          could be replayed as authority. A shared viewer may ask for it.
+//	Configure changes a setting. Owner, with a step-up. A late execution is
+//	          the same instruction, only later.
+//	Actuate   moves energy, or takes control of what is moving it. Refused
+//	          through the passthrough — the app sends a cmd, which carries an
+//	          expiry the box revalidates. Add Via(op) to name that command.
+//	Local     the session does not carry it at all: the answer holds a
+//	          credential or a whole file, or doing it needs somebody standing
+//	          at the box. Neither a role nor a ceremony changes that.
+//
+// The method used to decide this, and it was wrong twice in one review: a GET
+// that hands out a CalDAV password, which is a write channel into dispatch,
+// and a POST that drives every battery through ±3000 W for minutes. Both read
+// as ordinary from their verb alone. Neither is.
+//
+// ReplacesAll is a separate mark rather than a tier: it says the body replaces
+// a whole document instead of editing part of one.
 func (s *Server) routes() {
 	// ---- JSON endpoints ----
-	s.handle("GET  /api/health", s.handleHealth)
-	s.handle("GET  /api/status", s.handleStatus)
-	s.handle("GET  /api/system/info", s.handleSysInfo)
-	s.handle("GET  /api/storage/inventory", s.handleStorageInventory)
-	s.handle("GET  /api/config", s.handleGetConfig)
-	s.handle("POST /api/config", s.handlePostConfig)
-	s.handle("POST /api/drivers/verify_tesla", s.handleVerifyTesla)
-	s.handle("GET /api/oauth/myuplink/start", s.handleMyUplinkOAuthStart)
-	s.handle("GET /api/oauth/myuplink/callback", s.handleMyUplinkOAuthCallback)
-	s.handle("POST /api/oauth/myuplink/exchange", s.handleMyUplinkOAuthExchange)
-	s.handle("GET  /api/mode", s.handleGetMode)
-	s.handle("POST /api/mode", s.handleSetMode)
-	s.handle("GET  /api/modes", s.handleModes)
-	s.handle("POST /api/target", s.handleSetTarget)
-	s.handle("POST /api/peak_limit", s.handleSetPeakLimit)
-	s.handle("POST /api/peak_import_ceiling", s.handleSetPeakImportCeiling)
-	s.handle("POST /api/ev_charging", s.handleSetEVCharging)
-	s.handle("POST /api/battery_covers_ev", s.handleSetBatteryCoversEV)
-	s.handle("GET  /api/drivers", s.handleDrivers)
-	s.handle("GET  /api/drivers/catalog", s.handleDriversCatalog)
-	s.handle("POST /api/drivers/test", s.handleDriverTest)
-	s.handle("GET  /api/drivers/{id}/source", s.handleDriverSource)
-	s.handle("POST /api/drivers/{id}/lint", s.handleDriverLint)
-	s.handle("POST /api/drivers/{id}/draft", s.handleDriverDraft)
-	s.handle("GET  /api/drivers/{id}/draft", s.handleDriverDraftStatus)
-	s.handle("POST /api/drivers/{id}/draft/keep", s.handleDriverDraftKeep)
-	s.handle("POST /api/drivers/{id}/draft/revert", s.handleDriverDraftRevert)
-	s.handle("POST /api/drivers/fingerprint", s.handleDriverFingerprint)
-	s.handle("GET  /api/drivers/{name}", s.handleDriverDetail)
-	s.handle("GET  /api/drivers/{name}/logs", s.handleDriverLogs)
-	s.handle("GET  /api/logs", s.handleGlobalLogs)
-	s.handle("GET  /api/support/dump", s.handleSupportDump)
-	s.handle("POST /api/drivers/{name}/restart", s.handleDriverRestart)
-	s.handle("POST /api/drivers/{name}/disable", s.handleDriverDisable)
-	s.handle("POST /api/drivers/{name}/enable", s.handleDriverEnable)
-	s.handle("GET  /api/device_repository/status", s.handleDeviceRepositoryStatus)
-	s.handle("GET  /api/device_repository/catalog", s.handleDeviceRepositoryCatalog)
-	s.handle("POST /api/device_repository/refresh", s.handleDeviceRepositoryRefresh)
-	s.handle("POST /api/device_repository/drivers/{id}/install", s.handleDeviceRepositoryInstall)
-	s.handle("POST /api/device_repository/drivers/{id}/rollback", s.handleDeviceRepositoryRollback)
-	s.handle("POST /api/device_repository/drivers/{id}/use_bundled", s.handleDeviceRepositoryUseBundled)
-	s.handle("GET  /api/device_repository/drivers/{id}/versions", s.handleDeviceRepositoryVersions)
-	s.handle("POST /api/device_repository/drivers/{id}/activate", s.handleDeviceRepositoryActivate)
-	s.handle("GET  /api/components", s.handleComponents)
-	s.handle("GET  /api/components/history", s.handleComponentHistory)
-	s.handle("POST /api/components/optimizer/update", s.handleOptimizerComponentUpdate)
-	s.handle("POST /api/components/optimizer/rollback", s.handleOptimizerComponentRollback)
-	s.handle("POST /api/components/optimizer/channel", s.handleOptimizerComponentChannel)
-	s.handle("GET  /api/ha/status", s.handleHAStatus)
-	s.handle("GET  /api/home-link/status", s.handleHomeLinkStatus)
-	s.handle("POST /api/home-link/pairing", s.handleHomeLinkPairing)
-	s.handle("POST /api/home-link/passkeys/revoke", s.handleHomeLinkPasskeyRevoke)
-	s.handle("GET  /api/caldav/status", s.handleCalDAVStatus)
-	s.handle("GET  /api/caldav/credentials", s.handleCalDAVCredentials)
-	s.handle("GET  /api/notifications/status", s.handleNotificationsStatus)
-	s.handle("GET  /api/notifications/defaults", s.handleNotificationsDefaults)
-	s.handle("GET  /api/notifications/history", s.handleNotificationsHistory)
-	s.handle("POST /api/notifications/test", s.handleNotificationsTest)
-	s.handle("GET  /api/battery_models", s.handleGetModels)
-	s.handle("POST /api/battery_models/reset", s.handleResetModel)
-	s.handle("POST /api/self_tune/start", s.handleSelfTuneStart)
-	s.handle("GET  /api/self_tune/status", s.handleSelfTuneStatus)
-	s.handle("POST /api/self_tune/cancel", s.handleSelfTuneCancel)
-	s.handle("GET  /api/history", s.handleHistory)
-	s.handle("GET  /api/energy/daily", s.handleEnergyDaily)
-	s.handle("GET  /api/energy/assets", s.handleEnergyAssets)
-	s.handle("GET  /api/energy/history", s.handleEnergyHistory)
-	s.handle("GET  /api/energy/history.csv", s.handleEnergyHistoryCSV)
-	s.handle("GET  /api/savings/daily", s.handleSavingsDaily)
-	s.handle("GET  /api/prices", s.handlePrices)
-	s.handle("GET  /api/forecast", s.handleForecast)
-	s.handle("GET  /api/mpc/plan", s.handleMPCPlan)
-	s.handle("POST /api/mpc/replan", s.handleMPCReplan)
-	s.handle("GET  /api/mpc/diagnose", s.handleMPCDiagnose)
-	s.handle("GET  /api/mpc/diagnose/history", s.handleMPCDiagnoseHistory)
-	s.handle("GET  /api/mpc/diagnose/at", s.handleMPCDiagnoseAt)
-	s.handle("GET  /api/pvmodel", s.handlePVModel)
-	s.handle("POST /api/pvmodel/reset", s.handlePVModelReset)
-	s.handle("GET  /api/loadmodel", s.handleLoadModel)
-	s.handle("POST /api/loadmodel/profile", s.handleLoadModelProfile)
-	s.handle("POST /api/loadmodel/reset", s.handleLoadModelReset)
-	s.handle("GET  /api/research/load/dump", s.handleLoadResearchDump)
-	s.handle("GET  /api/series", s.handleSeries)
-	s.handle("GET  /api/series/catalog", s.handleSeriesCatalog)
-	s.handle("GET  /api/devices", s.handleDevices)
-	s.handle("GET  /api/scan", s.handleScan)
-	s.handle("GET  /api/ev/status", s.handleEVStatus)
-	s.handle("POST /api/ev/command", s.handleEVCommand)
-	s.handle("GET  /api/v2x/policy", s.handleV2XPolicy)
-	s.handle("POST /api/v2x/command", s.handleV2XCommand)
-	s.handle("POST /api/ev/chargers", s.handleEVChargers)
-	s.handle("GET  /api/ev/providers", s.handleEVProviders)
-	s.handle("GET  /api/loadpoints", s.handleLoadpoints)
-	s.handle("POST /api/loadpoints/{id}/target", s.handleLoadpointTarget)
-	s.handle("POST /api/loadpoints/{id}/soc", s.handleLoadpointSoC)
-	s.handle("POST /api/loadpoints/{id}/force_start", s.handleLoadpointForceStart)
-	s.handle("POST /api/loadpoints/{id}/manual_hold", s.handleLoadpointManualHold)
-	s.handle("DELETE /api/loadpoints/{id}/manual_hold", s.handleLoadpointManualHoldClear)
-	s.handle("GET  /api/loadpoints/{id}/manual_hold", s.handleLoadpointManualHoldGet)
-	s.handle("POST /api/loadpoints/{id}/battery_boost", s.handleLoadpointBatteryBoostEnable)
-	s.handle("DELETE /api/loadpoints/{id}/battery_boost", s.handleLoadpointBatteryBoostCancel)
-	s.handle("GET  /api/loadpoints/{id}/battery_boost", s.handleLoadpointBatteryBoostStatus)
-	s.handle("POST /api/battery/manual_hold", s.handleBatteryManualHold)
-	s.handle("DELETE /api/battery/manual_hold", s.handleBatteryManualHoldClear)
-	s.handle("GET  /api/battery/manual_hold", s.handleBatteryManualHoldGet)
-	s.handle("POST /api/pv/manual_hold", s.handlePVManualHold)
-	s.handle("DELETE /api/pv/manual_hold", s.handlePVManualHoldClear)
-	s.handle("GET  /api/pv/manual_hold", s.handlePVManualHoldGet)
-	s.handle("GET  /api/version/check", s.handleVersionCheck)
-	s.handle("POST /api/version/channel", s.handleVersionChannel)
-	s.handle("POST /api/version/skip", s.handleVersionSkip)
-	s.handle("POST /api/version/unskip", s.handleVersionUnskip)
-	s.handle("POST /api/version/update", s.handleVersionUpdate)
-	s.handle("POST /api/version/restart", s.handleVersionRestart)
-	s.handle("GET  /api/version/update/status", s.handleVersionUpdateStatus)
-	s.handle("GET  /api/version/snapshots", s.handleVersionSnapshots)
-	s.handle("POST /api/version/snapshots", s.handleVersionSnapshotCreate)
-	s.handle("DELETE /api/version/snapshots/{id}", s.handleVersionSnapshotDelete)
-	s.handle("GET  /api/backups", s.handleBackups)
-	s.handle("POST /api/backups", s.handleBackupCreate)
-	s.handle("GET  /api/backups/{id}", s.handleBackupDownload)
-	s.handle("DELETE /api/backups/{id}", s.handleBackupDelete)
-	s.handle("POST /api/backups/{id}/verify", s.handleBackupVerify)
-	s.handle("POST /api/version/rollback", s.handleVersionRollback)
-	s.handle("POST /api/restart", s.handleRestart)
+	s.handle("GET  /api/health", Read, s.handleHealth)
+	s.handle("GET  /api/status", Read, s.handleStatus)
+	s.handle("GET  /api/system/info", Read, s.handleSysInfo)
+	s.handle("GET  /api/storage/inventory", Read, s.handleStorageInventory)
+	s.handle("GET  /api/config", Local, s.handleGetConfig)
+	s.handle("POST /api/config", Configure, s.handlePostConfig, ReplacesAll)
+	s.handle("POST /api/drivers/verify_tesla", Configure, s.handleVerifyTesla)
+	s.handle("GET /api/oauth/myuplink/start", Local, s.handleMyUplinkOAuthStart)
+	s.handle("GET /api/oauth/myuplink/callback", Local, s.handleMyUplinkOAuthCallback)
+	s.handle("POST /api/oauth/myuplink/exchange", Local, s.handleMyUplinkOAuthExchange)
+	s.handle("GET  /api/mode", Read, s.handleGetMode)
+	s.handle("GET  /api/app-link/status", Read, s.handleAppLinkStatus)
+	s.handle("POST /api/app-link/pairing", Configure, s.handleAppLinkPairing)
+	s.handle("GET  /api/app-link/devices", Read, s.handleAppLinkDevices)
+	s.handle("DELETE /api/app-link/devices/{id}", Configure, s.handleAppLinkDeviceRevoke)
+	s.handle("PATCH  /api/app-link/devices/{id}", Configure, s.handleAppLinkDeviceRole)
+	s.handle("GET  /api/fleet-ping", Read, s.handleFleetPing)
+	s.handle("POST /api/mode", Actuate, s.handleSetMode, Via(appproto.OpSetMode))
+	s.handle("GET  /api/modes", Read, s.handleModes)
+	s.handle("POST /api/target", Actuate, s.handleSetTarget)
+	s.handle("POST /api/peak_limit", Actuate, s.handleSetPeakLimit)
+	s.handle("POST /api/peak_import_ceiling", Actuate, s.handleSetPeakImportCeiling)
+	s.handle("POST /api/ev_charging", Actuate, s.handleSetEVCharging)
+	s.handle("POST /api/battery_covers_ev", Configure, s.handleSetBatteryCoversEV)
+	s.handle("GET  /api/drivers", Read, s.handleDrivers)
+	s.handle("GET  /api/drivers/catalog", Read, s.handleDriversCatalog)
+	s.handle("POST /api/drivers/test", Configure, s.handleDriverTest)
+	s.handle("GET  /api/drivers/{id}/source", Local, s.handleDriverSource)
+	s.handle("POST /api/drivers/{id}/lint", Local, s.handleDriverLint)
+	s.handle("POST /api/drivers/{id}/draft", Local, s.handleDriverDraft)
+	s.handle("GET  /api/drivers/{id}/draft", Read, s.handleDriverDraftStatus)
+	s.handle("POST /api/drivers/{id}/draft/keep", Local, s.handleDriverDraftKeep)
+	s.handle("POST /api/drivers/{id}/draft/revert", Local, s.handleDriverDraftRevert)
+	s.handle("POST /api/drivers/fingerprint", Configure, s.handleDriverFingerprint)
+	s.handle("GET  /api/drivers/{name}", Read, s.handleDriverDetail)
+	s.handle("GET  /api/drivers/{name}/logs", Local, s.handleDriverLogs)
+	s.handle("GET  /api/logs", Local, s.handleGlobalLogs)
+	s.handle("GET  /api/support/dump", Local, s.handleSupportDump)
+	s.handle("GET  /api/support/report", Local, s.handleSupportReport)
+	s.handle("POST   /api/drivers/{name}/control", Actuate, s.handleDriverControl)
+	s.handle("DELETE /api/drivers/{name}/control", Actuate, s.handleDriverControlRelease)
+	s.handle("POST /api/drivers/{name}/restart", Configure, s.handleDriverRestart)
+	s.handle("POST /api/drivers/{name}/disable", Configure, s.handleDriverDisable)
+	s.handle("POST /api/drivers/{name}/enable", Configure, s.handleDriverEnable)
+	s.handle("GET  /api/device_repository/status", Read, s.handleDeviceRepositoryStatus)
+	s.handle("GET  /api/device_repository/catalog", Read, s.handleDeviceRepositoryCatalog)
+	s.handle("POST /api/device_repository/refresh", Configure, s.handleDeviceRepositoryRefresh)
+	s.handle("POST /api/device_repository/drivers/{id}/install", Configure, s.handleDeviceRepositoryInstall)
+	s.handle("POST /api/device_repository/drivers/{id}/rollback", Configure, s.handleDeviceRepositoryRollback)
+	s.handle("POST /api/device_repository/drivers/{id}/use_bundled", Configure, s.handleDeviceRepositoryUseBundled)
+	s.handle("GET  /api/device_repository/drivers/{id}/versions", Read, s.handleDeviceRepositoryVersions)
+	s.handle("POST /api/device_repository/drivers/{id}/activate", Configure, s.handleDeviceRepositoryActivate)
+	s.handle("GET  /api/components", Read, s.handleComponents)
+	s.handle("GET  /api/components/history", Read, s.handleComponentHistory)
+	s.handle("POST /api/components/optimizer/update", Configure, s.handleOptimizerComponentUpdate)
+	s.handle("POST /api/components/optimizer/rollback", Configure, s.handleOptimizerComponentRollback)
+	s.handle("POST /api/components/optimizer/channel", Configure, s.handleOptimizerComponentChannel)
+	s.handle("GET  /api/ha/status", Read, s.handleHAStatus)
+	s.handle("GET  /api/caldav/status", Read, s.handleCalDAVStatus)
+	s.handle("GET  /api/caldav/credentials", Local, s.handleCalDAVCredentials)
+	s.handle("GET  /api/notifications/status", Read, s.handleNotificationsStatus)
+	s.handle("GET  /api/notifications/defaults", Read, s.handleNotificationsDefaults)
+	s.handle("GET  /api/notifications/history", Read, s.handleNotificationsHistory)
+	s.handle("POST /api/notifications/test", Configure, s.handleNotificationsTest)
+	s.handle("GET  /api/battery_models", Read, s.handleGetModels)
+	s.handle("POST /api/battery_models/reset", Configure, s.handleResetModel)
+	s.handle("POST /api/self_tune/start", Actuate, s.handleSelfTuneStart)
+	s.handle("GET  /api/self_tune/status", Read, s.handleSelfTuneStatus)
+	s.handle("POST /api/self_tune/cancel", Actuate, s.handleSelfTuneCancel)
+	s.handle("GET  /api/history", Read, s.handleHistory)
+	s.handle("GET  /api/energy/daily", Read, s.handleEnergyDaily)
+	s.handle("GET  /api/energy/assets", Read, s.handleEnergyAssets)
+	s.handle("GET  /api/energy/history", Read, s.handleEnergyHistory)
+	s.handle("GET  /api/energy/history.csv", Read, s.handleEnergyHistoryCSV)
+	s.handle("GET  /api/savings/daily", Read, s.handleSavingsDaily)
+	s.handle("GET  /api/prices", Read, s.handlePrices)
+	s.handle("GET  /api/prices/zones", Read, s.handlePriceZones)
+	s.handle("GET  /api/forecast", Read, s.handleForecast)
+	s.handle("GET  /api/mpc/plan", Read, s.handleMPCPlan)
+	s.handle("POST /api/mpc/replan", Configure, s.handleMPCReplan)
+	s.handle("GET  /api/mpc/diagnose", Read, s.handleMPCDiagnose)
+	s.handle("GET  /api/mpc/diagnose/history", Read, s.handleMPCDiagnoseHistory)
+	s.handle("GET  /api/mpc/diagnose/at", Read, s.handleMPCDiagnoseAt)
+	s.handle("GET  /api/pvmodel", Read, s.handlePVModel)
+	s.handle("POST /api/pvmodel/reset", Configure, s.handlePVModelReset)
+	s.handle("GET  /api/loadmodel", Read, s.handleLoadModel)
+	s.handle("POST /api/loadmodel/profile", Configure, s.handleLoadModelProfile)
+	s.handle("POST /api/loadmodel/reset", Configure, s.handleLoadModelReset)
+	s.handle("GET  /api/research/load/dump", Read, s.handleLoadResearchDump)
+	s.handle("GET  /api/series", Read, s.handleSeries)
+	s.handle("GET  /api/series/catalog", Read, s.handleSeriesCatalog)
+	s.handle("GET  /api/devices", Read, s.handleDevices)
+	s.handle("GET  /api/scan", Configure, s.handleScan)
+	s.handle("GET  /api/ev/status", Read, s.handleEVStatus)
+	s.handle("POST /api/ev/command", Actuate, s.handleEVCommand)
+	s.handle("GET  /api/v2x/policy", Read, s.handleV2XPolicy)
+	s.handle("POST /api/v2x/command", Actuate, s.handleV2XCommand)
+	s.handle("POST /api/ev/chargers", Configure, s.handleEVChargers)
+	s.handle("GET  /api/ev/providers", Read, s.handleEVProviders)
+	s.handle("GET  /api/loadpoints", Read, s.handleLoadpoints)
+	s.handle("POST /api/loadpoints/{id}/target", Actuate, s.handleLoadpointTarget)
+	s.handle("POST /api/loadpoints/{id}/soc", Actuate, s.handleLoadpointSoC)
+	s.handle("POST /api/loadpoints/{id}/force_start", Actuate, s.handleLoadpointForceStart)
+	s.handle("POST /api/loadpoints/{id}/manual_hold", Actuate, s.handleLoadpointManualHold)
+	s.handle("DELETE /api/loadpoints/{id}/manual_hold", Actuate, s.handleLoadpointManualHoldClear)
+	s.handle("GET  /api/loadpoints/{id}/manual_hold", Read, s.handleLoadpointManualHoldGet)
+	s.handle("POST /api/loadpoints/{id}/battery_boost", Actuate, s.handleLoadpointBatteryBoostEnable)
+	s.handle("DELETE /api/loadpoints/{id}/battery_boost", Actuate, s.handleLoadpointBatteryBoostCancel)
+	s.handle("GET  /api/loadpoints/{id}/battery_boost", Read, s.handleLoadpointBatteryBoostStatus)
+	s.handle("POST /api/battery/manual_hold", Actuate, s.handleBatteryManualHold)
+	s.handle("DELETE /api/battery/manual_hold", Actuate, s.handleBatteryManualHoldClear)
+	s.handle("GET  /api/battery/manual_hold", Read, s.handleBatteryManualHoldGet)
+	s.handle("POST /api/pv/manual_hold", Actuate, s.handlePVManualHold)
+	s.handle("DELETE /api/pv/manual_hold", Actuate, s.handlePVManualHoldClear)
+	s.handle("GET  /api/pv/manual_hold", Read, s.handlePVManualHoldGet)
+	s.handle("GET  /api/version/check", Configure, s.handleVersionCheck)
+	s.handle("POST /api/version/channel", Configure, s.handleVersionChannel)
+	s.handle("POST /api/version/skip", Configure, s.handleVersionSkip)
+	s.handle("POST /api/version/unskip", Configure, s.handleVersionUnskip)
+	s.handle("POST /api/version/update", Configure, s.handleVersionUpdate)
+	s.handle("POST /api/version/restart", Configure, s.handleVersionRestart)
+	s.handle("GET  /api/version/update/status", Read, s.handleVersionUpdateStatus)
+	s.handle("GET  /api/version/snapshots", Read, s.handleVersionSnapshots)
+	s.handle("POST /api/version/snapshots", Configure, s.handleVersionSnapshotCreate)
+	s.handle("DELETE /api/version/snapshots/{id}", Configure, s.handleVersionSnapshotDelete)
+	s.handle("GET  /api/backups", Read, s.handleBackups)
+	s.handle("POST /api/backups", Configure, s.handleBackupCreate)
+	s.handle("GET  /api/backups/{id}", Local, s.handleBackupDownload)
+	s.handle("DELETE /api/backups/{id}", Configure, s.handleBackupDelete)
+	s.handle("POST /api/backups/{id}/verify", Configure, s.handleBackupVerify)
+	s.handle("POST /api/version/rollback", Configure, s.handleVersionRollback)
+	s.handle("POST /api/restart", Configure, s.handleRestart)
 
 	// ---- Static web UI ----
 	// Everything not matched above falls through to the static server.
 	s.mux.HandleFunc("/", s.handleStatic)
+	// Marked so the app's passthrough can refuse it by what the router says
+	// rather than by what happens to be on disk. A path under /api/ that no
+	// handler claims lands here, and the day somebody adds web/api/anything
+	// it would otherwise become reachable from a phone.
+	s.marks[staticPattern] = routeMark{static: true}
 }
 
-// handle wires "METHOD path" to a handler. Uses Go 1.22+ method-scoped
-// routing so GET + POST on the same path can be registered independently.
-func (s *Server) handle(methodPath string, h http.HandlerFunc) {
+// staticPattern is the catch-all the static file server is registered under.
+const staticPattern = "/"
+
+// The four tiers, spelled short so the table above reads as a table. They are
+// apiauth's values, not a second set: a copy here would be the second
+// authorisation namespace this codebase has already paid for once.
+const (
+	Read      = apiauth.TierRead
+	Configure = apiauth.TierConfigure
+	Actuate   = apiauth.TierActuate
+	Local     = apiauth.TierLocal
+)
+
+// handle wires "METHOD path" to a handler at an explicit tier. Uses Go 1.22+
+// method-scoped routing so GET + POST on the same path can be registered
+// independently.
+//
+// The tier is a required argument rather than an optional mark, which is the
+// whole point: leaving it out does not compile. Before this it was optional
+// and inferred from the method, and two routes were quietly mispriced for it —
+// a credential served as a read and a battery step-test served as ordinary
+// configuration.
+//
+// A route may carry further marks. They are written here, beside the handler
+// they govern, and never in a second list that has to be kept in step.
+func (s *Server) handle(methodPath string, tier apiauth.Tier, h http.HandlerFunc, marks ...RouteMark) {
+	if !tier.Known() {
+		// At startup, not on the first request. A box that will not start is a
+		// box nobody is quietly over-trusting.
+		panic(fmt.Sprintf("api: route %q registered at unknown tier %q; it must be one of %v",
+			methodPath, tier, apiauth.Tiers))
+	}
 	parts := strings.SplitN(strings.TrimSpace(methodPath), " ", 2)
 	for i := range parts {
 		parts[i] = strings.TrimSpace(parts[i])
 	}
 	method, path := parts[0], parts[1]
-	s.mux.HandleFunc(method+" "+path, h)
-	_ = fmt.Sprintf // keep fmt import used elsewhere
+	pattern := method + " " + path
+	s.mux.HandleFunc(pattern, h)
+
+	mark := routeMark{tier: tier}
+	for _, apply := range marks {
+		apply(&mark)
+	}
+	s.marks[pattern] = mark
 }
+
+// routeMark is what a route says about itself beyond its method and path.
+type routeMark struct {
+	tier        apiauth.Tier
+	cmdOp       string
+	replacesAll bool
+	static      bool
+}
+
+// RouteMark is one such fact, applied at registration.
+type RouteMark func(*routeMark)
+
+// Via names the command that does what an Actuate route does, so the app is
+// told what to send instead of being told only "no". A route with no Via is
+// one the box has no command for yet, and the honest answer to the app is that
+// this control is not available over the session.
+//
+// The rule for whoever adds the next route, and the reason Actuate exists: if
+// a late execution would be a DIFFERENT INSTRUCTION, it is actuation and
+// belongs on cmd. "Charge at 10 kW", arriving three hours late out of a
+// tunnel, is not the instruction the user gave. If a late execution is merely
+// a LATE SETTING, it is Configure and the passthrough carries it.
+func Via(op string) RouteMark {
+	return func(m *routeMark) { m.cmdOp = op }
+}
+
+// ReplacesAll marks a route whose body replaces a whole document.
+//
+// POST /api/config is the case: it writes the entire configuration, so
+// anything the sender's idea of the document lacked is dropped. On the LAN
+// that is survivable — the browser loaded the whole document from this box
+// seconds earlier — and it has still cost this project one silent regression.
+// Over a session, from a phone that may be running a build older than the box
+// by a year, it is a way to wipe settings its caller never knew about. The
+// passthrough refuses these outright rather than trusting the round trip.
+func ReplacesAll(m *routeMark) { m.replacesAll = true }
 
 // ---- Common helpers ----
 
@@ -1270,23 +1477,18 @@ func (s *Server) handlePostConfig(w http.ResponseWriter, r *http.Request) {
 			slog.Warn("failed to persist ev_charger_password", "err", err)
 		}
 	}
-	// Apply control-level changes immediately (file watcher will also pick
-	// this up but we're snappier).
-	s.deps.CtrlMu.Lock()
-	s.deps.Ctrl.SetGridTarget(newCfg.Site.GridTargetW)
-	s.deps.Ctrl.GridToleranceW = newCfg.Site.GridToleranceW
-	s.deps.Ctrl.SlewRateW = newCfg.Site.SlewRateW
-	s.deps.Ctrl.MinDispatchIntervalS = newCfg.Site.MinDispatchIntervalS
-	s.deps.Ctrl.PVSurplusAbsorbSoCCapPct = newCfg.Site.PVSurplusAbsorbSoCCapPct
-	s.deps.Ctrl.PVSurplusAbsorbThresholdW = newCfg.Site.PVSurplusAbsorbThresholdW
-	s.deps.CtrlMu.Unlock()
-	if s.deps.Registry != nil {
+	// One apply path, shared with the file watcher. Hand-applying a
+	// subset here and swapping the shared pointer is what #760 was: the
+	// watcher then diffed new against new, so everything this handler
+	// didn't copy — starting with the site-meter designation — never
+	// reached the running controller until a restart.
+	configreload.Apply(s.deps.CfgMu, s.deps.Cfg, s.deps.CtrlMu, s.deps.Ctrl,
+		&newCfg, s.deps.ConfigApplier)
+	if s.deps.ConfigApplier == nil && s.deps.Registry != nil {
+		// Minimal embeddings without main.go's callback still need the
+		// new driver set running.
 		s.deps.Registry.Reload(r.Context(), newCfg.Drivers, newCfg.Site.TroubleshootingMode)
 	}
-	// Update shared cfg pointer
-	s.deps.CfgMu.Lock()
-	*s.deps.Cfg = newCfg
-	s.deps.CfgMu.Unlock()
 	slog.Info("config updated via API", "restart_required", len(restartReasons) > 0)
 	writeJSON(w, 200, map[string]any{
 		"status":           "ok",
@@ -1322,23 +1524,16 @@ func (s *Server) handleSetMode(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]string{"error": "unknown mode: " + req.Mode})
 		return
 	}
+	// control.ApplyMode is the one door into a mode change: it drops any
+	// active manual hold and resets the PI integrator along with setting the
+	// mode. See its comment for what leaving either out has already cost.
 	s.deps.CtrlMu.Lock()
-	s.deps.Ctrl.Mode = m
-	// An explicit mode change is a reset signal: drop any active
-	// battery manual hold so the new mode takes effect on the very
-	// next dispatch tick. Mirrors the loadpoint manual_hold UX.
-	s.deps.Ctrl.ClearBatteryManualHold()
-	// Reset the PI integrator. The integral accumulated under the
-	// previous mode's error signal is meaningless to the new mode
-	// — keeping it caused integrator windup → wrong-direction stuck
-	// output across the 2026-05-24 evening mode switch (live
-	// regression: discharged the fleet to 7 % overnight while the
-	// PI integral was pinned in the wrong direction). Mode change
-	// is a discrete event; start the new regime from a clean PI.
-	if s.deps.Ctrl.PI != nil {
-		s.deps.Ctrl.PI.Reset()
-	}
+	applyErr := s.deps.Ctrl.ApplyMode(m)
 	s.deps.CtrlMu.Unlock()
+	if applyErr != nil {
+		writeJSON(w, 400, map[string]string{"error": applyErr.Error()})
+		return
+	}
 	if err := s.deps.State.SaveConfig("mode", req.Mode); err != nil {
 		slog.Warn("failed to persist mode", "err", err)
 	}
@@ -1375,7 +1570,11 @@ func (s *Server) handleSetTarget(w http.ResponseWriter, r *http.Request) {
 }
 
 // ---- /api/peak_limit ----
-
+//
+// Peak-shaving mode's import threshold. Validated against the site's
+// fuse — a limit above the breaker can never bind, and a negative one
+// would order export. See control.State.SetPeakLimit for the rules and
+// why 0 stays a real threshold here rather than "disabled".
 func (s *Server) handleSetPeakLimit(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		PeakLimitW float64 `json:"peak_limit_w"`
@@ -1385,8 +1584,13 @@ func (s *Server) handleSetPeakLimit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.deps.CtrlMu.Lock()
-	s.deps.Ctrl.PeakLimitW = req.PeakLimitW
+	err := s.deps.Ctrl.SetPeakLimit(req.PeakLimitW)
 	s.deps.CtrlMu.Unlock()
+	if err != nil {
+		writeJSON(w, 400, map[string]string{"error": err.Error()})
+		return
+	}
+	slog.Info("peak limit changed", "w", req.PeakLimitW)
 	writeJSON(w, 200, map[string]any{"status": "ok", "peak_limit_w": req.PeakLimitW})
 }
 
@@ -1988,10 +2192,32 @@ func (s *Server) handlePrices(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{
-		"zone":    s.deps.Prices.Zone,
-		"items":   rows,
-		"enabled": true,
+		"zone":     s.deps.Prices.Zone,
+		"currency": s.deps.Prices.Currency,
+		"items":    rows,
+		"enabled":  true,
 	})
+}
+
+// ---- /api/prices/zones ----
+//
+// The bidding zones a household can pick, with the currency each one is
+// billed in. Served from the same table the fetchers use, so the picker
+// can't offer a zone the providers don't know.
+//
+// Response: {"zones": [{code, country, currency, name}]}
+func (s *Server) handlePriceZones(w http.ResponseWriter, _ *http.Request) {
+	all := prices.Zones()
+	items := make([]map[string]string, 0, len(all))
+	for _, z := range all {
+		items = append(items, map[string]string{
+			"code":     z.Code,
+			"country":  z.Country,
+			"currency": z.Currency,
+			"name":     z.Name(),
+		})
+	}
+	writeJSON(w, 200, map[string]any{"zones": items})
 }
 
 // ---- /api/forecast ----

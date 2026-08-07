@@ -1,0 +1,214 @@
+package main
+
+import (
+	"context"
+	"log/slog"
+	"path"
+	"path/filepath"
+	"strconv"
+	"sync"
+	"time"
+
+	"github.com/srcfl/ftw/go/internal/config"
+	"github.com/srcfl/ftw/go/internal/drivers"
+	"github.com/srcfl/ftw/go/internal/fleetping"
+	"github.com/srcfl/ftw/go/internal/state"
+)
+
+// The anonymous fleet ping, wired to the box.
+//
+// Everything here is adapters. What may leave the house is decided in
+// go/internal/fleetping, in one function, so that this file cannot widen the
+// message by accident.
+
+// firstSeenKey records when this box first ran a version that counts install
+// age. It never leaves the box in this form — only as a bucket a few months
+// wide.
+const firstSeenKey = "install.first_seen_ms"
+
+// firstSeen is when this box first ran FTW, as far as it can tell.
+//
+// A box upgrading into this version starts its clock now, so an install that
+// has been running for two years reports "0-1m" for its first month. The
+// alternative — digging the oldest surviving history row out of SQLite — is a
+// query that would have to stay correct forever to improve one cohort's number
+// once, and cold storage rolls off anyway, so the oldest row is not the install
+// date either.
+func firstSeen(st *state.Store, now time.Time) time.Time {
+	if st == nil {
+		return time.Time{}
+	}
+	if v, ok := st.LoadConfig(firstSeenKey); ok {
+		if ms, err := strconv.ParseInt(v, 10, 64); err == nil && ms > 0 {
+			return time.UnixMilli(ms)
+		}
+	}
+	if err := st.SaveConfig(firstSeenKey, strconv.FormatInt(now.UnixMilli(), 10)); err != nil {
+		slog.Debug("could not record first-seen time", "err", err)
+		return time.Time{}
+	}
+	return now
+}
+
+// startFleetPing builds the pinger and starts its schedule.
+//
+// It is constructed even when the ping is switched off, because Settings
+// renders the payload this box would send and that screen has to work whether
+// or not anything is being sent — being able to see the message while it is
+// off is most of the point.
+func startFleetPing(
+	ctx context.Context,
+	cfg *config.Config,
+	cfgMu *sync.RWMutex,
+	st *state.Store,
+	version string,
+	managedDriverDir string,
+) (*fleetping.Pinger, error) {
+	cfgMu.RLock()
+	endpoint := cfg.FleetPing.Resolved()
+	cfgMu.RUnlock()
+	catalogue := fleetCatalogue(st, managedDriverDir)
+
+	provider, err := fleetping.NewHTTPProvider(endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	installedAt := firstSeen(st, time.Now())
+
+	pinger, err := fleetping.New(fleetping.Options{
+		Enabled: fleetPingEnabled(cfg, cfgMu),
+		Facts: func() fleetping.Facts {
+			cfgMu.RLock()
+			defer cfgMu.RUnlock()
+			return fleetping.FactsFromConfig(cfg, version, catalogue, installedAt)
+		},
+		Provider: provider,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	go pinger.Run(ctx)
+	return pinger, nil
+}
+
+// fleetPingEnabled reads the switch, under the config lock, at each send.
+//
+// On() and not a second reading of nil. A config posted to /api/config never
+// passes through applyDefaults and configreload.Apply swaps it in whole, so a
+// client that saves a config with no fleet_ping object hands the box a nil
+// section. Read here as "off", that would stop the ping the first time a
+// household saved anything at all, and keep it off until the next reboot.
+func fleetPingEnabled(cfg *config.Config, cfgMu *sync.RWMutex) func() bool {
+	return func() bool {
+		cfgMu.RLock()
+		defer cfgMu.RUnlock()
+		return cfg.FleetPing.On()
+	}
+}
+
+// fleetCatalogue is where the set of "known" driver names comes from, and the
+// point of it is to keep a household's own name for a driver out of that set.
+//
+// Two sources, and neither of them is "whatever is in this directory". A
+// config field says where installed drivers are kept, so a directory is
+// something the household can decide the contents of.
+//
+// The shipped catalogue is fleetping.ShippedCatalogue: generated from
+// drivers/BUNDLED_SOURCE.json and compiled into the binary, so every box
+// running this release has the same one and nothing on a running box can add
+// to it. It used to be a scan of the directory the bundled drivers sit in,
+// which was wrong: device_repository.root_dir is an ordinary config field, so
+// pointing it inside that directory made every artifact the household had ever
+// installed part of the shipped catalogue. A directory is something a config
+// can point at; a generated constant is not.
+//
+// The driver-repository active dir is the other, and its listing decides
+// nothing on its own. It holds one file per driver somebody installed, under
+// whatever name the manifest that installed it gave, so every filename found
+// there still has to answer: does this box's install history hold a record for
+// that name saying it arrived under a signature made with FTW's own key? That
+// is why root_dir may point anywhere at all — the listing only says which
+// install records still have a file behind them, and an install record is not
+// something a config writes.
+//
+// Only the name is matched here. That the file is still the artifact the
+// record describes is settled before this runs, by driverrepo.reconcileActive:
+// it drops any active entry that is not a symlink into the installed tree
+// hashing to the recorded digest, and deactivates the record with it. So a
+// household file left under an FTW-signed name is gone from both the directory
+// and the history by the time the catalogue is read — which is worth knowing,
+// because reading this function alone would suggest a name is all that is
+// checked.
+//
+// The question is deliberately not asked of the config. The config is the
+// household's to write, and it can be rewritten after the fact: an entry can
+// claim a repository id the binary pins, be switched off, or be deleted
+// outright while the file it installed stays where it is. Any of those turns
+// "which repositories require a signature today" into an answer the household
+// chose. What happened at install time is not theirs to rewrite, so that is
+// what is read here — the flag driverrepo wrote on the install row.
+//
+// Anything with no such record reports as "other": a file copied into the
+// active dir by hand, one renamed after it was installed, one from a
+// repository of the household's own, and one installed before FTW started
+// recording. That costs the box a name and nothing else.
+func fleetCatalogue(st *state.Store, managedDir string) []string {
+	names := fleetping.ShippedCatalogue()
+	if managedDir == "" {
+		return names
+	}
+	vouched := ftwSignedRepoFiles(st)
+	installed := make([]string, 0, len(vouched))
+	for _, name := range catalogueFilenames(managedDir) {
+		if vouched[name] {
+			installed = append(installed, name)
+		}
+	}
+	return append(names, fleetping.CatalogueNames(installed)...)
+}
+
+// catalogueFilenames lists the driver files in one directory. Only ever the
+// driver-repository active dir, and only ever to intersect with the install
+// history — a name that comes back from here still has to be vouched for.
+func catalogueFilenames(dir string) []string {
+	entries, err := drivers.LoadCatalogMulti(dir)
+	if err != nil {
+		// A dir that would not read means every driver installed from a
+		// repository reports as "other". That is a worse answer for the owner
+		// and a safe one for the household, which is the right way round.
+		slog.Debug("fleet ping could not read the driver catalogue", "err", err)
+		return nil
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Filename)
+	}
+	return names
+}
+
+// ftwSignedRepoFiles is the set of filenames the install history says arrived
+// under FTW's own signature, keyed the way the catalogue names them —
+// "easee_cloud.lua".
+//
+// The name is taken from the logical path the installer recorded, not from the
+// directory listing, so a file renamed on disk after it was installed no
+// longer matches anything here.
+func ftwSignedRepoFiles(st *state.Store) map[string]bool {
+	if st == nil {
+		return nil
+	}
+	installs, err := st.ActiveDriverRepoInstalls()
+	if err != nil {
+		slog.Debug("fleet ping could not read driver provenance", "err", err)
+		return nil
+	}
+	out := make(map[string]bool, len(installs))
+	for _, in := range installs {
+		if in.FTWSigned {
+			out[path.Base(filepath.ToSlash(in.LogicalPath))] = true
+		}
+	}
+	return out
+}

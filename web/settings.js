@@ -10,8 +10,9 @@
 //     var S = (window.FTWSettings = window.FTWSettings || { tabs: {} });
 //     S.tabs = S.tabs || {};
 //     S.tabs.<name> = {
-//       render: function (ctx) { return htmlString; },
-//       after:  function (ctx) { /* optional post-render hook */ },
+//       render:    function (ctx) { return htmlString; },
+//       after:     function (ctx) { /* optional post-render hook */ },
+//       afterSave: function ()    { /* optional post-save hook */ },
 //     };
 //   })();
 //
@@ -90,6 +91,12 @@
       .then(function (res) {
         setStatus("Saved ✓", "success");
         setTimeout(function () { setStatus(""); }, 2000);
+        // A tab that shows what the box says about itself, rather than what
+        // the form holds, is stale from here until it asks again.
+        var saved = S.tabs[currentTab];
+        if (saved && saved.afterSave) {
+          try { saved.afterSave(); } catch (e) { console.error("tab afterSave:", currentTab, e); }
+        }
         // Server tells us when the change touched a section that the
         // configreload watcher can't apply in flight (state.path,
         // api.port, …). Surface that as a dialog so the operator
