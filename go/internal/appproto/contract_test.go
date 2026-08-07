@@ -28,7 +28,7 @@ func TestContractGenIsCurrent(t *testing.T) {
 		t.Fatalf("read generated file: %v", err)
 	}
 	if string(got) != string(want) {
-		t.Fatalf("contract_gen.go is stale; run: go generate ./internal/appproto/...\n"+
+		t.Fatalf("contract_gen.go is stale; run: go generate ./internal/...\n"+
 			"(registry: %s)", filepath.Clean(registryPath))
 	}
 }

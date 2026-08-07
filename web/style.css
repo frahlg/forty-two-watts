@@ -1804,6 +1804,51 @@ footer {
   color: var(--text-dim);
 }
 
+/* ---- The FTW app settings tab ---- */
+/* One paired phone. The row is the whole of sharing: who this is, what they
+   may do, when they were last here, and the buttons that change it. It went
+   unstyled while it carried only a name and a timestamp, which already ran
+   them into one word; a role and a second button make that unreadable. */
+.app-device-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.82rem;
+}
+/* The name takes the slack, so the buttons sit together at the end and land
+   in the same place on every row. */
+.app-device-row > .mono {
+  flex: 1 1 auto;
+}
+.app-device-row .hint {
+  margin: 0;
+}
+.app-device-row button {
+  flex: 0 0 auto;
+}
+/* Who the next code is for, on one line and wrapping on a narrow screen.
+   Only one code is ever live, so these belong together rather than scattered
+   down the panel as if they were independent settings. How the code travels —
+   scanned, or read out loud — is offered under the code itself, once the
+   household has said who it is for. */
+.app-link-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 12px 0 8px;
+}
+/* The box code is read out loud, so it is set large and spaced: somebody is
+   reading it off this screen while talking into a phone. */
+.app-box-code {
+  font-size: 1.6rem;
+  letter-spacing: 0.12em;
+  margin: 10px 0 6px;
+  user-select: all;
+}
+
 /* ---- Fleet ping settings tab ---- */
 /* What the message cannot hide is a second thought, not the tail of the first
    one. .hint carries no margin, so two of them in a row set as one slab of

@@ -349,7 +349,7 @@ func main() {
 	apiHandler := newSwappableHandler(bootPhaseHandler())
 	httpSrv := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.API.Port),
-		Handler:           api.SecureMutations(apiHandler, apiMutationPolicy()),
+		Handler:           api.Authenticate(apiHandler, apiMutationPolicy()),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	go func() {
@@ -2123,9 +2123,13 @@ func main() {
 	if identityState.Nova != nil {
 		boxID = identityState.Nova.PublicKeyHex()[:16]
 	}
+	// The app's window onto this box's own HTTP API. Handed to the uplink
+	// now and filled in below, once the API server exists.
+	appAPI := &lateAPI{}
 	appEnroll, appUplink, appLinkEnabled, appLinkErr := startAppLink(
 		ctx, cfg, identityKeyPath, boxID, Version,
 		st, tel, mpcSvc, priceSvc, ctrl, ctrlMu, controlRev, appLinkWatchdog,
+		appAPI,
 	)
 	switch {
 	case appLinkErr != nil:
@@ -2222,6 +2226,9 @@ func main() {
 		Version: Version,
 	}
 	srv := api.New(deps)
+	// From here an app session reaches the same handler the LAN does, with
+	// the same trust boundary, carrying the enrolled device's identity.
+	appAPI.bind(srv)
 	// Dev-mode proxy: when FTW_PROXY_UPSTREAM is set (e.g.
 	// http://192.168.1.139:8080), /api/* is forwarded to that instance so
 	// the local UI renders live data without owning the control loop.

@@ -23,6 +23,10 @@ const (
 	MsgHistQuery        = "hist.query"
 	MsgHistChunk        = "hist.chunk"
 	MsgHistEnd          = "hist.end"
+	MsgAPIReq           = "api.req"
+	MsgAPIHead          = "api.head"
+	MsgAPIChunk         = "api.chunk"
+	MsgAPIEnd           = "api.end"
 )
 
 // Operations a client may ask for. Each maps to a scope.
@@ -96,6 +100,15 @@ type HelloOK struct {
 	// take minutes; saying so beats a spinner that looks hung.
 	Boot *BootProgress `cbor:"boot,omitempty"`
 	Hint string        `cbor:"hint,omitempty"`
+	// Role and Scopes are what this enrolment holds. The app uses them for
+	// one thing: deciding what to draw. The app hiding a button is
+	// presentation — if the app is wrong and shows it, the box refuses it.
+	//
+	// Both are sent, and the redundancy is deliberate. Role alone would make
+	// the app read a role table it has no reason to hold; the expanded list
+	// alone would leave the app unable to say "viewer" in a sentence.
+	Role   string   `cbor:"role"`
+	Scopes []string `cbor:"scopes"`
 }
 
 // HintAppUpdate tells the app it is behind. It is a hint, not an error: the
@@ -466,6 +479,89 @@ const (
 	GapEvicted = "evicted"
 	GapBoxDown = "box_down"
 )
+
+// --------------------------------------------------------------------------
+// The box's own HTTP API, over the session
+// --------------------------------------------------------------------------
+
+// APIReq asks the box to run one request against its own HTTP API.
+//
+// All four api.* messages ride the bulk lane and carry the request id. Never
+// lane 0: every field here varies in length with what was asked and answered,
+// and lane 0's constant size is a privacy control rather than a budget.
+type APIReq struct {
+	// Method is one of the six the passthrough accepts. Anything else is
+	// refused before a handler runs.
+	Method string `cbor:"method"`
+	// Path must start "/api/". The box's static handler is unreachable on
+	// purpose: serving HTML through the session would be a second origin
+	// under another name, which docs/architecture.md rejected.
+	Path string `cbor:"path"`
+	// Query is parsed, not a raw string. Two reasons: the tier gate keys on
+	// the path, and a tier decided over a string that can carry "?" is a
+	// parser bug that becomes a privilege bug — and this way the app never
+	// handles encoding, because the box rebuilds the URL itself.
+	Query map[string]string `cbor:"query,omitempty"`
+	// Body is opaque. The box sets Content-Type: application/json when one
+	// is present, and sets nothing else.
+	Body []byte `cbor:"body,omitempty"`
+	// MaxBytes is the app's own ceiling, clamped by the box's APIMaxBytes.
+	// The app learns the real figure from APIEnd.
+	MaxBytes int64 `cbor:"maxBytes,omitempty"`
+	// StepUp says the app ran a passkey ceremony for this request. Read the
+	// note above the check in passthrough.go before believing it means more
+	// than it does.
+	StepUp bool `cbor:"stepUp,omitempty"`
+
+	// There is deliberately no headers field. There is no path by which a
+	// client byte becomes a caller claim: identity rides on the request
+	// context inside the box process, and nothing about the caller is on the
+	// wire. Adding headers later would open exactly that hole.
+}
+
+// Methods the passthrough carries.
+const (
+	APIGet    = "GET"
+	APIHead   = "HEAD"
+	APIPost   = "POST"
+	APIPut    = "PUT"
+	APIPatch  = "PATCH"
+	APIDelete = "DELETE"
+)
+
+// APIHeadMsg is the answer's status line.
+//
+// Its arrival is what tells the two error kinds apart, and it needs no body
+// inspection: if api.head arrived, the box's HTTP layer answered and Status
+// is the answer — a 403 or a 500 from a box handler is a status, never an
+// E_ code. If an error arrived on that id instead, the passthrough refused
+// and no handler ran.
+type APIHeadMsg struct {
+	Status int `cbor:"status"`
+	// Headers is a short allowlist, not the handler's full set. Everything
+	// the app needs to read an answer and nothing that describes the box's
+	// LAN.
+	Headers map[string]string `cbor:"headers"`
+	// Len is the declared length, absent when the handler did not declare
+	// one — which is the usual case in process. A guessed number here would
+	// be a progress bar that lies.
+	Len *int64 `cbor:"len"`
+}
+
+// APIChunk is one piece of the answer, in order.
+type APIChunk struct {
+	Seq  uint32 `cbor:"seq"`
+	Data []byte `cbor:"data"`
+}
+
+// APIEnd closes an answer.
+type APIEnd struct {
+	Bytes int64 `cbor:"bytes"`
+	// Truncated means the answer ran past the ceiling and stops here. The
+	// app treats it as a failure rather than showing a partial answer as a
+	// whole one.
+	Truncated bool `cbor:"truncated"`
+}
 
 // --------------------------------------------------------------------------
 // Errors, events, teardown

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/srcfl/ftw/go/internal/apiauth"
 	"github.com/srcfl/ftw/go/internal/appwire"
 )
 
@@ -59,14 +61,14 @@ func TestAKnownKeyNeedsNoPairingCode(t *testing.T) {
 	id, _ := newIdentity(t)
 	app := appKey(t)
 
-	code, _, err := id.MintPairingCode()
+	code, _, err := id.MintPairingCode(apiauth.RoleOwner, PairingTTL)
 	if err != nil {
 		t.Fatalf("MintPairingCode: %v", err)
 	}
-	if err := id.Authorise(app, code); err != nil {
+	if _, err := id.Authorise(app, code); err != nil {
 		t.Fatalf("first pairing: %v", err)
 	}
-	if err := id.Authorise(app, nil); err != nil {
+	if _, err := id.Authorise(app, nil); err != nil {
 		t.Fatalf("reconnect with no code: %v", err)
 	}
 }
@@ -74,7 +76,7 @@ func TestAKnownKeyNeedsNoPairingCode(t *testing.T) {
 func TestAnUnknownKeyWithNoCodeIsRefused(t *testing.T) {
 	id, _ := newIdentity(t)
 
-	if err := id.Authorise(appKey(t), nil); !errors.Is(err, ErrNoPairing) {
+	if _, err := id.Authorise(appKey(t), nil); !errors.Is(err, ErrNoPairing) {
 		t.Fatalf("err = %v, want ErrNoPairing", err)
 	}
 }
@@ -84,16 +86,16 @@ func TestAnUnknownKeyWithNoCodeIsRefused(t *testing.T) {
 func TestAPairingCodeIsSpentOnFirstUse(t *testing.T) {
 	id, _ := newIdentity(t)
 
-	code, _, err := id.MintPairingCode()
+	code, _, err := id.MintPairingCode(apiauth.RoleOwner, PairingTTL)
 	if err != nil {
 		t.Fatalf("MintPairingCode: %v", err)
 	}
-	if err := id.Authorise(appKey(t), code); err != nil {
+	if _, err := id.Authorise(appKey(t), code); err != nil {
 		t.Fatalf("first use: %v", err)
 	}
 
 	second := appKey(t)
-	if err := id.Authorise(second, code); !errors.Is(err, ErrBadPairing) {
+	if _, err := id.Authorise(second, code); !errors.Is(err, ErrBadPairing) {
 		t.Fatalf("second use: err = %v, want ErrBadPairing", err)
 	}
 }
@@ -103,7 +105,7 @@ func TestAnExpiredCodeIsRefused(t *testing.T) {
 
 	now := time.Now()
 	id.now = func() time.Time { return now }
-	code, expires, err := id.MintPairingCode()
+	code, expires, err := id.MintPairingCode(apiauth.RoleOwner, PairingTTL)
 	if err != nil {
 		t.Fatalf("MintPairingCode: %v", err)
 	}
@@ -112,7 +114,7 @@ func TestAnExpiredCodeIsRefused(t *testing.T) {
 	}
 
 	id.now = func() time.Time { return now.Add(PairingTTL + time.Second) }
-	if err := id.Authorise(appKey(t), code); !errors.Is(err, ErrBadPairing) {
+	if _, err := id.Authorise(appKey(t), code); !errors.Is(err, ErrBadPairing) {
 		t.Fatalf("err = %v, want ErrBadPairing", err)
 	}
 }
@@ -120,11 +122,11 @@ func TestAnExpiredCodeIsRefused(t *testing.T) {
 func TestAWrongCodeIsRefused(t *testing.T) {
 	id, _ := newIdentity(t)
 
-	if _, _, err := id.MintPairingCode(); err != nil {
+	if _, _, err := id.MintPairingCode(apiauth.RoleOwner, PairingTTL); err != nil {
 		t.Fatalf("MintPairingCode: %v", err)
 	}
 	wrong := bytes.Repeat([]byte{0x5a}, PairingCodeBytes)
-	if err := id.Authorise(appKey(t), wrong); !errors.Is(err, ErrBadPairing) {
+	if _, err := id.Authorise(appKey(t), wrong); !errors.Is(err, ErrBadPairing) {
 		t.Fatalf("err = %v, want ErrBadPairing", err)
 	}
 }
@@ -134,15 +136,15 @@ func TestAWrongCodeIsRefused(t *testing.T) {
 func TestMintingRetiresThePreviousCode(t *testing.T) {
 	id, _ := newIdentity(t)
 
-	first, _, err := id.MintPairingCode()
+	first, _, err := id.MintPairingCode(apiauth.RoleOwner, PairingTTL)
 	if err != nil {
 		t.Fatalf("MintPairingCode: %v", err)
 	}
-	if _, _, err := id.MintPairingCode(); err != nil {
+	if _, _, err := id.MintPairingCode(apiauth.RoleOwner, PairingTTL); err != nil {
 		t.Fatalf("second MintPairingCode: %v", err)
 	}
 
-	if err := id.Authorise(appKey(t), first); !errors.Is(err, ErrBadPairing) {
+	if _, err := id.Authorise(appKey(t), first); !errors.Is(err, ErrBadPairing) {
 		t.Fatalf("err = %v, want ErrBadPairing", err)
 	}
 }
@@ -151,11 +153,11 @@ func TestAuthorisationSurvivesARestart(t *testing.T) {
 	id, keyPath := newIdentity(t)
 	app := appKey(t)
 
-	code, _, err := id.MintPairingCode()
+	code, _, err := id.MintPairingCode(apiauth.RoleOwner, PairingTTL)
 	if err != nil {
 		t.Fatalf("MintPairingCode: %v", err)
 	}
-	if err := id.Authorise(app, code); err != nil {
+	if _, err := id.Authorise(app, code); err != nil {
 		t.Fatalf("pairing: %v", err)
 	}
 
@@ -166,7 +168,7 @@ func TestAuthorisationSurvivesARestart(t *testing.T) {
 	if again.AuthorisedCount() != 1 {
 		t.Fatalf("authorised = %d, want 1", again.AuthorisedCount())
 	}
-	if err := again.Authorise(app, nil); err != nil {
+	if _, err := again.Authorise(app, nil); err != nil {
 		t.Fatalf("after restart: %v", err)
 	}
 }
@@ -196,7 +198,7 @@ func TestRotatingTheRendezvousSecretPersists(t *testing.T) {
 // parser in srcfl/ftw-webapp rather than against this file's own opinion.
 func TestEnrollmentURLMatchesTheAppsParser(t *testing.T) {
 	id, _ := newIdentity(t)
-	code, _, err := id.MintPairingCode()
+	code, _, err := id.MintPairingCode(apiauth.RoleOwner, PairingTTL)
 	if err != nil {
 		t.Fatalf("MintPairingCode: %v", err)
 	}
@@ -254,7 +256,7 @@ func TestEnrollmentURLMatchesTheAppsParser(t *testing.T) {
 
 func TestEnrollmentURLRefusesAHintTheAppWouldReject(t *testing.T) {
 	id, _ := newIdentity(t)
-	code, _, err := id.MintPairingCode()
+	code, _, err := id.MintPairingCode(apiauth.RoleOwner, PairingTTL)
 	if err != nil {
 		t.Fatalf("MintPairingCode: %v", err)
 	}
@@ -269,7 +271,7 @@ func TestEnrollmentURLRefusesAHintTheAppWouldReject(t *testing.T) {
 
 func TestAnEmptyLANHintIsAllowed(t *testing.T) {
 	id, _ := newIdentity(t)
-	code, _, err := id.MintPairingCode()
+	code, _, err := id.MintPairingCode(apiauth.RoleOwner, PairingTTL)
 	if err != nil {
 		t.Fatalf("MintPairingCode: %v", err)
 	}
@@ -331,7 +333,7 @@ func TestDeviceListAndRevoke(t *testing.T) {
 	id.now = func() time.Time { return clock }
 
 	pairPhone := func() []byte {
-		code, _, err := id.MintPairingCode()
+		code, _, err := id.MintPairingCode(apiauth.RoleOwner, PairingTTL)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -339,7 +341,7 @@ func TestDeviceListAndRevoke(t *testing.T) {
 		if _, err := rand.Read(pub); err != nil {
 			t.Fatal(err)
 		}
-		if err := id.Authorise(pub, code); err != nil {
+		if _, err := id.Authorise(pub, code); err != nil {
 			t.Fatal(err)
 		}
 		return pub
@@ -362,7 +364,7 @@ func TestDeviceListAndRevoke(t *testing.T) {
 	// A reconnect stamps lastSeen — that is what tells a live phone from a
 	// key that paired once and vanished.
 	clock = base.Add(2 * time.Hour)
-	if err := id.Authorise(first, nil); err != nil {
+	if _, err := id.Authorise(first, nil); err != nil {
 		t.Fatalf("reconnect refused: %v", err)
 	}
 	devices = id.Devices()
@@ -379,7 +381,7 @@ func TestDeviceListAndRevoke(t *testing.T) {
 	if string(key) != string(second) {
 		t.Fatal("revoke returned a different key than it removed")
 	}
-	if err := id.Authorise(second, nil); !errors.Is(err, ErrNoPairing) {
+	if _, err := id.Authorise(second, nil); !errors.Is(err, ErrNoPairing) {
 		t.Fatalf("a revoked key reconnected: %v", err)
 	}
 	if _, err := id.Revoke("nosuchid"); !errors.Is(err, ErrUnknownDevice) {
@@ -418,5 +420,103 @@ func TestLegacyBareKeyListStillReads(t *testing.T) {
 	devices := id.Devices()
 	if len(devices) != 1 || devices[0].AddedAtMs != 0 {
 		t.Fatalf("legacy row should carry unknown stamps: %+v", devices)
+	}
+}
+
+// --------------------------------------------------------------------------
+// What a grant says
+// --------------------------------------------------------------------------
+
+// The first phone a box pairs is its household's, so it is an owner. A box
+// with no owner cannot be administered.
+func TestTheFirstPairingIsAnOwner(t *testing.T) {
+	id, _ := newIdentity(t)
+	code, _, err := id.MintPairingCode(apiauth.RoleOwner, PairingTTL)
+	if err != nil {
+		t.Fatalf("MintPairingCode: %v", err)
+	}
+
+	app := appKey(t)
+	grant, err := id.Authorise(app, code)
+	if err != nil {
+		t.Fatalf("pairing: %v", err)
+	}
+	if grant.Role != apiauth.RoleOwner {
+		t.Fatalf("role = %q, want owner", grant.Role)
+	}
+	if grant.Epoch == 0 {
+		t.Fatal("the grant carries no epoch, so a revoke has nothing to move")
+	}
+	if want := base64.RawURLEncoding.EncodeToString(app)[:8]; grant.DeviceID != want {
+		t.Fatalf("device id = %q, want %q", grant.DeviceID, want)
+	}
+
+	// The reconnect takes the other branch and must answer the same.
+	again, err := id.Authorise(app, nil)
+	if err != nil {
+		t.Fatalf("reconnect: %v", err)
+	}
+	if again != grant {
+		t.Fatalf("reconnect granted %+v, want %+v", again, grant)
+	}
+}
+
+// A box updating from a version with no roles must not silently demote every
+// paired phone in the house to viewer.
+func TestALegacyEnrolmentLoadsAsAnOwner(t *testing.T) {
+	id, keyPath := newIdentity(t)
+	app := appKey(t)
+	key := base64.RawURLEncoding.EncodeToString(app)
+
+	// applink.json as a box that has never heard of roles wrote it.
+	raw, err := os.ReadFile(filepath.Join(filepath.Dir(keyPath), FileName))
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	var file map[string]any
+	if err := json.Unmarshal(raw, &file); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	file["authorisedApps"] = []any{map[string]any{"key": key, "addedAtMs": 1}}
+	patched, _ := json.Marshal(file)
+	if err := os.WriteFile(filepath.Join(filepath.Dir(keyPath), FileName), patched, 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	_ = id
+
+	again, err := LoadOrCreate(keyPath)
+	if err != nil {
+		t.Fatalf("LoadOrCreate: %v", err)
+	}
+	grant, err := again.Authorise(app, nil)
+	if err != nil {
+		t.Fatalf("reconnect after the update: %v", err)
+	}
+	if grant.Role != apiauth.RoleOwner {
+		t.Fatalf("role = %q; the update demoted a paired phone", grant.Role)
+	}
+	if grant.Epoch == 0 {
+		t.Fatal("a legacy row came back with no epoch, which no session can match")
+	}
+}
+
+// Revocation's second layer: the row is gone, so a session still holding an
+// epoch has nothing to match against and every privileged request it makes is
+// refused before a handler runs.
+func TestARevokedDeviceHasNoLiveGrant(t *testing.T) {
+	id, _ := newIdentity(t)
+	// An owner first, because the only owner cannot be revoked — and a
+	// household revoking a phone almost always has another.
+	pair(t, id, apiauth.RoleOwner)
+	guest := pair(t, id, apiauth.RoleViewer)
+
+	if live, ok := id.GrantFor(guest.DeviceID); !ok || live.Epoch != guest.Epoch {
+		t.Fatalf("grant before the revoke = %+v/%v, want %+v/live", live, ok, guest)
+	}
+	if _, err := id.Revoke(guest.DeviceID); err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
+	if live, ok := id.GrantFor(guest.DeviceID); ok {
+		t.Fatalf("a revoked device still has grant %+v", live)
 	}
 }

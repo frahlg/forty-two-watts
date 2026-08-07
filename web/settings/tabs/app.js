@@ -56,11 +56,33 @@
     return Math.round(d / 86400000) + " d ago";
   }
 
-  // The device list is what makes "remove" possible at all. Rows carry a
-  // short key prefix and two timestamps — the phone in daily use shows a
-  // fresh "last seen" and floats to the top; a key that paired once and
-  // vanished (a test run, a mistake, a stranger) sinks and is the one to
-  // remove. Removal is immediate: the box drops any live session too.
+  // What each role may do, in the words the row uses. The box is what
+  // enforces these; this only names them.
+  function roleText(role) {
+    return role === "viewer" ? "Can look" : "Can change things";
+  }
+
+  // Reports a refusal the box gave, rather than swallowing it. The one that
+  // matters is the last owner: without a sentence here, the Remove button
+  // simply does nothing and the household has no idea why.
+  function sayWhyNot(response, row) {
+    return response.json().then(function (body) {
+      var note = document.createElement("p");
+      note.className = "hint";
+      note.textContent = (body && body.error) || "That did not work.";
+      row.appendChild(note);
+    });
+  }
+
+  // The device list is what makes "remove" possible at all, and it is where
+  // sharing lives too. Rows carry a short key prefix, what the phone may do
+  // and two timestamps — the phone in daily use shows a fresh "last seen" and
+  // floats to the top; a key that paired once and vanished (a test run, a
+  // mistake, a stranger) sinks and is the one to remove.
+  //
+  // Removing a guest and locking a phone out are the same button, because
+  // they are the same thing: a guest's phone is a paired phone. Removal is
+  // immediate — the box drops any live session too.
   function refreshDevices() {
     var list = document.getElementById("app-link-devices");
     if (!list) return;
@@ -69,6 +91,12 @@
       .then(function (body) {
         list.textContent = "";
         var devices = (body && body.devices) || [];
+        // Sharing needs somebody to share from. The first phone on a box is
+        // its owner whatever code it used, so the button appears once there
+        // is one — otherwise it would offer a guest pass that silently makes
+        // an owner.
+        var shareButton = document.getElementById("app-link-share");
+        if (shareButton) shareButton.hidden = devices.length === 0;
         if (devices.length === 0) return;
 
         devices.forEach(function (d) {
@@ -80,22 +108,62 @@
           name.textContent = "Phone " + d.id;
           row.appendChild(name);
 
+          var what = document.createElement("span");
+          what.className = "hint";
+          what.textContent = roleText(d.role);
+          row.appendChild(what);
+
           var seen = document.createElement("span");
           seen.className = "hint";
           seen.textContent = d.last_seen_ms ? "seen " + agoText(d.last_seen_ms) : "never connected";
           row.appendChild(seen);
 
-          var btn = document.createElement("button");
-          btn.type = "button";
-          btn.textContent = "Remove";
-          btn.addEventListener("click", function () {
-            if (!confirm("Remove this phone? It loses access immediately and must scan a new code to come back.")) return;
-            btn.disabled = true;
-            fetch("/api/app-link/devices/" + encodeURIComponent(d.id), { method: "DELETE" })
-              .then(function () { refreshDevices(); refreshStatus(pairingCtx); })
-              .catch(function () { btn.disabled = false; });
-          });
-          row.appendChild(btn);
+          // The last owner cannot be removed or stepped down, so say so on
+          // the row rather than letting somebody press a button that answers
+          // with a refusal.
+          if (d.last_owner) {
+            var only = document.createElement("span");
+            only.className = "hint";
+            only.textContent = "The only phone that can change things — add another before removing this one.";
+            row.appendChild(only);
+          } else {
+            var toRole = d.role === "viewer" ? "owner" : "viewer";
+            var change = document.createElement("button");
+            change.type = "button";
+            change.textContent = d.role === "viewer" ? "Let it change things" : "Make it view only";
+            change.addEventListener("click", function () {
+              change.disabled = true;
+              fetch("/api/app-link/devices/" + encodeURIComponent(d.id), {
+                method: "PATCH",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ role: toRole }),
+              })
+                .then(function (r) {
+                  if (!r.ok) return sayWhyNot(r, row);
+                  refreshDevices();
+                })
+                .catch(function () {})
+                .then(function () { change.disabled = false; });
+            });
+            row.appendChild(change);
+
+            var btn = document.createElement("button");
+            btn.type = "button";
+            btn.textContent = "Remove";
+            btn.addEventListener("click", function () {
+              if (!confirm("Remove this phone? It loses access immediately and must scan a new code to come back.")) return;
+              btn.disabled = true;
+              fetch("/api/app-link/devices/" + encodeURIComponent(d.id), { method: "DELETE" })
+                .then(function (r) {
+                  if (!r.ok) return sayWhyNot(r, row);
+                  refreshDevices();
+                  refreshStatus(pairingCtx);
+                })
+                .catch(function () {})
+                .then(function () { btn.disabled = false; });
+            });
+            row.appendChild(btn);
+          }
 
           list.appendChild(row);
         });
@@ -111,15 +179,24 @@
         return r.ok ? r.json() : null;
       })
       .then(function (s) {
-        var button = document.getElementById("app-link-pair");
+        // Both ways of letting a phone in, enabled together. Sharing is not a
+        // separate feature that could still work with the app link off: it
+        // mints the same code from the same endpoint.
+        var buttons = [
+          document.getElementById("app-link-pair"),
+          document.getElementById("app-link-share"),
+        ];
+        var setEnabled = function (on) {
+          buttons.forEach(function (b) { if (b) b.disabled = !on; });
+        };
         if (!s) {
           setStatus("Pairing is available on your local network only.");
-          if (button) button.disabled = true;
+          setEnabled(false);
           return;
         }
         var note = describe(saved, s.enabled);
         setStatus(note === null ? pairedText(s.paired_devices) : note);
-        if (button) button.disabled = !s.enabled;
+        setEnabled(s.enabled);
         if (s.enabled) refreshDevices();
       })
       .catch(function () {
@@ -150,44 +227,109 @@
     return canvas;
   }
 
+  // What the code lets in, said in words above it, before anyone reads it
+  // out or holds a phone up to it. A code whose power is invisible is the one
+  // that gets given to the wrong person.
+  function sayWhatItLetsIn(slot, role) {
+    var says = document.createElement("p");
+    says.className = "hint";
+    says.textContent = role === "viewer"
+      ? "This lets someone see this home. They cannot change anything."
+      : "This adds a phone that can change things here.";
+    slot.appendChild(says);
+  }
+
+  function expiryText(pairing) {
+    var minutes = Math.max(1, Math.round((pairing.expires_at_ms - Date.now()) / 60000));
+    return "Works once, for about " + minutes + " more minutes.";
+  }
+
+  // The way in for a phone that cannot scan: no camera, a cracked lens, or
+  // somebody setting their own phone up again from another house.
+  //
+  // It carries the role of the code already on screen, so who this is for is
+  // chosen once, at the button above, and cannot drift between the sentence
+  // the household just read and the code they read out. It is built before
+  // the encoder is even asked for, because a QR that will not draw is exactly
+  // when somebody needs this most.
+  function spokenFallback(role) {
+    var label = "Cannot scan? Read a code out instead";
+    var btn = document.createElement("button");
+    btn.type = "button";
+    btn.textContent = label;
+    btn.addEventListener("click", function () {
+      requestCode({ role: role, kind: "spoken" }, btn, "Making a code…", label);
+    });
+    return btn;
+  }
+
   function showCode(pairing) {
     var slot = document.getElementById("app-link-slot");
     if (!slot) return;
     slot.textContent = "";
+    sayWhatItLetsIn(slot, pairing.role);
+
+    // A box code is meant to be read down a phone, so it is shown as text and
+    // nothing else. The QR payload never is: it is a credential, and the only
+    // path it should take is a camera.
+    if (pairing.code) {
+      var spoken = document.createElement("p");
+      spoken.className = "mono app-box-code";
+      spoken.textContent = pairing.code;
+      slot.appendChild(spoken);
+
+      var how = document.createElement("p");
+      how.className = "hint";
+      // What to do, not what to tap. The button that takes this code lives in
+      // the app, in another repository, and a label quoted here would go on
+      // being quoted long after the app renamed it.
+      how.textContent = "Read this out. On the other phone, choose to type a code " +
+        "rather than scan one. " + expiryText(pairing) + " Five wrong tries and it " +
+        "stops working, so ask for a new one rather than guessing.";
+      slot.appendChild(how);
+      return;
+    }
+
+    // Held so the drawing lands above the fallback button rather than after
+    // it, whenever the encoder finishes.
+    var picture = document.createElement("div");
+    slot.appendChild(picture);
+    slot.appendChild(spokenFallback(pairing.role));
 
     // Loaded on demand: this tab is opened once per phone, and every other
     // page would otherwise carry the encoder for nothing.
     import("/vendor/qrcode.js")
       .then(function (m) {
-        slot.appendChild(drawQR(m.qrMatrix, pairing.url, 260));
+        picture.appendChild(drawQR(m.qrMatrix, pairing.url, 260));
 
         var note = document.createElement("p");
         note.className = "hint";
-        var minutes = Math.max(1, Math.round((pairing.expires_at_ms - Date.now()) / 60000));
-        note.textContent = "Works once, for about " + minutes + " more minutes.";
-        slot.appendChild(note);
+        note.textContent = expiryText(pairing);
+        picture.appendChild(note);
       })
       .catch(function () {
         var err = document.createElement("p");
         err.className = "hint";
-        err.textContent = "Could not draw the code. Reload the page and try again.";
-        slot.appendChild(err);
+        err.textContent = "Could not draw the code here — read one out instead.";
+        picture.appendChild(err);
       });
   }
 
-  function requestCode() {
-    var button = document.getElementById("app-link-pair");
+  // One code at a time, whatever kind it is: asking for a guest pass cancels
+  // a pairing code still on screen, and the reverse. Every button here goes
+  // through this, so the rule is not something a caller has to remember.
+  function requestCode(opts, button, busyText, doneText) {
     var slot = document.getElementById("app-link-slot");
     if (!button || !slot) return;
 
     button.disabled = true;
-    button.textContent = "Making a code…";
+    button.textContent = busyText;
     slot.textContent = "";
 
     fetch("/api/app-link/pairing", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: "{}",
+      body: JSON.stringify(opts),
     })
       .then(function (r) {
         return r.json().then(function (body) {
@@ -204,7 +346,7 @@
       })
       .then(function () {
         button.disabled = false;
-        button.textContent = "Show a new code";
+        button.textContent = doneText;
         refreshStatus(pairingCtx);
       });
   }
@@ -217,8 +359,19 @@
 
       // Wired after this string becomes the DOM.
       setTimeout(function () {
-        var button = document.getElementById("app-link-pair");
-        if (button) button.addEventListener("click", requestCode);
+        var pairButton = document.getElementById("app-link-pair");
+        if (pairButton) {
+          pairButton.addEventListener("click", function () {
+            requestCode({ role: "owner" }, pairButton, "Making a code…", "Show a new code");
+          });
+        }
+
+        var shareButton = document.getElementById("app-link-share");
+        if (shareButton) {
+          shareButton.addEventListener("click", function () {
+            requestCode({ role: "viewer" }, shareButton, "Making a code…", "Let someone see this home");
+          });
+        }
 
         // The shared data-checkbox-path handler writes the config; this only
         // repaints the line underneath, so the wording follows the checkbox
@@ -241,11 +394,21 @@
         "you save.</p>" +
         '<p id="app-link-status" class="hint">checking…</p>' +
         '<div id="app-link-devices"></div>' +
+        '<div class="app-link-actions">' +
         '<button type="button" id="app-link-pair" disabled>Show pairing code</button>' +
+        '<button type="button" id="app-link-share" hidden>Let someone see this home</button>' +
+        "</div>" +
         '<p class="hint">Scan the code with the FTW app to add a phone. It works ' +
         "once and expires in a few minutes, so ask for a new one when you need it. " +
         "Everything the app needs is in the code itself, which is why the app can " +
         "be sure it is talking to this box.</p>" +
+        '<p class="hint">A code can be read out instead of scanned. The offer sits ' +
+        "under whichever code is on screen and lets in exactly the same access. It " +
+        "is for a phone that has been here before and is being set up again — a " +
+        "phone that has never seen this box has to scan, because only the square " +
+        "carries what it needs to find this box and be sure it is this one. Only " +
+        "one code is live at a time, so asking for any of them stops the last " +
+        "one.</p>" +
         '<div id="app-link-slot"></div>' +
         "</fieldset>"
       );

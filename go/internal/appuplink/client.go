@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/srcfl/ftw/go/internal/apiauth"
 	"github.com/srcfl/ftw/go/internal/appenroll"
 	"github.com/srcfl/ftw/go/internal/appproto"
 )
@@ -112,7 +113,7 @@ type Options struct {
 	// Handler builds one message-layer handler per app session. The caller
 	// supplies it so this package needs to know nothing about telemetry,
 	// control or the planner.
-	Handler func(appproto.Sender) (*appproto.Handler, error)
+	Handler HandlerBuilder
 
 	Logger *slog.Logger
 
@@ -121,6 +122,16 @@ type Options struct {
 	Now    func() time.Time
 	Random func() float64
 }
+
+// HandlerBuilder makes one message-layer handler for one app session.
+//
+// The caller is passed in rather than looked up later, because the handshake
+// has just authenticated the device and that is the only moment the answer is
+// certain. The grant reader is passed beside it because the caller is a
+// snapshot and a revoke can land a second afterwards: the handler re-reads
+// the enrolment on every privileged request, and refuses one whose epoch has
+// moved.
+type HandlerBuilder func(appproto.Sender, apiauth.Caller, appproto.GrantReader) (*appproto.Handler, error)
 
 // Uplink maintains the connection and the sessions on it.
 type Uplink struct {

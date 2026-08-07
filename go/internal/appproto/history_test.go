@@ -123,6 +123,7 @@ func newHistoryRig(t *testing.T, ledger HistoryProvider) (*Handler, *recorder, *
 		Clock: clock, Site: box, Info: box, Modes: box, Plans: box,
 		History: ledger,
 		Codec:   testCodec{}, Sender: rec,
+		Caller: ownerCaller(), Grants: newGrants(),
 		SrcGrid: "meter.p1", SrcPV: "meter.p1", SrcBattery: "meter.p1",
 		NewLeaseID: func() string { return "lease-test" },
 	})

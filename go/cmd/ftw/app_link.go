@@ -4,10 +4,13 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/srcfl/ftw/go/internal/api"
+	"github.com/srcfl/ftw/go/internal/apiauth"
 	"github.com/srcfl/ftw/go/internal/appenroll"
 	"github.com/srcfl/ftw/go/internal/appproto"
 	"github.com/srcfl/ftw/go/internal/appuplink"
@@ -397,6 +400,7 @@ func startAppLink(
 	ctrlMu *sync.Mutex,
 	revision *control.Revision,
 	siteMeterStale time.Duration,
+	gateway *lateAPI,
 ) (*appenroll.Identity, *appuplink.Uplink, bool, error) {
 	enabled := cfg != nil && cfg.AppLink != nil && cfg.AppLink.Enabled
 
@@ -444,9 +448,19 @@ func startAppLink(
 		caps = append(caps, appproto.CapPriceSpot)
 	}
 
+	// The box's own HTTP API, reachable over the session. Bound after this
+	// returns, because the API server is built from dependencies that are not
+	// assembled yet; until then it answers 503 and the app says the box is
+	// starting, which is true.
+	caps = append(caps, appproto.CapApiPassthrough)
+
 	uplink, err := appuplink.New(appuplink.Options{
 		Enroll: enroll,
-		Handler: func(sender appproto.Sender) (*appproto.Handler, error) {
+		Handler: func(
+			sender appproto.Sender,
+			caller apiauth.Caller,
+			grants appproto.GrantReader,
+		) (*appproto.Handler, error) {
 			// One handler per app session. They share the ports above, which
 			// are read-only apart from the mode, and the mode goes through
 			// control's own validation.
@@ -458,6 +472,9 @@ func startAppLink(
 				Plans:   plans,
 				History: history,
 				Prices:  priceReader,
+				API:     gateway,
+				Caller:  caller,
+				Grants:  grants,
 				Caps:    caps,
 				Codec:   appuplink.Codec(),
 				Sender:  sender,
@@ -489,6 +506,49 @@ func siteMeterName(ctrl *control.State, ctrlMu *sync.Mutex) string {
 	return ctrl.SiteMeterDriver
 }
 
+// lateAPI is the box's HTTP API as the app session sees it.
+//
+// Late-bound because the uplink starts before the API server is assembled.
+// Until it is bound every request answers 503, which the app already renders
+// as "your box is starting, this takes a few minutes after an update" — an
+// honest sentence rather than a silent hang.
+//
+// It is the same handler the LAN listener serves, trust boundary and all. The
+// passthrough deliberately does not reach past it to the bare mux: one door
+// with one set of checks, whichever side the request came in on.
+type lateAPI struct {
+	srv atomic.Pointer[api.Server]
+}
+
+func (l *lateAPI) bind(srv *api.Server) { l.srv.Store(srv) }
+
+func (l *lateAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	srv := l.srv.Load()
+	if srv == nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"error":"the box is still starting"}`))
+		return
+	}
+	srv.ServeHTTP(w, r)
+}
+
+func (l *lateAPI) Route(r *http.Request) apiauth.RouteFacts {
+	srv := l.srv.Load()
+	if srv == nil {
+		// No routes are registered yet, so nothing can be recognised as
+		// actuation — and nothing can be served either, since every request
+		// in this window meets the 503 above. The method still decides the
+		// tier, mirroring api.Route's first rule, so a write is not waved
+		// through in the seconds before the server exists.
+		if r.Method == http.MethodGet || r.Method == http.MethodHead {
+			return apiauth.RouteFacts{Tier: apiauth.TierRead}
+		}
+		return apiauth.RouteFacts{Tier: apiauth.TierConfigure}
+	}
+	return srv.Route(r)
+}
+
 // appLinkAPI is the API's view of enrollment: the identity plus, when the
 // uplink runs, the ability to tear a revoked phone's sessions down at once
 // rather than at its next reconnect.
@@ -497,8 +557,24 @@ type appLinkAPI struct {
 	uplink *appuplink.Uplink
 }
 
-func (a *appLinkAPI) MintPairingCode() ([]byte, time.Time, error) {
-	return a.enroll.MintPairingCode()
+// MintPairingCode issues an owner's or a viewer's QR code.
+//
+// An invite is not a new cryptographic object: it is this same code, with a
+// role the box remembers and stamps when the code is spent. The payload does
+// not change shape, so the app's scanner needs to know nothing about sharing —
+// a guest scans what an owner scans and learns what they are from hello_ok.
+func (a *appLinkAPI) MintPairingCode(role string) ([]byte, time.Time, error) {
+	ttl := appenroll.PairingTTL
+	if role != apiauth.RoleOwner {
+		ttl = appenroll.InviteTTL
+	}
+	code, expires, err := a.enroll.MintPairingCode(role, ttl)
+	return code, expires, appLinkError(err)
+}
+
+func (a *appLinkAPI) MintSpokenCode(role string) (string, time.Time, error) {
+	code, expires, err := a.enroll.MintSpokenCode(role)
+	return code, expires, appLinkError(err)
 }
 
 func (a *appLinkAPI) EnrollmentURL(code []byte, lanHint string) (string, error) {
@@ -511,18 +587,30 @@ func (a *appLinkAPI) Devices() []api.AppDevice {
 	infos := a.enroll.Devices()
 	out := make([]api.AppDevice, 0, len(infos))
 	for _, d := range infos {
-		out = append(out, api.AppDevice{ID: d.ID, AddedAtMs: d.AddedAtMs, LastSeenMs: d.LastSeenMs})
+		out = append(out, api.AppDevice{
+			ID: d.ID, AddedAtMs: d.AddedAtMs, LastSeenMs: d.LastSeenMs,
+			Role: d.Role, LastOwner: d.LastOwner,
+		})
 	}
 	return out
+}
+
+// SetDeviceRole changes what one phone may do, and leaves its session up.
+//
+// No session is dropped, deliberately. The epoch moved with the role, and both
+// doors re-read the grant on every privileged request — so a demoted owner
+// loses their writes at the next one and keeps the readings they still have
+// every right to see. Tearing the session down would tell them their access
+// was withdrawn, which for a demotion is not true and for a promotion is the
+// opposite of true.
+func (a *appLinkAPI) SetDeviceRole(id, role string) error {
+	return appLinkError(a.enroll.SetRole(id, role))
 }
 
 func (a *appLinkAPI) RevokeDevice(id string) error {
 	key, err := a.enroll.Revoke(id)
 	if err != nil {
-		if errors.Is(err, appenroll.ErrUnknownDevice) {
-			return api.ErrUnknownAppDevice
-		}
-		return err
+		return appLinkError(err)
 	}
 	// Forgetting the key locks the next handshake out; dropping the live
 	// sessions locks out the one running now. Both, or "remove" quietly
@@ -531,6 +619,26 @@ func (a *appLinkAPI) RevokeDevice(id string) error {
 		a.uplink.DropSessionsByAppKey(key)
 	}
 	return nil
+}
+
+// appLinkError translates enrollment's refusals into the API's.
+//
+// Two vocabularies because the API package does not import appenroll — and
+// because the refusals are the part a screen has to explain, so they are worth
+// naming once on each side rather than passing a package's errors through.
+func appLinkError(err error) error {
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, appenroll.ErrUnknownDevice):
+		return api.ErrUnknownAppDevice
+	case errors.Is(err, appenroll.ErrLastOwnerProtected):
+		return api.ErrLastAppOwnerProtected
+	case errors.Is(err, appenroll.ErrUnknownRole):
+		return api.ErrUnknownAppRole
+	default:
+		return err
+	}
 }
 
 // appEnrollForAPI hands the enroller to the API, or nothing.

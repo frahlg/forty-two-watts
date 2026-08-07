@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/srcfl/ftw/go/internal/apiauth"
 	"github.com/srcfl/ftw/go/internal/control"
 	"github.com/srcfl/ftw/go/internal/mpc"
 )
@@ -68,12 +70,17 @@ type sent struct {
 	env   Envelope
 }
 
+// recorder is guarded because a handler sends from two goroutines: the tick,
+// and the passthrough answering a request.
 type recorder struct {
+	mu     sync.Mutex
 	frames []sent
 	fail   error
 }
 
 func (r *recorder) Send(frame []byte) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if r.fail != nil {
 		return r.fail
 	}
@@ -85,13 +92,24 @@ func (r *recorder) Send(frame []byte) error {
 	return nil
 }
 
-func (r *recorder) reset() { r.frames = nil }
+func (r *recorder) reset() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.frames = nil
+}
+
+// snapshot is how an asynchronous test reads what has been sent so far.
+func (r *recorder) snapshot() []sent {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]sent(nil), r.frames...)
+}
 
 // only returns the single frame of a type, failing if there is not exactly one.
 func (r *recorder) only(t *testing.T, msgType string) sent {
 	t.Helper()
 	var found []sent
-	for _, f := range r.frames {
+	for _, f := range r.snapshot() {
 		if f.env.T == msgType {
 			found = append(found, f)
 		}
@@ -104,9 +122,10 @@ func (r *recorder) only(t *testing.T, msgType string) sent {
 
 func (r *recorder) last(t *testing.T, msgType string) sent {
 	t.Helper()
-	for i := len(r.frames) - 1; i >= 0; i-- {
-		if r.frames[i].env.T == msgType {
-			return r.frames[i]
+	frames := r.snapshot()
+	for i := len(frames) - 1; i >= 0; i-- {
+		if frames[i].env.T == msgType {
+			return frames[i]
 		}
 	}
 	t.Fatalf("no %s frame; got %s", msgType, r.types())
@@ -114,7 +133,7 @@ func (r *recorder) last(t *testing.T, msgType string) sent {
 }
 
 func (r *recorder) has(msgType string) bool {
-	for _, f := range r.frames {
+	for _, f := range r.snapshot() {
 		if f.env.T == msgType {
 			return true
 		}
@@ -124,7 +143,7 @@ func (r *recorder) has(msgType string) bool {
 
 func (r *recorder) types() string {
 	var out []string
-	for _, f := range r.frames {
+	for _, f := range r.snapshot() {
 		out = append(out, f.env.T)
 	}
 	return fmt.Sprint(out)
@@ -196,6 +215,65 @@ func (b *fakeBox) SetMode(_ context.Context, m control.Mode) error {
 
 func (b *fakeBox) ObservedMode() (control.Mode, bool) { return b.observedMode, b.observedOK }
 
+// ownerCaller is the grant every test here used to carry implicitly: the
+// household's own phone, paired from the code on the box's lid.
+func ownerCaller() apiauth.Caller {
+	return apiauth.Caller{
+		Subject: apiauth.KindApp + ":aBcD1234",
+		Kind:    apiauth.KindApp,
+		Role:    apiauth.RoleOwner,
+		Scopes:  ScopesForRole(apiauth.RoleOwner),
+		Epoch:   1,
+	}
+}
+
+func viewerCaller() apiauth.Caller {
+	return apiauth.Caller{
+		Subject: apiauth.KindApp + ":wXyZ9876",
+		Kind:    apiauth.KindApp,
+		Role:    apiauth.RoleViewer,
+		Scopes:  ScopesForRole(apiauth.RoleViewer),
+		Epoch:   1,
+	}
+}
+
+// fakeGrants is the enrolment record as the box holds it right now. Tests
+// move it under a running session, which is the whole point of re-reading it
+// per request rather than trusting the handshake.
+type fakeGrants struct {
+	mu    sync.Mutex
+	role  string
+	epoch uint64
+	gone  bool
+}
+
+func newGrants() *fakeGrants { return &fakeGrants{role: apiauth.RoleOwner, epoch: 1} }
+
+func newViewerGrants() *fakeGrants { return &fakeGrants{role: apiauth.RoleViewer, epoch: 1} }
+
+func (g *fakeGrants) Grant() (string, uint64, bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.role, g.epoch, !g.gone
+}
+
+// revoke is what appenroll.Revoke does to a row: it stops existing.
+func (g *fakeGrants) revoke() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.gone = true
+}
+
+// setRole is what appenroll.SetRole does to a row: the role changes, the epoch
+// moves with it, and the row goes on existing. That last part is the whole
+// difference between a demotion and a revoke.
+func (g *fakeGrants) setRole(role string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.role = role
+	g.epoch++
+}
+
 // newRig builds a handler over a box with a meter, an inverter and a battery,
 // all live.
 func newRig(t *testing.T) (*Handler, *fakeBox, *recorder, *fakeClock) {
@@ -238,6 +316,8 @@ func newRig(t *testing.T) (*Handler, *fakeBox, *recorder, *fakeClock) {
 		Plans:      box,
 		Codec:      testCodec{},
 		Sender:     rec,
+		Caller:     ownerCaller(),
+		Grants:     newGrants(),
 		SrcGrid:    "meter.p1",
 		SrcPV:      "inverter.sungrow",
 		SrcBattery: "battery.sungrow",
