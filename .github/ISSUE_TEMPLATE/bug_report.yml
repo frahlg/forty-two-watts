@@ -9,6 +9,9 @@ body:
         Thanks for taking the time to report a bug. Please fill in the
         details below so the community can reproduce and evaluate it.
 
+        If you want to contribute a code fix, start with this report and wait
+        for a maintainer to confirm the scope before opening the pull request.
+
         FTW Community has no guaranteed response or resolution time. Do not
         include credentials, access tokens, private keys, or unredacted
         configuration and energy data.
@@ -74,3 +77,10 @@ body:
     attributes:
       label: Anything else?
       description: Config snippets, screenshots, network topology, etc.
+  - type: checkboxes
+    id: text-first
+    attributes:
+      label: Contribution path
+      options:
+        - label: I will wait for a maintainer to confirm the fix scope before opening a code pull request.
+          required: true

@@ -76,8 +76,33 @@ By making a contribution to this project, I certify that:
     this project or the open source license(s) involved.
 ```
 
+## Start with text
+
+External code contributions start with a written proposal, not an
+implementation pull request. Open an issue or Discussion before writing code
+and describe:
+
+- the problem and current behaviour;
+- the result you want and what stays out of scope;
+- real hardware, tariff, protocol or user evidence where it applies;
+- safety and failure behaviour;
+- the test, run or rendered view that would prove the change;
+- related issues and open pull requests that touch the same area.
+
+Wait for a maintainer to accept the scope in that thread. An accepted proposal
+covers one focused change; it does not approve a stack of follow-on pull
+requests. Once the scope is agreed, link the thread from the implementation
+pull request and keep the code within it.
+
+This review protects contributor time and keeps new work aligned with current
+architecture and work already in progress. We may close an unsolicited code
+pull request and invite the author to bring the proposal back as text first.
+Documentation-only corrections may go straight to a pull request, but the pull
+request must still explain the change and why it is correct.
+
 ## Pull requests
 
+- Link the written proposal and the maintainer comment that accepted its scope.
 - Keep PRs focused on one logical change.
 - New code needs tests; `make verify` must pass before review.
 - User-visible changes need a Changeset entry (`npx changeset`) — see the

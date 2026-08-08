@@ -26,6 +26,23 @@ this lane, not parallel remote products. Their contracts must converge on one
 rule: identity can establish who or what is speaking, but only core can admit a
 mutation and validate its effect.
 
+## NEXT — review the tariff and demand contract
+
+FTW will review the tariff and demand model in text before C&I implementation
+resumes. [Issue #866](https://github.com/srcfl/ftw/issues/866) is the shared
+review thread. It starts from named, current utility tariffs and source
+documents, not from an implementation branch.
+
+The review must settle import and export direction, local civil time and DST,
+complete and missing intervals, billing-cycle and peak rules, apparent-power
+inputs, proven hardware limits, and the boundary between planning and live
+control. Its fixtures must cover at least one real tariff and its failure
+cases.
+
+No tariff, demand, optimizer, control or tariff-UI implementation PR starts
+until that written contract is accepted. The accepted result will be split
+into small issues and one focused PR at a time.
+
 ## NEXT — the FTW app
 
 The optional FTW Home Link was built, shipped and then removed whole; see
