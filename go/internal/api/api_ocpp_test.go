@@ -40,6 +40,7 @@ func TestOCPPChargersDisabled(t *testing.T) {
 
 func TestOCPPChargersReportsSnapshotSorted(t *testing.T) {
 	cfg := &config.Config{OCPP: &config.OCPP{Enabled: true, PortV201: 8888}}
+	steerable := true
 	srv := New(&Deps{
 		Cfg:   cfg,
 		CfgMu: &sync.RWMutex{},
@@ -50,6 +51,7 @@ func TestOCPPChargersReportsSnapshotSorted(t *testing.T) {
 					Online: true, Connected: true, Charging: true,
 					PowerW: 7400, Version: "1.6", LastAmps: 10,
 					Vendor: "Charge Amps", Model: "Dawn",
+					FeatureProfiles: "Core,SmartCharging", Steerable: &steerable,
 				},
 			}
 		},
@@ -87,8 +89,17 @@ func TestOCPPChargersReportsSnapshotSorted(t *testing.T) {
 	if _, ok := first["pending"]; ok {
 		t.Fatalf("adopted charger should not carry pending, got %v", first["pending"])
 	}
+	// Capability discovery must reach the UI, and stay tri-state: the probed
+	// charger reports its verdict, the unprobed one omits the field so the
+	// panel can say "not reported" rather than "cannot be steered".
+	if first["steerable"] != true || first["feature_profiles"] != "Core,SmartCharging" {
+		t.Fatalf("steerable/profiles = %v/%v", first["steerable"], first["feature_profiles"])
+	}
 	second := chargers[1].(map[string]any)
 	if second["pending"] != true {
 		t.Fatalf("pending = %v, want true for garage-right", second["pending"])
+	}
+	if _, ok := second["steerable"]; ok {
+		t.Fatalf("unprobed charger should omit steerable, got %v", second["steerable"])
 	}
 }

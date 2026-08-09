@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 
 globalThis.window = {};
 await import("./loadpoints.js");
-const { evDriverNames, ocppChargerIds, ocppStateLabel, ocppSection,
+const { evDriverNames, ocppChargerIds, ocppStateLabel, ocppSection, steerLabel,
   vehiclesSection, vehicleForIdentifier, parseIdentifiers } =
   globalThis.window.FTWSettings.tabs.loadpoints._pure;
 
@@ -31,6 +31,40 @@ describe("charger driver dropdown sources", () => {
   it("survives a missing or disabled OCPP status", () => {
     assert.deepEqual(evDriverNames({ drivers: [] }, null), []);
     assert.deepEqual(evDriverNames({ drivers: [] }, { enabled: false }), []);
+  });
+});
+
+describe("charger control capability", () => {
+  it("keeps unknown distinct from telemetry-only", () => {
+    assert.equal(steerLabel({ steerable: true }), "smart charging");
+    assert.equal(steerLabel({ steerable: false }), "telemetry only");
+    assert.equal(steerLabel({}), "not reported");
+  });
+
+  it("warns only when a charger reported no smart charging", () => {
+    const warn = /telemetry only<\/b> answered FTW/;
+    const withMeterOnly = ocppSection({
+      enabled: true, port: 8887, path: "/",
+      chargers: [{ id: "dumb", online: true, steerable: false, feature_profiles: "Core" }],
+    }, "ftw.lan", escHtml, []);
+    assert.match(withMeterOnly, /telemetry only/);
+    assert.match(withMeterOnly, warn);
+    // The raw answer is kept as a tooltip for whoever needs the detail.
+    assert.match(withMeterOnly, /title="Core"/);
+
+    const allSteerable = ocppSection({
+      enabled: true, port: 8887, path: "/",
+      chargers: [{ id: "good", online: true, steerable: true, feature_profiles: "Core,SmartCharging" }],
+    }, "ftw.lan", escHtml, []);
+    assert.match(allSteerable, /smart charging/);
+    assert.doesNotMatch(allSteerable, warn);
+
+    const unprobed = ocppSection({
+      enabled: true, port: 8887, path: "/",
+      chargers: [{ id: "quiet", online: true }],
+    }, "ftw.lan", escHtml, []);
+    assert.match(unprobed, /not reported/);
+    assert.doesNotMatch(unprobed, warn);
   });
 });
 

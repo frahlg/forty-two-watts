@@ -36,6 +36,11 @@ type Handler struct {
 	// matching vehicle profile (capacity, charging policy) to the loadpoint.
 	// Pending chargers never fire it: quarantine means no influence.
 	vehicleIdentified func(chargerID, vehicleID, source string)
+
+	// capabilityProbe, set by the Server, asks a charger which feature
+	// profiles it supports (see capabilities.go). Fired from OnConnect and
+	// OnBootNotification until the charger answers, then never again.
+	capabilityProbe func(id string)
 }
 
 // chargerState is what we accumulate from successive OCPP messages for one
@@ -72,6 +77,13 @@ type chargerState struct {
 	// Kept after the session ends so the UI can show what was last seen.
 	vehicleID       string
 	vehicleIDSource string
+	// featureProfiles is the raw capability answer from the probe in
+	// capabilities.go (the SupportedFeatureProfiles CSV on 1.6, a
+	// synthesized SmartChargingCtrlr line on 2.0.1); empty until one
+	// arrived. steerable is the verdict derived from it: nil = never
+	// answered, false = telemetry only, true = accepts charging profiles.
+	featureProfiles string
+	steerable       *bool
 }
 
 // NewHandler returns a Handler ready to register with a CentralSystem.
@@ -159,6 +171,38 @@ func (h *Handler) SetVehicleIdentified(fn func(chargerID, vehicleID, source stri
 	h.mu.Unlock()
 }
 
+// setControlCapability records a capability-probe answer and the verdict
+// derived from it. A telemetry-only verdict is worth a warning: the operator
+// may be about to bind a charger the planner can never steer.
+func (h *Handler) setControlCapability(id, raw string, steerable bool) {
+	h.mu.Lock()
+	s := h.chargersLocked(id)
+	s.featureProfiles = raw
+	b := steerable
+	s.steerable = &b
+	h.mu.Unlock()
+	if steerable {
+		slog.Info("ocpp: charger supports smart charging", "charger", id, "profiles", raw)
+	} else {
+		slog.Warn("ocpp: charger declares no smart-charging support — telemetry only, FTW cannot steer it",
+			"charger", id, "profiles", raw)
+	}
+}
+
+// maybeProbeCapability fires the capability probe unless the charger has
+// already answered one. Called from OnConnect and boot notifications so a
+// charger that ignores the probe pre-boot gets asked again post-boot, and
+// again on every reconnect, until an answer sticks.
+func (h *Handler) maybeProbeCapability(id string) {
+	h.mu.Lock()
+	fn := h.capabilityProbe
+	known := h.chargersLocked(id).steerable != nil
+	h.mu.Unlock()
+	if fn != nil && !known {
+		go fn(id)
+	}
+}
+
 // noteVehicleID records the identity a transaction presented and fires the
 // vehicleIdentified callback when it is new for this charger. Quarantine
 // applies: a pending charger's identity is stored (the UI shows it so the
@@ -198,7 +242,7 @@ func (h *Handler) Snapshot() map[string]ChargerView {
 	defer h.mu.Unlock()
 	out := make(map[string]ChargerView, len(h.chargers))
 	for id, s := range h.chargers {
-		out[id] = ChargerView{
+		v := ChargerView{
 			Online:          s.online,
 			Connected:       s.connected,
 			Charging:        s.charging,
@@ -212,7 +256,13 @@ func (h *Handler) Snapshot() map[string]ChargerView {
 			Pending:         !h.approved[id],
 			VehicleID:       s.vehicleID,
 			VehicleIDSource: s.vehicleIDSource,
+			FeatureProfiles: s.featureProfiles,
 		}
+		if s.steerable != nil {
+			b := *s.steerable
+			v.Steerable = &b
+		}
+		out[id] = v
 	}
 	return out
 }
@@ -243,6 +293,12 @@ type ChargerView struct {
 	// 2.0.1 (names the car). VehicleIDSource says which kind.
 	VehicleID       string `json:"vehicle_id,omitempty"`
 	VehicleIDSource string `json:"vehicle_id_source,omitempty"`
+	// FeatureProfiles is the charger's raw capability answer (see
+	// capabilities.go); Steerable the verdict: absent = charger never
+	// answered the probe, false = telemetry only, true = accepts charging
+	// profiles.
+	FeatureProfiles string `json:"feature_profiles,omitempty"`
+	Steerable       *bool  `json:"steerable,omitempty"`
 }
 
 // OnConnect / OnDisconnect are wired by the Server to the OCPP library's
@@ -259,6 +315,7 @@ func (h *Handler) OnConnect(id string) {
 	s.online = true
 	h.mu.Unlock()
 	h.telSuccess(id)
+	h.maybeProbeCapability(id)
 }
 
 func (h *Handler) OnDisconnect(id string) {
@@ -289,6 +346,7 @@ func (h *Handler) OnBootNotification(id string, req *core.BootNotificationReques
 	s.model = req.ChargePointModel
 	h.mu.Unlock()
 	h.telSuccess(id)
+	h.maybeProbeCapability(id)
 	return core.NewBootNotificationConfirmation(
 		types.NewDateTime(time.Now()),
 		h.heartbeatIntervalS,

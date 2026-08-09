@@ -92,10 +92,11 @@ func Start(ctx context.Context, cfg *Config, tel *telemetry.Store) (*Server, err
 	h.SetApprovedIDs(cfg.ApprovedIDs)
 	cs.SetCoreHandler(h)
 	cs.SetNewChargePointHandler(func(cp ocpp16.ChargePointConnection) {
-		h.OnConnect(cp.ID())
 		// Which listener a charger reached is what identifies its dialect, so
-		// record it here rather than inferring it from a later message.
+		// record it here rather than inferring it from a later message — and
+		// before OnConnect, whose capability probe dispatches on it.
 		h.setVersion(cp.ID(), Version16)
+		h.OnConnect(cp.ID())
 	})
 	cs.SetChargePointDisconnectedHandler(func(cp ocpp16.ChargePointConnection) {
 		h.OnDisconnect(cp.ID())
@@ -121,8 +122,8 @@ func Start(ctx context.Context, cfg *Config, tel *telemetry.Store) (*Server, err
 		csms.SetMeterHandler(h201)
 		csms.SetAuthorizationHandler(h201)
 		csms.SetNewChargingStationHandler(func(cs ocpp201.ChargingStationConnection) {
-			h.OnConnect(cs.ID())
 			h.setVersion(cs.ID(), Version201)
+			h.OnConnect(cs.ID())
 		})
 		csms.SetChargingStationDisconnectedHandler(func(cs ocpp201.ChargingStationConnection) {
 			h.OnDisconnect(cs.ID())
@@ -137,6 +138,22 @@ func Start(ctx context.Context, cfg *Config, tel *telemetry.Store) (*Server, err
 				"basic_auth", cfg.Username != "")
 			csms.Start(cfg.PortV201, fmt.Sprintf("%s{ws}", cfg.Path))
 		}()
+	}
+
+	// Capability probe: whether a charger can be steered (SmartCharging /
+	// SmartChargingCtrlr) or only meters. Fired by the Handler from connect
+	// and boot until the charger answers; dispatched here by dialect. The
+	// closure reads s.csms at call time, so a 2.0.1 charger probes correctly
+	// even though the CSMS is wired after the 1.6 server.
+	h.capabilityProbe = func(id string) {
+		h.mu.Lock()
+		ver := h.chargersLocked(id).version
+		h.mu.Unlock()
+		if ver == Version201 && s.csms != nil {
+			probeSmartChargingV201(s.csms, h, id)
+			return
+		}
+		probeFeatureProfiles16(cs, h, id)
 	}
 
 	go func() {

@@ -85,6 +85,15 @@
     return null;
   }
 
+  // What the charger answered when asked which OCPP feature profiles it
+  // supports. Tri-state on purpose: a charger that never answered is
+  // "not reported", which is not the same as "cannot be steered".
+  function steerLabel(c) {
+    if (c.steerable === true) return "smart charging";
+    if (c.steerable === false) return "telemetry only";
+    return "not reported";
+  }
+
   function parseIdentifiers(s) {
     if (!s || !s.trim()) return [];
     return s.split(",").map(function (p) { return p.trim(); }).filter(Boolean);
@@ -152,6 +161,7 @@
         '<th style="text-align:left">Charger</th>' +
         '<th style="text-align:left">Hardware</th>' +
         '<th style="text-align:left">OCPP</th>' +
+        '<th style="text-align:left">Control</th>' +
         '<th style="text-align:left">State</th>' +
         '<th style="text-align:left">Vehicle</th>' +
         '<th style="text-align:right">Power</th>' +
@@ -170,10 +180,13 @@
             ? escHtml(match.name || match.id || "")
             : '<code>' + escHtml(c.vehicle_id) + '</code> <span style="color:var(--text-dim)">(no profile)</span>';
         }
+        var steer = escHtml(steerLabel(c));
+        if (c.steerable === false) steer = '<b style="color:var(--warn,#e6a700)">' + steer + '</b>';
         html += '<tr' + (c.pending ? ' style="opacity:.65"' : '') + '>' +
           '<td><code>' + escHtml(c.id || "") + '</code></td>' +
           '<td>' + escHtml(hw) + '</td>' +
           '<td>' + escHtml(c.version || "?") + '</td>' +
+          '<td' + (c.feature_profiles ? ' title="' + escHtml(c.feature_profiles) + '"' : '') + '>' + steer + '</td>' +
           '<td>' + escHtml(state) + '</td>' +
           '<td>' + veh + '</td>' +
           '<td style="text-align:right">' + fmtPowerW(c.power_w) + '</td>' +
@@ -181,6 +194,17 @@
           '</tr>';
       });
       html += '</tbody></table>';
+      if (chargers.some(function (c) { return c.steerable === false; })) {
+        html +=
+          '<p style="color:var(--text-dim);font-size:0.8rem;margin:8px 0 0">' +
+          '⚠ A charger marked <b>telemetry only</b> answered FTW’s capability probe without the ' +
+          '<code>SmartCharging</code> feature profile: it reports power and sessions, but rejects the ' +
+          'charging profiles FTW steers with, so binding it to a charger entry gets you metering and ' +
+          'no planning. Some vendors ship smart charging behind a firmware update or a setting in the ' +
+          'installer app. FTW still attempts control — the probe is advisory, and a charger that ' +
+          'under-reports itself is not locked out.' +
+          '</p>';
+      }
       if (chargers.some(function (c) { return c.pending; })) {
         html +=
           '<p style="color:var(--text-dim);font-size:0.8rem;margin:8px 0 0">' +
@@ -555,6 +579,7 @@
       ocppChargerIds: ocppChargerIds,
       ocppStateLabel: ocppStateLabel,
       ocppSection: ocppSection,
+      steerLabel: steerLabel,
       vehiclesSection: vehiclesSection,
       vehicleForIdentifier: vehicleForIdentifier,
       parseIdentifiers: parseIdentifiers,

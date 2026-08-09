@@ -199,6 +199,33 @@ Two traps worth knowing:
 For the full commissioning and factory-reset detail per model, see the bench
 guide in the device-drivers repository.
 
+## Can this charger be steered?
+
+Not every OCPP charger accepts control. FTW asks each one, once, shortly after
+it connects: `GetConfiguration(SupportedFeatureProfiles)` on 1.6, and the
+`SmartChargingCtrlr.Available` variable on 2.0.1. The answer lands in the
+**Control** column of the Chargers tab and in `GET /api/ocpp/chargers`:
+
+| Column says | Meaning |
+|---|---|
+| smart charging | The charger advertises `SmartCharging`; FTW can throttle and pause it. |
+| telemetry only | The charger answered without `SmartCharging` — expect metering, no planning. |
+| not reported | The charger never answered the probe. Unknown, not incapable. |
+
+The raw answer is kept (hover the column) and re-probed on every reconnect
+until one arrives.
+
+**The verdict is advisory, never a gate.** FTW still sends charging profiles to
+a charger that claims it cannot take them, because vendors under-report and a
+firmware update can change the answer without changing the advertisement. What
+actually decides is the response to a real command: a charger that refuses
+`SetChargingProfile` is walked to its autonomous default and reported through
+the same path as any driver that cannot actuate. The probe exists so the UI can
+warn *before* you bind a metering-only charger to a charger entry and wonder
+why the planner never moves it — and some vendors ship smart charging behind a
+firmware update or an installer-app setting, which is worth checking when you
+see the warning.
+
 ## Control
 
 FTW throttles, pauses and resumes an OCPP charger the same way it steers any
