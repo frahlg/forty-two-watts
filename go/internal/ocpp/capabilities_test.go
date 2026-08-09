@@ -129,13 +129,16 @@ func TestCapabilityProbeRecordsSmartCharging(t *testing.T) {
 	if v.FeatureProfiles != "Core,FirmwareManagement,SmartCharging" {
 		t.Errorf("raw profiles not recorded: %+v", v)
 	}
-	// Connect + boot both call maybeProbeCapability; once an answer is
-	// stored no further probe may fire, so the count must settle.
-	before := cp.askedCount()
+	// Connect and boot both call maybeProbeCapability milliseconds apart.
+	// The in-flight marker must collapse that into a single request, and
+	// the stored answer must stop any later one.
+	if n := cp.askedCount(); n != 1 {
+		t.Errorf("connect+boot should ask exactly once, asked %d times", n)
+	}
 	srv.Handler().maybeProbeCapability("steerable-cp")
 	time.Sleep(200 * time.Millisecond)
-	if after := cp.askedCount(); after != before {
-		t.Errorf("probe re-asked after an answer was stored: %d → %d", before, after)
+	if n := cp.askedCount(); n != 1 {
+		t.Errorf("probe re-asked after an answer was stored: %d", n)
 	}
 }
 
@@ -163,7 +166,8 @@ func TestCapabilityProbeUnknownWhenKeyMissing(t *testing.T) {
 	port, srv := startServer(t, telemetry.NewStore(), "quiet-cp")
 	defer srv.Stop()
 
-	connectCapabilityCP(t, port, "quiet-cp", &capabilityCP{omitKey: true})
+	cp := &capabilityCP{omitKey: true}
+	connectCapabilityCP(t, port, "quiet-cp", cp)
 	time.Sleep(600 * time.Millisecond)
 
 	v := srv.Handler().Snapshot()["quiet-cp"]
@@ -172,5 +176,17 @@ func TestCapabilityProbeUnknownWhenKeyMissing(t *testing.T) {
 	}
 	if v.FeatureProfiles != "" {
 		t.Errorf("no profiles should be recorded, got %q", v.FeatureProfiles)
+	}
+	// An unanswered probe must not wedge the in-flight marker: the charger
+	// gets asked again next time, which is how a firmware update that adds
+	// the key is ever noticed.
+	askedBefore := cp.askedCount()
+	srv.Handler().maybeProbeCapability("quiet-cp")
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && cp.askedCount() == askedBefore {
+		time.Sleep(25 * time.Millisecond)
+	}
+	if cp.askedCount() <= askedBefore {
+		t.Errorf("probe should retry while the verdict is unknown, still %d", cp.askedCount())
 	}
 }

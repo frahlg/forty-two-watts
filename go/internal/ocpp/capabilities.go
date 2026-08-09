@@ -42,6 +42,7 @@ func profilesIncludeSmartCharging(csv string) bool {
 // Async: the library delivers the confirmation on its own goroutine.
 func probeFeatureProfiles16(cs ocpp16.CentralSystem, h *Handler, id string) {
 	err := cs.GetConfiguration(id, func(conf *core.GetConfigurationConfirmation, err error) {
+		defer h.probeFinished(id)
 		if err != nil || conf == nil {
 			slog.Info("ocpp: charger did not answer GetConfiguration — control capability stays unknown",
 				"charger", id, "err", err)
@@ -57,6 +58,8 @@ func probeFeatureProfiles16(cs ocpp16.CentralSystem, h *Handler, id string) {
 			"charger", id)
 	}, []string{"SupportedFeatureProfiles"})
 	if err != nil {
+		// The request never left, so no callback will clear the marker.
+		h.probeFinished(id)
 		slog.Warn("ocpp: GetConfiguration send failed", "charger", id, "err", err)
 	}
 }
@@ -65,6 +68,7 @@ func probeFeatureProfiles16(cs ocpp16.CentralSystem, h *Handler, id string) {
 // available — the 2.0.1 shape of the SmartCharging feature profile.
 func probeSmartChargingV201(csms ocpp201.CSMS, h *Handler, id string) {
 	err := csms.GetVariables(id, func(resp *provisioning.GetVariablesResponse, err error) {
+		defer h.probeFinished(id)
 		if err != nil || resp == nil || len(resp.GetVariableResult) == 0 {
 			slog.Info("ocpp: station did not answer GetVariables — control capability stays unknown",
 				"charger", id, "err", err)
@@ -83,6 +87,7 @@ func probeSmartChargingV201(csms ocpp201.CSMS, h *Handler, id string) {
 		Variable:  types201.Variable{Name: "Available"},
 	}})
 	if err != nil {
+		h.probeFinished(id)
 		slog.Warn("ocpp: GetVariables send failed", "charger", id, "err", err)
 	}
 }

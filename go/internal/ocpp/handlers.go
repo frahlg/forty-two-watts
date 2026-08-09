@@ -41,6 +41,10 @@ type Handler struct {
 	// profiles it supports (see capabilities.go). Fired from OnConnect and
 	// OnBootNotification until the charger answers, then never again.
 	capabilityProbe func(id string)
+	// probing holds the chargers with a capability request in flight, so
+	// the connect and boot triggers — which arrive milliseconds apart, long
+	// before any answer — ask once between them rather than twice.
+	probing map[string]bool
 }
 
 // chargerState is what we accumulate from successive OCPP messages for one
@@ -95,6 +99,7 @@ func NewHandler(tel *telemetry.Store, heartbeatIntervalS int) *Handler {
 		heartbeatIntervalS: heartbeatIntervalS,
 		chargers:           map[string]*chargerState{},
 		approved:           map[string]bool{},
+		probing:            map[string]bool{},
 		nextTxID:           1,
 	}
 }
@@ -190,17 +195,28 @@ func (h *Handler) setControlCapability(id, raw string, steerable bool) {
 }
 
 // maybeProbeCapability fires the capability probe unless the charger has
-// already answered one. Called from OnConnect and boot notifications so a
-// charger that ignores the probe pre-boot gets asked again post-boot, and
-// again on every reconnect, until an answer sticks.
+// already answered one, or one is in flight. Called from OnConnect and boot
+// notifications so a charger that ignores the probe pre-boot gets asked again
+// post-boot, and again on every reconnect, until an answer sticks.
 func (h *Handler) maybeProbeCapability(id string) {
 	h.mu.Lock()
 	fn := h.capabilityProbe
-	known := h.chargersLocked(id).steerable != nil
+	skip := h.chargersLocked(id).steerable != nil || h.probing[id]
+	if fn != nil && !skip {
+		h.probing[id] = true
+	}
 	h.mu.Unlock()
-	if fn != nil && !known {
+	if fn != nil && !skip {
 		go fn(id)
 	}
+}
+
+// probeFinished releases the in-flight marker, whatever the outcome. A probe
+// that failed leaves steerable nil, so the next connect asks again.
+func (h *Handler) probeFinished(id string) {
+	h.mu.Lock()
+	delete(h.probing, id)
+	h.mu.Unlock()
 }
 
 // noteVehicleID records the identity a transaction presented and fires the
