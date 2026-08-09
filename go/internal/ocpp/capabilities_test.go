@@ -142,6 +142,29 @@ func TestCapabilityProbeRecordsSmartCharging(t *testing.T) {
 	}
 }
 
+// A probe still in flight when the socket drops must not wedge the marker:
+// the reconnect is exactly when the charger should be asked again.
+func TestCapabilityProbeMarkerClearedOnDisconnect(t *testing.T) {
+	port, srv := startServer(t, telemetry.NewStore(), "flappy")
+	defer srv.Stop()
+
+	h := srv.Handler()
+	// Simulate "probe fired, no answer yet" without a live charge point.
+	h.mu.Lock()
+	h.probing["flappy"] = true
+	h.mu.Unlock()
+
+	h.OnDisconnect("flappy")
+
+	h.mu.Lock()
+	stuck := h.probing["flappy"]
+	h.mu.Unlock()
+	if stuck {
+		t.Error("disconnect must clear an in-flight probe marker")
+	}
+	_ = port
+}
+
 // A charger without SmartCharging is recorded as telemetry-only — the UI
 // warns rather than the code blocking, so control is still attempted.
 func TestCapabilityProbeRecordsTelemetryOnly(t *testing.T) {

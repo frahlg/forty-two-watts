@@ -338,6 +338,10 @@ func (h *Handler) OnDisconnect(id string) {
 	slog.Info("OCPP charger disconnected", "charger", id)
 	s := h.state(id)
 	h.mu.Lock()
+	// A probe in flight when the socket dropped may never get its callback,
+	// which would leave the marker set and block every future probe. The
+	// reconnect is exactly when we want to ask again, so clear it here.
+	delete(h.probing, id)
 	s.online = false
 	s.connected = false
 	s.charging = false
