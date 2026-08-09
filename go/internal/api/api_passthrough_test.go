@@ -603,6 +603,13 @@ func TestRouteTierIgnoresTheMethod(t *testing.T) {
 		{"POST", "/api/notifications/test", apiauth.TierConfigure, "a late test message is the same message"},
 		{"POST", "/api/mode", apiauth.TierActuate, ""},
 		{"DELETE", "/api/battery/manual_hold", apiauth.TierActuate, ""},
+
+		// Sibling routes priced apart on purpose: a charging schedule is a
+		// standing instruction about future days, so a late save is the same
+		// instruction, only later — while the target route moves energy now.
+		{"PUT", "/api/loadpoints/1/schedule", apiauth.TierConfigure, "a schedule saved late is the same instruction, only later"},
+		{"DELETE", "/api/loadpoints/1/schedule", apiauth.TierConfigure, "removing the standing instruction is configuration too"},
+		{"POST", "/api/loadpoints/1/target", apiauth.TierActuate, "its sibling moves energy now"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.method+" "+tc.path, func(t *testing.T) {

@@ -461,6 +461,12 @@ func (s *Server) routes() {
 	s.handle("GET  /api/ev/providers", Read, s.handleEVProviders)
 	s.handle("GET  /api/loadpoints", Read, s.handleLoadpoints)
 	s.handle("POST /api/loadpoints/{id}/target", Actuate, s.handleLoadpointTarget)
+	// The schedule is configuration where its sibling target is
+	// actuation: a schedule saved late is the same instruction, only
+	// later, while target/soc/force_start move energy now. The split is
+	// what lets a phone save one through the passthrough.
+	s.handle("PUT    /api/loadpoints/{id}/schedule", Configure, s.handleLoadpointSchedulePut)
+	s.handle("DELETE /api/loadpoints/{id}/schedule", Configure, s.handleLoadpointScheduleClear)
 	s.handle("POST /api/loadpoints/{id}/soc", Actuate, s.handleLoadpointSoC)
 	s.handle("POST /api/loadpoints/{id}/force_start", Actuate, s.handleLoadpointForceStart)
 	s.handle("POST /api/loadpoints/{id}/manual_hold", Actuate, s.handleLoadpointManualHold)
@@ -3391,28 +3397,9 @@ func (s *Server) handleLoadpointTarget(w http.ResponseWriter, r *http.Request) {
 	// values that SetTarget below will read back, so apply order matters.
 	scheduleChanged := false
 	if len(req.Schedule) > 0 {
-		if bytes.Equal(bytes.TrimSpace(req.Schedule), []byte("null")) {
-			if !s.deps.Loadpoints.ClearSchedule(id) {
-				writeJSON(w, 404, map[string]string{"error": "loadpoint not found"})
-				return
-			}
-		} else {
-			var sched loadpoint.Schedule
-			if err := json.Unmarshal(req.Schedule, &sched); err != nil {
-				writeJSON(w, 400, map[string]string{"error": "invalid schedule: " + err.Error()})
-				return
-			}
-			if sched.TimeOfDayMinUTC < 0 || sched.TimeOfDayMinUTC >= 1440 {
-				writeJSON(w, 400, map[string]string{"error": "time_of_day_min_utc must be 0..1439"})
-				return
-			}
-			if !s.deps.Loadpoints.SetSchedule(id, sched) {
-				writeJSON(w, 404, map[string]string{"error": "loadpoint not found"})
-				return
-			}
-			// Roll immediately so the upcoming SetTarget read-modify-write
-			// sees the schedule-implied deadline, not stale state.
-			s.deps.Loadpoints.RollSchedules(time.Now().UTC())
+		if status, msg := s.applyLoadpointSchedule(id, req.Schedule); status != 0 {
+			writeJSON(w, status, map[string]string{"error": msg})
+			return
 		}
 		scheduleChanged = true
 	}
@@ -3463,22 +3450,8 @@ func (s *Server) handleLoadpointTarget(w http.ResponseWriter, r *http.Request) {
 			surplusDisabled = true
 		}
 	}
-	// Force-wake the bound vehicle on any schedule edit. Without this
-	// the next plan + dispatch tick reads stale vehicle state — the
-	// new schedule could be planning against an old SoC, old vehicle
-	// charge_limit, or a "Complete" status that no longer reflects
-	// reality. Fire-and-forget on a background goroutine so the API
-	// stays snappy even when the BLE proxy is slow / asleep. Bounded
-	// timeout so a hung wake never leaks. Bypasses the auto-wake
-	// cooldown — the operator just told us they want a fresh read.
-	if scheduleChanged && s.deps.LoadpointCtrl != nil {
-		go func(lpID string) {
-			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-			defer cancel()
-			if err := s.deps.LoadpointCtrl.RefreshVehicle(ctx, lpID); err != nil {
-				slog.Warn("loadpoint refresh-vehicle failed", "lp", lpID, "err", err)
-			}
-		}(id)
+	if scheduleChanged {
+		s.refreshVehicleForSchedule(id)
 	}
 	if s.deps.MPC != nil {
 		if surplusDisabled {
@@ -3491,8 +3464,7 @@ func (s *Server) handleLoadpointTarget(w http.ResponseWriter, r *http.Request) {
 			// /api/mpc/plan and see the new schedule.
 			s.deps.MPC.ReplanWithReason(context.Background(), "surplus_only_disabled")
 		} else if scheduleChanged {
-			slog.Info("loadpoint schedule changed — forcing replan", "lp", id)
-			s.deps.MPC.ReplanWithReason(context.Background(), "loadpoint_schedule_changed")
+			s.replanForScheduleChange(id)
 		} else {
 			// Other field changes: replan is helpful but not load-
 			// bearing — kick it off in the background so the API stays
@@ -3501,6 +3473,132 @@ func (s *Server) handleLoadpointTarget(w http.ResponseWriter, r *http.Request) {
 			go s.deps.MPC.ReplanWithReason(context.Background(), "loadpoint_target_changed")
 		}
 	}
+	writeJSON(w, 200, map[string]any{"ok": true})
+}
+
+// applyLoadpointSchedule stores or clears the schedule carried in raw:
+// JSON null clears, an object validates and stores, and a stored
+// schedule is rolled immediately so the derived one-shot target is
+// consistent before the caller answers. Returns 0 on success, else an
+// HTTP status and a message for the caller to write. Shared by the
+// target route (schedule embedded in a wider edit) and the
+// schedule-only route.
+func (s *Server) applyLoadpointSchedule(id string, raw json.RawMessage) (int, string) {
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		if !s.deps.Loadpoints.ClearSchedule(id) {
+			return 404, "loadpoint not found"
+		}
+		return 0, ""
+	}
+	var sched loadpoint.Schedule
+	if err := json.Unmarshal(raw, &sched); err != nil {
+		return 400, "invalid schedule: " + err.Error()
+	}
+	if sched.TimeOfDayMinUTC < 0 || sched.TimeOfDayMinUTC >= 1440 {
+		return 400, "time_of_day_min_utc must be 0..1439"
+	}
+	if sched.Days > 0x7F {
+		return 400, "days must be a 7-bit weekday mask (0..127, bit 0 = Monday)"
+	}
+	if !s.deps.Loadpoints.SetSchedule(id, sched) {
+		return 404, "loadpoint not found"
+	}
+	// Roll immediately so a read-modify-write on the heels of this set
+	// sees the schedule-implied deadline, not stale state.
+	s.deps.Loadpoints.RollSchedules(time.Now().UTC())
+	return 0, ""
+}
+
+// refreshVehicleForSchedule force-wakes the bound vehicle after a
+// schedule edit. Without this the next plan + dispatch tick reads
+// stale vehicle state — the new schedule could be planning against an
+// old SoC, old vehicle charge_limit, or a "Complete" status that no
+// longer reflects reality. Fire-and-forget on a background goroutine
+// so the API stays snappy even when the BLE proxy is slow / asleep.
+// Bounded timeout so a hung wake never leaks. Bypasses the auto-wake
+// cooldown — the operator just told us they want a fresh read.
+func (s *Server) refreshVehicleForSchedule(id string) {
+	if s.deps.LoadpointCtrl == nil {
+		return
+	}
+	go func(lpID string) {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if err := s.deps.LoadpointCtrl.RefreshVehicle(ctx, lpID); err != nil {
+			slog.Warn("loadpoint refresh-vehicle failed", "lp", lpID, "err", err)
+		}
+	}(id)
+}
+
+// replanForScheduleChange forces a synchronous MPC replan tagged with
+// the schedule-change reason. Synchronous + fresh context (the request
+// context dies the moment the handler answers) so the caller returns
+// to a UI that can immediately fetch /api/mpc/plan and see the new
+// schedule.
+func (s *Server) replanForScheduleChange(id string) {
+	if s.deps.MPC == nil {
+		return
+	}
+	slog.Info("loadpoint schedule changed — forcing replan", "lp", id)
+	s.deps.MPC.ReplanWithReason(context.Background(), "loadpoint_schedule_changed")
+}
+
+// PUT /api/loadpoints/{id}/schedule replaces the loadpoint's schedule.
+// The body is the schedule object itself:
+//
+//	{"soc_pct": 80, "time_of_day_min_utc": 360, "recurring": true, "days": 31}
+//
+// Priced Configure where its sibling POST …/target is Actuate, because
+// a schedule is a standing instruction about future days: saved late,
+// it is the same instruction, only later. The target route also
+// carries one-shot fields that move energy now, which is why it stays
+// on Actuate and why the app's passthrough needed this route to save a
+// schedule at all.
+func (s *Server) handleLoadpointSchedulePut(w http.ResponseWriter, r *http.Request) {
+	if s.deps.Loadpoints == nil {
+		writeJSON(w, 404, map[string]string{"error": "loadpoints not configured"})
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, 400, map[string]string{"error": "id required"})
+		return
+	}
+	var raw json.RawMessage
+	if err := readJSON(r, &raw); err != nil {
+		writeJSON(w, 400, map[string]string{"error": err.Error()})
+		return
+	}
+	if status, msg := s.applyLoadpointSchedule(id, raw); status != 0 {
+		writeJSON(w, status, map[string]string{"error": msg})
+		return
+	}
+	s.refreshVehicleForSchedule(id)
+	s.replanForScheduleChange(id)
+	writeJSON(w, 200, map[string]any{"ok": true})
+}
+
+// DELETE /api/loadpoints/{id}/schedule clears the schedule. Same price
+// as PUT: removing the standing instruction is configuration too. The
+// one-shot target a previous roll derived stays until it expires —
+// clearing the schedule is not a stop button, and stopping a charge in
+// progress remains an actuation.
+func (s *Server) handleLoadpointScheduleClear(w http.ResponseWriter, r *http.Request) {
+	if s.deps.Loadpoints == nil {
+		writeJSON(w, 404, map[string]string{"error": "loadpoints not configured"})
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		writeJSON(w, 400, map[string]string{"error": "id required"})
+		return
+	}
+	if !s.deps.Loadpoints.ClearSchedule(id) {
+		writeJSON(w, 404, map[string]string{"error": "loadpoint not found"})
+		return
+	}
+	s.refreshVehicleForSchedule(id)
+	s.replanForScheduleChange(id)
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
 

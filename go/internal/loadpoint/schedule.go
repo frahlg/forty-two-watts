@@ -18,9 +18,16 @@ import "time"
 // Zero value (Empty) means "no schedule configured". Persistence keys
 // off this — Empty schedules are not written to disk.
 type Schedule struct {
-	SoCPct                 float64 `json:"soc_pct"`
-	TimeOfDayMinUTC        int     `json:"time_of_day_min_utc"` // 0..1439
-	Recurring              bool    `json:"recurring"`
+	SoCPct          float64 `json:"soc_pct"`
+	TimeOfDayMinUTC int     `json:"time_of_day_min_utc"` // 0..1439
+	Recurring       bool    `json:"recurring"`
+	// Days restricts which weekdays the deadline may land on: a 7-bit
+	// mask, bit 0 = Monday through bit 6 = Sunday (ISO order). Zero
+	// means every day — the value every schedule stored before this
+	// field existed decodes to, so old rows and old clients keep
+	// their behaviour. The weekday is the household's, not UTC's: the
+	// mask is read in the box's own time zone (see NextDeadlineUTC).
+	Days                   uint8   `json:"days,omitempty"`
 	SurplusUnlockBatSoCPct float64 `json:"surplus_unlock_bat_soc_pct,omitempty"`
 }
 
@@ -53,4 +60,41 @@ func NextDailyUTC(now time.Time, minUTC int) time.Time {
 		today = today.Add(24 * time.Hour)
 	}
 	return today
+}
+
+// NextDeadlineUTC returns the schedule's next deadline strictly after
+// `now`: the stored time-of-day (UTC minutes, via NextDailyUTC) on the
+// next day whose bit is set in Days. The weekday is read in `loc` — the
+// box's own zone — because "weekdays" must mean the household's
+// weekdays, not UTC's: a 00:30 Saturday deadline in Stockholm is still
+// Friday in UTC, and a mask read in UTC would skip the wrong day. A
+// zero mask means every day; nil loc falls back to time.Local, which
+// is the box's zone.
+//
+// Known drift: the time-of-day itself stays stored as UTC minutes, so
+// when the household crosses a DST change the local wall-clock deadline
+// shifts by an hour until the operator re-saves. Storing local minutes
+// instead needs a migration and a UI save-path change; that is deferred
+// on purpose rather than half-done here.
+func (s Schedule) NextDeadlineUTC(now time.Time, loc *time.Location) time.Time {
+	next := NextDailyUTC(now, s.TimeOfDayMinUTC)
+	days := s.Days & 0x7F
+	if days == 0 {
+		return next
+	}
+	if loc == nil {
+		loc = time.Local
+	}
+	for range 7 {
+		// time.Weekday counts Sunday=0; the mask counts Monday=0 (ISO).
+		iso := (int(next.In(loc).Weekday()) + 6) % 7
+		if days&(1<<iso) != 0 {
+			break
+		}
+		// Adding 24 h in UTC keeps the stored time-of-day fixed; only
+		// the weekday moves. A non-zero 7-bit mask matches within the
+		// 7 candidates this loop examines.
+		next = next.Add(24 * time.Hour)
+	}
+	return next
 }

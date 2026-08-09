@@ -200,6 +200,13 @@ type Manager struct {
 	// (session-completion timer in particular). Defaults to time.Now;
 	// tests inject a deterministic clock via SetNowFn.
 	nowFn func() time.Time
+
+	// loc is the time zone Schedule.Days weekday masks are read in.
+	// Nil means time.Local — the box's own zone, which is the only
+	// zone "charge on weekdays" can honestly mean. Tests pin a fixed
+	// zone via SetLocation so weekday assertions don't depend on the
+	// machine running them.
+	loc *time.Location
 }
 
 // SessionCompletionTimeout is how long a vehicle must stay connected
@@ -499,6 +506,15 @@ func (m *Manager) SetNowFn(fn func() time.Time) {
 	m.nowFn = fn
 }
 
+// SetLocation pins the time zone Schedule.Days weekday masks are
+// evaluated in. main.go leaves it alone — time.Local is the box's own
+// zone — and tests pass a fixed zone. Pass nil to revert.
+func (m *Manager) SetLocation(loc *time.Location) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.loc = loc
+}
+
 // estimateSoCPct returns the vehicle SoC % inferred from the session
 // anchor + energy delivered. Chargers like Easee don't expose the
 // car's BMS; this is the best-effort estimate the MPC uses.
@@ -729,6 +745,9 @@ func (m *Manager) SetSchedule(id string, s Schedule) bool {
 	if s.SurplusUnlockBatSoCPct > 100 {
 		s.SurplusUnlockBatSoCPct = 100
 	}
+	// The weekday mask is 7 bits; a stray high bit from a future
+	// client is dropped rather than left to confuse the roll.
+	s.Days &= 0x7F
 	lp.schedule = s
 	// Force RollSchedules to re-evaluate on next call — operator just
 	// changed the contract so any previous idempotence cache is stale.
@@ -833,7 +852,7 @@ func (m *Manager) RollSchedules(now time.Time) {
 		if s.Empty() {
 			continue
 		}
-		next := NextDailyUTC(now, s.TimeOfDayMinUTC)
+		next := s.NextDeadlineUTC(now, m.loc)
 		if s.Recurring {
 			if !lp.targetTime.IsZero() && lp.targetTime.After(now) {
 				continue

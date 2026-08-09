@@ -1,0 +1,188 @@
+package api
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/srcfl/ftw/go/internal/loadpoint"
+	"github.com/srcfl/ftw/go/internal/mpc"
+	"github.com/srcfl/ftw/go/internal/state"
+)
+
+// The schedule-only route. Its tier is pinned alongside the other
+// verb-blind cases in TestRouteTierIgnoresTheMethod; these tests cover
+// what the handlers do: PUT stores and rolls, DELETE clears, and both
+// force a replan tagged with the schedule-change reason.
+
+// newScheduleServer wires a manager and an MPC service whose store is
+// an empty temp db: ReplanWithReason records its reason and then
+// returns at "no prices available yet", which is all a replan
+// assertion needs.
+func newScheduleServer(t *testing.T) (*Server, *loadpoint.Manager, *mpc.Service) {
+	t.Helper()
+	mgr := loadpoint.NewManager()
+	mgr.Load([]loadpoint.Config{{ID: "garage", DriverName: "easee"}})
+	st, err := state.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatalf("opening state store: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+	svc := &mpc.Service{Store: st, Zone: "SE4"}
+	return New(&Deps{Loadpoints: mgr, MPC: svc}), mgr, svc
+}
+
+func putSchedule(t *testing.T, srv *Server, id, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPut, "/api/loadpoints/"+id+"/schedule", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	return rr
+}
+
+func TestSchedulePutStoresRollsAndReplans(t *testing.T) {
+	srv, mgr, svc := newScheduleServer(t)
+
+	rr := putSchedule(t, srv, "garage",
+		`{"soc_pct":80,"time_of_day_min_utc":360,"recurring":true,"days":31}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("PUT status = %d, want 200 (body: %s)", rr.Code, rr.Body.String())
+	}
+
+	got, ok := mgr.GetSchedule("garage")
+	if !ok {
+		t.Fatal("PUT did not store the schedule")
+	}
+	want := loadpoint.Schedule{SoCPct: 80, TimeOfDayMinUTC: 360, Recurring: true, Days: 31}
+	if got != want {
+		t.Fatalf("stored schedule = %+v, want %+v", got, want)
+	}
+
+	// The handler rolls immediately: the derived one-shot target is
+	// seeded before the response goes out.
+	lpState, _ := mgr.State("garage")
+	if lpState.TargetTime.IsZero() || !lpState.TargetTime.After(time.Now()) {
+		t.Fatalf("PUT did not roll: target_time = %v", lpState.TargetTime)
+	}
+	if lpState.TargetSoCPct != 80 {
+		t.Fatalf("PUT did not roll: target_soc_pct = %v, want 80", lpState.TargetSoCPct)
+	}
+
+	if _, reason := svc.LastReplanInfo(); reason != "loadpoint_schedule_changed" {
+		t.Fatalf("replan reason = %q, want loadpoint_schedule_changed", reason)
+	}
+}
+
+func TestScheduleDeleteClearsAndReplans(t *testing.T) {
+	srv, mgr, svc := newScheduleServer(t)
+	// Seeded on the manager directly, so the replan reason below can
+	// only have come from the DELETE.
+	mgr.SetSchedule("garage", loadpoint.Schedule{SoCPct: 80, TimeOfDayMinUTC: 360, Recurring: true})
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/loadpoints/garage/schedule", nil)
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("DELETE status = %d, want 200 (body: %s)", rr.Code, rr.Body.String())
+	}
+
+	if _, ok := mgr.GetSchedule("garage"); ok {
+		t.Fatal("DELETE did not clear the schedule")
+	}
+	if _, reason := svc.LastReplanInfo(); reason != "loadpoint_schedule_changed" {
+		t.Fatalf("replan reason = %q, want loadpoint_schedule_changed", reason)
+	}
+}
+
+// PUT with a JSON null body clears too — the same signal the target
+// route's embedded schedule field accepts.
+func TestSchedulePutNullClears(t *testing.T) {
+	srv, mgr, _ := newScheduleServer(t)
+	mgr.SetSchedule("garage", loadpoint.Schedule{SoCPct: 80, TimeOfDayMinUTC: 360, Recurring: true})
+
+	rr := putSchedule(t, srv, "garage", `null`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("PUT null status = %d, want 200 (body: %s)", rr.Code, rr.Body.String())
+	}
+	if _, ok := mgr.GetSchedule("garage"); ok {
+		t.Fatal("PUT null did not clear the schedule")
+	}
+}
+
+func TestSchedulePutValidates(t *testing.T) {
+	srv, _, _ := newScheduleServer(t)
+	cases := []struct {
+		name string
+		id   string
+		body string
+		want int
+	}{
+		{"time of day too large", "garage", `{"soc_pct":80,"time_of_day_min_utc":1440}`, http.StatusBadRequest},
+		{"negative time of day", "garage", `{"soc_pct":80,"time_of_day_min_utc":-1}`, http.StatusBadRequest},
+		{"days beyond seven bits", "garage", `{"soc_pct":80,"time_of_day_min_utc":360,"days":128}`, http.StatusBadRequest},
+		{"days not a number", "garage", `{"soc_pct":80,"days":"weekdays"}`, http.StatusBadRequest},
+		{"malformed json", "garage", `{`, http.StatusBadRequest},
+		{"empty body", "garage", ``, http.StatusBadRequest},
+		{"unknown loadpoint", "ghost", `{"soc_pct":80,"time_of_day_min_utc":360}`, http.StatusNotFound},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if rr := putSchedule(t, srv, tc.id, tc.body); rr.Code != tc.want {
+				t.Errorf("status = %d, want %d (body: %s)", rr.Code, tc.want, rr.Body.String())
+			}
+		})
+	}
+}
+
+func TestScheduleRoutesWithoutLoadpoints(t *testing.T) {
+	srv := New(&Deps{}) // no Loadpoints wired
+	if rr := putSchedule(t, srv, "garage", `{"soc_pct":80}`); rr.Code != http.StatusNotFound {
+		t.Errorf("PUT without loadpoints: status = %d, want 404", rr.Code)
+	}
+	req := httptest.NewRequest(http.MethodDelete, "/api/loadpoints/garage/schedule", nil)
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusNotFound {
+		t.Errorf("DELETE without loadpoints: status = %d, want 404", rr.Code)
+	}
+}
+
+// The target route keeps carrying an embedded schedule for the on-box
+// UI — the schedule-only route is an addition, not a move. Guards the
+// extraction of the shared apply path.
+func TestTargetRouteStillCarriesSchedule(t *testing.T) {
+	srv, mgr, svc := newScheduleServer(t)
+
+	body := `{"schedule":{"soc_pct":70,"time_of_day_min_utc":420,"recurring":true}}`
+	req := httptest.NewRequest(http.MethodPost, "/api/loadpoints/garage/target", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("POST target status = %d, want 200 (body: %s)", rr.Code, rr.Body.String())
+	}
+	got, ok := mgr.GetSchedule("garage")
+	if !ok || got.SoCPct != 70 || got.TimeOfDayMinUTC != 420 {
+		t.Fatalf("target route stopped storing schedules: got=%+v ok=%v", got, ok)
+	}
+	if _, reason := svc.LastReplanInfo(); reason != "loadpoint_schedule_changed" {
+		t.Fatalf("replan reason = %q, want loadpoint_schedule_changed", reason)
+	}
+
+	// And the embedded null still clears.
+	req = httptest.NewRequest(http.MethodPost, "/api/loadpoints/garage/target",
+		strings.NewReader(`{"schedule":null}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("POST target schedule:null status = %d, want 200 (body: %s)", rr.Code, rr.Body.String())
+	}
+	if _, ok := mgr.GetSchedule("garage"); ok {
+		t.Fatal("target route stopped clearing schedules via null")
+	}
+}
