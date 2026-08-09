@@ -56,7 +56,7 @@ func mustMAC(raw string) net.HardwareAddr {
 }
 
 func TestStableInterfaceUsesKernelResolvedOutputForEveryAddress(t *testing.T) {
-	if SoftwareIdentityUplinkHost != "uplink.home.sourceful.energy" {
+	if SoftwareIdentityUplinkHost != "relay.ftw.energy" {
 		t.Fatalf("software identity uplink = %q", SoftwareIdentityUplinkHost)
 	}
 	authority := &fakeRouteAuthority{
