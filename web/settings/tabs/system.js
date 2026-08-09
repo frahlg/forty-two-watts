@@ -59,6 +59,9 @@
   function bundleDisplay(d) {
     d = d || {};
     var bundle = d.bundle || {};
+    // Deliberately literal: /api/components' Bundle is generic over Kind, but
+    // the collapsed row is not — a new bundle kind needs its own branch here,
+    // and falls back to the per-component view until it gets one.
     if (bundle.kind !== "home_assistant_addon") return null;
     var ftwVersion = (d.core || {}).version || "dev";
     return {
