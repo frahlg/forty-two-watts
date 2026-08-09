@@ -29,7 +29,9 @@ const (
 	MsgAPIEnd           = "api.end"
 )
 
-// Operations a client may ask for. Each maps to a scope.
+// Operations a client may ask for, from contract/registry.yaml `ops` — the
+// scope each demands lives there too, and TestRegistryOpsMatchCommandTable
+// reads the pair back against defaultOps().
 const (
 	// OpSetMode changes the site operating mode. It goes through the same
 	// mode validation the API and Home Assistant use — a second validator

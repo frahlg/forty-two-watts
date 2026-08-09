@@ -265,6 +265,9 @@ func TestAModeTheBoxDoesNotHaveIsRefused(t *testing.T) {
 	}
 }
 
+// battery.hold sits in the registry's ops, so an app may name it — and this
+// box does not implement it. Unknown here means unknown to defaultOps(), and
+// the answer is a rejection rather than silence.
 func TestAnUnknownOpIsRejectedNotIgnored(t *testing.T) {
 	h, _, rec, _ := newRig(t)
 	subscribe(t, h, rec)

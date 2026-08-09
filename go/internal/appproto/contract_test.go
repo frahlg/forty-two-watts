@@ -81,6 +81,24 @@ func TestFrozenFieldIdsAreFrozen(t *testing.T) {
 	}
 }
 
+// The ops in the registry are this repository's, copied there so neither side
+// hand-writes an operation name or the scope it demands. defaultOps() in
+// command.go stays the authority on what this box accepts; this catches the
+// two drifting apart. Containment rather than equality, on purpose: the
+// registry may name an op ahead of the box — battery.hold today — and a box
+// that lacks it answers ErrUnknownOp, which command_test.go pins.
+func TestRegistryOpsMatchCommandTable(t *testing.T) {
+	for op, spec := range defaultOps() {
+		scope, ok := RegistryOps[op]
+		if !ok {
+			t.Fatalf("op %q is accepted but not in contract/registry.yaml", op)
+		}
+		if scope != spec.scope {
+			t.Fatalf("op %q: command table demands scope %q, registry says %q", op, spec.scope, scope)
+		}
+	}
+}
+
 // Everything the box advertises must be something it can answer. A capability
 // the app cannot use is hidden; one it can ask for and not get is a hang.
 func TestDefaultCapsAreAllRegistryNames(t *testing.T) {

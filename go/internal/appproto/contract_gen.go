@@ -131,6 +131,17 @@ var WriteScopes = []string{
 	ScopeMembersWrite,
 }
 
+// RegistryOps is the app's copy of the operations a cmd frame may name,
+// each mapped to the scope its grant must carry. defaultOps() in command.go
+// remains the authority on what this box accepts — this exists only so
+// TestRegistryOpsMatchCommandTable can catch the two drifting apart.
+var RegistryOps = map[string]string{
+	// site.mode.set — Change the site operating mode.
+	"site.mode.set": "ftw.mode.write",
+	// battery.hold — Hold the battery at a fixed setpoint.
+	"battery.hold": "ftw.dispatch.write",
+}
+
 // Error codes. The box sends the code and machine-readable args; the app
 // owns every word of prose, in every language it ships.
 const (

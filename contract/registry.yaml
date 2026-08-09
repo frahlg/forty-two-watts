@@ -101,6 +101,22 @@ roles:
     scopes: [ftw.live.read]
 
 # ---------------------------------------------------------------------------
+# Command operations. What a `cmd` frame may name, and the scope the grant
+# must carry before the box acts on it.
+#
+# The box's own table — defaultOps() in go/internal/appproto/command.go — is
+# the authority on what a given box accepts. The pair is copied here because
+# both sides used to hand-write it: the box beside its dispatcher, the app in
+# its simulator, and nothing compared the two. An op declared here that a box
+# does not implement is answered with E_UNKNOWN_OP like any other stranger —
+# battery.hold is the app's vocabulary today and no shipping box acts on it
+# yet.
+# ---------------------------------------------------------------------------
+ops:
+  - { name: site.mode.set, scope: ftw.mode.write, desc: Change the site operating mode }
+  - { name: battery.hold, scope: ftw.dispatch.write, desc: Hold the battery at a fixed setpoint }
+
+# ---------------------------------------------------------------------------
 # Dispatch modes.
 #
 # These keys are FTW's, from control.AllModes() in go/internal/control/
@@ -182,6 +198,18 @@ client_errors:
   # into a code because half a document is not an answer and a view needs one
   # thing to catch.
   - { code: E_RESPONSE_TOO_LARGE, retryable: false, desc: The answer arrived cut off }
+  # The session's own command deadlines. No ack inside the window — or the
+  # carrier closed with the command still unacknowledged — means the box never
+  # took the intent, so asking again cannot make anything happen twice.
+  - { code: E_NO_ACK, retryable: true, desc: The command was never acknowledged }
+  # The wire went away or the deadline passed before any status arrived. The
+  # session reconnects on its own, so the same request can simply be asked
+  # again.
+  - { code: E_NO_ANSWER, retryable: true, desc: The request got no answer at all }
+  # An answer this app could not read: a body that is not the JSON it claimed
+  # to be, or one that contradicts what was asked. The box and the app
+  # disagree about a route, and asking again gets the same answer.
+  - { code: E_BAD_BODY, retryable: false, desc: The answer could not be read }
 
 # ---------------------------------------------------------------------------
 # Source states. Orthogonal to carrier state — see docs/protocol.md. Merging

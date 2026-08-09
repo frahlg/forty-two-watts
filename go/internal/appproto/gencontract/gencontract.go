@@ -36,6 +36,11 @@ type Registry struct {
 		Label  string   `yaml:"label"`
 		Scopes []string `yaml:"scopes"`
 	} `yaml:"roles"`
+	Ops []struct {
+		Name  string `yaml:"name"`
+		Scope string `yaml:"scope"`
+		Desc  string `yaml:"desc"`
+	} `yaml:"ops"`
 	Modes []struct {
 		Key  string `yaml:"key"`
 		Tier string `yaml:"tier"`
@@ -71,6 +76,7 @@ func Generate(raw []byte) ([]byte, error) {
 	writeFields(&b, reg)
 	writeCaps(&b, reg)
 	writeScopes(&b, reg)
+	writeOps(&b, reg)
 	writeErrors(&b, reg)
 	writeSourceStates(&b, reg)
 	writeResolutions(&b, reg)
@@ -173,6 +179,23 @@ func writeScopes(b *bytes.Buffer, reg Registry) {
 			continue
 		}
 		fmt.Fprintf(b, "\tScope%s,\n", goName(strings.TrimPrefix(s.Name, "ftw.")))
+	}
+	b.WriteString("}\n\n")
+}
+
+// writeOps emits the operation table as data rather than constants. The op
+// names the box uses are the hand-written ones in messages.go, read back by
+// TestRegistryOpsMatchCommandTable — generating a constant for an op no code
+// handles yet (battery.hold today) only invites someone to use it.
+func writeOps(b *bytes.Buffer, reg Registry) {
+	b.WriteString("// RegistryOps is the app's copy of the operations a cmd frame may name,\n")
+	b.WriteString("// each mapped to the scope its grant must carry. defaultOps() in command.go\n")
+	b.WriteString("// remains the authority on what this box accepts — this exists only so\n")
+	b.WriteString("// TestRegistryOpsMatchCommandTable can catch the two drifting apart.\n")
+	b.WriteString("var RegistryOps = map[string]string{\n")
+	for _, o := range reg.Ops {
+		fmt.Fprintf(b, "\t// %s — %s.\n", o.Name, o.Desc)
+		fmt.Fprintf(b, "\t%q: %q,\n", o.Name, o.Scope)
 	}
 	b.WriteString("}\n\n")
 }
