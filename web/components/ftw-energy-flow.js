@@ -1146,8 +1146,11 @@ class FtwEnergyFlow extends FtwElement {
         <!-- HOUSE / hub: load reading lives here. Kept outside both
              aggregation layers because the hub value (instantaneous
              house load) is identical in both views, so there's no
-             reason to duplicate it. -->
-        <g class="ef-hub">
+             reason to duplicate it. Clickable like a planet, so the host
+             can open the house's own live reading — the click handler
+             reads data-role and fires ftw-planet-click with role "load". -->
+        <g class="ef-hub ef-clickable" data-role="load" data-name="" data-id=""
+           tabindex="0" role="button" aria-label="House load, live">
           <circle cx="${CX}" cy="${P.cy}" r="${P.hubR}"
                   fill="var(--hero-house-fill)"
                   stroke="var(--hero-house-stroke)" stroke-width="1.5"/>
