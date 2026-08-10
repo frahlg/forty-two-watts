@@ -520,8 +520,17 @@ func startAppLink(
 	// starting, which is true.
 	caps = append(caps, appproto.CapApiPassthrough)
 
+	// The dead man's switch rides on the uplink exactly when there is
+	// state to hold subscriptions in. With none stored it produces no
+	// rows and the uplink says no extra word.
+	var deadman appuplink.DeadmanSource
+	if st != nil {
+		deadman = deadmanFromState{st: st}
+	}
+
 	uplink, err := appuplink.New(appuplink.Options{
-		Enroll: enroll,
+		Enroll:  enroll,
+		Deadman: deadman,
 		Handler: func(
 			sender appproto.Sender,
 			caller apiauth.Caller,
@@ -622,6 +631,9 @@ func (l *lateAPI) Route(r *http.Request) apiauth.RouteFacts {
 type appLinkAPI struct {
 	enroll *appenroll.Identity
 	uplink *appuplink.Uplink
+	// st sweeps a revoked phone's push subscriptions. Nil in embeddings
+	// without storage; the sweep is then vacuously done.
+	st *state.Store
 }
 
 // MintPairingCode issues an owner's or a viewer's QR code.
@@ -685,6 +697,21 @@ func (a *appLinkAPI) RevokeDevice(id string) error {
 	if a.uplink != nil && key != nil {
 		a.uplink.DropSessionsByAppKey(key)
 	}
+	// A phone that may no longer read the house may no longer be told
+	// about it: its push subscriptions go with the grant, and the relay's
+	// pre-encrypted farewell rows for them go on the resync.
+	if a.st != nil {
+		n, err := a.st.DeletePushSubscriptionsByDevice(id)
+		switch {
+		case err != nil:
+			slog.Warn("could not sweep a revoked phone's push subscriptions", "device", id, "err", err)
+		case n > 0:
+			slog.Info("swept a revoked phone's push subscriptions", "device", id, "rows", n)
+			if a.uplink != nil {
+				go a.uplink.ResyncDeadman()
+			}
+		}
+	}
 	return nil
 }
 
@@ -715,9 +742,9 @@ func appLinkError(err error) error {
 // panics on first use. Returning an untyped nil is the difference between
 // "pairing is off" and a crash on the one screen someone reaches for when
 // nothing else works.
-func appEnrollForAPI(enroll *appenroll.Identity, uplink *appuplink.Uplink, enabled bool) api.AppEnroller {
+func appEnrollForAPI(enroll *appenroll.Identity, uplink *appuplink.Uplink, st *state.Store, enabled bool) api.AppEnroller {
 	if !enabled || enroll == nil {
 		return nil
 	}
-	return &appLinkAPI{enroll: enroll, uplink: uplink}
+	return &appLinkAPI{enroll: enroll, uplink: uplink, st: st}
 }

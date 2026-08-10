@@ -61,12 +61,15 @@ func (b *Bus) Publish(e Event) {
 // ---- event kinds ----
 
 const (
-	KindHealthTick             = "health.tick"
-	KindDriverLost             = "driver.lost"
-	KindDriverRecovered        = "driver.recovered"
-	KindNotificationTest       = "notifications.test"
-	KindNotificationDispatched = "notifications.dispatched"
-	KindUpdateAvailable        = "update.available"
+	KindHealthTick              = "health.tick"
+	KindDriverLost              = "driver.lost"
+	KindDriverRecovered         = "driver.recovered"
+	KindNotificationTest        = "notifications.test"
+	KindNotificationDispatched  = "notifications.dispatched"
+	KindUpdateAvailable         = "update.available"
+	KindUpdateInstalled         = "update.installed"
+	KindChargingSessionComplete = "charging.session_complete"
+	KindChargingInterrupted     = "charging.interrupted"
 )
 
 // HealthTick is fired every control-loop tick with the current telemetry
@@ -139,3 +142,37 @@ type NotificationTest struct {
 }
 
 func (NotificationTest) Kind() string { return KindNotificationTest }
+
+// UpdateInstalled is emitted once, on the first boot of a new version: the
+// previous run wrote its version down, and this run reads a different one
+// back. It is the "everything came back on its own" moment, which is the
+// only update fact worth a lock screen.
+type UpdateInstalled struct {
+	Version         string
+	PreviousVersion string
+	At              time.Time
+}
+
+func (UpdateInstalled) Kind() string { return KindUpdateInstalled }
+
+// ChargingSessionComplete is emitted by the loadpoint manager at its
+// session-completion latch — the vehicle held "not requesting" past
+// SessionCompletionTimeout — which already fires exactly once per plug-in.
+type ChargingSessionComplete struct {
+	LoadpointID string
+	KWh         float64 // what the session meter delivered
+	At          time.Time
+}
+
+func (ChargingSessionComplete) Kind() string { return KindChargingSessionComplete }
+
+// ChargingInterrupted is emitted when a session that had charged steadily
+// for at least ten minutes stops without finishing while the cable is still
+// in. The hysteresis lives at the emitter: a flapping cable never produces
+// this event, so subscribers may treat every one as real.
+type ChargingInterrupted struct {
+	LoadpointID string
+	At          time.Time
+}
+
+func (ChargingInterrupted) Kind() string { return KindChargingInterrupted }

@@ -1,6 +1,7 @@
 package appuplink
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -33,11 +34,30 @@ type fakeRelay struct {
 	// the relay does when a box guessed wrong.
 	refuseEpoch *int64
 
-	joined chan struct{}
+	// The dead man's switch half of the contract: rows keyed on id, and
+	// the claims heard on the uplink socket, in order.
+	deadmanRows   map[string]deadmanRowWire
+	deadmanClaims []string
+
+	joined  chan struct{}
+	deadman chan struct{}
+}
+
+// deadmanRowWire is the POST /deadman body, as the contract writes it.
+type deadmanRowWire struct {
+	ID        string `json:"id"`
+	Endpoint  string `json:"endpoint"`
+	CT        string `json:"ct"`
+	DeadlineS int    `json:"deadline_s"`
 }
 
 func newFakeRelay(epoch int64) *fakeRelay {
-	r := &fakeRelay{epoch: epoch, joined: make(chan struct{}, 16)}
+	r := &fakeRelay{
+		epoch:       epoch,
+		joined:      make(chan struct{}, 16),
+		deadman:     make(chan struct{}, 64),
+		deadmanRows: map[string]deadmanRowWire{},
+	}
 	r.server = httptest.NewServer(http.HandlerFunc(r.handle))
 	return r
 }
@@ -49,6 +69,10 @@ func (r *fakeRelay) url() string {
 func (r *fakeRelay) close() { r.server.Close() }
 
 func (r *fakeRelay) handle(w http.ResponseWriter, req *http.Request) {
+	if req.URL.Path == "/deadman" || strings.HasPrefix(req.URL.Path, "/deadman/") {
+		r.handleDeadman(w, req)
+		return
+	}
 	parts := strings.Split(strings.TrimPrefix(req.URL.Path, "/"), "/")
 	if len(parts) != 4 || parts[0] != "r" {
 		http.Error(w, "join", http.StatusBadRequest)
@@ -131,6 +155,21 @@ func (r *fakeRelay) serveUplink(conn *websocket.Conn) {
 			return
 		}
 		if kind != websocket.BinaryMessage {
+			// The deadman-aware relay accepts exactly one text word from
+			// the box: "deadman <id>" claims the id on this socket.
+			// Anything else remains a protocol breach and drops the
+			// connection, as before.
+			word := string(message)
+			if kind == websocket.TextMessage && strings.HasPrefix(word, CtrlDeadman+" ") {
+				r.mu.Lock()
+				r.deadmanClaims = append(r.deadmanClaims, strings.TrimPrefix(word, CtrlDeadman+" "))
+				r.mu.Unlock()
+				select {
+				case r.deadman <- struct{}{}:
+				default:
+				}
+				continue
+			}
 			return
 		}
 		// Broadcast, because the relay cannot tell which stream a ciphertext
@@ -193,6 +232,52 @@ func (r *fakeRelay) seenHandles() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return append([]string(nil), r.handles...)
+}
+
+// handleDeadman is the relay's HTTP half of the dead man's switch contract:
+// POST /deadman upserts a row on id, DELETE /deadman/<id> forgets one,
+// idempotently. 204 both ways.
+func (r *fakeRelay) handleDeadman(w http.ResponseWriter, req *http.Request) {
+	switch req.Method {
+	case http.MethodPost:
+		var row deadmanRowWire
+		if err := json.NewDecoder(req.Body).Decode(&row); err != nil ||
+			len(row.ID) != 32 || row.Endpoint == "" || row.CT == "" ||
+			row.DeadlineS < 60 || row.DeadlineS > 86400 {
+			http.Error(w, "bad row", http.StatusBadRequest)
+			return
+		}
+		r.mu.Lock()
+		r.deadmanRows[row.ID] = row
+		r.mu.Unlock()
+		select {
+		case r.deadman <- struct{}{}:
+		default:
+		}
+		w.WriteHeader(http.StatusNoContent)
+	case http.MethodDelete:
+		id := strings.TrimPrefix(req.URL.Path, "/deadman/")
+		r.mu.Lock()
+		delete(r.deadmanRows, id)
+		r.mu.Unlock()
+		select {
+		case r.deadman <- struct{}{}:
+		default:
+		}
+		w.WriteHeader(http.StatusNoContent)
+	default:
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+	}
+}
+
+func (r *fakeRelay) deadmanState() (rows map[string]deadmanRowWire, claims []string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	rows = make(map[string]deadmanRowWire, len(r.deadmanRows))
+	for id, row := range r.deadmanRows {
+		rows[id] = row
+	}
+	return rows, append([]string(nil), r.deadmanClaims...)
 }
 
 func closeWith(conn *websocket.Conn, code int, reason string) {

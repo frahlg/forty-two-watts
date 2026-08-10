@@ -18,9 +18,11 @@ package notifications
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"text/template"
@@ -84,6 +86,31 @@ func DefaultRules() []config.NotificationRule {
 		{Type: EventConcurrentDriversOffline, Enabled: false,
 			ThresholdS: 300, ThresholdN: DefaultConcurrentThresholdN,
 			Priority: 5, CooldownS: 1800},
+		// The catalogue-worded events. Their sentences come from
+		// contract/push-catalogue.yaml alone — the app's prose, which the
+		// box renders only because a push arrives when the app is not
+		// running — so a rule here carries no templates, only the gate.
+		// session_complete needs no cooldown: the loadpoint latch already
+		// fires once per plug-in. interrupted keeps an hour on top of the
+		// emitter's hysteresis, because a charger failing repeatedly is
+		// one fact, not a feed.
+		{Type: PushChargingSessionComplete, Enabled: false, Priority: 3},
+		{Type: PushChargingInterrupted, Enabled: false, Priority: 4, CooldownS: 3600},
+		{Type: PushUpdateInstalled, Enabled: false, Priority: 2},
+	}
+}
+
+// KnownRuleTypes is every event type a notification rule may name: the
+// template-driven built-ins plus the catalogue-worded kinds the engine
+// dispatches. box.unreachable is deliberately absent — that sentence is the
+// dead man's switch's, delivered by the relay when this box cannot speak,
+// and no rule here could gate it.
+func KnownRuleTypes() []string {
+	return []string{
+		EventDriverOffline, EventDriverRecovered, EventUpdateAvailable,
+		EventFuseOverLimit, EventConcurrentDriversOffline,
+		PushChargingSessionComplete, PushChargingInterrupted,
+		PushUpdateInstalled,
 	}
 }
 
@@ -136,14 +163,18 @@ func RegisterProvider(name string, factory ProviderFactory) {
 }
 
 // NewProvider constructs the provider named by cfg.Provider (defaulting to
-// "ntfy") using the registry. Returns nil if the provider is unknown — the
-// Service treats that as disabled.
+// "ntfy" when ntfy settings exist) using the registry. Returns nil if the
+// provider is unknown or nothing is configured — the Service then runs on
+// its engine-owned publishers alone, which is the web-push-only household.
 func NewProvider(cfg *config.Notifications) Provider {
 	if cfg == nil {
 		return nil
 	}
 	name := cfg.Provider
 	if name == "" {
+		if cfg.Ntfy == nil {
+			return nil
+		}
 		name = "ntfy"
 	}
 	providersMu.RLock()
@@ -157,14 +188,18 @@ func NewProvider(cfg *config.Notifications) Provider {
 
 // Status is a snapshot of the service state for the UI.
 type Status struct {
-	Enabled     bool   `json:"enabled"`
-	Provider    string `json:"provider,omitempty"`
-	Server      string `json:"server,omitempty"`
-	Topic       string `json:"topic,omitempty"`
-	Sent        uint64 `json:"sent"`
-	Failed      uint64 `json:"failed"`
-	RuleCount   int    `json:"rule_count"`
-	ActiveAlert int    `json:"active_alerts"`
+	Enabled bool `json:"enabled"`
+	// Provider is the config-selected transport; Providers is every
+	// installed one, engine-owned included. The app reads the latter to
+	// say "web push is on" without guessing from the config.
+	Provider    string   `json:"provider,omitempty"`
+	Providers   []string `json:"providers,omitempty"`
+	Server      string   `json:"server,omitempty"`
+	Topic       string   `json:"topic,omitempty"`
+	Sent        uint64   `json:"sent"`
+	Failed      uint64   `json:"failed"`
+	RuleCount   int      `json:"rule_count"`
+	ActiveAlert int      `json:"active_alerts"`
 }
 
 // Service is the rule engine + dispatcher.
@@ -173,9 +208,15 @@ type Status struct {
 // constructs a Service, but tests sometimes pass nil Deps so handlers
 // must remain nil-safe.
 type Service struct {
-	mu           sync.Mutex
-	cfg          *config.Notifications
-	pub          Publisher
+	mu  sync.Mutex
+	cfg *config.Notifications
+	pub Publisher
+	// always is the engine-owned transports: installed once, running
+	// beside whatever provider the config names, surviving Reload and
+	// SetPublisher both. Web push lives here — a phone opts in by storing
+	// a subscription, not by editing the provider the household already
+	// depends on.
+	always       []Publisher
 	lookup       DeviceLookup
 	fuseReader   FuseReader
 	bus          *events.Bus
@@ -218,9 +259,10 @@ func (s *Service) SetFuseReader(fr FuseReader) {
 	s.mu.Unlock()
 }
 
-// SetPublisher swaps the transport. Used by main.go's reload applier to
-// install a provider built from fresh config when the notifications
-// section was absent at startup (or when the provider type changed).
+// SetPublisher swaps the config-selected transport. Used by main.go's
+// reload applier to install a provider built from fresh config when the
+// notifications section was absent at startup (or when the provider type
+// changed). Engine-owned publishers are untouched.
 func (s *Service) SetPublisher(pub Publisher) {
 	if s == nil {
 		return
@@ -228,6 +270,29 @@ func (s *Service) SetPublisher(pub Publisher) {
 	s.mu.Lock()
 	s.pub = pub
 	s.mu.Unlock()
+}
+
+// AddPublisher installs an engine-owned transport that runs beside whatever
+// provider the config names. A household using ntfy loses nothing when the
+// app enables web push; both hear every dispatch.
+func (s *Service) AddPublisher(pub Publisher) {
+	if s == nil || pub == nil {
+		return
+	}
+	s.mu.Lock()
+	s.always = append(s.always, pub)
+	s.mu.Unlock()
+}
+
+// publishers is every transport currently installed, config-selected first.
+func (s *Service) publishers() []Publisher {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]Publisher, 0, 1+len(s.always))
+	if s.pub != nil {
+		out = append(out, s.pub)
+	}
+	return append(out, s.always...)
 }
 
 // Reload swaps the config. Preserves lastFired (cooldown must survive a
@@ -296,6 +361,82 @@ func (s *Service) Subscribe(bus *events.Bus) {
 		// Dispatch in a goroutine for the same reason as HealthTick —
 		// the bus is synchronous and Publish can block up to 10 s.
 		go s.handleUpdateAvailable(ev)
+	})
+	// The catalogue-worded events. Each producer already fires once per
+	// real-world moment — the loadpoint latches, the boot version check —
+	// so the rule adds only the operator's gate: enabled, priority,
+	// cooldown. Words come from the catalogue and nowhere else.
+	bus.Subscribe(events.KindChargingSessionComplete, func(e events.Event) {
+		ev, ok := e.(events.ChargingSessionComplete)
+		if !ok {
+			return
+		}
+		go s.handleCatalogued(PushChargingSessionComplete, ev.LoadpointID,
+			map[string]string{"kwh": strconv.FormatFloat(ev.KWh, 'f', 1, 64)})
+	})
+	bus.Subscribe(events.KindChargingInterrupted, func(e events.Event) {
+		ev, ok := e.(events.ChargingInterrupted)
+		if !ok {
+			return
+		}
+		go s.handleCatalogued(PushChargingInterrupted, ev.LoadpointID, nil)
+	})
+	bus.Subscribe(events.KindUpdateInstalled, func(e events.Event) {
+		ev, ok := e.(events.UpdateInstalled)
+		if !ok {
+			return
+		}
+		go s.handleCatalogued(PushUpdateInstalled, ev.Version,
+			map[string]string{"version": ev.Version})
+	})
+}
+
+// handleCatalogued gates and delivers one catalogue-worded event. device is
+// the cooldown key's second half — the loadpoint for charging events, the
+// version for updates — so one loadpoint's cooldown never silences another.
+func (s *Service) handleCatalogued(kind, device string, args map[string]string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	if s.cfg == nil || !s.cfg.Enabled {
+		s.mu.Unlock()
+		return
+	}
+	rule, ok := findRule(s.cfg.Events, kind)
+	if !ok || !rule.Enabled {
+		s.mu.Unlock()
+		return
+	}
+	key := kind + "|" + device
+	now := s.now()
+	if rule.CooldownS > 0 {
+		if last, ok := s.lastFired[key]; ok && now.Sub(last) < time.Duration(rule.CooldownS)*time.Second {
+			s.mu.Unlock()
+			return
+		}
+	}
+	s.lastFired[key] = now
+	prio := rule.Priority
+	if prio == 0 {
+		prio = s.cfg.DefaultPriority
+	}
+	s.mu.Unlock()
+
+	title, body, err := RenderPush(kind, args)
+	if err != nil {
+		// The catalogue promised a sentence the event could not finish.
+		// Fail into the history, never onto a lock screen.
+		slog.Warn("notifications: catalogue render failed", "event", kind, "err", err)
+		s.bumpFailed()
+		s.emitDispatched(kind, device, Message{Priority: prio}, "failed", err.Error())
+		return
+	}
+	s.deliver(kind, device, Message{
+		Title:    title,
+		Body:     body,
+		Priority: prio,
+		Tags:     splitTags(rule.Tags),
 	})
 }
 
@@ -460,6 +601,14 @@ func (s *Service) Status() Status {
 			out.Topic = s.cfg.Ntfy.Topic
 		}
 		out.RuleCount = len(s.cfg.Events)
+	}
+	if p, ok := s.pub.(Provider); ok {
+		out.Providers = append(out.Providers, p.Name())
+	}
+	for _, pub := range s.always {
+		if p, ok := pub.(Provider); ok {
+			out.Providers = append(out.Providers, p.Name())
+		}
 	}
 	for _, v := range s.activeAlert {
 		if v {
@@ -645,19 +794,22 @@ func (s *Service) observeAt(health map[string]telemetry.DriverHealth, now time.T
 	}
 }
 
-// SendTest renders and publishes a synthetic notification. Errors when disabled.
+// SendTest renders and publishes a synthetic notification through every
+// installed transport. Errors when disabled, and when nothing was delivered
+// anywhere — the operator pressed a button to learn whether a push arrives,
+// and "no" must come back as words, not as a counter ticking somewhere.
 func (s *Service) SendTest() error {
 	if s == nil {
 		return fmt.Errorf("notifications not configured")
 	}
 	s.mu.Lock()
 	cfg := s.cfg
-	pub := s.pub
 	s.mu.Unlock()
 	if cfg == nil || !cfg.Enabled {
 		return fmt.Errorf("notifications disabled")
 	}
-	if pub == nil {
+	pubs := s.publishers()
+	if len(pubs) == 0 {
 		return fmt.Errorf("notifications: no publisher")
 	}
 	prio := cfg.DefaultPriority
@@ -671,7 +823,25 @@ func (s *Service) SendTest() error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	err := pub.Publish(ctx, msg)
+	var sent int
+	var errs []error
+	for _, pub := range pubs {
+		switch err := pub.Publish(ctx, msg); {
+		case err == nil:
+			sent++
+		case errors.Is(err, ErrNothingToSend):
+		default:
+			errs = append(errs, err)
+		}
+	}
+	var err error
+	if sent == 0 {
+		if len(errs) > 0 {
+			err = errors.Join(errs...)
+		} else {
+			err = fmt.Errorf("nothing to send: no provider configured and no push subscription stored")
+		}
+	}
 	s.mu.Lock()
 	if err != nil {
 		s.failed++
@@ -769,30 +939,53 @@ func (s *Service) dispatch(cfg *config.Notifications, rule config.NotificationRu
 		Priority: prio,
 		Tags:     splitTags(rule.Tags),
 	}
-	// Nil-publisher guard: cold-start / reload can leave pub unset when
-	// notifications are enabled but the configured provider isn't
-	// installed (NewProvider returned nil). Treat as a failed dispatch
-	// so history + counters stay truthful instead of panicking.
-	s.mu.Lock()
-	pub := s.pub
-	s.mu.Unlock()
-	if pub == nil {
-		slog.Warn("notifications: no publisher installed — skipping", "event", rule.Type, "driver", data.Device)
-		s.bumpFailed()
-		s.emitDispatched(rule.Type, data.Device, msg, "failed", "no publisher installed")
-		return
-	}
+	s.deliver(rule.Type, data.Device, msg)
+}
+
+// deliver fans one rendered message out to every installed transport and
+// settles the counters and the history trail once for the lot.
+//
+// One delivery anywhere counts as sent — the operator was told. A transport
+// answering ErrNothingToSend was absent, not failing: web push with no
+// stored subscription has not had a push fail. No transport at all is the
+// old nil-publisher case — cold-start / reload can leave notifications
+// enabled with no provider installed — and stays a truthful failure in the
+// history rather than a panic or a silence.
+func (s *Service) deliver(eventType, device string, msg Message) {
+	pubs := s.publishers()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := pub.Publish(ctx, msg); err != nil {
-		slog.Warn("notifications: publish failed", "event", rule.Type, "driver", data.Device, "err", err)
-		s.bumpFailed()
-		s.emitDispatched(rule.Type, data.Device, msg, "failed", err.Error())
-		return
+
+	var sent int
+	var errs []error
+	for _, pub := range pubs {
+		switch err := pub.Publish(ctx, msg); {
+		case err == nil:
+			sent++
+		case errors.Is(err, ErrNothingToSend):
+			// Absence, not failure.
+		default:
+			errs = append(errs, err)
+		}
 	}
-	slog.Info("notifications: sent", "event", rule.Type, "driver", data.Device)
-	s.bumpSent()
-	s.emitDispatched(rule.Type, data.Device, msg, "sent", "")
+	switch {
+	case sent > 0:
+		if len(errs) > 0 {
+			slog.Warn("notifications: some transports failed", "event", eventType, "err", errors.Join(errs...))
+		}
+		slog.Info("notifications: sent", "event", eventType, "driver", device)
+		s.bumpSent()
+		s.emitDispatched(eventType, device, msg, "sent", "")
+	case len(errs) > 0:
+		err := errors.Join(errs...)
+		slog.Warn("notifications: publish failed", "event", eventType, "driver", device, "err", err)
+		s.bumpFailed()
+		s.emitDispatched(eventType, device, msg, "failed", err.Error())
+	default:
+		slog.Warn("notifications: no publisher installed — skipping", "event", eventType, "driver", device)
+		s.bumpFailed()
+		s.emitDispatched(eventType, device, msg, "failed", "no publisher installed")
+	}
 }
 
 // emitDispatched publishes a NotificationDispatched event for history

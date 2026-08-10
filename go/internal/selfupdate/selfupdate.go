@@ -60,6 +60,7 @@ type Store interface {
 const (
 	skippedKey           = "update.skipped_version"
 	channelKey           = "update.channel"
+	lastRunKey           = "update.last_run_version"
 	defaultCheckInterval = 1 * time.Hour
 	defaultHTTPTimeout   = 10 * time.Second
 	// staleThreshold flags an in-flight update as failed when the sidecar
@@ -275,7 +276,42 @@ func New(cfg Config, store Store) *Checker {
 // cancelled. The first probe runs after a 5–30 s random delay so restart
 // bursts don't all hit GitHub at the same instant.
 func (c *Checker) Start(ctx context.Context) {
+	c.announceInstalled()
 	go c.loop(ctx)
+}
+
+// announceInstalled settles the one question only a fresh boot can answer:
+// whether this process is the first run of a new version. The previous run
+// wrote its version under lastRunKey; reading a different one back means the
+// update installed and survived, and events.UpdateInstalled says so — once,
+// because the key is rewritten before the announcement.
+func (c *Checker) announceInstalled() {
+	cur := c.cfg.CurrentVersion
+	if c.store == nil || cur == "" {
+		return
+	}
+	key := c.cfg.StoragePrefix + lastRunKey
+	prev, _ := c.store.LoadConfig(key)
+	if prev == cur {
+		return
+	}
+	if err := c.store.SaveConfig(key, cur); err != nil {
+		// Fail closed on the announcement too: a version this could not
+		// record would be re-announced on every boot, and a repeated
+		// "your box updated itself" teaches the operator to ignore it.
+		slog.Warn("selfupdate: could not record the running version", "err", err)
+		return
+	}
+	if c.cfg.Bus == nil || prev == "" || prev == "dev" || cur == "dev" {
+		// A first boot has nothing to have updated from, and a dev binary
+		// changes identity every build without ever installing anything.
+		return
+	}
+	c.cfg.Bus.Publish(events.UpdateInstalled{
+		Version:         cur,
+		PreviousVersion: prev,
+		At:              c.cfg.Now(),
+	})
 }
 
 func (c *Checker) loop(ctx context.Context) {

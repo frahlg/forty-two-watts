@@ -1,0 +1,34 @@
+# The push notification catalogue — every sentence a phone's lock screen
+# may carry, and the one place they are written.
+#
+# The app owns all prose; the box sends codes. Push is the sole exception,
+# stated in CLAUDE.md since the beginning: a push must render text when the
+# app is not running, so the box renders it — FROM THIS FILE, never from
+# words of its own. The box's copy is byte-identical and CI on both sides
+# compares them, exactly as contract/registry.yaml is paired.
+#
+# `{arg}` placeholders are filled by the box from the event's own facts.
+# Every event here must be sparse by design: a notification is an
+# interruption, and a household that mutes the app because it nagged has
+# lost every notification that mattered.
+version: 1
+events:
+  - kind: charging.session_complete
+    title: Car charged
+    body: "{kwh} kWh delivered — ready to go."
+  - kind: charging.interrupted
+    # Only after the hysteresis window the box applies: a charge that had
+    # been running steadily and then stopped without finishing. A flapping
+    # cable must not become a night of lock-screen noise.
+    title: Charging stopped early
+    body: "The car stopped charging before it was done."
+  - kind: update.installed
+    title: Your box updated itself
+    body: "Now running {version}. Everything came back on its own."
+  - kind: box.unreachable
+    # The one sentence the box cannot send about itself. The relay holds
+    # this pre-encrypted and posts it only when the box has missed its
+    # deadline — the dead man's switch, and the only stored row the relay
+    # has. The box encrypts it before it ever leaves home.
+    title: Your box is out of reach
+    body: "It stopped answering. Power cut, or the internet at home is down."

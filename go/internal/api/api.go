@@ -188,6 +188,15 @@ type Deps struct {
 	// /api/notifications/* endpoints.
 	Notifications *notifications.Service
 
+	// Optional: the web-push provider. Nil disables GET
+	// /api/notifications/vapid — the subscription routes need only State.
+	WebPush *notifications.WebPush
+
+	// PushResync pokes the dead man's switch after a subscription change,
+	// so the relay's pre-encrypted rows track what is stored here. Nil
+	// when the uplink is off; the routes work without it.
+	PushResync func()
+
 	// Restart triggers a graceful process restart from POST /api/restart.
 	// Implementations:
 	//   - production (docker compose): dispatch to the ftw-updater sidecar
@@ -424,6 +433,10 @@ func (s *Server) routes() {
 	s.handle("GET  /api/notifications/defaults", Read, s.handleNotificationsDefaults)
 	s.handle("GET  /api/notifications/history", Read, s.handleNotificationsHistory)
 	s.handle("POST /api/notifications/test", Configure, s.handleNotificationsTest)
+	s.handle("GET  /api/notifications/vapid", Read, s.handleNotificationsVAPID)
+	s.handle("POST   /api/notifications/subscriptions", Configure, s.handlePushSubscribe)
+	s.handle("DELETE /api/notifications/subscriptions/{id}", Configure, s.handlePushUnsubscribe)
+	s.handle("PUT  /api/notifications/rules", Configure, s.handleNotificationsRulesPut)
 	s.handle("GET  /api/battery_models", Read, s.handleGetModels)
 	s.handle("POST /api/battery_models/reset", Configure, s.handleResetModel)
 	s.handle("POST /api/self_tune/start", Actuate, s.handleSelfTuneStart)

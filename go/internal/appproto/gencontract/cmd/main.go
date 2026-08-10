@@ -10,7 +10,7 @@ import (
 
 func main() {
 	if len(os.Args) != 4 {
-		fmt.Fprintln(os.Stderr, "usage: gencontract <proto|roles> <registry.yaml> <out.go>")
+		fmt.Fprintln(os.Stderr, "usage: gencontract <proto|roles|push> <contract yaml> <out.go>")
 		os.Exit(2)
 	}
 
@@ -26,6 +26,8 @@ func main() {
 		out, err = gencontract.Generate(raw)
 	case "roles":
 		out, err = gencontract.GenerateRoles(raw)
+	case "push":
+		out, err = gencontract.GeneratePush(raw)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown target %q\n", os.Args[1])
 		os.Exit(2)

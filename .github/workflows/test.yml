@@ -445,29 +445,39 @@ jobs:
           ref: ${{ steps.pair.outputs.ref }}
           path: .app
           token: ${{ secrets.FTW_CONTRACT_TOKEN || github.token }}
-          sparse-checkout: contract/registry.yaml
+          sparse-checkout: |
+            contract/registry.yaml
+            contract/push-catalogue.yaml
           sparse-checkout-cone-mode: false
 
       - name: Compare the two copies
         run: |
           set -euo pipefail
-          # A missing checkout is not agreement. Said out loud here because the
-          # obvious way to write this step — diff and hope — passes silently
-          # when the path is wrong, which is exactly how the last guard failed.
-          if [ ! -f .app/contract/registry.yaml ]; then
-            echo "the app's copy is not at .app/contract/registry.yaml."
-            echo "the checkout above failed or moved; this check will not guess."
-            exit 1
-          fi
-          if ! diff -u contract/registry.yaml .app/contract/registry.yaml; then
-            echo
-            echo "This file is one file in two repositories. Decide which side"
-            echo "is right by reading what each side's code does, then change"
-            echo "both copies in the same pair of pull requests — and rerun"
-            echo "go generate ./internal/... here."
-            exit 1
-          fi
-          echo "byte for byte the same file"
+          # The registry and the push catalogue are paired the same way: one
+          # file each, living in both repositories. The catalogue carries every
+          # sentence the box may put on a lock screen — the app's prose, which
+          # the box renders only because a push arrives when the app is not
+          # running to render it itself.
+          for file in contract/registry.yaml contract/push-catalogue.yaml; do
+            # A missing checkout is not agreement. Said out loud here because
+            # the obvious way to write this step — diff and hope — passes
+            # silently when the path is wrong, which is exactly how the last
+            # guard failed.
+            if [ ! -f ".app/$file" ]; then
+              echo "the app's copy is not at .app/$file."
+              echo "the checkout above failed or moved; this check will not guess."
+              exit 1
+            fi
+            if ! diff -u "$file" ".app/$file"; then
+              echo
+              echo "This file is one file in two repositories. Decide which side"
+              echo "is right by reading what each side's code does, then change"
+              echo "both copies in the same pair of pull requests — and rerun"
+              echo "go generate ./internal/... here."
+              exit 1
+            fi
+          done
+          echo "byte for byte the same files"
 
   e2e:
     name: full stack

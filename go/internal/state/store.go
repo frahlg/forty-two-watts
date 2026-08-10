@@ -797,6 +797,21 @@ func (s *Store) migrate() error {
 		// Retention is unbounded for now; volumes are small (operators
 		// configure a threshold + cooldown, not per-tick events) so a
 		// house would take years to accumulate even 100k rows.
+		// Web-push subscriptions, one row per browser endpoint an enrolled
+		// phone stored. endpoint is unique because a browser re-subscribing
+		// is the same subscription with fresh keys. device_id ties the row
+		// to the enrolment that made it, so revoking the phone sweeps its
+		// subscriptions in the same breath.
+		`CREATE TABLE IF NOT EXISTS push_subscriptions (
+			id            TEXT PRIMARY KEY NOT NULL,
+			endpoint      TEXT NOT NULL UNIQUE,
+			p256dh        TEXT NOT NULL,
+			auth          TEXT NOT NULL,
+			device_id     TEXT NOT NULL DEFAULT '',
+			created_at_ms INTEGER NOT NULL
+		) STRICT`,
+		`CREATE INDEX IF NOT EXISTS idx_push_subscriptions_device
+			ON push_subscriptions(device_id)`,
 		`CREATE TABLE IF NOT EXISTS notification_log (
 			id         INTEGER PRIMARY KEY AUTOINCREMENT,
 			ts_ms      INTEGER NOT NULL,

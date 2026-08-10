@@ -13,6 +13,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/srcfl/ftw/go/internal/events"
 )
 
 // DeliveringW is the current_power_w threshold above which we treat a
@@ -207,6 +209,12 @@ type Manager struct {
 	// zone via SetLocation so weekday assertions don't depend on the
 	// machine running them.
 	loc *time.Location
+
+	// bus, when set, receives ChargingSessionComplete at the completion
+	// latch and ChargingInterrupted from the hysteresis below. Nil (the
+	// default, and every existing test) publishes nothing — a nil bus is
+	// already a safe no-op on Publish, so this needs no guard.
+	bus *events.Bus
 }
 
 // SessionCompletionTimeout is how long a vehicle must stay connected
@@ -217,6 +225,27 @@ type Manager struct {
 // snapping on a transient hiccup. Once tripped, the snap persists
 // until the cable is unplugged.
 const SessionCompletionTimeout = 90 * time.Second
+
+// The interruption hysteresis. A charge that had run steadily for at least
+// InterruptSteadyRun and then stops below steadyChargeFloorW for
+// interruptConfirm — cable still in, box not the one pausing it, completion
+// latch not tripped — is a session that ended before it was done, and the
+// one somebody wants their phone to mention. Every threshold here exists so
+// a flapping cable or a passing cloud never becomes lock-screen noise: a
+// short run never arms it, a short dip never trips it, and firing disarms
+// it until another full steady run.
+const (
+	// steadyChargeFloorW is the "actually charging" floor. The smallest
+	// real delivery step is 1Φ 6 A ≈ 1380 W; 500 W splits the difference
+	// between that and settling noise with room for odd chargers.
+	steadyChargeFloorW = 500.0
+	// InterruptSteadyRun is how long a session must have charged
+	// continuously before its stopping can count as an interruption.
+	InterruptSteadyRun = 10 * time.Minute
+	// interruptConfirm is how long the stop must persist before it is
+	// believed — the same debounce the completion latch uses.
+	interruptConfirm = SessionCompletionTimeout
+)
 
 // loadpointRuntime is the in-memory representation. Its fields are the
 // union of configured parameters and observed state. Lives behind
@@ -279,11 +308,50 @@ type loadpointRuntime struct {
 	// session done and the planner stops offering PV surplus for the rest
 	// of the day. Transient per-tick; the controller refreshes it.
 	surplusWithheld bool
+
+	// commandedW is the power the controller last ordered this loadpoint
+	// to deliver; commandedKnown separates "ordered zero" from "nobody is
+	// ordering". The interruption latch reads it: a charger at 0 W because
+	// the plan parked it in an expensive hour, or an operator pressed
+	// Stop, is the box doing its job, not a charge that failed.
+	commandedW     float64
+	commandedKnown bool
+
+	// The interruption hysteresis state. chargingSteadySince anchors the
+	// current continuous above-floor run; steadyRunArmed latches once that
+	// run reaches InterruptSteadyRun and is consumed by a fire (or cleared
+	// by plug-out), so one stop is one event; stoppedSince anchors the
+	// below-floor spell being timed against interruptConfirm.
+	chargingSteadySince time.Time
+	stoppedSince        time.Time
+	steadyRunArmed      bool
 }
 
 // NewManager returns an empty manager. Configure with Load().
 func NewManager() *Manager {
 	return &Manager{byID: map[string]*loadpointRuntime{}}
+}
+
+// SetBus wires the shared event bus. The manager publishes exactly two
+// things on it: the session-completion latch tripping, and the interruption
+// hysteresis firing. Nil stays a no-op.
+func (m *Manager) SetBus(bus *events.Bus) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.bus = bus
+}
+
+// SetCommandedW records what the controller last ordered this loadpoint to
+// deliver. The interruption latch reads it to tell "the charge failed" from
+// "the box paused it on purpose" — a plan parking the car through expensive
+// hours must never page anyone. No-op for an unknown id.
+func (m *Manager) SetCommandedW(id string, w float64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if lp, ok := m.byID[id]; ok {
+		lp.commandedW = w
+		lp.commandedKnown = true
+	}
 }
 
 // Load replaces the configured set. Idempotent: existing state is
@@ -318,6 +386,11 @@ func (m *Manager) Load(cfgs []Config) {
 			lp.notRequestingSince = existing.notRequestingSince
 			lp.sessionComplete = existing.sessionComplete
 			lp.socSource = existing.socSource
+			lp.commandedW = existing.commandedW
+			lp.commandedKnown = existing.commandedKnown
+			lp.chargingSteadySince = existing.chargingSteadySince
+			lp.stoppedSince = existing.stoppedSince
+			lp.steadyRunArmed = existing.steadyRunArmed
 		}
 		newByID[c.ID] = lp
 		newOrder = append(newOrder, c.ID)
@@ -413,11 +486,16 @@ func (m *Manager) SetSurplusWithheld(id string, withheld bool) {
 
 func (m *Manager) Observe(id string, pluggedIn bool, powerW, deliveredWh float64, requestActive bool) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	lp, ok := m.byID[id]
 	if !ok {
+		m.mu.Unlock()
 		return
 	}
+	// Events decided under the lock, published after it: the bus runs
+	// handlers inline on the publisher, and a handler that looked back at
+	// this manager would deadlock.
+	var fired []events.Event
+	bus := m.bus
 	now := m.now()
 	if pluggedIn && !lp.pluggedIn {
 		// Plug-in transition: seed the session anchor and clear any
@@ -462,6 +540,13 @@ func (m *Manager) Observe(id string, pluggedIn bool, powerW, deliveredWh float64
 			now.Sub(lp.notRequestingSince) >= SessionCompletionTimeout {
 			lp.sessionComplete = true
 			lp.socSource = "completed"
+			// The latch is the once-per-session moment, so it is the
+			// publish point: nothing downstream needs its own dedupe.
+			fired = append(fired, events.ChargingSessionComplete{
+				LoadpointID: id,
+				KWh:         deliveredWh / 1000,
+				At:          now,
+			})
 		}
 	} else if pluggedIn && requestActive {
 		// Vehicle is back to requesting. Reset the timer, but keep
@@ -470,6 +555,49 @@ func (m *Manager) Observe(id string, pluggedIn bool, powerW, deliveredWh float64
 		// retry briefly succeeds would reopen the export hole the
 		// completion latch exists to close. Plug-cycle to reset.
 		lp.notRequestingSince = time.Time{}
+	}
+
+	// The interruption hysteresis. Armed by a steady above-floor run,
+	// tripped by a confirmed stop the box did not order, disarmed by
+	// firing — see the constants beside SessionCompletionTimeout for why
+	// each threshold exists.
+	switch {
+	case pluggedIn && powerW >= steadyChargeFloorW:
+		if lp.chargingSteadySince.IsZero() {
+			lp.chargingSteadySince = now
+		}
+		lp.stoppedSince = time.Time{}
+		if now.Sub(lp.chargingSteadySince) >= InterruptSteadyRun {
+			lp.steadyRunArmed = true
+		}
+	case pluggedIn:
+		if !lp.chargingSteadySince.IsZero() {
+			// Charging just stopped. Credit a run that crossed the
+			// threshold on its way down, then start timing the stop.
+			if now.Sub(lp.chargingSteadySince) >= InterruptSteadyRun {
+				lp.steadyRunArmed = true
+			}
+			lp.chargingSteadySince = time.Time{}
+			lp.stoppedSince = now
+		}
+		// A pause the box ordered — plan slot, operator Stop, surplus
+		// clamp, safety standdown — is the box working, and a vehicle
+		// that stopped requesting chose to stop. Neither is a failure.
+		selfInflicted := lp.surplusWithheld ||
+			(lp.commandedKnown && lp.commandedW < steadyChargeFloorW)
+		if lp.steadyRunArmed && !lp.sessionComplete && requestActive &&
+			!selfInflicted && !lp.stoppedSince.IsZero() &&
+			now.Sub(lp.stoppedSince) >= interruptConfirm {
+			lp.steadyRunArmed = false
+			fired = append(fired, events.ChargingInterrupted{
+				LoadpointID: id,
+				At:          now,
+			})
+		}
+	default: // unplugged
+		lp.chargingSteadySince = time.Time{}
+		lp.stoppedSince = time.Time{}
+		lp.steadyRunArmed = false
 	}
 
 	if pluggedIn {
@@ -486,6 +614,11 @@ func (m *Manager) Observe(id string, pluggedIn bool, powerW, deliveredWh float64
 		lp.currentSoCPct = 0
 	}
 	lp.updatedAtMs = now.UnixMilli()
+	m.mu.Unlock()
+
+	for _, e := range fired {
+		bus.Publish(e)
+	}
 }
 
 // now returns the manager's clock, defaulting to time.Now when nowFn

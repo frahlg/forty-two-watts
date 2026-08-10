@@ -2159,7 +2159,7 @@ func main() {
 		State: st,
 		CapMu: capMu, Capacities: capacities, TelemetryCapacities: telemetryCapacities,
 		BatteryIdentity: batteryIdentity,
-		AppEnroll:       appEnrollForAPI(appEnroll, appUplink, appLinkEnabled),
+		AppEnroll:       appEnrollForAPI(appEnroll, appUplink, st, appLinkEnabled),
 		FleetPing:       fleetPinger,
 		CfgMu:           cfgMu, Cfg: cfg, ConfigPath: *configPath,
 		ConfigApplier:       applyConfigChange,
@@ -2332,12 +2332,36 @@ func main() {
 			slog.Warn("notification_log: record failed", "err", err)
 		}
 	})
+	// Web push runs beside whatever provider the config names — engine-
+	// owned, keyed by stored subscriptions rather than by config, so a
+	// household using ntfy loses nothing when the app enables it. Its
+	// VAPID key is the box's own, generated on first run beside state.db
+	// exactly as nova.key is, and it signs VAPID tokens and nothing else.
+	if st != nil {
+		vapidPath := filepath.Join(filepath.Dir(statePath), "webpush.key")
+		if vapidKey, err := nova.LoadOrCreateIdentity(vapidPath); err != nil {
+			slog.Warn("web push disabled — VAPID key unavailable", "err", err, "path", vapidPath)
+		} else if wp, err := notifications.NewWebPush(vapidKey, pushSubscriptionSource{st: st}); err != nil {
+			slog.Warn("web push disabled", "err", err)
+		} else {
+			notifSvc.AddPublisher(wp)
+			deps.WebPush = wp
+		}
+	}
+	if appUplink != nil {
+		deps.PushResync = appUplink.ResyncDeadman
+	}
+	// The loadpoint manager publishes its session latches (completion,
+	// interruption) on the same bus the engine listens to.
+	if lpMgr != nil {
+		lpMgr.SetBus(bus)
+	}
 	// Late-bind onto the Deps literal that was built earlier with a nil
 	// notifSvc (the deps struct is assembled before this block runs).
 	// Same pattern haBridge uses a few lines below.
 	deps.Notifications = notifSvc
 	if cfg.Notifications != nil && cfg.Notifications.Enabled {
-		name := "ntfy"
+		name := "webpush"
 		if notifProvider != nil {
 			name = notifProvider.Name()
 		}

@@ -1753,7 +1753,21 @@ func (c *Config) Validate() error {
 		}
 		if n.Enabled {
 			switch n.Provider {
-			case "", "ntfy":
+			case "":
+				// No provider named. That used to imply ntfy and demand
+				// its settings; web push ended that — it is engine-owned,
+				// keyed by stored subscriptions rather than config, so
+				// enabled-with-nothing-configured is now a real state.
+				// Ntfy settings that do exist must still be complete.
+				if n.Ntfy != nil {
+					if strings.TrimSpace(n.Ntfy.Server) == "" {
+						return errors.New("notifications.ntfy.server required when enabled")
+					}
+					if strings.TrimSpace(n.Ntfy.Topic) == "" {
+						return errors.New("notifications.ntfy.topic required when enabled")
+					}
+				}
+			case "ntfy":
 				if n.Ntfy == nil {
 					return errors.New("notifications.ntfy required when provider=ntfy and enabled")
 				}
