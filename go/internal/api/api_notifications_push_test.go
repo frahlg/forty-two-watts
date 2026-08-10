@@ -399,3 +399,58 @@ func TestRulesPutSeedsDefaultsOnFirstTouch(t *testing.T) {
 		t.Fatalf("%d rules enabled, want exactly the submitted one", enabled)
 	}
 }
+
+// A box that saved rules before a release added new kinds must still be
+// offered the new ones: stored entries untouched, missing known types
+// appended at their disabled defaults. The real regression: the first
+// household to ever save a rule could never see a kind added later.
+func TestRulesGetOffersKindsAddedAfterTheConfigWasSaved(t *testing.T) {
+	srv, _ := pushServer(t)
+	srv.deps.Cfg.Notifications = &config.Notifications{
+		Enabled: true,
+		Events: []config.NotificationRule{
+			{Type: "driver_offline", Enabled: true, ThresholdS: 120, Priority: 4, CooldownS: 600},
+		},
+	}
+	srv.deps.SaveConfig = func(string, *config.Config) error {
+		t.Error("the offer wrote the config — it must be a view, not a migration")
+		return nil
+	}
+
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/notifications/rules", nil))
+	if rr.Code != 200 {
+		t.Fatalf("rules get = %d: %s", rr.Code, rr.Body.String())
+	}
+	var got struct {
+		Enabled bool                      `json:"enabled"`
+		Events  []config.NotificationRule `json:"events"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+
+	byType := map[string]config.NotificationRule{}
+	for _, e := range got.Events {
+		byType[e.Type] = e
+	}
+	// The stored choice survives byte for byte.
+	stored := byType["driver_offline"]
+	if !stored.Enabled || stored.ThresholdS != 120 || stored.CooldownS != 600 {
+		t.Fatalf("the stored rule was rewritten: %+v", stored)
+	}
+	// The kinds the release added are offered, disabled.
+	for _, kind := range []string{"charging.session_complete", "charging.interrupted", "update.installed"} {
+		rule, ok := byType[kind]
+		if !ok {
+			t.Fatalf("kind %s is not offered to a box with a stored config", kind)
+		}
+		if rule.Enabled {
+			t.Fatalf("kind %s arrived enabled — new kinds must arrive off", kind)
+		}
+	}
+	// And the stored slice itself is untouched.
+	if len(srv.deps.Cfg.Notifications.Events) != 1 {
+		t.Fatalf("the GET grew the stored config to %d events", len(srv.deps.Cfg.Notifications.Events))
+	}
+}

@@ -102,6 +102,20 @@ func (s *Server) effectiveNotificationRules() config.Notifications {
 	if s.deps.Cfg.Notifications != nil {
 		notif = *s.deps.Cfg.Notifications
 		notif.Events = append([]config.NotificationRule(nil), notif.Events...)
+		// A box that chose its rules before a release added new kinds must
+		// still be offered them: the stored entries win untouched, and any
+		// known type the stored list lacks is appended at its default,
+		// disabled. Without this, the first box to ever save a rule was
+		// also the last box that could ever see a new one.
+		have := make(map[string]bool, len(notif.Events))
+		for _, rule := range notif.Events {
+			have[rule.Type] = true
+		}
+		for _, rule := range notifications.DefaultRules() {
+			if !have[rule.Type] {
+				notif.Events = append(notif.Events, rule)
+			}
+		}
 	} else {
 		notif.Events = notifications.DefaultRules()
 	}
