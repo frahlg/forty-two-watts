@@ -89,6 +89,47 @@ func (s *Server) handlePushUnsubscribe(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]string{"status": "ok"})
 }
 
+// effectiveNotificationRules is the rules document as the app should see
+// it: the stored section, deep-copied so the caller may edit its events
+// slice, or the full disabled default set when nothing is stored yet — so
+// Settings shows every event rather than none. GET answers it untouched;
+// PUT mutates its copy and saves. One builder, so the two verbs can never
+// show different documents.
+func (s *Server) effectiveNotificationRules() config.Notifications {
+	s.deps.CfgMu.RLock()
+	defer s.deps.CfgMu.RUnlock()
+	notif := config.Notifications{}
+	if s.deps.Cfg.Notifications != nil {
+		notif = *s.deps.Cfg.Notifications
+		notif.Events = append([]config.NotificationRule(nil), notif.Events...)
+	} else {
+		notif.Events = notifications.DefaultRules()
+	}
+	return notif
+}
+
+// writeNotificationRules answers the rules document. Both verbs of the
+// route speak exactly this shape.
+func writeNotificationRules(w http.ResponseWriter, notif config.Notifications) {
+	writeJSON(w, 200, map[string]any{
+		"enabled": notif.Enabled,
+		"events":  notif.Events,
+	})
+}
+
+// GET /api/notifications/rules — the same document the PUT answers, read
+// without writing anything. The app's toggles must show the current rules
+// before anyone flips one, and showing them is a read: it cannot cost the
+// step-up ceremony the write rightly does, and it must not store the
+// defaults it renders — a GET that writes is a lie.
+func (s *Server) handleNotificationsRulesGet(w http.ResponseWriter, r *http.Request) {
+	if s.deps.Cfg == nil || s.deps.CfgMu == nil {
+		writeJSON(w, 503, map[string]string{"error": "configuration is not readable here"})
+		return
+	}
+	writeNotificationRules(w, s.effectiveNotificationRules())
+}
+
 // PUT /api/notifications/rules — the narrow rules write.
 //
 // POST /api/config is refused over the passthrough because its body replaces
@@ -121,19 +162,13 @@ func (s *Server) handleNotificationsRulesPut(w http.ResponseWriter, r *http.Requ
 		}
 	}
 
-	// Copy the live config, deep enough that the rules slice is ours.
+	// The same document the GET renders — first touch seeds the full
+	// disabled rule set, so the operator's later visit to Settings sees
+	// every event, not just this one.
 	s.deps.CfgMu.RLock()
 	newCfg := *s.deps.Cfg
-	notif := config.Notifications{}
-	if s.deps.Cfg.Notifications != nil {
-		notif = *s.deps.Cfg.Notifications
-		notif.Events = append([]config.NotificationRule(nil), notif.Events...)
-	} else {
-		// First touch: seed the full disabled rule set so the operator's
-		// later visit to Settings sees every event, not just this one.
-		notif.Events = notifications.DefaultRules()
-	}
 	s.deps.CfgMu.RUnlock()
+	notif := s.effectiveNotificationRules()
 
 	for _, e := range req.Events {
 		replaced := false
@@ -166,10 +201,7 @@ func (s *Server) handleNotificationsRulesPut(w http.ResponseWriter, r *http.Requ
 	configreload.Apply(s.deps.CfgMu, s.deps.Cfg, s.deps.CtrlMu, s.deps.Ctrl,
 		&newCfg, s.deps.ConfigApplier)
 	slog.Info("notification rules updated via API", "events", len(req.Events))
-	writeJSON(w, 200, map[string]any{
-		"enabled": notif.Enabled,
-		"events":  notif.Events,
-	})
+	writeNotificationRules(w, notif)
 }
 
 // callerDeviceID names the enrolled device behind a request, empty when the

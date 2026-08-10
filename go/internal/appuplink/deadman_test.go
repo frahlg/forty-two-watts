@@ -2,18 +2,91 @@ package appuplink
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"log/slog"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/srcfl/ftw/go/internal/appenroll"
+	"github.com/srcfl/ftw/go/internal/notifications"
 )
 
+// testVAPIDKey mirrors nova.Identity's signing surface, the same double the
+// notifications tests use, so the rows below carry real ES256 headers.
+type testVAPIDKey struct{ priv *ecdsa.PrivateKey }
+
+func newTestVAPIDKey(t *testing.T) *testVAPIDKey {
+	t.Helper()
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	return &testVAPIDKey{priv: priv}
+}
+
+func (k *testVAPIDKey) PublicKeyHex() string {
+	out := make([]byte, 64)
+	k.priv.X.FillBytes(out[:32])
+	k.priv.Y.FillBytes(out[32:])
+	return hex.EncodeToString(out)
+}
+
+func (k *testVAPIDKey) SignRawHex(msg string) (string, error) {
+	hash := sha256.Sum256([]byte(msg))
+	r, s, err := ecdsa.Sign(rand.Reader, k.priv, hash[:])
+	if err != nil {
+		return "", err
+	}
+	sig := make([]byte, 64)
+	r.FillBytes(sig[:32])
+	s.FillBytes(sig[32:])
+	return hex.EncodeToString(sig), nil
+}
+
+func (k *testVAPIDKey) publicB64() string {
+	out := make([]byte, 65)
+	out[0] = 0x04
+	k.priv.X.FillBytes(out[1:33])
+	k.priv.Y.FillBytes(out[33:])
+	return base64.RawURLEncoding.EncodeToString(out)
+}
+
+// testClock is a movable now, shared between the uplink and the row source
+// so a test can let six hours pass without waiting for them.
+type testClock struct {
+	mu sync.Mutex
+	t  time.Time
+}
+
+func (c *testClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.t
+}
+
+func (c *testClock) Advance(d time.Duration) {
+	c.mu.Lock()
+	c.t = c.t.Add(d)
+	c.mu.Unlock()
+}
+
+// stubDeadman is main.go's row source in miniature: it holds the current
+// subscriptions' rows and signs each row's auth freshly on every call,
+// through the same exported builder production uses — which is what lets
+// the refresh test below prove a re-post carries a new signature rather
+// than a replay of the old one.
 type stubDeadman struct {
+	key  notifications.VAPIDKey
+	now  func() time.Time
 	mu   sync.Mutex
 	rows []DeadmanRow
 }
@@ -21,7 +94,16 @@ type stubDeadman struct {
 func (s *stubDeadman) DeadmanRows() ([]DeadmanRow, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return append([]DeadmanRow(nil), s.rows...), nil
+	out := make([]DeadmanRow, 0, len(s.rows))
+	for _, row := range s.rows {
+		auth, err := notifications.DeadmanAuthorization(s.key, row.Endpoint, s.now())
+		if err != nil {
+			return nil, err
+		}
+		row.Auth = auth
+		out = append(out, row)
+	}
+	return out, nil
 }
 
 func (s *stubDeadman) set(rows []DeadmanRow) {
@@ -30,8 +112,10 @@ func (s *stubDeadman) set(rows []DeadmanRow) {
 	s.mu.Unlock()
 }
 
-// newDeadmanRig is newRig with the switch armed.
-func newDeadmanRig(t *testing.T, epoch int64, source DeadmanSource) *rig {
+// newDeadmanRig is newRig with the switch armed. now drives the epoch (and
+// should be the same clock the source signs with); refresh shortens the
+// six-hour re-posting cadence, zero keeping production's.
+func newDeadmanRig(t *testing.T, epoch int64, source DeadmanSource, now func() time.Time, refresh time.Duration) *rig {
 	t.Helper()
 
 	relay := newFakeRelay(epoch)
@@ -42,15 +126,15 @@ func newDeadmanRig(t *testing.T, epoch int64, source DeadmanSource) *rig {
 		t.Fatalf("LoadOrCreate: %v", err)
 	}
 
-	now := time.UnixMilli(epoch * EpochMs)
 	uplink, err := New(Options{
-		Endpoint: relay.url(),
-		Enroll:   enroll,
-		Handler:  newHandler,
-		Deadman:  source,
-		Logger:   slog.New(slog.DiscardHandler),
-		Now:      func() time.Time { return now },
-		Random:   func() float64 { return 0 },
+		Endpoint:       relay.url(),
+		Enroll:         enroll,
+		Handler:        newHandler,
+		Deadman:        source,
+		Logger:         slog.New(slog.DiscardHandler),
+		Now:            now,
+		Random:         func() float64 { return 0 },
+		DeadmanRefresh: refresh,
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -62,6 +146,11 @@ func newDeadmanRig(t *testing.T, epoch int64, source DeadmanSource) *rig {
 	go func() { done <- uplink.Run(ctx) }()
 
 	return &rig{relay: relay, enroll: enroll, uplink: uplink, cancel: cancel, done: done}
+}
+
+func fixedNow(epoch int64) func() time.Time {
+	now := time.UnixMilli(epoch * EpochMs)
+	return func() time.Time { return now }
 }
 
 func waitForDeadman(t *testing.T, relay *fakeRelay, ok func(rows map[string]deadmanRowWire, claims []string) bool) (map[string]deadmanRowWire, []string) {
@@ -80,6 +169,35 @@ func waitForDeadman(t *testing.T, relay *fakeRelay, ok func(rows map[string]dead
 		case <-time.After(20 * time.Millisecond):
 		}
 	}
+}
+
+// vapidClaims unpacks a stored row's Authorization header: the JWT's aud
+// and exp, and the k= public key it names.
+func vapidClaims(t *testing.T, auth string) (aud string, exp int64, k string) {
+	t.Helper()
+	if !strings.HasPrefix(auth, "vapid t=") {
+		t.Fatalf("auth = %q", auth)
+	}
+	parts := strings.SplitN(strings.TrimPrefix(auth, "vapid t="), ", k=", 2)
+	if len(parts) != 2 {
+		t.Fatalf("auth = %q", auth)
+	}
+	segments := strings.Split(parts[0], ".")
+	if len(segments) != 3 {
+		t.Fatalf("JWT has %d segments", len(segments))
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(segments[1])
+	if err != nil {
+		t.Fatalf("claims: %v", err)
+	}
+	var claims struct {
+		Aud string `json:"aud"`
+		Exp int64  `json:"exp"`
+	}
+	if err := json.Unmarshal(raw, &claims); err != nil {
+		t.Fatal(err)
+	}
+	return claims.Aud, claims.Exp, parts[1]
 }
 
 // The id is 32 lowercase hex chars, stable across calls, different per
@@ -108,15 +226,20 @@ func TestDeadmanIDShape(t *testing.T) {
 }
 
 // On connect the box posts one row per subscription — id, endpoint,
-// pre-encrypted ct, deadline, exactly the contract's body — and claims
-// every id on the socket it just opened.
+// pre-encrypted ct, auth, deadline, exactly the contract's body — and
+// claims every id on the socket it just opened. Each row's auth is a VAPID
+// header the push service could verify: aud is that row's own endpoint
+// origin, exp the full 24 hours out, k the box's key.
 func TestDeadmanRowsPostedAndClaimedOnConnect(t *testing.T) {
-	source := &stubDeadman{}
+	const epoch = 481234
+	key := newTestVAPIDKey(t)
+	now := fixedNow(epoch)
+	source := &stubDeadman{key: key, now: now}
 	source.set([]DeadmanRow{
-		{SubscriptionID: "s1", Endpoint: "https://push.example/a", CT: []byte("ct-one")},
-		{SubscriptionID: "s2", Endpoint: "https://push.example/b", CT: []byte("ct-two")},
+		{SubscriptionID: "s1", Endpoint: "https://push-a.example/a", CT: []byte("ct-one")},
+		{SubscriptionID: "s2", Endpoint: "https://push-b.example/b", CT: []byte("ct-two")},
 	})
-	r := newDeadmanRig(t, 481234, source)
+	r := newDeadmanRig(t, epoch, source, now, 0)
 
 	rows, claims := waitForDeadman(t, r.relay, func(rows map[string]deadmanRowWire, claims []string) bool {
 		return len(rows) == 2 && len(claims) >= 2
@@ -124,10 +247,10 @@ func TestDeadmanRowsPostedAndClaimedOnConnect(t *testing.T) {
 
 	secret := r.enroll.RendezvousSecret()
 	for _, want := range []struct {
-		sub, endpoint, ct string
+		sub, endpoint, origin, ct string
 	}{
-		{"s1", "https://push.example/a", "ct-one"},
-		{"s2", "https://push.example/b", "ct-two"},
+		{"s1", "https://push-a.example/a", "https://push-a.example", "ct-one"},
+		{"s2", "https://push-b.example/b", "https://push-b.example", "ct-two"},
 	} {
 		id := DeadmanID(secret, want.sub)
 		row, ok := rows[id]
@@ -143,6 +266,16 @@ func TestDeadmanRowsPostedAndClaimedOnConnect(t *testing.T) {
 		}
 		if row.DeadlineS != DeadmanDeadlineS {
 			t.Fatalf("deadline_s = %d, want %d", row.DeadlineS, DeadmanDeadlineS)
+		}
+		aud, exp, k := vapidClaims(t, row.Auth)
+		if aud != want.origin {
+			t.Fatalf("auth aud = %q, want this row's own origin %q", aud, want.origin)
+		}
+		if wantExp := now().Add(24 * time.Hour).Unix(); exp != wantExp {
+			t.Fatalf("auth exp = %d, want 24h out (%d)", exp, wantExp)
+		}
+		if k != key.publicB64() {
+			t.Fatalf("auth k = %q, want the box's key %q", k, key.publicB64())
 		}
 		claimed := false
 		for _, c := range claims {
@@ -160,12 +293,15 @@ func TestDeadmanRowsPostedAndClaimedOnConnect(t *testing.T) {
 // keep a farewell for a phone that no longer exists — and the remaining
 // ids are re-claimed.
 func TestDeadmanResyncDeletesRemovedRows(t *testing.T) {
-	source := &stubDeadman{}
+	const epoch = 481234
+	key := newTestVAPIDKey(t)
+	now := fixedNow(epoch)
+	source := &stubDeadman{key: key, now: now}
 	source.set([]DeadmanRow{
 		{SubscriptionID: "s1", Endpoint: "https://push.example/a", CT: []byte("ct-one")},
 		{SubscriptionID: "s2", Endpoint: "https://push.example/b", CT: []byte("ct-two")},
 	})
-	r := newDeadmanRig(t, 481234, source)
+	r := newDeadmanRig(t, epoch, source, now, 0)
 	waitForDeadman(t, r.relay, func(rows map[string]deadmanRowWire, claims []string) bool {
 		return len(rows) == 2 && len(claims) >= 2
 	})
@@ -185,6 +321,46 @@ func TestDeadmanResyncDeletesRemovedRows(t *testing.T) {
 	})
 	if _, ok := rows[kept]; !ok {
 		t.Fatalf("the surviving subscription's row went too: %v", rows)
+	}
+}
+
+// While the connection lasts, the rows are re-posted on the refresh cadence
+// with a freshly signed header each time: six hours after the first post
+// the relay must hold a JWT expiring six hours later too, or the header
+// would one day expire in the relay's hands and the switch would fire with
+// a voice the push service refuses.
+func TestDeadmanRefreshRepostsWithFreshJWT(t *testing.T) {
+	const epoch = 481234
+	key := newTestVAPIDKey(t)
+	clock := &testClock{t: time.UnixMilli(epoch * EpochMs)}
+	source := &stubDeadman{key: key, now: clock.Now}
+	source.set([]DeadmanRow{
+		{SubscriptionID: "s1", Endpoint: "https://push.example/a", CT: []byte("ct-one")},
+	})
+	r := newDeadmanRig(t, epoch, source, clock.Now, 40*time.Millisecond)
+
+	id := DeadmanID(r.enroll.RendezvousSecret(), "s1")
+	rows, _ := waitForDeadman(t, r.relay, func(rows map[string]deadmanRowWire, _ []string) bool {
+		_, ok := rows[id]
+		return ok
+	})
+	_, exp0, _ := vapidClaims(t, rows[id].Auth)
+
+	// Six hours pass while the connection holds. The next refresh tick must
+	// re-post the row signed against the moved clock — a replayed header
+	// would keep the old exp.
+	clock.Advance(6 * time.Hour)
+	rows, _ = waitForDeadman(t, r.relay, func(rows map[string]deadmanRowWire, _ []string) bool {
+		row, ok := rows[id]
+		if !ok {
+			return false
+		}
+		_, exp, _ := vapidClaims(t, row.Auth)
+		return exp != exp0
+	})
+	_, exp1, _ := vapidClaims(t, rows[id].Auth)
+	if got, want := exp1-exp0, int64(6*3600); got != want {
+		t.Fatalf("exp moved by %ds, want the clock's 6h (%ds)", got, want)
 	}
 }
 

@@ -22,6 +22,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // testVAPIDKey mirrors nova.Identity's signing surface so the provider can
@@ -326,6 +327,67 @@ func TestPublishCarriesVAPIDAndDecryptablePayload(t *testing.T) {
 	ss := new(big.Int).SetBytes(sig[32:])
 	if !ecdsa.Verify(&key.priv.PublicKey, hash[:], rr, ss) {
 		t.Fatal("the VAPID JWT does not verify against the published key")
+	}
+}
+
+// The dead man's header is the same construction the live publish uses,
+// with two facts pinned: aud is the row's own endpoint origin, and exp is
+// the full 24 hours from the clock the caller passed — the relay may hold
+// it for six hours before the box re-signs, and it must still verify when
+// the switch fires.
+func TestDeadmanAuthorizationPinsAudAndExp(t *testing.T) {
+	key := newTestVAPIDKey(t)
+	now := time.Unix(1_750_000_000, 0)
+
+	auth, err := DeadmanAuthorization(key, "https://push.example/p/route/abc", now)
+	if err != nil {
+		t.Fatalf("DeadmanAuthorization: %v", err)
+	}
+	if !strings.HasPrefix(auth, "vapid t=") {
+		t.Fatalf("auth = %q", auth)
+	}
+	parts := strings.SplitN(strings.TrimPrefix(auth, "vapid t="), ", k=", 2)
+	if len(parts) != 2 {
+		t.Fatalf("auth = %q", auth)
+	}
+	if pub, err := publicKeyB64(key); err != nil || parts[1] != pub {
+		t.Fatalf("k = %q, want the published key %q (%v)", parts[1], pub, err)
+	}
+	segments := strings.Split(parts[0], ".")
+	if len(segments) != 3 {
+		t.Fatalf("JWT has %d segments", len(segments))
+	}
+	claimsRaw, err := base64.RawURLEncoding.DecodeString(segments[1])
+	if err != nil {
+		t.Fatalf("claims: %v", err)
+	}
+	var claims struct {
+		Aud string `json:"aud"`
+		Exp int64  `json:"exp"`
+		Sub string `json:"sub"`
+	}
+	if err := json.Unmarshal(claimsRaw, &claims); err != nil {
+		t.Fatal(err)
+	}
+	if claims.Aud != "https://push.example" {
+		t.Fatalf("aud = %q, want the endpoint origin", claims.Aud)
+	}
+	if claims.Exp != now.Add(24*time.Hour).Unix() {
+		t.Fatalf("exp = %d, want the full 24 hours from the caller's clock (%d)",
+			claims.Exp, now.Add(24*time.Hour).Unix())
+	}
+	if claims.Sub != "https://ftw.energy" {
+		t.Fatalf("sub = %q", claims.Sub)
+	}
+	sig, err := base64.RawURLEncoding.DecodeString(segments[2])
+	if err != nil || len(sig) != 64 {
+		t.Fatalf("signature: %v (%d bytes)", err, len(sig))
+	}
+	hash := sha256.Sum256([]byte(segments[0] + "." + segments[1]))
+	rr := new(big.Int).SetBytes(sig[:32])
+	ss := new(big.Int).SetBytes(sig[32:])
+	if !ecdsa.Verify(&key.priv.PublicKey, hash[:], rr, ss) {
+		t.Fatal("the dead man's JWT does not verify against the key")
 	}
 }
 

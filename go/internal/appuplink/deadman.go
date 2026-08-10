@@ -32,7 +32,10 @@ import (
 //
 //	POST <origin>/deadman
 //	     {"id": <32 lowercase hex>, "endpoint": <https url>,
-//	      "ct": <base64 aes128gcm ciphertext>, "deadline_s": <60..86400>}
+//	      "ct": <base64 aes128gcm ciphertext>,
+//	      "auth": <the complete VAPID Authorization header value for the
+//	      endpoint's origin, signed by the box>,
+//	      "deadline_s": <60..86400>}
 //	     → 204, upsert keyed on id, persisted by the relay
 //	DELETE <origin>/deadman/<id> → 204, idempotent; the id is the bearer
 //	     capability and there is no other auth
@@ -46,6 +49,15 @@ import (
 // allows 60..86400.
 const DeadmanDeadlineS = 600
 
+// deadmanRefreshInterval is how often a connected uplink re-posts its rows.
+// Each row's auth is a VAPID signature with 24 hours to live (RFC 8292's
+// ceiling), and the switch fires within DeadmanDeadlineS of a disconnect —
+// so re-signing every six hours means the header the relay holds is never
+// more than a quarter spent when it is needed, and a signature that could
+// expire in the relay's hands would need the box to be gone for over 18
+// hours while somehow never disconnecting.
+const deadmanRefreshInterval = 6 * time.Hour
+
 // CtrlDeadman is the claim word the box says on its uplink socket.
 const CtrlDeadman = "deadman"
 
@@ -57,6 +69,12 @@ type DeadmanRow struct {
 	SubscriptionID string
 	Endpoint       string
 	CT             []byte
+	// Auth is the complete VAPID Authorization header value for Endpoint's
+	// origin, signed by the box. The subscription is bound to the box's key
+	// and the push service refuses a POST without it — and the relay must
+	// never hold the key, so it holds a signature instead, re-signed on
+	// every resync. See deadmanRefreshInterval for the arithmetic.
+	Auth string
 }
 
 // DeadmanSource hands the uplink the current rows. main.go implements it
@@ -164,6 +182,7 @@ func (u *Uplink) postDeadman(ctx context.Context, id string, row DeadmanRow) err
 		"id":         id,
 		"endpoint":   row.Endpoint,
 		"ct":         base64.StdEncoding.EncodeToString(row.CT),
+		"auth":       row.Auth,
 		"deadline_s": DeadmanDeadlineS,
 	})
 	if err != nil {

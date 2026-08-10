@@ -78,6 +78,12 @@ const (
 	webPushTTL = 3600
 	// vapidTokenLife is well under RFC 8292's 24-hour ceiling.
 	vapidTokenLife = 12 * time.Hour
+	// deadmanTokenLife is that ceiling, taken whole, for the dead man's
+	// rows only: the relay may not fire until long after the box last
+	// spoke, so a stored header lives as long as the RFC allows — and the
+	// uplink re-signs every six hours, so it is never more than a quarter
+	// spent when the relay needs it.
+	deadmanTokenLife = 24 * time.Hour
 	// vapidSubject identifies the operator of this application server to
 	// the push service, as RFC 8292 asks.
 	vapidSubject = "https://ftw.energy"
@@ -121,7 +127,11 @@ func (w *WebPush) SetConfig(cfg *config.Notifications) {}
 // PublicKeyB64 is the applicationServerKey the app hands to
 // PushManager.subscribe: the uncompressed point, base64url, no padding.
 func (w *WebPush) PublicKeyB64() (string, error) {
-	raw, err := hex.DecodeString(w.key.PublicKeyHex())
+	return publicKeyB64(w.key)
+}
+
+func publicKeyB64(key VAPIDKey) (string, error) {
+	raw, err := hex.DecodeString(key.PublicKeyHex())
 	if err != nil || len(raw) != 64 {
 		return "", errors.New("webpush: the VAPID public key is malformed")
 	}
@@ -189,7 +199,7 @@ func (w *WebPush) publishOne(ctx context.Context, sub PushSubscription, payload 
 	if err != nil {
 		return err
 	}
-	auth, err := w.vapidAuthorization(sub.Endpoint)
+	auth, err := vapidAuthorization(w.key, sub.Endpoint, w.now(), vapidTokenLife)
 	if err != nil {
 		return err
 	}
@@ -222,8 +232,26 @@ func (w *WebPush) publishOne(ctx context.Context, sub PushSubscription, payload 
 	return nil
 }
 
-// vapidAuthorization builds the RFC 8292 header for one push service origin.
-func (w *WebPush) vapidAuthorization(endpoint string) (string, error) {
+// DeadmanAuthorization is the Authorization header a dead man's row stores
+// with the relay, built by the box because the relay must never hold the
+// signing key: aud is the row's own endpoint origin, exp the full 24 hours.
+// Exported with an explicit clock for the same reason EncryptForSubscription
+// is — the switch composes its rows in advance, and the uplink's tests
+// prove the re-signing cadence by moving the clock.
+func DeadmanAuthorization(key VAPIDKey, endpoint string, now time.Time) (string, error) {
+	return vapidAuthorization(key, endpoint, now, deadmanTokenLife)
+}
+
+// DeadmanAuthorization on the provider signs with its own key and clock;
+// main.go's row source calls this once per subscription on every resync.
+func (w *WebPush) DeadmanAuthorization(endpoint string) (string, error) {
+	return DeadmanAuthorization(w.key, endpoint, w.now())
+}
+
+// vapidAuthorization builds the complete RFC 8292 header for one push
+// service origin: "vapid t=<ES256 JWT>, k=<public key b64url>". Every
+// Authorization this package ever writes comes through here.
+func vapidAuthorization(key VAPIDKey, endpoint string, now time.Time, life time.Duration) (string, error) {
 	u, err := url.Parse(endpoint)
 	if err != nil || u.Scheme == "" || u.Host == "" {
 		return "", errors.New("endpoint is not a URL")
@@ -231,14 +259,14 @@ func (w *WebPush) vapidAuthorization(endpoint string) (string, error) {
 	header := base64.RawURLEncoding.EncodeToString([]byte(`{"typ":"JWT","alg":"ES256"}`))
 	claims, err := json.Marshal(map[string]any{
 		"aud": u.Scheme + "://" + u.Host,
-		"exp": w.now().Add(vapidTokenLife).Unix(),
+		"exp": now.Add(life).Unix(),
 		"sub": vapidSubject,
 	})
 	if err != nil {
 		return "", err
 	}
 	signingInput := header + "." + base64.RawURLEncoding.EncodeToString(claims)
-	sigHex, err := w.key.SignRawHex(signingInput)
+	sigHex, err := key.SignRawHex(signingInput)
 	if err != nil {
 		return "", fmt.Errorf("sign VAPID token: %w", err)
 	}
@@ -248,7 +276,7 @@ func (w *WebPush) vapidAuthorization(endpoint string) (string, error) {
 	}
 	jwt := signingInput + "." + base64.RawURLEncoding.EncodeToString(sig)
 
-	pub, err := w.PublicKeyB64()
+	pub, err := publicKeyB64(key)
 	if err != nil {
 		return "", err
 	}

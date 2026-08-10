@@ -48,6 +48,7 @@ type deadmanRowWire struct {
 	ID        string `json:"id"`
 	Endpoint  string `json:"endpoint"`
 	CT        string `json:"ct"`
+	Auth      string `json:"auth"`
 	DeadlineS int    `json:"deadline_s"`
 }
 
@@ -236,13 +237,16 @@ func (r *fakeRelay) seenHandles() []string {
 
 // handleDeadman is the relay's HTTP half of the dead man's switch contract:
 // POST /deadman upserts a row on id, DELETE /deadman/<id> forgets one,
-// idempotently. 204 both ways.
+// idempotently. 204 both ways. A row without a VAPID auth header is refused
+// the way the real relay refuses it: the subscription is bound to the box's
+// key, so a row the relay could never deliver must not arm the switch.
 func (r *fakeRelay) handleDeadman(w http.ResponseWriter, req *http.Request) {
 	switch req.Method {
 	case http.MethodPost:
 		var row deadmanRowWire
 		if err := json.NewDecoder(req.Body).Decode(&row); err != nil ||
 			len(row.ID) != 32 || row.Endpoint == "" || row.CT == "" ||
+			!strings.HasPrefix(row.Auth, "vapid t=") ||
 			row.DeadlineS < 60 || row.DeadlineS > 86400 {
 			http.Error(w, "bad row", http.StatusBadRequest)
 			return

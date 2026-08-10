@@ -18,6 +18,7 @@ import (
 	"github.com/srcfl/ftw/go/internal/control"
 	"github.com/srcfl/ftw/go/internal/loadpoint"
 	"github.com/srcfl/ftw/go/internal/mpc"
+	"github.com/srcfl/ftw/go/internal/notifications"
 	"github.com/srcfl/ftw/go/internal/prices"
 	"github.com/srcfl/ftw/go/internal/state"
 	"github.com/srcfl/ftw/go/internal/telemetry"
@@ -457,6 +458,7 @@ func startAppLink(
 	revision *control.Revision,
 	siteMeterStale time.Duration,
 	gateway *lateAPI,
+	webPush *notifications.WebPush,
 ) (*appenroll.Identity, *appuplink.Uplink, bool, error) {
 	enabled := cfg != nil && cfg.AppLink != nil && cfg.AppLink.Enabled
 
@@ -521,11 +523,12 @@ func startAppLink(
 	caps = append(caps, appproto.CapApiPassthrough)
 
 	// The dead man's switch rides on the uplink exactly when there is
-	// state to hold subscriptions in. With none stored it produces no
-	// rows and the uplink says no extra word.
+	// state to hold subscriptions in and a VAPID key to sign for them —
+	// a row the push service would refuse is not a farewell. With neither
+	// it produces no rows and the uplink says no extra word.
 	var deadman appuplink.DeadmanSource
-	if st != nil {
-		deadman = deadmanFromState{st: st}
+	if st != nil && webPush != nil {
+		deadman = deadmanFromState{st: st, wp: webPush}
 	}
 
 	uplink, err := appuplink.New(appuplink.Options{

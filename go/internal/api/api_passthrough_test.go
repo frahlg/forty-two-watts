@@ -610,6 +610,11 @@ func TestRouteTierIgnoresTheMethod(t *testing.T) {
 		{"PUT", "/api/loadpoints/1/schedule", apiauth.TierConfigure, "a schedule saved late is the same instruction, only later"},
 		{"DELETE", "/api/loadpoints/1/schedule", apiauth.TierConfigure, "removing the standing instruction is configuration too"},
 		{"POST", "/api/loadpoints/1/target", apiauth.TierActuate, "its sibling moves energy now"},
+
+		// One path, two prices: the app's toggles must be showable without
+		// the write's step-up ceremony.
+		{"GET", "/api/notifications/rules", apiauth.TierRead, "showing the toggles is a read"},
+		{"PUT", "/api/notifications/rules", apiauth.TierConfigure, "flipping one is a write into config"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.method+" "+tc.path, func(t *testing.T) {

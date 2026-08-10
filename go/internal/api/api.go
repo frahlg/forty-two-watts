@@ -436,6 +436,7 @@ func (s *Server) routes() {
 	s.handle("GET  /api/notifications/vapid", Read, s.handleNotificationsVAPID)
 	s.handle("POST   /api/notifications/subscriptions", Configure, s.handlePushSubscribe)
 	s.handle("DELETE /api/notifications/subscriptions/{id}", Configure, s.handlePushUnsubscribe)
+	s.handle("GET  /api/notifications/rules", Read, s.handleNotificationsRulesGet)
 	s.handle("PUT  /api/notifications/rules", Configure, s.handleNotificationsRulesPut)
 	s.handle("GET  /api/battery_models", Read, s.handleGetModels)
 	s.handle("POST /api/battery_models/reset", Configure, s.handleResetModel)

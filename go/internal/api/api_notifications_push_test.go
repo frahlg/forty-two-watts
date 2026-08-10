@@ -302,6 +302,72 @@ func TestRulesPutRefusesUnknownTypes(t *testing.T) {
 	}
 }
 
+// Before anything is stored, the read answers the full disabled default
+// set — the toggles the app draws — and writes nothing while doing it.
+func TestRulesGetShowsDefaultsAndStoresNothing(t *testing.T) {
+	srv, _ := pushServer(t)
+	srv.deps.SaveConfig = func(string, *config.Config) error {
+		t.Error("a GET wrote the config")
+		return nil
+	}
+
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/notifications/rules", nil))
+	if rr.Code != 200 {
+		t.Fatalf("rules get = %d: %s", rr.Code, rr.Body.String())
+	}
+	var got struct {
+		Enabled bool                      `json:"enabled"`
+		Events  []config.NotificationRule `json:"events"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Enabled {
+		t.Fatal("nothing is stored, yet the master switch reads on")
+	}
+	defaults := notifications.DefaultRules()
+	if len(got.Events) != len(defaults) {
+		t.Fatalf("%d events, want the full default set of %d", len(got.Events), len(defaults))
+	}
+	for i, e := range got.Events {
+		if e.Type != defaults[i].Type {
+			t.Fatalf("event %d is %q, want %q", i, e.Type, defaults[i].Type)
+		}
+		if e.Enabled {
+			t.Fatalf("default rule %q came back enabled", e.Type)
+		}
+	}
+
+	srv.deps.CfgMu.RLock()
+	stored := srv.deps.Cfg.Notifications
+	srv.deps.CfgMu.RUnlock()
+	if stored != nil {
+		t.Fatalf("the GET stored a notifications section: %+v", stored)
+	}
+}
+
+// After a write, the read answers what was stored — byte for byte the
+// document the PUT itself answered, because both come from one builder.
+func TestRulesGetAfterPutShowsWhatWasStored(t *testing.T) {
+	srv, _ := pushServer(t)
+	put := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(put, jsonReq(http.MethodPut, "/api/notifications/rules",
+		`{"enabled":true,"events":[{"type":"update.installed","enabled":true}]}`))
+	if put.Code != 200 {
+		t.Fatalf("rules put = %d: %s", put.Code, put.Body.String())
+	}
+
+	get := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(get, httptest.NewRequest(http.MethodGet, "/api/notifications/rules", nil))
+	if get.Code != 200 {
+		t.Fatalf("rules get = %d: %s", get.Code, get.Body.String())
+	}
+	if get.Body.String() != put.Body.String() {
+		t.Fatalf("GET = %s, want the PUT's own answer %s", get.Body.String(), put.Body.String())
+	}
+}
+
 // First touch with no notifications section seeds the full disabled rule
 // set, so Settings later shows every event rather than only the one the
 // app enabled.

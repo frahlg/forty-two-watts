@@ -40,8 +40,15 @@ func (p pushSubscriptionSource) DeletePushSubscription(id string) error {
 // deadmanFromState renders and encrypts the box.unreachable farewell, one
 // row per stored subscription. The sentence comes from the push catalogue
 // and the encryption is the same RFC 8291 construction every live push
-// uses — the relay stores it and can read none of it.
-type deadmanFromState struct{ st *state.Store }
+// uses — the relay stores it and can read none of it. Each row also carries
+// the VAPID Authorization header the push service will demand, signed here
+// by the provider's own key because the relay must never hold that key; the
+// uplink calls back every six hours, so the signature is re-made long
+// before its 24 hours run out.
+type deadmanFromState struct {
+	st *state.Store
+	wp *notifications.WebPush
+}
 
 func (d deadmanFromState) DeadmanRows() ([]appuplink.DeadmanRow, error) {
 	subs, err := d.st.PushSubscriptions()
@@ -67,10 +74,16 @@ func (d deadmanFromState) DeadmanRows() ([]appuplink.DeadmanRow, error) {
 			slog.Warn("dead man's switch: skipping a subscription", "id", sub.ID, "err", err)
 			continue
 		}
+		auth, err := d.wp.DeadmanAuthorization(sub.Endpoint)
+		if err != nil {
+			slog.Warn("dead man's switch: skipping a subscription", "id", sub.ID, "err", err)
+			continue
+		}
 		rows = append(rows, appuplink.DeadmanRow{
 			SubscriptionID: sub.ID,
 			Endpoint:       sub.Endpoint,
 			CT:             ct,
+			Auth:           auth,
 		})
 	}
 	return rows, nil

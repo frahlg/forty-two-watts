@@ -2113,6 +2113,25 @@ func main() {
 		slog.Info("site identity ready", "pubkey_prefix", identityState.Nova.PublicKeyHex()[:16])
 	}
 
+	// The web-push provider, built before the uplink because the dead man's
+	// rows carry its VAPID signature. Engine-owned, keyed by stored
+	// subscriptions rather than by config, so a household using ntfy loses
+	// nothing when the app enables it. Its VAPID key is the box's own,
+	// generated on first run beside state.db exactly as nova.key is, and it
+	// signs VAPID tokens and nothing else. Wired into the notifications
+	// engine and the API further down, once those exist.
+	var webPush *notifications.WebPush
+	if st != nil {
+		vapidPath := filepath.Join(filepath.Dir(statePath), "webpush.key")
+		if vapidKey, err := nova.LoadOrCreateIdentity(vapidPath); err != nil {
+			slog.Warn("web push disabled — VAPID key unavailable", "err", err, "path", vapidPath)
+		} else if wp, err := notifications.NewWebPush(vapidKey, pushSubscriptionSource{st: st}); err != nil {
+			slog.Warn("web push disabled", "err", err)
+		} else {
+			webPush = wp
+		}
+	}
+
 	// The FTW app's uplink. It speaks the app's own protocol end to end and
 	// reaches the box through a relay that holds no keys.
 	appLinkWatchdog := time.Duration(cfg.Site.WatchdogTimeoutS) * time.Second
@@ -2129,7 +2148,7 @@ func main() {
 	appEnroll, appUplink, appLinkEnabled, appLinkErr := startAppLink(
 		ctx, cfg, identityKeyPath, boxID, Version,
 		st, tel, mpcSvc, lpMgr, lpController, priceSvc, ctrl, ctrlMu,
-		controlRev, appLinkWatchdog, appAPI,
+		controlRev, appLinkWatchdog, appAPI, webPush,
 	)
 	switch {
 	case appLinkErr != nil:
@@ -2332,21 +2351,12 @@ func main() {
 			slog.Warn("notification_log: record failed", "err", err)
 		}
 	})
-	// Web push runs beside whatever provider the config names — engine-
-	// owned, keyed by stored subscriptions rather than by config, so a
-	// household using ntfy loses nothing when the app enables it. Its
-	// VAPID key is the box's own, generated on first run beside state.db
-	// exactly as nova.key is, and it signs VAPID tokens and nothing else.
-	if st != nil {
-		vapidPath := filepath.Join(filepath.Dir(statePath), "webpush.key")
-		if vapidKey, err := nova.LoadOrCreateIdentity(vapidPath); err != nil {
-			slog.Warn("web push disabled — VAPID key unavailable", "err", err, "path", vapidPath)
-		} else if wp, err := notifications.NewWebPush(vapidKey, pushSubscriptionSource{st: st}); err != nil {
-			slog.Warn("web push disabled", "err", err)
-		} else {
-			notifSvc.AddPublisher(wp)
-			deps.WebPush = wp
-		}
+	// Web push runs beside whatever provider the config names. The provider
+	// itself was built before the uplink (the dead man's rows carry its
+	// signature); here it joins the engine and the API.
+	if webPush != nil {
+		notifSvc.AddPublisher(webPush)
+		deps.WebPush = webPush
 	}
 	if appUplink != nil {
 		deps.PushResync = appUplink.ResyncDeadman
