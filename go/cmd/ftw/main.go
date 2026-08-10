@@ -2128,8 +2128,8 @@ func main() {
 	appAPI := &lateAPI{}
 	appEnroll, appUplink, appLinkEnabled, appLinkErr := startAppLink(
 		ctx, cfg, identityKeyPath, boxID, Version,
-		st, tel, mpcSvc, priceSvc, ctrl, ctrlMu, controlRev, appLinkWatchdog,
-		appAPI,
+		st, tel, mpcSvc, lpMgr, lpController, priceSvc, ctrl, ctrlMu,
+		controlRev, appLinkWatchdog, appAPI,
 	)
 	switch {
 	case appLinkErr != nil:

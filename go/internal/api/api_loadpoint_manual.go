@@ -52,8 +52,9 @@ type manualHoldResponse struct {
 
 // maxManualHoldS bounds the hold duration so a forgotten hold can't
 // indefinitely override MPC-driven dispatch. 30 minutes is well above
-// any realistic diagnostics session.
-const maxManualHoldS = 30 * 60
+// any realistic diagnostics session. The number itself lives in the
+// loadpoint package, shared with the app session's loadpoint.hold op.
+const maxManualHoldS = int(loadpoint.MaxManualHold / time.Second)
 
 // handleLoadpointManualHold installs a manual override on the named
 // loadpoint until `now + hold_s`. POST body is manualHoldRequest.

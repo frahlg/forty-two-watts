@@ -115,6 +115,8 @@ roles:
 ops:
   - { name: site.mode.set, scope: ftw.mode.write, desc: Change the site operating mode }
   - { name: battery.hold, scope: ftw.dispatch.write, desc: Hold the battery at a fixed setpoint }
+  - { name: loadpoint.hold, scope: ftw.dispatch.write, desc: Charge the car now at a fixed current }
+  - { name: loadpoint.boost, scope: ftw.dispatch.write, desc: Boost the car from the house battery }
 
 # ---------------------------------------------------------------------------
 # Dispatch modes.

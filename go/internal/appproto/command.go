@@ -37,6 +37,13 @@ type opSpec struct {
 func defaultOps() map[string]opSpec {
 	return map[string]opSpec{
 		OpSetMode: {scope: ScopeModeWrite, dispatchWrite: false},
+		// The loadpoint pair moves energy — a manual hold commands the
+		// charger and a boost opens the battery-to-EV path — so both sit
+		// behind the dispatch gate. A box with no loadpoint controller
+		// answers E_UNAVAILABLE, the session's word for the HTTP 503 the
+		// same routes give.
+		OpLoadpointHold:  {scope: ScopeDispatchWrite, dispatchWrite: true},
+		OpLoadpointBoost: {scope: ScopeDispatchWrite, dispatchWrite: true},
 	}
 }
 

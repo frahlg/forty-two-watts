@@ -16,6 +16,7 @@ import (
 	"github.com/srcfl/ftw/go/internal/appuplink"
 	"github.com/srcfl/ftw/go/internal/config"
 	"github.com/srcfl/ftw/go/internal/control"
+	"github.com/srcfl/ftw/go/internal/loadpoint"
 	"github.com/srcfl/ftw/go/internal/mpc"
 	"github.com/srcfl/ftw/go/internal/prices"
 	"github.com/srcfl/ftw/go/internal/state"
@@ -335,6 +336,59 @@ func (a *appPrices) Slots(_ context.Context, fromMs, toMs int64) ([]appproto.Pri
 	return out, nil
 }
 
+// appLoadpoints is the command lane's way to the box's EV charging: the same
+// loadpoint controller the HTTP routes call, behind appproto's narrow
+// questions. Boost carries the same replan nudge the HTTP enable route has —
+// the cancel path needs none here because the controller's stopped hook
+// already replans on every active-to-stopped transition, whichever door
+// asked.
+type appLoadpoints struct {
+	mgr  *loadpoint.Manager
+	ctrl *loadpoint.Controller
+	mpc  *mpc.Service
+}
+
+func (a *appLoadpoints) Exists(id string) bool {
+	_, ok := a.mgr.State(id)
+	return ok
+}
+
+func (a *appLoadpoints) Hold(id string, h loadpoint.ManualHold) {
+	a.ctrl.SetManualHold(id, h)
+}
+
+func (a *appLoadpoints) ClearHold(id string) {
+	a.ctrl.ClearManualHold(id)
+}
+
+func (a *appLoadpoints) ObservedHold(id string, now time.Time) (loadpoint.ManualHold, bool) {
+	return a.ctrl.GetManualHold(id, now)
+}
+
+func (a *appLoadpoints) Boost(id string, lease loadpoint.BatteryBoostLease, now time.Time) error {
+	if _, err := a.ctrl.EnableBatteryBoost(id, lease, now); err != nil {
+		return err
+	}
+	if a.mpc != nil {
+		// The same nudge the HTTP enable gives, for the same reason: a boost
+		// changes what moves, and the planner should know now rather than at
+		// its next scheduled run. Off this goroutine and unattached to the
+		// session — a phone that drops its socket right after tapping must
+		// not abort the planner mid-run.
+		go a.mpc.ReplanWithReason(context.Background(), "loadpoint_battery_boost_enabled")
+	}
+	return nil
+}
+
+func (a *appLoadpoints) CancelBoost(id string, now time.Time) {
+	a.ctrl.CancelBatteryBoost(id, now)
+}
+
+func (a *appLoadpoints) ObservedBoost(id string, now time.Time) loadpoint.BatteryBoostStatus {
+	_, status := a.ctrl.BatteryBoost(id, now)
+	return status
+}
+
 // appPlans hands over the planner's current output.
 type appPlans struct {
 	planner *mpc.Service
@@ -395,6 +449,8 @@ func startAppLink(
 	st *state.Store,
 	tel *telemetry.Store,
 	planner *mpc.Service,
+	lpMgr *loadpoint.Manager,
+	lpCtrl *loadpoint.Controller,
 	priceSvc *prices.Service,
 	ctrl *control.State,
 	ctrlMu *sync.Mutex,
@@ -439,6 +495,16 @@ func startAppLink(
 		)
 	}
 
+	// EV charging rides on the loadpoint controller, so the two loadpoint
+	// ops work exactly when the HTTP routes do. Without one the port stays
+	// nil, the ops answer E_UNAVAILABLE, and der.ev stays unsaid so the app
+	// hides the buttons rather than drawing dead ones.
+	var loadpoints appproto.Loadpoints
+	if lpMgr != nil && lpCtrl != nil {
+		loadpoints = &appLoadpoints{mgr: lpMgr, ctrl: lpCtrl, mpc: planner}
+		caps = append(caps, appproto.CapDerEv)
+	}
+
 	// Prices ride on the price service, and only when it has a zone and a
 	// store to have fetched into. With either missing there is nothing to
 	// serve, so the capability stays unsaid rather than advertised and empty.
@@ -469,10 +535,11 @@ func startAppLink(
 				Site:    site,
 				Info:    info,
 				Modes:   modes,
-				Plans:   plans,
-				History: history,
-				Prices:  priceReader,
-				API:     gateway,
+				Plans:      plans,
+				History:    history,
+				Prices:     priceReader,
+				Loadpoints: loadpoints,
+				API:        gateway,
 				Caller:  caller,
 				Grants:  grants,
 				Caps:    caps,

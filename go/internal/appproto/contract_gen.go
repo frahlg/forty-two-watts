@@ -140,6 +140,10 @@ var RegistryOps = map[string]string{
 	"site.mode.set": "ftw.mode.write",
 	// battery.hold — Hold the battery at a fixed setpoint.
 	"battery.hold": "ftw.dispatch.write",
+	// loadpoint.hold — Charge the car now at a fixed current.
+	"loadpoint.hold": "ftw.dispatch.write",
+	// loadpoint.boost — Boost the car from the house battery.
+	"loadpoint.boost": "ftw.dispatch.write",
 }
 
 // Error codes. The box sends the code and machine-readable args; the app

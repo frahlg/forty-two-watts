@@ -37,6 +37,14 @@ const (
 	// mode validation the API and Home Assistant use — a second validator
 	// here would be a second place for the two to disagree.
 	OpSetMode = "site.mode.set"
+	// OpLoadpointHold pins one EV loadpoint to a fixed charging power, or
+	// releases it with `clear`. The same manual hold the HTTP route
+	// installs, reached through this door's gates instead of a verb.
+	OpLoadpointHold = "loadpoint.hold"
+	// OpLoadpointBoost lets the house battery boost the car under a bounded
+	// lease, or withdraws it with `cancel`. Same lease and same preflight
+	// as the HTTP route.
+	OpLoadpointBoost = "loadpoint.boost"
 )
 
 // BoxMode is what the box is able to offer this session.

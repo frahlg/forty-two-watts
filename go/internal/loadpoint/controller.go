@@ -348,6 +348,13 @@ func (w *surplusWindow) push(v float64) float64 {
 	return sum / float64(w.n)
 }
 
+// MaxManualHold bounds a timed manual hold so a forgotten diagnostic
+// override cannot indefinitely displace planned dispatch. Persistent
+// operator holds are exempt: they end on Stop or unplug, never on time.
+// One constant for every door that installs a hold — the HTTP route and
+// the app session validate against this same number.
+const MaxManualHold = 30 * time.Minute
+
 // ManualHold pins a loadpoint to a specific dispatch payload until
 // ExpiresAt. PowerW is sent verbatim; PhaseMode / PhaseSplitW /
 // MinPhaseHoldS / Voltage / MaxAmpsPerPhase override the loadpoint's

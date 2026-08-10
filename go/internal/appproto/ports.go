@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/srcfl/ftw/go/internal/control"
+	"github.com/srcfl/ftw/go/internal/loadpoint"
 	"github.com/srcfl/ftw/go/internal/mpc"
 )
 
@@ -133,6 +134,33 @@ type BoxInfoReader interface {
 type ModeController interface {
 	SetMode(ctx context.Context, m control.Mode) error
 	ObservedMode() (control.Mode, bool)
+}
+
+// Loadpoints is how the command lane reaches the box's EV charging.
+//
+// The write methods and their read-backs are separate questions on purpose,
+// the same split ModeController has: cmd.result reports what the box now
+// holds, never an echo of the request. Behind these sit the very calls the
+// HTTP loadpoint routes make — SetManualHold, ClearManualHold,
+// EnableBatteryBoost, CancelBatteryBoost on the loadpoint controller — so
+// there is one code path from either door to the charger.
+type Loadpoints interface {
+	// Exists reports whether a loadpoint with this id is configured.
+	Exists(id string) bool
+	// Hold pins the loadpoint to a fixed dispatch payload.
+	Hold(id string, h loadpoint.ManualHold)
+	// ClearHold releases it. Idempotent.
+	ClearHold(id string)
+	// ObservedHold is the hold as the box holds it right now.
+	ObservedHold(id string, now time.Time) (loadpoint.ManualHold, bool)
+	// Boost installs a battery-boost lease, refusing when live state cannot
+	// safely honour it. The implementation carries whatever replan
+	// bookkeeping the HTTP enable route does.
+	Boost(id string, lease loadpoint.BatteryBoostLease, now time.Time) error
+	// CancelBoost withdraws it. Idempotent.
+	CancelBoost(id string, now time.Time)
+	// ObservedBoost is the boost as the box reports it right now.
+	ObservedBoost(id string, now time.Time) loadpoint.BatteryBoostStatus
 }
 
 // PlanReader hands over the planner's current output.

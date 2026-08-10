@@ -42,6 +42,12 @@ type Config struct {
 	// every view that needs it, exactly like history.
 	API APIGateway
 
+	// Loadpoints is the box's EV charging, or nil on a box with none. The
+	// two loadpoint ops then answer E_UNAVAILABLE — the session's word for
+	// the 503 the HTTP routes give — because the op exists on every box of
+	// this build and the subsystem is what is missing.
+	Loadpoints Loadpoints
+
 	// Caller is whose session this is. Required: a session always belongs to
 	// one enrolled device, and a handler that does not know which one cannot
 	// refuse anything.
@@ -785,9 +791,41 @@ func (h *Handler) onCmd(ctx context.Context, env Envelope) error {
 	switch cmd.Op {
 	case OpSetMode:
 		return h.setMode(ctx, cmd, uptimeMs)
+	case OpLoadpointHold:
+		return h.loadpointHold(cmd, uptimeMs)
+	case OpLoadpointBoost:
+		return h.loadpointBoost(cmd, uptimeMs)
 	default:
 		return fmt.Errorf("appproto: op %q is in the table but has no handler", cmd.Op)
 	}
+}
+
+// acceptCmd takes the intent: mints the lease, remembers the command id and
+// tells the app. From here on a retry replays whatever outcome follows
+// rather than acting a second time.
+func (h *Handler) acceptCmd(cmd Cmd, uptimeMs int64) (CmdAck, error) {
+	ack := CmdAck{
+		CmdID:       cmd.CmdID,
+		LeaseID:     h.cfg.NewLeaseID(),
+		ExpiresAtMs: uptimeMs + LeaseMs,
+	}
+	h.cmds.remember(cmd.CmdID, ack, uptimeMs)
+	return ack, h.sendCmdAck(ack)
+}
+
+// settleAndReport records the outcome, reports it, and pushes a fresh plan
+// after anything applied. A mode change, a hold and a boost all alter what
+// the box means to do next, and the app must not show the old intent beside
+// the new state with neither looking wrong.
+func (h *Handler) settleAndReport(cmdID string, res CmdResult) error {
+	h.cmds.settle(cmdID, res)
+	if err := h.sendCmdResult(res); err != nil {
+		return err
+	}
+	if res.State == CmdApplied {
+		return h.sendPlan(nil)
+	}
+	return nil
 }
 
 func (h *Handler) setMode(ctx context.Context, cmd Cmd, uptimeMs int64) error {
@@ -808,19 +846,13 @@ func (h *Handler) setMode(ctx context.Context, cmd Cmd, uptimeMs int64) error {
 		})
 	}
 
-	ack := CmdAck{
-		CmdID:       cmd.CmdID,
-		LeaseID:     h.cfg.NewLeaseID(),
-		ExpiresAtMs: uptimeMs + LeaseMs,
-	}
-	h.cmds.remember(cmd.CmdID, ack, uptimeMs)
-	if err := h.sendCmdAck(ack); err != nil {
+	if _, err := h.acceptCmd(cmd, uptimeMs); err != nil {
 		return err
 	}
 
 	if err := h.cfg.Modes.SetMode(ctx, wanted); err != nil {
 		h.log.Warn("mode change refused by control", "mode", wanted, "err", err)
-		res := CmdResult{
+		return h.settleAndReport(cmd.CmdID, CmdResult{
 			CmdID: cmd.CmdID,
 			State: CmdRejected,
 			Error: &ErrorBody{
@@ -828,9 +860,7 @@ func (h *Handler) setMode(ctx context.Context, cmd Cmd, uptimeMs int64) error {
 				Retryable: ErrorRetryable[ErrUnavailable],
 				Args:      map[string]any{"op": cmd.Op},
 			},
-		}
-		h.cmds.settle(cmd.CmdID, res)
-		return h.sendCmdResult(res)
+		})
 	}
 
 	// Read back. The echo of the requested value is never confirmation —
@@ -868,18 +898,7 @@ func (h *Handler) setMode(ctx context.Context, cmd Cmd, uptimeMs int64) error {
 		}
 	}
 
-	h.cmds.settle(cmd.CmdID, res)
-	if err := h.sendCmdResult(res); err != nil {
-		return err
-	}
-
-	// A mode change alters what the planner does, so the plan is remade and
-	// pushed unasked. Otherwise the app would show the old intent beside the
-	// new mode and neither would look wrong.
-	if res.State == CmdApplied {
-		return h.sendPlan(nil)
-	}
-	return nil
+	return h.settleAndReport(cmd.CmdID, res)
 }
 
 // --------------------------------------------------------------------------
