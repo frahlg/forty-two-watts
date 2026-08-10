@@ -140,6 +140,8 @@ These are bounded follow-on directions, not scheduled commitments:
 | External grid constraints | A versioned constraint record has provenance, effective window, expiry, conflict handling and an audit trail; it can never weaken physical site limits. |
 | Active heat | Neutral thermal capabilities, comfort bounds and a safe autonomous default are demonstrated before dispatch is enabled. |
 | Native widgets and richer multi-site views | The app protocol's read schema, per-site pairing and privacy budget are stable in production. |
+| [Dashboard render budget](https://github.com/srcfl/ftw/issues/881) | A reference Raspberry Pi trace proves zero chart and particle work while hidden, measures visible-frame cost on the agreed fixture, and shows no visual or control regression in automated checks and human browser review. |
+| [Energy-ledger write batching](https://github.com/srcfl/ftw/issues/882) | Exact ledger and cursor parity and rollback tests pass; Pi arm64 shows at least 2x speed on tmpfs, 20% on deployment SD, and 35% fewer allocations at 12 observations, with no case slower by more than 5%. |
 | V2X automation | Bidirectional capability, metering, lease ownership, interlocks and fallback are proven for the complete local actuation path. |
 | General vehicle snapshot adapter | A minimal vendor-neutral snapshot has stable vehicle identity, freshness and consent semantics without becoming a second control path. |
 
