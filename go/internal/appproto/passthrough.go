@@ -51,6 +51,22 @@ const (
 
 	// apiHandlerTimeout bounds one in-process request.
 	apiHandlerTimeout = 15 * time.Second
+
+	// StepUpWindowMs is how long a genuine passkey ceremony vouches for the
+	// configure calls that follow it on the same session.
+	//
+	// Five minutes, in box uptime like every other expiry here. A configure
+	// tier action needs recent human presence, and one ceremony proves it;
+	// what it must not do is prove it once per write. A settings screen that
+	// subscribes, saves its rules and sends a test is three configure calls in
+	// a row, and before this each paid its own Face ID — plus another for every
+	// failed attempt. Five minutes is long enough to cover that flow with
+	// retries and short enough that "recent" is still true: it is the sudo
+	// grace shape, and it sits well under the 15-minute dispatcher lease, so a
+	// window is never the longest-lived thing a session is trusted with. The
+	// window runs from the last real ceremony and is never extended by a call
+	// it merely waved through, so it can outlast a ceremony by at most this.
+	StepUpWindowMs int64 = 5 * 60 * 1000
 )
 
 // APIGateway is the box's HTTP API as this package needs it.
@@ -283,7 +299,18 @@ func (h *Handler) gateAPI(caller apiauth.Caller, facts apiauth.RouteFacts, req A
 				Args:      map[string]any{"needRole": apiauth.RoleOwner, "role": caller.Role},
 			}
 		}
-		if !req.StepUp {
+		// Step-up, with a grace window. A configure action needs recent human
+		// presence; one ceremony proves it, and the box now remembers that
+		// proof for StepUpWindowMs instead of demanding a fresh one per write.
+		// A genuine ceremony (stepUp on the wire) opens the window and every
+		// configure call inside it is waved through — the sudo-timestamp shape,
+		// which is what turns a settings screen's three prompts back into one.
+		// The window is measured on the monotonic uptime clock the rest of the
+		// box expires against, and it runs only from a real ceremony: a call it
+		// merely waved through never extends it, so it outlives a ceremony by at
+		// most the window and no chain of writes can hold it open unattended.
+		now := h.cfg.Clock.UptimeMs()
+		if req.StepUp {
 			// What step-up buys: a phone left unlocked on a table cannot be
 			// picked up and used to reconfigure the site, because the app will
 			// not send stepUp without a ceremony.
@@ -294,14 +321,22 @@ func (h *Handler) gateAPI(caller apiauth.Caller, facts apiauth.RouteFacts, req A
 			// relying party would need an origin, which the box is
 			// deliberately never. A modified client on an enrolled device can
 			// already send a cmd today. Do not let this comment, or any other,
-			// grow into a claim that the box checked a signature.
-			return &ErrorBody{
-				Code:      ErrNeedsStepUp,
-				Retryable: true,
-				Args:      map[string]any{"tier": string(facts.Tier)},
-			}
+			// grow into a claim that the box checked a signature. The window
+			// below changes none of this: it remembers the app's word, it does
+			// not upgrade it to proof.
+			h.stepUpAtMs.Store(now)
+			return nil
 		}
-		return nil
+		if at := h.stepUpAtMs.Load(); at > 0 && now-at < StepUpWindowMs {
+			// A genuine ceremony on this session is still recent. Accept
+			// without re-prompting — this is the whole point of the window.
+			return nil
+		}
+		return &ErrorBody{
+			Code:      ErrNeedsStepUp,
+			Retryable: true,
+			Args:      map[string]any{"tier": string(facts.Tier)},
+		}
 
 	case apiauth.TierActuate:
 		// The second door, and the sharper call than "actuation costs an

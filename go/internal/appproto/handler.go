@@ -89,6 +89,17 @@ type Handler struct {
 	// ops is this handler's own copy of the operation table.
 	ops map[string]opSpec
 
+	// stepUpAtMs is the box uptime at this session's last genuine passkey
+	// ceremony (a configure request that arrived carrying stepUp), or 0 for
+	// none yet. It opens a short grace window — StepUpWindowMs — inside which
+	// further configure calls are accepted without a fresh ceremony, so a
+	// multi-step settings screen costs one Face ID rather than one per write.
+	// Bound to this handler, and a handler serves exactly one enrolled device,
+	// so no session inherits another's window. Monotonic, so a wall-clock jump
+	// cannot widen it. Atomic: the passthrough queue is depth one, but reading
+	// it lock-free keeps the gate off the handler mutex.
+	stepUpAtMs atomic.Int64
+
 	// ctx is the session's lifetime and cancel ends it. A passthrough
 	// request derives from this, so Close stops a call already in flight
 	// rather than only the next one.

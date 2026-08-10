@@ -623,3 +623,155 @@ func TestAPanickingHandlerDoesNotEndTheBox(t *testing.T) {
 		t.Fatalf("tick after a panicking handler: %v", err)
 	}
 }
+
+// --------------------------------------------------------------------------
+// Step-up, and the grace window that stops a settings screen re-prompting
+// --------------------------------------------------------------------------
+
+// stepUpClock reaches the rig's clock so a test can move box uptime across the
+// window boundary.
+func stepUpClock(t *testing.T, h *Handler) *fakeClock {
+	t.Helper()
+	c, ok := h.cfg.Clock.(*fakeClock)
+	if !ok {
+		t.Fatalf("clock is %T, want *fakeClock", h.cfg.Clock)
+	}
+	return c
+}
+
+// waitIdle blocks until the passthrough queue is free, so the next request is
+// served rather than refused as busy. The frame lands just before the serving
+// goroutine clears the flag, so a test that only waited on the frame could race
+// the very next deliver.
+func waitIdle(t *testing.T, h *Handler) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if !h.apiBusy.Load() {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("passthrough stayed busy")
+}
+
+// The security property the window must not weaken: a configure with no
+// ceremony behind it, and no recent one either, is still refused. This is the
+// first write of any session — the app was never meant to skip it.
+func TestAConfigureWithNoCeremonyIsRefused(t *testing.T) {
+	h, _, rec, _ := newAPIRig(t, &stubAPI{
+		facts: apiauth.RouteFacts{Tier: apiauth.TierConfigure},
+		serve: text(`{}`),
+	})
+
+	deliver(t, h, MsgAPIReq, ptrU32(20), APIReq{
+		Method: APIPost, Path: "/api/battery_covers_ev",
+	})
+	if err := body[ErrorBody](t, waitFor(t, rec, MsgError)); err.Code != ErrNeedsStepUp {
+		t.Fatalf("refusal was %+v, want E_NEEDS_STEP_UP", err)
+	}
+	if rec.has(MsgAPIHead) {
+		t.Fatal("a configure with no ceremony reached the handler")
+	}
+}
+
+// The whole point: one ceremony, then the writes that follow it on the same
+// session cost nothing. A settings screen that subscribes, saves and tests is
+// three configure calls; this is what turns three Face IDs into one.
+func TestASecondConfigureWithinTheWindowSkipsTheCeremony(t *testing.T) {
+	h, _, rec, _ := newAPIRig(t, &stubAPI{
+		facts: apiauth.RouteFacts{Tier: apiauth.TierConfigure},
+		serve: text(`{}`),
+	})
+	clock := stepUpClock(t, h)
+
+	// The one ceremony: refused first, the app ran the passkey and retried
+	// with stepUp. This opens the window.
+	deliver(t, h, MsgAPIReq, ptrU32(21), APIReq{
+		Method: APIPost, Path: "/api/battery_covers_ev", StepUp: true,
+	})
+	if head := body[APIHeadMsg](t, waitFor(t, rec, MsgAPIHead)); head.Status != http.StatusOK {
+		t.Fatalf("the ceremony write answered %d, want 200", head.Status)
+	}
+	waitFor(t, rec, MsgAPIEnd)
+	waitIdle(t, h)
+	rec.reset()
+
+	// A later write in the same screen, four minutes on, carrying no ceremony.
+	clock.uptimeMs += 4 * 60 * 1000
+	deliver(t, h, MsgAPIReq, ptrU32(22), APIReq{
+		Method: APIPost, Path: "/api/battery_covers_ev",
+	})
+	if head := body[APIHeadMsg](t, waitFor(t, rec, MsgAPIHead)); head.Status != http.StatusOK {
+		t.Fatalf("a write inside the window answered %d, want 200", head.Status)
+	}
+	if rec.has(MsgError) {
+		t.Fatal("a write inside the window was re-prompted for a ceremony")
+	}
+}
+
+// The window is recent human presence, not a session-long pass. Once it has
+// elapsed, the next write pays a fresh ceremony. The boundary is exclusive, so
+// a jump of exactly the window is already out.
+func TestAConfigureAfterTheWindowNeedsAFreshCeremony(t *testing.T) {
+	h, _, rec, _ := newAPIRig(t, &stubAPI{
+		facts: apiauth.RouteFacts{Tier: apiauth.TierConfigure},
+		serve: text(`{}`),
+	})
+	clock := stepUpClock(t, h)
+
+	deliver(t, h, MsgAPIReq, ptrU32(23), APIReq{
+		Method: APIPost, Path: "/api/battery_covers_ev", StepUp: true,
+	})
+	waitFor(t, rec, MsgAPIEnd)
+	waitIdle(t, h)
+	rec.reset()
+
+	clock.uptimeMs += StepUpWindowMs
+	deliver(t, h, MsgAPIReq, ptrU32(24), APIReq{
+		Method: APIPost, Path: "/api/battery_covers_ev",
+	})
+	if err := body[ErrorBody](t, waitFor(t, rec, MsgError)); err.Code != ErrNeedsStepUp {
+		t.Fatalf("a write past the window was %+v, want E_NEEDS_STEP_UP", err)
+	}
+	if rec.has(MsgAPIHead) {
+		t.Fatal("a write past the window reached the handler without a ceremony")
+	}
+}
+
+// The window is bound to the enrolment behind the session, not shared across
+// them: one device's ceremony must never let another skip its own. A handler
+// serves exactly one enrolled device, and its window lives and dies with it.
+func TestOneSessionsCeremonyDoesNotOpenAnothers(t *testing.T) {
+	// Device A proves presence.
+	hA, _, recA, _ := newAPIRig(t, &stubAPI{
+		facts: apiauth.RouteFacts{Tier: apiauth.TierConfigure},
+		serve: text(`{}`),
+	})
+	deliver(t, hA, MsgAPIReq, ptrU32(25), APIReq{
+		Method: APIPost, Path: "/api/battery_covers_ev", StepUp: true,
+	})
+	waitFor(t, recA, MsgAPIEnd)
+
+	// Device B is a different enrolment and has run no ceremony of its own.
+	hB, _, recB, _ := newAPIRig(t, &stubAPI{
+		facts: apiauth.RouteFacts{Tier: apiauth.TierConfigure},
+		serve: text(`{}`),
+	})
+	hB.cfg.Caller = apiauth.Caller{
+		Subject: apiauth.KindApp + ":device-B",
+		Kind:    apiauth.KindApp,
+		Role:    apiauth.RoleOwner,
+		Scopes:  ScopesForRole(apiauth.RoleOwner),
+		Epoch:   1,
+	}
+	deliver(t, hB, MsgAPIReq, ptrU32(26), APIReq{
+		Method: APIPost, Path: "/api/battery_covers_ev",
+	})
+	if err := body[ErrorBody](t, waitFor(t, recB, MsgError)); err.Code != ErrNeedsStepUp {
+		t.Fatalf("device B inherited a window; got %+v, want E_NEEDS_STEP_UP", err)
+	}
+	if recB.has(MsgAPIHead) {
+		t.Fatal("device B's write landed on another device's ceremony")
+	}
+}
