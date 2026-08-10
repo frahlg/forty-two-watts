@@ -47,8 +47,13 @@ type AppEnroller interface {
 	SetDeviceRole(id, role string) error
 	// RevokeDevice forgets one and tears down its live sessions. Returns
 	// ErrUnknownAppDevice when no row carries the id, and
-	// ErrLastAppOwnerProtected when it would leave the box with no owner.
-	RevokeDevice(id string) error
+	// ErrLastAppOwnerProtected when it would leave the box with no owner and
+	// the caller is not standing at it.
+	//
+	// atTheBox is that last fact, and it is the caller's to establish rather
+	// than the request's to claim: it comes from which door the request came
+	// through, never from anything a remote caller can put in one.
+	RevokeDevice(id string, atTheBox bool) error
 }
 
 // AppDevice is one paired phone. The id is a short prefix of its key —
@@ -61,8 +66,10 @@ type AppDevice struct {
 	// list rather than on a screen of its own, because a guest's phone is a
 	// paired phone and removing one is the same action as locking one out.
 	Role string `json:"role"`
-	// LastOwner marks the row that cannot be removed or demoted, so the page
-	// can say why before somebody presses the button.
+	// LastOwner marks the only phone left that can change anything here. It
+	// cannot be stepped down, and cannot be removed over a session — so a
+	// screen can say what it is before somebody presses a button. The box's
+	// own page may remove it, and warns instead of refusing.
 	LastOwner bool `json:"last_owner,omitempty"`
 }
 
@@ -232,6 +239,17 @@ func (s *Server) handleAppLinkDevices(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"devices": s.deps.AppEnroll.Devices()})
 }
 
+// handleAppLinkDeviceRevoke locks one phone out, guest or owner.
+//
+// The last owner is the one row where the two doors part. Over a session the
+// removal is refused, because a phone that empties the roster from anywhere in
+// the world leaves a box nobody can administer and no remote way to mend it.
+// At the box it goes through: the person pressing the button is in the
+// building, and the same page mints a fresh pairing code, so refusing there
+// protects nothing and only strands a household that has lost the phone.
+//
+// Which door it was comes from the caller the box named at admission, never
+// from the request — there is no field a remote caller could set to claim it.
 func (s *Server) handleAppLinkDeviceRevoke(w http.ResponseWriter, r *http.Request) {
 	if !s.appLinkGate(w, r, appproto.ScopeMembersWrite) {
 		return
@@ -241,7 +259,7 @@ func (s *Server) handleAppLinkDeviceRevoke(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	id := r.PathValue("id")
-	if err := s.deps.AppEnroll.RevokeDevice(id); err != nil {
+	if err := s.deps.AppEnroll.RevokeDevice(id, !appLinkOverSession(r)); err != nil {
 		if errors.Is(err, ErrUnknownAppDevice) {
 			writeAppLinkError(w, http.StatusNotFound, "that phone is no longer paired")
 			return

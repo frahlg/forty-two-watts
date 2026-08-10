@@ -688,7 +688,7 @@ func TestARevokedShareStopsACallAlreadyInFlight(t *testing.T) {
 
 	// What the settings page does: forget the key, then tear down whatever
 	// it is running right now.
-	key, err := r.enroll.Revoke(deviceIDOf(app.staticPublic()))
+	key, err := r.enroll.Revoke(deviceIDOf(app.staticPublic()), appenroll.AtTheBox)
 	if err != nil {
 		t.Fatalf("Revoke: %v", err)
 	}

@@ -17,9 +17,13 @@ type stubEnroller struct {
 	mintedRole string
 	roleSet    string
 	err        error
-	// lastOwner makes the stub refuse to remove or demote its one row, the
-	// way appenroll does when it is the only owner left.
+	// lastOwner makes the stub refuse to demote its one row, and to remove it
+	// for anyone who is not standing at the box — the way appenroll does when
+	// it is the only owner left.
 	lastOwner bool
+	// revokedAtTheBox records the door the last removal came through, so a
+	// test can prove the handler passed the fact rather than a constant.
+	revokedAtTheBox bool
 }
 
 func (s *stubEnroller) MintPairingCode(role string) ([]byte, time.Time, error) {
@@ -68,14 +72,15 @@ func (s *stubEnroller) SetDeviceRole(id, role string) error {
 	return nil
 }
 
-func (s *stubEnroller) RevokeDevice(id string) error {
+func (s *stubEnroller) RevokeDevice(id string, atTheBox bool) error {
 	if id != "aaaa1111" {
 		return ErrUnknownAppDevice
 	}
-	if s.lastOwner {
+	if s.lastOwner && !atTheBox {
 		return ErrLastAppOwnerProtected
 	}
 	s.revoked++
+	s.revokedAtTheBox = atTheBox
 	return nil
 }
 

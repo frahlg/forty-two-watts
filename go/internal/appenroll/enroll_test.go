@@ -374,7 +374,7 @@ func TestDeviceListAndRevoke(t *testing.T) {
 
 	// Revoke by row id: the key comes back so live sessions can be dropped,
 	// and the next handshake meets ErrNoPairing like any stranger's.
-	key, err := id.Revoke(devices[1].ID)
+	key, err := id.Revoke(devices[1].ID, OverASession)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -384,7 +384,7 @@ func TestDeviceListAndRevoke(t *testing.T) {
 	if _, err := id.Authorise(second, nil); !errors.Is(err, ErrNoPairing) {
 		t.Fatalf("a revoked key reconnected: %v", err)
 	}
-	if _, err := id.Revoke("nosuchid"); !errors.Is(err, ErrUnknownDevice) {
+	if _, err := id.Revoke("nosuchid", OverASession); !errors.Is(err, ErrUnknownDevice) {
 		t.Fatalf("revoking a ghost: %v", err)
 	}
 
@@ -513,7 +513,7 @@ func TestARevokedDeviceHasNoLiveGrant(t *testing.T) {
 	if live, ok := id.GrantFor(guest.DeviceID); !ok || live.Epoch != guest.Epoch {
 		t.Fatalf("grant before the revoke = %+v/%v, want %+v/live", live, ok, guest)
 	}
-	if _, err := id.Revoke(guest.DeviceID); err != nil {
+	if _, err := id.Revoke(guest.DeviceID, OverASession); err != nil {
 		t.Fatalf("Revoke: %v", err)
 	}
 	if live, ok := id.GrantFor(guest.DeviceID); ok {

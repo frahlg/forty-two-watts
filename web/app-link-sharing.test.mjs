@@ -88,6 +88,7 @@ function load({ devices = [], pairing = null, spoken = null, refuse = null } = {
   };
 
   const calls = [];
+  const confirmed = [];
   const answer = (body, ok = true) => Promise.resolve({ ok, json: () => Promise.resolve(body) });
 
   const sandbox = {
@@ -97,7 +98,13 @@ function load({ devices = [], pairing = null, spoken = null, refuse = null } = {
       return 0;
     },
     document,
-    confirm: () => true,
+    // Kept, not just answered. The warning before a removal is the whole of
+    // what the page tells a household about a step it cannot undo, and a stub
+    // that only said yes let it go blank without a test noticing.
+    confirm: (question) => {
+      confirmed.push(question);
+      return true;
+    },
     fetch: (path, opts) => {
       calls.push({ path, opts });
       if (refuse && opts && opts.method === refuse.method) {
@@ -133,7 +140,7 @@ function load({ devices = [], pairing = null, spoken = null, refuse = null } = {
 
   const tab = sandbox.window.FTWSettings.tabs.app;
   const html = tab.render({ config: { app_link: { enabled: true } } });
-  return { html, calls, el: (id) => byId.get(id) };
+  return { html, calls, confirmed, el: (id) => byId.get(id) };
 }
 
 // Lets the promise chains inside the tab settle. Two turns, because a button
@@ -184,16 +191,72 @@ describe("the device list", () => {
     assert.equal(removal.path, "/api/app-link/devices/bbbb2222");
   });
 
-  it("explains the last owner instead of offering a button that fails", async () => {
+  // A household that has lost its only phone has to be able to get back to
+  // nothing paired. The box allows that from this page and refuses it from the
+  // app, because whoever is at the box can mint a fresh code on the same page.
+  // So the row offers the button, and the warning carries the cost.
+  it("removes the last phone from the box's own page, and says what that costs", async () => {
+    const { el, calls, confirmed } = load({
+      devices: [{ id: "aaaa1111", role: "owner", last_owner: true }],
+    });
+    await settle();
+
+    const row = el("app-link-devices").children[0];
+    assert.doesNotMatch(
+      row.words(),
+      /add another before removing/i,
+      "the row still tells a household to do something the box no longer asks of it",
+    );
+
+    const remove = row.buttons().find((b) => b.textContent === "Remove");
+    assert.ok(remove, "the last phone cannot be removed where every other phone can");
+    assert.equal(remove.disabled, false, "the button is drawn dead");
+
+    remove.click();
+    await settle();
+
+    const said = confirmed.join(" ");
+    assert.match(said, /last phone/i, "nothing warned that this is the last one");
+    assert.match(said, /see or change this home/i, "the warning never says what is lost");
+    assert.match(said, /code from this page/i, "the warning never says how to get back in");
+
+    const removal = calls.find((c) => c.opts && c.opts.method === "DELETE");
+    assert.ok(removal, "the button asked and then sent nothing");
+    assert.equal(removal.path, "/api/app-link/devices/aaaa1111");
+  });
+
+  // Stepping the last owner down is refused at both doors, so that button
+  // stays off the row. A button whose only answer is a refusal is worse than
+  // no button.
+  it("does not offer to step the last owner down", async () => {
     const { el } = load({
       devices: [{ id: "aaaa1111", role: "owner", last_owner: true }],
     });
     await settle();
 
     const row = el("app-link-devices").children[0];
-    assert.equal(row.buttons().length, 0, "the last owner was offered a button the box refuses");
+    const labels = row.buttons().map((b) => b.textContent);
+    assert.deepEqual(labels, ["Remove"], `the row offers ${labels.join(", ")}`);
     assert.match(row.words(), /only phone that can change things/);
-    assert.match(row.words(), /add another/i);
+  });
+
+  // The only owner with guests still paired is a different sentence. Those
+  // phones keep looking; what goes is anybody's ability to change anything.
+  it("warns about what is left when guests stay behind", async () => {
+    const { el, confirmed } = load({
+      devices: [
+        { id: "aaaa1111", role: "owner", last_owner: true },
+        { id: "bbbb2222", role: "viewer" },
+      ],
+    });
+    await settle();
+
+    el("app-link-devices").children[0].buttons().find((b) => b.textContent === "Remove").click();
+    await settle();
+
+    const said = confirmed.join(" ");
+    assert.match(said, /look but change nothing/i, "the warning claims more is lost than is");
+    assert.doesNotMatch(said, /last phone/i, "two phones are paired and one was called the last");
   });
 
   it("hides sharing until there is somebody to share from", async () => {

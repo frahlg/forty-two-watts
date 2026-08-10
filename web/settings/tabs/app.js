@@ -62,9 +62,30 @@
     return role === "viewer" ? "Can look" : "Can change things";
   }
 
-  // Reports a refusal the box gave, rather than swallowing it. The one that
-  // matters is the last owner: without a sentence here, the Remove button
-  // simply does nothing and the household has no idea why.
+  // What removing this phone costs, asked before it happens.
+  //
+  // The last phone that can change things can be removed from this page — the
+  // box allows it here and refuses it from the app, because whoever is reading
+  // this is in the house and the code above is the way back in. So the warning
+  // has to be honest about what is on the other side of the button, and about
+  // what is left: a household with viewers still paired keeps its viewers, and
+  // one down to a single phone is left with nothing paired at all.
+  function removalWarning(d, total) {
+    if (!d.last_owner) {
+      return "Remove this phone? It loses access immediately and must scan a new code to come back.";
+    }
+    if (total === 1) {
+      return "This is the last phone. Remove it and nothing can see or change this " +
+        "home until you pair a phone again, with a code from this page. Remove it?";
+    }
+    return "This is the only phone that can change things. Remove it and the phones " +
+      "left can look but change nothing, until you pair another owner with a code " +
+      "from this page. Remove it?";
+  }
+
+  // Reports a refusal the box gave, rather than swallowing it. Without a
+  // sentence here a refused button simply does nothing and the household has
+  // no idea why.
   function sayWhyNot(response, row) {
     return response.json().then(function (body) {
       var note = document.createElement("p");
@@ -118,13 +139,15 @@
           seen.textContent = d.last_seen_ms ? "seen " + agoText(d.last_seen_ms) : "never connected";
           row.appendChild(seen);
 
-          // The last owner cannot be removed or stepped down, so say so on
-          // the row rather than letting somebody press a button that answers
-          // with a refusal.
+          // The last owner cannot be stepped down at either door, so that
+          // button is not drawn for it — a button whose only answer is a
+          // refusal is worse than no button. Removing it is a different
+          // matter: the box allows that from this page, so the row offers it
+          // and the warning above says what it costs.
           if (d.last_owner) {
             var only = document.createElement("span");
             only.className = "hint";
-            only.textContent = "The only phone that can change things — add another before removing this one.";
+            only.textContent = "The only phone that can change things. Pair another owner to step this one down.";
             row.appendChild(only);
           } else {
             var toRole = d.role === "viewer" ? "owner" : "viewer";
@@ -146,24 +169,24 @@
                 .then(function () { change.disabled = false; });
             });
             row.appendChild(change);
-
-            var btn = document.createElement("button");
-            btn.type = "button";
-            btn.textContent = "Remove";
-            btn.addEventListener("click", function () {
-              if (!confirm("Remove this phone? It loses access immediately and must scan a new code to come back.")) return;
-              btn.disabled = true;
-              fetch("/api/app-link/devices/" + encodeURIComponent(d.id), { method: "DELETE" })
-                .then(function (r) {
-                  if (!r.ok) return sayWhyNot(r, row);
-                  refreshDevices();
-                  refreshStatus(pairingCtx);
-                })
-                .catch(function () {})
-                .then(function () { btn.disabled = false; });
-            });
-            row.appendChild(btn);
           }
+
+          var btn = document.createElement("button");
+          btn.type = "button";
+          btn.textContent = "Remove";
+          btn.addEventListener("click", function () {
+            if (!confirm(removalWarning(d, devices.length))) return;
+            btn.disabled = true;
+            fetch("/api/app-link/devices/" + encodeURIComponent(d.id), { method: "DELETE" })
+              .then(function (r) {
+                if (!r.ok) return sayWhyNot(r, row);
+                refreshDevices();
+                refreshStatus(pairingCtx);
+              })
+              .catch(function () {})
+              .then(function () { btn.disabled = false; });
+          });
+          row.appendChild(btn);
 
           list.appendChild(row);
         });

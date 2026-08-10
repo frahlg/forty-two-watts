@@ -15,6 +15,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/srcfl/ftw/go/internal/apiauth"
 	"github.com/srcfl/ftw/go/internal/appproto"
 )
 
@@ -28,6 +29,23 @@ func localRequest(method, target, body string) *http.Request {
 	r.Host = "192.168.1.1"
 	r.RemoteAddr = "192.168.1.5:1234"
 	return r
+}
+
+// sessionRequest is what the passthrough hands these handlers for an owner's
+// phone: a request built to look local on purpose — Host localhost, loopback
+// address, no forwarding header — carrying the caller the box named when the
+// session was admitted. An address alone cannot tell it from the page in the
+// kitchen, which is exactly why these handlers ask the caller instead.
+func sessionRequest(method, target, body string) *http.Request {
+	r := localRequest(method, target, body)
+	r.Host = "localhost"
+	r.RemoteAddr = "127.0.0.1:0"
+	return r.WithContext(apiauth.WithCaller(r.Context(), apiauth.Caller{
+		Subject: apiauth.KindApp + ":aaaa1111",
+		Kind:    apiauth.KindApp,
+		Role:    apiauth.RoleOwner,
+		Scopes:  apiauth.EveryScope(),
+	}))
 }
 
 // An invite is minted for the role that was asked for, and the answer names
@@ -232,16 +250,22 @@ func TestARoleIsChangedFromTheDeviceList(t *testing.T) {
 
 // The last owner is protected, and the refusal has to be one a person can act
 // on: 409 with a sentence saying what to do first, not a 500.
+//
+// Removing it is refused over the session, where the household could be
+// anywhere. Stepping it down is refused at either door — see the box's own
+// removal test below for where the two part and why.
 func TestTheLastOwnerIsRefusedWithSomethingToDo(t *testing.T) {
 	for _, c := range []struct {
 		name  string
 		serve func(*Server, http.ResponseWriter, *http.Request)
 		req   *http.Request
 	}{
-		{"demote", (*Server).handleAppLinkDeviceRole,
+		{"demote at the box", (*Server).handleAppLinkDeviceRole,
 			localRequest(http.MethodPatch, "/api/app-link/devices/aaaa1111", `{"role":"viewer"}`)},
-		{"remove", (*Server).handleAppLinkDeviceRevoke,
-			localRequest(http.MethodDelete, "/api/app-link/devices/aaaa1111", "")},
+		{"demote from the app", (*Server).handleAppLinkDeviceRole,
+			sessionRequest(http.MethodPatch, "/api/app-link/devices/aaaa1111", `{"role":"viewer"}`)},
+		{"remove from the app", (*Server).handleAppLinkDeviceRevoke,
+			sessionRequest(http.MethodDelete, "/api/app-link/devices/aaaa1111", "")},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			enroll := &stubEnroller{lastOwner: true}
@@ -276,6 +300,66 @@ func TestTheLastOwnerIsRefusedWithSomethingToDo(t *testing.T) {
 			}
 			if enroll.revoked != 0 || enroll.roleSet != "" {
 				t.Fatalf("the last owner was changed anyway: %+v", enroll)
+			}
+		})
+	}
+}
+
+// At the box, the last phone comes off the list.
+//
+// The refusal above guards against a phone emptying the roster from anywhere
+// in the world, leaving a box nobody can administer and no remote way to mend
+// it. Whoever is standing at the box has the mend in front of them — the same
+// page shows a new pairing code — so refusing there protects nothing, and it
+// stranded every household that lost its only phone.
+//
+// The handler tells the two apart by the caller the box named, not by an
+// address and not by anything in the request. A remote caller has no field to
+// set that would get it here.
+func TestTheLastPhoneIsRemovedAtTheBox(t *testing.T) {
+	enroll := &stubEnroller{lastOwner: true}
+	s := New(&Deps{AppEnroll: enroll})
+
+	w := httptest.NewRecorder()
+	r := localRequest(http.MethodDelete, "/api/app-link/devices/aaaa1111", "")
+	r.SetPathValue("id", "aaaa1111")
+	s.handleAppLinkDeviceRevoke(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200 — a household at its own box cannot start clean: %s",
+			w.Code, w.Body.String())
+	}
+	if enroll.revoked != 1 {
+		t.Fatalf("the phone was answered for but never removed: %+v", enroll)
+	}
+	if !enroll.revokedAtTheBox {
+		t.Fatal("the handler told enrolment the caller was remote; the last owner would survive a real box")
+	}
+}
+
+// Removing a phone that is not the last owner is the same at both doors.
+// Nothing about this change touches the ordinary case.
+func TestRemovingAPhoneThatIsNotTheLastOwnerIsUnchanged(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		req  *http.Request
+	}{
+		{"at the box", localRequest(http.MethodDelete, "/api/app-link/devices/aaaa1111", "")},
+		{"from the app", sessionRequest(http.MethodDelete, "/api/app-link/devices/aaaa1111", "")},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			enroll := &stubEnroller{}
+			s := New(&Deps{AppEnroll: enroll})
+
+			w := httptest.NewRecorder()
+			c.req.SetPathValue("id", "aaaa1111")
+			s.handleAppLinkDeviceRevoke(w, c.req)
+
+			if w.Code != http.StatusOK {
+				t.Fatalf("got %d, want 200: %s", w.Code, w.Body.String())
+			}
+			if enroll.revoked != 1 {
+				t.Fatalf("the phone was answered for but never removed: %+v", enroll)
 			}
 		})
 	}

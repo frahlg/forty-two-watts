@@ -92,7 +92,8 @@ var (
 	ErrBadPairing = errors.New("appenroll: pairing code is not valid")
 	// ErrUnknownRole is a role that is not in contract/registry.yaml.
 	ErrUnknownRole = errors.New("appenroll: no such role")
-	// ErrLastOwnerProtected is an attempt to remove or demote the only owner.
+	// ErrLastOwnerProtected is an attempt to demote the only owner, or to
+	// remove it from somewhere other than the box itself.
 	ErrLastOwnerProtected = errors.New("appenroll: that is the only owner")
 )
 
@@ -156,8 +157,10 @@ type DeviceInfo struct {
 	// and locking out are the same screen: a household that cannot see which
 	// phone is a guest cannot decide which one to remove.
 	Role string
-	// LastOwner marks the row that cannot be removed or demoted, so the
-	// screen can say why before somebody presses the button rather than after.
+	// LastOwner marks the only phone left that can change anything here. It
+	// cannot be stepped down at either door, and cannot be removed over a
+	// session — so a screen can say what it is before somebody presses a
+	// button rather than after.
 	LastOwner bool
 }
 
@@ -659,6 +662,12 @@ func (i *Identity) GrantFor(id string) (Grant, bool) {
 // Refused for the only owner, here rather than in the API layer — otherwise
 // the box's own web UI could do what the app cannot, and the protection would
 // be a property of the screen instead of a property of the box.
+//
+// Refused at both doors, the box's own page included. Removing the last owner
+// there is allowed — see Revoke — because a household whose phone is gone has
+// to be able to empty the list and start again. Stepping the last owner down
+// leaves that same box carrying a list of phones that can only look, which is
+// the shape of the problem rather than a way out of it.
 func (i *Identity) SetRole(id, role string) error {
 	if err := knownRole(role); err != nil {
 		return err
@@ -714,6 +723,21 @@ func (i *Identity) Devices() []DeviceInfo {
 // ErrUnknownDevice is a revoke aimed at an id no paired phone carries.
 var ErrUnknownDevice = errors.New("appenroll: no such device")
 
+// Presence says whether whoever is asking is standing at the box.
+//
+// It is not a role and it is not a scope: an owner's phone holds every scope
+// this box grants and still cannot prove where it is. Presence is the one
+// thing only the LAN door establishes, and here it settles exactly one
+// question — whether the last owner may go.
+type Presence bool
+
+const (
+	// AtTheBox is a request off the box's own page, on the home network.
+	AtTheBox Presence = true
+	// OverASession is an enrolled phone, which could be anywhere on earth.
+	OverASession Presence = false
+)
+
 // Revoke forgets a phone by its device id and returns the full key, so the
 // caller can also tear down any session that key is running right now. The
 // next handshake from it meets ErrNoPairing like any stranger's.
@@ -722,17 +746,27 @@ var ErrUnknownDevice = errors.New("appenroll: no such device")
 // Sharing does not get its own gesture with its own bugs: a shared phone is a
 // row in the same list, removed by the same button.
 //
-// Refused for the only owner. A household can always pair a new owner at the
-// box and then remove the old one; what it cannot do is reduce itself to a set
-// of phones that can only look.
-func (i *Identity) Revoke(id string) ([]byte, error) {
+// Refused for the only owner over a session, and allowed at the box.
+//
+// What the refusal guards against is a phone locking a household out of its
+// own box from anywhere in the world: remove the last owner remotely and
+// nobody can administer the box, and nothing done remotely can undo that.
+// Presence is the way back — whoever is standing at the box can mint a fresh
+// owner's code on the same page the Remove button is on. So at the box the
+// refusal protects nothing, and all it does is stop a household emptying the
+// list after a phone is lost or starting clean.
+//
+// The decision stays here rather than in the API layer. What is new is that
+// the box is told which door the request came through; which screen drew the
+// button still decides nothing.
+func (i *Identity) Revoke(id string, from Presence) ([]byte, error) {
 	i.mu.Lock()
 	fullKey, meta := i.findLocked(id)
 	if meta == nil {
 		i.mu.Unlock()
 		return nil, ErrUnknownDevice
 	}
-	if meta.role == apiauth.RoleOwner && i.ownerCountLocked() == 1 {
+	if from == OverASession && meta.role == apiauth.RoleOwner && i.ownerCountLocked() == 1 {
 		i.mu.Unlock()
 		return nil, ErrLastOwnerProtected
 	}

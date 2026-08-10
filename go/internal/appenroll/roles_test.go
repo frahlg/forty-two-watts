@@ -188,10 +188,10 @@ func TestTheFirstEnrolmentIsAnOwnerEvenFromAViewerCode(t *testing.T) {
 // The last owner
 // --------------------------------------------------------------------------
 
-// Nobody can leave the household with no phone that can change anything —
-// not through the app, and not from the box's own page either, because the
-// check is here and not in the API layer.
-func TestTheLastOwnerCannotBeRemovedOrDemoted(t *testing.T) {
+// A phone cannot leave the household with nothing that can change anything.
+// It is holding a session that proves enrolment and says nothing about where
+// it is, and a box with no owner cannot be mended from a phone anywhere.
+func TestTheLastOwnerCannotBeRemovedOrDemotedOverASession(t *testing.T) {
 	id, _ := newIdentity(t)
 	owner := pair(t, id, apiauth.RoleOwner)
 	guest := pair(t, id, apiauth.RoleViewer)
@@ -199,7 +199,7 @@ func TestTheLastOwnerCannotBeRemovedOrDemoted(t *testing.T) {
 	if err := id.SetRole(owner.DeviceID, apiauth.RoleViewer); !errors.Is(err, ErrLastOwnerProtected) {
 		t.Fatalf("demoting the only owner: %v", err)
 	}
-	if _, err := id.Revoke(owner.DeviceID); !errors.Is(err, ErrLastOwnerProtected) {
+	if _, err := id.Revoke(owner.DeviceID, OverASession); !errors.Is(err, ErrLastOwnerProtected) {
 		t.Fatalf("revoking the only owner: %v", err)
 	}
 	// The box, not the error. A check that returns the right error and writes
@@ -211,18 +211,78 @@ func TestTheLastOwnerCannotBeRemovedOrDemoted(t *testing.T) {
 		t.Fatal("no row is marked as the last owner, so no screen can explain the refusal")
 	}
 
-	// Promote the guest, and the first owner is free to go.
-	if err := id.SetRole(guest.DeviceID, apiauth.RoleOwner); err != nil {
-		t.Fatalf("promoting the guest: %v", err)
+	// The guest is not the last owner and goes, from the same door. The rule
+	// is about the one row, not about sessions removing phones.
+	if _, err := id.Revoke(guest.DeviceID, OverASession); err != nil {
+		t.Fatalf("revoking a guest over a session: %v", err)
 	}
-	if _, err := id.Revoke(owner.DeviceID); err != nil {
+
+	// Promote a second owner, and the first is free to go.
+	second := pair(t, id, apiauth.RoleViewer)
+	if err := id.SetRole(second.DeviceID, apiauth.RoleOwner); err != nil {
+		t.Fatalf("promoting the second phone: %v", err)
+	}
+	if _, err := id.Revoke(owner.DeviceID, OverASession); err != nil {
 		t.Fatalf("revoking an owner once there are two: %v", err)
 	}
 	if n := id.AuthorisedCount(); n != 1 {
 		t.Fatalf("%d enrolments, want 1", n)
 	}
-	if got := roleOf(t, id, guest.DeviceID); got != apiauth.RoleOwner {
+	if got := roleOf(t, id, second.DeviceID); got != apiauth.RoleOwner {
 		t.Fatalf("the surviving phone is a %q, want the owner it was promoted to", got)
+	}
+}
+
+// At the box, the last phone goes and the list ends empty.
+//
+// The refusal above is against a lockout nothing remote can mend. Standing at
+// the box is the mending: the same page mints a fresh owner's code. So a
+// household whose only phone was lost, or one that wants to start clean, gets
+// its list back to nothing here and nowhere else.
+func TestTheLastPhoneCanBeRemovedAtTheBox(t *testing.T) {
+	id, _ := newIdentity(t)
+	owner := pair(t, id, apiauth.RoleOwner)
+
+	if _, err := id.Revoke(owner.DeviceID, AtTheBox); err != nil {
+		t.Fatalf("removing the last phone at the box: %v", err)
+	}
+	if n := id.AuthorisedCount(); n != 0 {
+		t.Fatalf("%d enrolments left, want an empty list", n)
+	}
+	if rows := id.Devices(); len(rows) != 0 {
+		t.Fatalf("the roster still lists %+v", rows)
+	}
+
+	// And the box is not stranded: a code minted here admits an owner again,
+	// which is the whole reason the removal above is safe.
+	code, _, err := id.MintPairingCode(apiauth.RoleOwner, PairingTTL)
+	if err != nil {
+		t.Fatalf("minting a code after the list was emptied: %v", err)
+	}
+	grant, err := id.Authorise(appKey(t), code)
+	if err != nil {
+		t.Fatalf("pairing a phone with the emptied box: %v", err)
+	}
+	if grant.Role != apiauth.RoleOwner {
+		t.Fatalf("the phone that came back is a %q, want an owner", grant.Role)
+	}
+}
+
+// Stepping the last owner down is refused at the box too.
+//
+// Not an oversight of the rule above. Removing the last phone leaves a list
+// somebody at the box can fill again; demoting it leaves a list of phones that
+// can only look, which is the lockout rather than a way out of it.
+func TestTheLastOwnerCannotBeSteppedDownAtTheBox(t *testing.T) {
+	id, _ := newIdentity(t)
+	owner := pair(t, id, apiauth.RoleOwner)
+	pair(t, id, apiauth.RoleViewer)
+
+	if err := id.SetRole(owner.DeviceID, apiauth.RoleViewer); !errors.Is(err, ErrLastOwnerProtected) {
+		t.Fatalf("demoting the only owner: %v", err)
+	}
+	if got := roleOf(t, id, owner.DeviceID); got != apiauth.RoleOwner {
+		t.Fatalf("the last owner is now a %q", got)
 	}
 }
 

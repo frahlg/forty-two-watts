@@ -689,8 +689,11 @@ func (a *appLinkAPI) SetDeviceRole(id, role string) error {
 	return appLinkError(a.enroll.SetRole(id, role))
 }
 
-func (a *appLinkAPI) RevokeDevice(id string) error {
-	key, err := a.enroll.Revoke(id)
+// RevokeDevice locks one phone out. atTheBox is the API's word for the door
+// the request came through, and it is the only thing that decides whether the
+// last owner may go; Presence is enrollment's word for the same fact.
+func (a *appLinkAPI) RevokeDevice(id string, atTheBox bool) error {
+	key, err := a.enroll.Revoke(id, appenroll.Presence(atTheBox))
 	if err != nil {
 		return appLinkError(err)
 	}

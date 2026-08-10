@@ -73,8 +73,8 @@ func (e *realEnroller) SetDeviceRole(id, role string) error {
 	return enrollError(e.id.SetRole(id, role))
 }
 
-func (e *realEnroller) RevokeDevice(id string) error {
-	_, err := e.id.Revoke(id)
+func (e *realEnroller) RevokeDevice(id string, atTheBox bool) error {
+	_, err := e.id.Revoke(id, appenroll.Presence(atTheBox))
 	return enrollError(err)
 }
 
