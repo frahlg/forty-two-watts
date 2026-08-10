@@ -268,6 +268,42 @@ def solve(payload: dict[str, Any]) -> dict[str, Any]:
         raise ProtocolError("settings.scenario_policy must be shared, recourse, or multistage")
 
     started = time.perf_counter()
+    shared_backend = str(settings.get("shared_backend", "auto"))
+    if shared_backend not in {"auto", "highs", "cvxpy"}:
+        raise ProtocolError("settings.shared_backend must be auto, highs, or cvxpy")
+    direct_fallback_reason = ""
+    direct_storage_guard = False
+    if shared_backend in {"auto", "highs"}:
+        from .direct_highs import (
+            DirectHighsError,
+            SIMULTANEOUS_STORAGE_CYCLE_ERROR,
+        )
+        from .shared_highs import DirectSharedIneligible, solve_shared_highs
+
+        try:
+            response = solve_shared_highs(payload, started)
+            _validate_storage_replay(
+                response["plan"]["actions"],
+                require_list(payload.get("slots", []), "slots"),
+                require_list(payload.get("storages", []), "storages"),
+            )
+            return response
+        except DirectSharedIneligible as exc:
+            if shared_backend == "highs":
+                raise ProtocolError(str(exc)) from exc
+        except Exception as exc:
+            if shared_backend == "highs":
+                raise
+            # The direct path is optional in auto mode. Let the reference
+            # model validate the request again as it builds the fallback.
+            direct_fallback_reason = str(exc) or type(exc).__name__
+            direct_storage_guard = isinstance(
+                exc, ReplayConsistencyError
+            ) or (
+                isinstance(exc, DirectHighsError)
+                and str(exc) == SIMULTANEOUS_STORAGE_CYCLE_ERROR
+            )
+
     slots = [require_dict(v, f"slots[{i}]") for i, v in enumerate(require_list(payload["slots"], "slots"))]
     n = len(slots)
     mode = _mode(payload)
@@ -457,7 +493,12 @@ def solve(payload: dict[str, Any]) -> dict[str, Any]:
         service_slack += cp.sum(lower_recovery[1:] + upper_recovery[1:]) / (capacity * n)
         unsafe_cycle = bool(np.any(eff_import < 0)) or pv_charge_bonus_ore > 0
         initial_above_max = storage_above_maximum[i]
-        if force_milp or initial_above_max or (formulation == "auto" and unsafe_cycle):
+        if (
+            force_milp
+            or direct_storage_guard
+            or initial_above_max
+            or (formulation == "auto" and unsafe_cycle)
+        ):
             direction = cp.Variable(n, boolean=True, name=f"storage_{i}_charge_mode")
             constraints += [charge <= max_charge * direction, discharge <= max_discharge * (1 - direction)]
             discrete = True
@@ -960,7 +1001,7 @@ def solve(payload: dict[str, Any]) -> dict[str, Any]:
                 break
     solve_ms = (time.perf_counter() - started) * 1000.0
     _validate_storage_replay(actions, slots, [storage.spec for storage in storages])
-    return {
+    response = {
         "schema_version": SCHEMA_VERSION,
         "request_id": str(payload["request_id"]),
         "ok": True,
@@ -995,3 +1036,7 @@ def solve(payload: dict[str, Any]) -> dict[str, Any]:
             "actions": actions,
         },
     }
+    if direct_fallback_reason:
+        response["solver"]["fallback"] = True
+        response["solver"]["fallback_reason"] = direct_fallback_reason
+    return response

@@ -20,6 +20,11 @@ class DirectHighsError(RuntimeError):
     pass
 
 
+SIMULTANEOUS_STORAGE_CYCLE_ERROR = (
+    "HiGHS returned simultaneous storage charge and discharge"
+)
+
+
 @dataclass
 class DirectScenarioVars:
     charge: list[list[int]]
@@ -28,6 +33,17 @@ class DirectScenarioVars:
     curtail: list[int]
     grid_import: list[int]
     grid_export: list[int]
+
+
+@dataclass
+class DirectSharedStorageVars:
+    charge: list[list[int]]
+    discharge: list[list[int]]
+    energy: list[list[int]]
+    total_charge: list[list[int]]
+    total_discharge: list[list[int]]
+    service: dict[int, float]
+    economic: dict[int, float]
 
 
 class SparseModel:
@@ -97,6 +113,8 @@ def solve_direct_highs(
     started: float,
     prepare_ms: float,
     decomposition: str,
+    *,
+    shared: bool = False,
 ) -> dict[str, Any]:
     if _storage_starts_above_maximum(prepared.storages):
         raise DirectHighsError(
@@ -113,6 +131,7 @@ def solve_direct_highs(
     )
     service_terms: list[dict[int, float]] = []
     economic_terms: list[dict[int, float]] = []
+    risk_terms: list[dict[int, float]] = []
     scenario_vars: list[DirectScenarioVars] = []
 
     block_start_at = np.zeros(n, dtype=np.int64)
@@ -120,6 +139,7 @@ def solve_direct_highs(
         block_start_at[block_start:block_end] = block_start
 
     storage_actions: dict[tuple[int, int, int], tuple[int, int]] = {}
+    shared_storage: DirectSharedStorageVars | None = None
     curtail_upper: dict[tuple[int, int], float] = {}
     for si, scenario in enumerate(prepared.scenario_set.scenarios):
         pv_generation = np.maximum(0.0, -scenario.pv)
@@ -141,15 +161,25 @@ def solve_direct_highs(
         pv_generation = np.maximum(0.0, -scenario.pv)
         pv_surplus = np.maximum(0.0, pv_generation - scenario.load)
         base_import = np.maximum(0.0, scenario.load - pv_generation)
-        charges: list[list[int]] = []
-        discharges: list[list[int]] = []
-        energies: list[list[int]] = []
-        total_charge: list[list[int]] = [[] for _ in range(n)]
-        total_discharge: list[list[int]] = [[] for _ in range(n)]
-        service: dict[int, float] = {}
-        economic: dict[int, float] = {}
-
-        for storage_index, spec in enumerate(prepared.storages):
+        charges = shared_storage.charge if shared_storage is not None else []
+        discharges = shared_storage.discharge if shared_storage is not None else []
+        energies = shared_storage.energy if shared_storage is not None else []
+        total_charge = (
+            shared_storage.total_charge
+            if shared_storage is not None
+            else [[] for _ in range(n)]
+        )
+        total_discharge = (
+            shared_storage.total_discharge
+            if shared_storage is not None
+            else [[] for _ in range(n)]
+        )
+        service = dict(shared_storage.service) if shared_storage is not None else {}
+        economic = dict(shared_storage.economic) if shared_storage is not None else {}
+        # Shared charge and discharge make storage state deterministic across
+        # scenarios. Reuse its variables and rows; only meter flow varies.
+        storages_to_build = () if shared_storage is not None else prepared.storages
+        for storage_index, spec in enumerate(storages_to_build):
             capacity = float(spec["capacity_wh"])
             minimum = float(spec.get("min_energy_wh", 0))
             maximum = float(spec.get("max_energy_wh", capacity))
@@ -224,12 +254,25 @@ def solve_direct_highs(
                 _add(service, shortfall, 1.0 / capacity)
 
             cycle_coefficient = spread + max(0.0, float(spec.get("cycle_cost_ore_kwh", 0)))
+            throughput_coefficient = (
+                max(0.0, float(spec.get("throughput_cost_ore_kwh", 0)))
+                if shared
+                else 0.0
+            )
             for t in range(n):
                 _add(
                     economic,
                     discharge[t],
                     cycle_coefficient * float(prepared.dt_h[t]) / 1000.0,
                 )
+                if throughput_coefficient > 0:
+                    coefficient = (
+                        throughput_coefficient
+                        * float(prepared.dt_h[t])
+                        / 1000.0
+                    )
+                    _add(economic, charge[t], coefficient)
+                    _add(economic, discharge[t], coefficient)
             _add(
                 economic,
                 energy[-1],
@@ -238,6 +281,17 @@ def solve_direct_highs(
             charges.append(charge)
             discharges.append(discharge)
             energies.append(energy)
+        if shared and shared_storage is None:
+            shared_storage = DirectSharedStorageVars(
+                charges,
+                discharges,
+                energies,
+                total_charge,
+                total_discharge,
+                dict(service),
+                dict(economic),
+            )
+        scenario_grid_cost: dict[int, float] = {}
 
         curtail = [
             curtail_actions[(int(prepared.tree.node_at[si, t]), t)] for t in range(n)
@@ -279,11 +333,31 @@ def solve_direct_highs(
                 import_index,
                 float(prepared.effective_import[t] * prepared.dt_h[t] / 1000.0),
             )
+            if shared:
+                _add(
+                    scenario_grid_cost,
+                    import_index,
+                    float(
+                        prepared.effective_import[t]
+                        * prepared.dt_h[t]
+                        / 1000.0
+                    ),
+                )
             _add(
                 economic,
                 export_index,
                 -float(prepared.effective_export[t] * prepared.dt_h[t] / 1000.0),
             )
+            if shared:
+                _add(
+                    scenario_grid_cost,
+                    export_index,
+                    -float(
+                        prepared.effective_export[t]
+                        * prepared.dt_h[t]
+                        / 1000.0
+                    ),
+                )
 
             if prepared.mode in {"self_consumption", "passive_arbitrage"}:
                 house_import = model.variable()
@@ -306,6 +380,7 @@ def solve_direct_highs(
 
         service_terms.append(service)
         economic_terms.append(economic)
+        risk_terms.append(scenario_grid_cost if shared else economic)
         scenario_vars.append(
             DirectScenarioVars(
                 charges, discharges, energies, curtail, grid_import, grid_export
@@ -347,9 +422,9 @@ def solve_direct_highs(
         service_costs = np.pad(service_costs, (0, 1 + m))
         economic_costs = np.pad(economic_costs, (0, 1 + m))
         economic_costs[threshold] += prepared.economic_cvar_weight
-        for si, economic in enumerate(economic_terms):
+        for si, risk in enumerate(risk_terms):
             row = {excess[si]: 1.0, threshold: 1.0}
-            for index, value in economic.items():
+            for index, value in risk.items():
                 _add(row, index, -value)
             model.row(row, 0.0)
             economic_costs[excess[si]] += (
@@ -400,6 +475,7 @@ def solve_direct_highs(
         decomposition,
         len(model.lower),
         len(model.rows),
+        shared,
     )
 
 
@@ -416,9 +492,8 @@ def _response(
     decomposition: str,
     variables: int,
     constraints: int,
+    shared: bool,
 ) -> dict[str, Any]:
-    from .multistage import policy_config
-
     scenarios = prepared.scenario_set.scenarios
     base_index = next((i for i, scenario in enumerate(scenarios) if scenario.id == "base"), 0)
     base = scenarios[base_index]
@@ -427,9 +502,7 @@ def _response(
         for charges, discharges in zip(scenario.charge, scenario.discharge):
             for charge_index, discharge_index in zip(charges, discharges):
                 if min(solution[charge_index], solution[discharge_index]) > 1e-6:
-                    raise DirectHighsError(
-                        "HiGHS returned simultaneous storage charge and discharge"
-                    )
+                    raise DirectHighsError(SIMULTANEOUS_STORAGE_CYCLE_ERROR)
     total_capacity = sum(float(spec["capacity_wh"]) for spec in prepared.storages)
     initial_total = sum(float(spec["initial_energy_wh"]) for spec in prepared.storages)
     actions: list[dict[str, Any]] = []
@@ -457,6 +530,7 @@ def _response(
         )
         raw_total_cost += raw_cost
         curtailed_w = max(0.0, float(solution[base_vars.curtail[t]]))
+        pv_forecast = prepared.base_pv if shared else base.pv
         actions.append(
             {
                 "slot_start_ms": int(slot.get("start_ms", 0)),
@@ -465,7 +539,7 @@ def _response(
                 "grid_w": grid_w,
                 "soc_pct": stored_wh / total_capacity * 100.0,
                 "cost_ore": raw_cost,
-                "pv_limit_w": max(0.0, -base.pv[t] - curtailed_w)
+                "pv_limit_w": max(0.0, -pv_forecast[t] - curtailed_w)
                 if curtailed_w > 1e-5
                 else 0.0,
                 "storage_power_w": storage_power,
@@ -477,42 +551,111 @@ def _response(
             }
         )
     solve_ms = (time.perf_counter() - started) * 1000.0
+    solver: dict[str, Any] = {
+        "engine": "highspy",
+        "backend": "highs",
+        "status": "optimal",
+        "formulation": "convex" if shared else "multistage-lp",
+        "objective_ore": objective,
+        "service_slack": best_service,
+        "solve_ms": solve_ms,
+        "prepare_ms": prepare_ms,
+        "build_ms": build_ms,
+        "solver_ms": solver_ms,
+        "cache_hit": False,
+        "dpp": False,
+        "mip_gap": None,
+        "scenario_count": len(scenarios),
+        "scenario_policy": "shared" if shared else "multistage",
+        "policy_version": "shared-v1" if shared else "storage-multistage-v1",
+        "non_anticipative_slots": prepared.first_stage_slots,
+        "model_variables": variables,
+        "model_constraints": constraints,
+    }
+    if shared:
+        probabilities = np.asarray([scenario.probability for scenario in scenarios])
+        energy_cost = 0.0
+        for probability, scenario in zip(probabilities, scenario_vars):
+            for t in range(prepared.n):
+                energy_cost += float(probability) * (
+                    prepared.effective_import[t]
+                    * prepared.dt_h[t]
+                    * solution[scenario.grid_import[t]]
+                    / 1000.0
+                    - prepared.effective_export[t]
+                    * prepared.dt_h[t]
+                    * solution[scenario.grid_export[t]]
+                    / 1000.0
+                )
+        degradation = 0.0
+        terminal_value = 0.0
+        spread = max(
+            0.0,
+            finite_number(
+                prepared.settings.get("min_arbitrage_spread_ore_kwh", 0),
+                "settings.min_arbitrage_spread_ore_kwh",
+            ),
+        )
+        for index, spec in enumerate(prepared.storages):
+            discharge_rate = spread + max(
+                0.0, float(spec.get("cycle_cost_ore_kwh", 0))
+            )
+            throughput_rate = max(
+                0.0, float(spec.get("throughput_cost_ore_kwh", 0))
+            )
+            for t in range(prepared.n):
+                degradation += (
+                    prepared.dt_h[t]
+                    * (
+                        discharge_rate * solution[base_vars.discharge[index][t]]
+                        + throughput_rate
+                        * (
+                            solution[base_vars.charge[index][t]]
+                            + solution[base_vars.discharge[index][t]]
+                        )
+                    )
+                    / 1000.0
+                )
+            terminal_value -= (
+                float(spec.get("terminal_price_ore_kwh", 0))
+                * solution[base_vars.energy[index][-1]]
+                / 1000.0
+            )
+        solver.update(
+            {
+                "cvar_weight": prepared.economic_cvar_weight,
+                "cvar_alpha": prepared.economic_cvar_alpha,
+                "objective_breakdown_ore": {
+                    "energy": float(energy_cost),
+                    "demand_charge_increment": 0.0,
+                    "degradation": float(degradation),
+                    "terminal_energy_value": float(terminal_value),
+                },
+            }
+        )
+    else:
+        from .multistage import policy_config
+
+        solver.update(
+            {
+                "scenario_original_count": prepared.scenario_set.original_count,
+                "scenario_reduction_error": prepared.scenario_set.reduction_error,
+                "policy_config": policy_config(prepared),
+                "tree_nodes": prepared.tree.node_count,
+                "move_blocks": len(prepared.blocks),
+                "decomposition": f"direct-highs-{decomposition}",
+                "risk_model": "service-cvar-then-expected-cost",
+                "service_cvar_weight": prepared.service_cvar_weight,
+                "service_cvar_alpha": prepared.service_cvar_alpha,
+                "economic_cvar_weight": prepared.economic_cvar_weight,
+                "economic_cvar_alpha": prepared.economic_cvar_alpha,
+            }
+        )
     return {
         "schema_version": SCHEMA_VERSION,
         "request_id": str(prepared.payload["request_id"]),
         "ok": True,
-        "solver": {
-            "engine": "highspy",
-            "backend": "highs",
-            "status": "optimal",
-            "formulation": "multistage-lp",
-            "objective_ore": objective,
-            "service_slack": best_service,
-            "solve_ms": solve_ms,
-            "prepare_ms": prepare_ms,
-            "build_ms": build_ms,
-            "solver_ms": solver_ms,
-            "cache_hit": False,
-            "dpp": False,
-            "mip_gap": None,
-            "scenario_count": len(scenarios),
-            "scenario_original_count": prepared.scenario_set.original_count,
-            "scenario_reduction_error": prepared.scenario_set.reduction_error,
-            "scenario_policy": "multistage",
-            "policy_version": "storage-multistage-v1",
-            "policy_config": policy_config(prepared),
-            "non_anticipative_slots": prepared.first_stage_slots,
-            "tree_nodes": prepared.tree.node_count,
-            "move_blocks": len(prepared.blocks),
-            "decomposition": f"direct-highs-{decomposition}",
-            "risk_model": "service-cvar-then-expected-cost",
-            "service_cvar_weight": prepared.service_cvar_weight,
-            "service_cvar_alpha": prepared.service_cvar_alpha,
-            "economic_cvar_weight": prepared.economic_cvar_weight,
-            "economic_cvar_alpha": prepared.economic_cvar_alpha,
-            "model_variables": variables,
-            "model_constraints": constraints,
-        },
+        "solver": solver,
         "plan": {
             "mode": prepared.mode,
             "horizon_slots": prepared.n,

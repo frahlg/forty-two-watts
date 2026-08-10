@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import math
 import threading
 
@@ -173,6 +174,745 @@ def assert_storage_replays(request: dict, response: dict, tolerance_wh: float = 
             if abs(power) <= 1e-3:
                 assert reported >= previous - tolerance_wh
             energies[storage_id] = replayed
+
+
+def assert_nested_close(
+    direct: object,
+    reference: object,
+    *,
+    abs_tol: float = 1e-3,
+    path: str = "value",
+) -> None:
+    if isinstance(direct, dict) and isinstance(reference, dict):
+        assert direct.keys() == reference.keys(), path
+        for key in direct:
+            assert_nested_close(
+                direct[key],
+                reference[key],
+                abs_tol=abs_tol,
+                path=f"{path}.{key}",
+            )
+        return
+    if isinstance(direct, list) and isinstance(reference, list):
+        assert len(direct) == len(reference), path
+        for index, (direct_item, reference_item) in enumerate(
+            zip(direct, reference)
+        ):
+            assert_nested_close(
+                direct_item,
+                reference_item,
+                abs_tol=abs_tol,
+                path=f"{path}[{index}]",
+            )
+        return
+    if (
+        isinstance(direct, (int, float))
+        and not isinstance(direct, bool)
+        and isinstance(reference, (int, float))
+        and not isinstance(reference, bool)
+    ):
+        assert math.isclose(
+            float(direct), float(reference), abs_tol=abs_tol
+        ), f"{path}: {direct} != {reference}"
+        return
+    assert direct == reference, path
+
+
+def assert_shared_plan_parity(
+    direct: dict,
+    reference: dict,
+    *,
+    abs_tol: float = 1e-3,
+) -> None:
+    direct_plan = direct["plan"]
+    reference_plan = reference["plan"]
+    for key in (
+        "mode",
+        "horizon_slots",
+        "capacity_wh",
+        "initial_soc_pct",
+        "total_cost_ore",
+    ):
+        assert_nested_close(
+            direct_plan[key],
+            reference_plan[key],
+            abs_tol=abs_tol,
+            path=f"plan.{key}",
+        )
+    assert_nested_close(
+        direct_plan["actions"],
+        reference_plan["actions"],
+        abs_tol=abs_tol,
+        path="plan.actions",
+    )
+
+
+def test_shared_direct_highs_matches_cvxpy_with_risk_targets_and_costs() -> None:
+    request = base_request()
+    request["request_id"] = "shared-direct-parity"
+    request["settings"].update(
+        {
+            "shared_backend": "highs",
+            "cvar_weight": 0.25,
+            "cvar_alpha": 0.75,
+            "min_arbitrage_spread_ore_kwh": 7,
+        }
+    )
+    prices = [20, 35, 70, 260, 310, 120]
+    loads = [1200, 1800, 900, 2600, 3200, 1600]
+    pv = [0, -500, -2400, -800, 0, -300]
+    request["slots"] = [
+        {
+            "start_ms": 1 + index * 900_000,
+            "len_min": 15,
+            "price_ore": price,
+            "spot_ore": 0,
+            "confidence": 0.85,
+            "pv_w": pv[index],
+            "load_w": loads[index],
+            "max_import_w": 10_000,
+            "max_export_w": 10_000,
+        }
+        for index, price in enumerate(prices)
+    ]
+    request["storages"][0].update(
+        {
+            "initial_energy_wh": 2500,
+            "target_energy_wh": 4500,
+            "target_slot": 2,
+            "throughput_cost_ore_kwh": 2,
+        }
+    )
+    request["storages"].append(
+        {
+            "id": "garage",
+            "capacity_wh": 6000,
+            "initial_energy_wh": 3500,
+            "min_energy_wh": 800,
+            "max_energy_wh": 5600,
+            "max_charge_w": 2600,
+            "max_discharge_w": 2200,
+            "charge_efficiency": 0.92,
+            "discharge_efficiency": 0.9,
+            "terminal_price_ore_kwh": 14,
+            "cycle_cost_ore_kwh": 11,
+            "throughput_cost_ore_kwh": 1.5,
+        }
+    )
+    request["scenarios"] = [
+        {
+            "id": "base",
+            "probability": 0.5,
+            "load_w": loads,
+            "pv_w": pv,
+        },
+        {
+            "id": "cloudy",
+            "probability": 0.3,
+            "load_w": [value * 1.15 for value in loads],
+            "pv_w": [value * 0.65 for value in pv],
+        },
+        {
+            "id": "sunny",
+            "probability": 0.2,
+            "load_w": [value * 0.9 for value in loads],
+            "pv_w": [value * 1.2 for value in pv],
+        },
+    ]
+
+    reference_request = copy.deepcopy(request)
+    reference_request["request_id"] = "shared-cvxpy-parity"
+    reference_request["settings"]["shared_backend"] = "cvxpy"
+    direct = handle(request)
+    reference = handle(reference_request)
+
+    assert direct["ok"], direct
+    assert reference["ok"], reference
+    assert direct["solver"]["engine"] == "highspy"
+    assert reference["solver"]["engine"] == "cvxpy"
+    assert direct["solver"]["scenario_policy"] == "shared"
+    assert direct["solver"]["formulation"] == "convex"
+    assert math.isclose(
+        direct["solver"]["objective_ore"],
+        reference["solver"]["objective_ore"],
+        abs_tol=1e-4,
+    )
+    for key in (
+        "energy",
+        "demand_charge_increment",
+        "degradation",
+        "terminal_energy_value",
+    ):
+        assert math.isclose(
+            direct["solver"]["objective_breakdown_ore"][key],
+            reference["solver"]["objective_breakdown_ore"][key],
+            abs_tol=1e-4,
+        )
+    for direct_action, reference_action in zip(
+        direct["plan"]["actions"], reference["plan"]["actions"]
+    ):
+        assert math.isclose(
+            direct_action["battery_w"], reference_action["battery_w"], abs_tol=1e-3
+        )
+        assert math.isclose(
+            direct_action["grid_w"], reference_action["grid_w"], abs_tol=1e-3
+        )
+    assert_storage_replays(request, direct)
+
+
+@pytest.mark.parametrize(
+    "mode",
+    ["arbitrage", "cheap_charge", "passive_arbitrage", "self_consumption"],
+)
+def test_shared_direct_highs_matches_cvxpy_modes(mode: str) -> None:
+    request = base_request()
+    request["settings"].update({"mode": mode, "shared_backend": "highs"})
+    for slot in request["slots"]:
+        slot["spot_ore"] = 0
+    reference_request = copy.deepcopy(request)
+    reference_request["request_id"] = f"shared-{mode}-cvxpy"
+    reference_request["settings"]["shared_backend"] = "cvxpy"
+
+    direct = handle(request)
+    reference = handle(reference_request)
+
+    assert direct["ok"], direct
+    assert reference["ok"], reference
+    assert math.isclose(
+        direct["solver"]["objective_ore"],
+        reference["solver"]["objective_ore"],
+        abs_tol=1e-3,
+    )
+    assert_storage_replays(request, direct)
+
+
+def test_shared_direct_highs_matches_cvxpy_below_minimum_recovery() -> None:
+    request = base_request()
+    request["request_id"] = "shared-below-minimum-direct"
+    request["settings"].update(
+        {
+            "mode": "arbitrage",
+            "formulation": "relaxed",
+            "shared_backend": "highs",
+        }
+    )
+    request["slots"] = [dict(request["slots"][0]) for _ in range(4)]
+    for index, slot in enumerate(request["slots"]):
+        slot.update(
+            {
+                "start_ms": 1 + index * 900_000,
+                "len_min": 15,
+                "price_ore": 20 + index * 40,
+                "spot_ore": 0,
+            }
+        )
+    request["storages"][0].update(
+        {
+            "initial_energy_wh": 500,
+            "max_charge_w": 1000,
+            "max_discharge_w": 1000,
+            "terminal_price_ore_kwh": 0,
+        }
+    )
+    reference_request = copy.deepcopy(request)
+    reference_request["request_id"] = "shared-below-minimum-cvxpy"
+    reference_request["settings"]["shared_backend"] = "cvxpy"
+
+    direct = handle(request)
+    reference = handle(reference_request)
+
+    assert direct["ok"], direct
+    assert reference["ok"], reference
+    assert direct["solver"]["engine"] == "highspy"
+    assert reference["solver"]["engine"] == "cvxpy"
+    assert math.isclose(
+        direct["solver"]["service_slack"],
+        reference["solver"]["service_slack"],
+        abs_tol=1e-7,
+    )
+    assert math.isclose(
+        direct["solver"]["objective_ore"],
+        reference["solver"]["objective_ore"],
+        abs_tol=1e-4,
+    )
+    assert_shared_plan_parity(direct, reference)
+    assert_storage_replays(request, direct)
+    assert_storage_replays(reference_request, reference)
+
+
+def test_shared_direct_highs_matches_strict_pv_surplus_and_limit() -> None:
+    request = base_request()
+    request["request_id"] = "shared-pv-surplus-direct"
+    request["settings"].update(
+        {
+            "mode": "passive_arbitrage",
+            "formulation": "relaxed",
+            "shared_backend": "highs",
+        }
+    )
+    request["slots"] = [
+        {
+            "start_ms": 1,
+            "len_min": 60,
+            "price_ore": 100,
+            "spot_ore": 50,
+            "confidence": 1,
+            "pv_w": -4000,
+            "load_w": 500,
+            "max_import_w": 8000,
+            "max_export_w": 100,
+        }
+    ]
+    request["storages"][0].update(
+        {
+            "initial_energy_wh": 9500,
+            "max_charge_w": 0,
+            "max_discharge_w": 0,
+            "terminal_price_ore_kwh": 0,
+        }
+    )
+    reference_request = copy.deepcopy(request)
+    reference_request["request_id"] = "shared-pv-surplus-cvxpy"
+    reference_request["settings"]["shared_backend"] = "cvxpy"
+
+    direct = handle(request)
+    reference = handle(reference_request)
+
+    assert direct["ok"], direct
+    assert reference["ok"], reference
+    assert_shared_plan_parity(direct, reference)
+    action = direct["plan"]["actions"][0]
+    assert math.isclose(action["battery_w"], 0, abs_tol=1e-6)
+    assert math.isclose(action["grid_w"], -100, abs_tol=1e-6)
+    assert math.isclose(action["pv_limit_w"], 600, abs_tol=1e-6)
+    assert_storage_replays(request, direct)
+    assert_storage_replays(reference_request, reference)
+
+
+def test_shared_auto_falls_back_at_each_direct_eligibility_boundary() -> None:
+    cases: list[tuple[str, dict]] = []
+
+    commercial = base_request()
+    commercial["commercial_constraints"] = {"version": "srcful-commercial-v1"}
+    cases.append(("commercial", commercial))
+
+    flex = base_request()
+    flex["flex_loads"] = [
+        {
+            "id": "car",
+            "capacity_wh": 40_000,
+            "initial_energy_wh": 20_000,
+            "max_energy_wh": 40_000,
+            "target_energy_wh": 20_000,
+            "target_slot": 1,
+            "charge_efficiency": 0.9,
+            "allowed_steps_w": [0, 2000],
+        }
+    ]
+    cases.append(("flex", flex))
+
+    thermal = base_request()
+    thermal["thermal_loads"] = [
+        {
+            "id": "heater",
+            "initial_temp_c": 20,
+            "min_temp_c": 18,
+            "max_temp_c": 24,
+            "outside_temp_c": [10, 10],
+            "allowed_steps_w": [0, 1000],
+            "gain_c_per_kwh": 1,
+            "loss_per_hour": 0.1,
+        }
+    ]
+    cases.append(("thermal", thermal))
+
+    no_storage = base_request()
+    no_storage["storages"] = []
+    cases.append(("no-storage", no_storage))
+
+    clarabel = base_request()
+    clarabel["settings"].update({"solver": "CLARABEL", "formulation": "relaxed"})
+    cases.append(("clarabel", clarabel))
+
+    milp = base_request()
+    milp["settings"]["formulation"] = "milp"
+    cases.append(("milp", milp))
+
+    negative_import = base_request()
+    negative_import["slots"][0]["price_ore"] = -10
+    cases.append(("unsafe-cycle", negative_import))
+
+    pv_charge_bonus = base_request()
+    pv_charge_bonus["settings"]["pv_charge_bonus_ore_kwh"] = 1
+    cases.append(("pv-charge-bonus", pv_charge_bonus))
+
+    meter_split = base_request()
+    meter_split["settings"]["export_ore_per_kwh"] = 400
+    cases.append(("unsafe-meter-split", meter_split))
+
+    above_maximum = base_request()
+    above_maximum["storages"][0]["initial_energy_wh"] = 9800
+    cases.append(("initial-above-maximum", above_maximum))
+
+    for name, request in cases:
+        request["request_id"] = f"shared-auto-boundary-{name}"
+        request["settings"]["shared_backend"] = "auto"
+        response = handle(request)
+        assert response["ok"], (name, response)
+        assert response["solver"]["engine"] == "cvxpy", (name, response)
+        assert response["solver"]["scenario_policy"] == "shared"
+
+
+def test_shared_auto_preserves_duplicate_ids_and_first_base_output() -> None:
+    request = base_request()
+    request["settings"]["shared_backend"] = "auto"
+    base_load = [slot["load_w"] for slot in request["slots"]]
+    base_pv = [slot["pv_w"] for slot in request["slots"]]
+    request["scenarios"] = [
+        {"id": "base", "probability": 0.5, "load_w": base_load, "pv_w": base_pv},
+        {
+            "id": "base",
+            "probability": 0.5,
+            "load_w": [3500, 6000],
+            "pv_w": [-500, -1000],
+        },
+    ]
+    reference_request = copy.deepcopy(request)
+    reference_request["request_id"] = "duplicate-base-cvxpy"
+    reference_request["settings"]["shared_backend"] = "cvxpy"
+
+    direct = handle(request)
+    reference = handle(reference_request)
+
+    assert direct["ok"], direct
+    assert reference["ok"], reference
+    assert direct["solver"]["engine"] == "highspy"
+    assert direct["solver"]["scenario_count"] == 2
+    assert math.isclose(
+        direct["solver"]["objective_ore"],
+        reference["solver"]["objective_ore"],
+        abs_tol=1e-4,
+    )
+    assert_shared_plan_parity(direct, reference)
+    for action, load_w, pv_w in zip(
+        direct["plan"]["actions"], base_load, base_pv
+    ):
+        assert math.isclose(
+            action["grid_w"],
+            load_w + pv_w + action["battery_w"],
+            abs_tol=1e-4,
+        )
+    assert_storage_replays(request, direct)
+    assert_storage_replays(reference_request, reference)
+
+
+@pytest.mark.parametrize("target_slot", [-4, 99])
+def test_shared_direct_clamps_target_slot_like_cvxpy(target_slot: int) -> None:
+    request = base_request()
+    request["settings"]["shared_backend"] = "highs"
+    request["storages"][0].update(
+        {"target_energy_wh": 5000, "target_slot": target_slot}
+    )
+    reference_request = copy.deepcopy(request)
+    reference_request["request_id"] = f"target-slot-{target_slot}-cvxpy"
+    reference_request["settings"]["shared_backend"] = "cvxpy"
+
+    direct = handle(request)
+    reference = handle(reference_request)
+
+    assert direct["ok"], direct
+    assert reference["ok"], reference
+    assert math.isclose(
+        direct["solver"]["objective_ore"],
+        reference["solver"]["objective_ore"],
+        abs_tol=1e-4,
+    )
+    assert_storage_replays(request, direct)
+
+
+def realistic_shared_request(scenario_count: int) -> dict:
+    request = base_request()
+    request["request_id"] = f"realistic-shared-{scenario_count}"
+    request["settings"].update(
+        {
+            "mode": "passive_arbitrage",
+            "solver": "HIGHS",
+            "formulation": "relaxed",
+            "time_limit_s": 8,
+            "shared_backend": "highs",
+            "cvar_weight": 0.15,
+            "cvar_alpha": 0.9,
+        }
+    )
+    slots = []
+    base_load = []
+    base_pv = []
+    for index in range(192):
+        hour = (index % 96) / 4.0
+        price = 80 + 180 * math.exp(-0.5 * ((hour - 18) / 2) ** 2)
+        pv_w = (
+            -7000 * math.exp(-0.5 * ((hour - 12.5) / 3) ** 2)
+            if 5 < hour < 21
+            else 0
+        )
+        load_w = 500 + 1800 * math.exp(-0.5 * ((hour - 19) / 2) ** 2)
+        base_load.append(load_w)
+        base_pv.append(pv_w)
+        slots.append(
+            {
+                "start_ms": 1 + index * 900_000,
+                "len_min": 15,
+                "price_ore": price,
+                "spot_ore": price * 0.7,
+                "confidence": 1 if index < 96 else 0.6,
+                "pv_w": pv_w,
+                "load_w": load_w,
+                "max_import_w": 11_000,
+                "max_export_w": 11_000,
+            }
+        )
+    request["slots"] = slots
+    request["storages"] = [
+        {
+            "id": "home",
+            "capacity_wh": 15_000,
+            "initial_energy_wh": 7500,
+            "min_energy_wh": 1500,
+            "max_energy_wh": 14_250,
+            "max_charge_w": 5000,
+            "max_discharge_w": 5000,
+            "charge_efficiency": 0.95,
+            "discharge_efficiency": 0.95,
+            "terminal_price_ore_kwh": 150,
+            "cycle_cost_ore_kwh": 10,
+            "throughput_cost_ore_kwh": 1.5,
+        }
+    ]
+    scenarios = []
+    for index in range(scenario_count):
+        offset = index - (scenario_count - 1) / 2
+        scenarios.append(
+            {
+                "id": "base" if index == 0 else f"scenario-{index}",
+                "probability": 1 / scenario_count,
+                "load_w": [max(0, value + offset * 250) for value in base_load],
+                "pv_w": [min(0, value + offset * 150) for value in base_pv],
+            }
+        )
+    scenarios[0]["load_w"] = base_load
+    scenarios[0]["pv_w"] = base_pv
+    request["scenarios"] = scenarios
+    return request
+
+
+@pytest.mark.parametrize("scenario_count", [3, 12])
+def test_shared_direct_realistic_horizon_matches_cvxpy(
+    scenario_count: int,
+) -> None:
+    request = realistic_shared_request(scenario_count)
+    reference_request = copy.deepcopy(request)
+    reference_request["request_id"] += "-cvxpy"
+    reference_request["settings"]["shared_backend"] = "cvxpy"
+
+    direct = handle(request)
+    reference = handle(reference_request)
+
+    assert direct["ok"], direct
+    assert reference["ok"], reference
+    direct_solver = direct["solver"]
+    reference_solver = reference["solver"]
+    assert direct_solver["engine"] == "highspy"
+    assert direct_solver["backend"] == "highs"
+    assert direct_solver["status"] == "optimal"
+    assert direct_solver["formulation"] == "convex"
+    assert direct_solver["dpp"] is False
+    assert direct_solver["cache_hit"] is False
+    assert direct_solver["model_variables"] > 0
+    assert direct_solver["model_constraints"] > 0
+    assert reference_solver["engine"] == "cvxpy"
+    assert reference_solver["backend"] == "highs"
+    assert reference_solver["formulation"] == "milp"
+    for key, expected in (
+        ("scenario_count", scenario_count),
+        ("scenario_policy", "shared"),
+        ("policy_version", "shared-v1"),
+        ("non_anticipative_slots", 192),
+        ("cvar_weight", 0.15),
+        ("cvar_alpha", 0.9),
+    ):
+        assert direct_solver[key] == expected
+        assert reference_solver[key] == expected
+    assert math.isclose(
+        direct_solver["service_slack"],
+        reference_solver["service_slack"],
+        abs_tol=1e-7,
+    )
+    assert math.isclose(
+        direct_solver["objective_ore"],
+        reference_solver["objective_ore"],
+        abs_tol=1e-3,
+    )
+    assert_nested_close(
+        direct_solver["objective_breakdown_ore"],
+        reference_solver["objective_breakdown_ore"],
+        abs_tol=1e-3,
+        path="solver.objective_breakdown_ore",
+    )
+    assert_shared_plan_parity(direct, reference, abs_tol=2e-3)
+    assert_storage_replays(request, direct)
+    assert_storage_replays(reference_request, reference)
+
+
+def test_shared_auto_retries_with_storage_guard_after_direct_failure(monkeypatch) -> None:
+    from ftw_optimizer import direct_highs, shared_highs
+
+    request = base_request()
+    request["settings"].update(
+        {
+            "mode": "arbitrage",
+            "formulation": "relaxed",
+            "shared_backend": "auto",
+        }
+    )
+
+    def reject_direct(*args, **kwargs):
+        raise direct_highs.DirectHighsError(
+            "HiGHS returned simultaneous storage charge and discharge"
+        )
+
+    monkeypatch.setattr(shared_highs, "solve_direct_highs", reject_direct)
+    response = handle(request)
+
+    assert response["ok"], response
+    assert response["solver"]["engine"] == "cvxpy"
+    assert response["solver"]["formulation"] == "milp"
+    assert response["solver"]["fallback"] is True
+    assert "simultaneous" in response["solver"]["fallback_reason"]
+    assert_storage_replays(request, response)
+
+
+def test_shared_auto_retries_with_storage_guard_after_replay_failure(
+    monkeypatch,
+) -> None:
+    from ftw_optimizer import shared_highs
+    from ftw_optimizer.model import ReplayConsistencyError
+
+    request = base_request()
+    request["settings"].update(
+        {
+            "mode": "arbitrage",
+            "formulation": "relaxed",
+            "shared_backend": "auto",
+        }
+    )
+
+    def reject_direct(*args, **kwargs):
+        raise ReplayConsistencyError("direct storage replay failed")
+
+    monkeypatch.setattr(shared_highs, "solve_direct_highs", reject_direct)
+    response = handle(request)
+
+    assert response["ok"], response
+    assert response["solver"]["engine"] == "cvxpy"
+    assert response["solver"]["formulation"] == "milp"
+    assert response["solver"]["fallback"] is True
+    assert response["solver"]["fallback_reason"] == "direct storage replay failed"
+    assert_storage_replays(request, response)
+
+
+def test_shared_auto_retries_generic_direct_failure_without_storage_guard(
+    monkeypatch,
+) -> None:
+    from ftw_optimizer import shared_highs
+
+    request = base_request()
+    request["settings"].update(
+        {
+            "mode": "arbitrage",
+            "formulation": "relaxed",
+            "shared_backend": "auto",
+        }
+    )
+
+    def reject_direct(*args, **kwargs):
+        raise RuntimeError("direct API failed")
+
+    monkeypatch.setattr(shared_highs, "solve_direct_highs", reject_direct)
+    response = handle(request)
+
+    assert response["ok"], response
+    assert response["solver"]["engine"] == "cvxpy"
+    assert response["solver"]["formulation"] == "convex"
+    assert response["solver"]["fallback"] is True
+    assert response["solver"]["fallback_reason"] == "direct API failed"
+    assert_storage_replays(request, response)
+
+
+def test_shared_auto_retries_other_direct_highs_error_without_storage_guard(
+    monkeypatch,
+) -> None:
+    from ftw_optimizer import direct_highs, shared_highs
+
+    request = base_request()
+    request["settings"].update(
+        {
+            "mode": "arbitrage",
+            "formulation": "relaxed",
+            "shared_backend": "auto",
+        }
+    )
+
+    def reject_direct(*args, **kwargs):
+        raise direct_highs.DirectHighsError(
+            "HiGHS economic solve failed with status kTimeLimit"
+        )
+
+    monkeypatch.setattr(shared_highs, "solve_direct_highs", reject_direct)
+    response = handle(request)
+
+    assert response["ok"], response
+    assert response["solver"]["engine"] == "cvxpy"
+    assert response["solver"]["formulation"] == "convex"
+    assert response["solver"]["fallback"] is True
+    assert "kTimeLimit" in response["solver"]["fallback_reason"]
+    assert_storage_replays(request, response)
+
+
+def test_shared_auto_lets_cvxpy_reject_invalid_input_after_direct_error() -> None:
+    request = base_request()
+    request["settings"].update(
+        {"formulation": "relaxed", "shared_backend": "auto"}
+    )
+    request["storages"][0]["throughput_cost_ore_kwh"] = "invalid"
+
+    response = handle(request)
+
+    assert not response["ok"]
+    assert response["error"]["code"] == "invalid_request"
+    assert "throughput_cost_ore_kwh must be a number" in response["error"]["message"]
+
+
+def test_shared_backend_rejects_unknown_value() -> None:
+    request = base_request()
+    request["settings"]["shared_backend"] = "other"
+
+    response = handle(request)
+
+    assert not response["ok"]
+    assert response["error"]["code"] == "invalid_request"
+    assert "shared_backend" in response["error"]["message"]
+
+
+def test_shared_backend_highs_rejects_an_ineligible_request() -> None:
+    request = base_request()
+    request["settings"]["shared_backend"] = "highs"
+    request["storages"] = []
+
+    response = handle(request)
+
+    assert not response["ok"]
+    assert response["error"]["code"] == "invalid_request"
+    assert "requires at least one storage" in response["error"]["message"]
 
 
 def test_arbitrage_moves_energy_from_cheap_to_expensive_slot() -> None:
@@ -515,8 +1255,49 @@ def test_direct_highs_matches_cvxpy_multistage_reference() -> None:
     assert direct["ok"], direct
     assert reference["ok"], reference
     assert direct["solver"]["engine"] == "highspy"
+    assert direct["solver"]["backend"] == "highs"
+    assert direct["solver"]["status"] == "optimal"
     assert direct["solver"]["formulation"] == "multistage-lp"
     assert direct["solver"]["dpp"] is False
+    assert direct["solver"]["cache_hit"] is False
+    assert direct["solver"]["mip_gap"] is None
+    assert direct["solver"]["scenario_count"] == 2
+    assert direct["solver"]["scenario_original_count"] == 2
+    assert direct["solver"]["scenario_reduction_error"] == 0
+    assert direct["solver"]["scenario_policy"] == "multistage"
+    assert direct["solver"]["policy_version"] == "storage-multistage-v1"
+    assert direct["solver"]["non_anticipative_slots"] == 1
+    assert direct["solver"]["tree_nodes"] == 1
+    assert direct["solver"]["move_blocks"] == 2
+    assert direct["solver"]["decomposition"] == "direct-highs-extensive"
+    assert direct["solver"]["risk_model"] == "service-cvar-then-expected-cost"
+    assert direct["solver"]["service_cvar_weight"] == 1
+    assert direct["solver"]["service_cvar_alpha"] == 0.95
+    assert direct["solver"]["economic_cvar_weight"] == 0.25
+    assert direct["solver"]["economic_cvar_alpha"] == 0.9
+    assert direct["solver"]["model_variables"] > 0
+    assert direct["solver"]["model_constraints"] > 0
+    direct_policy = json.loads(direct["solver"]["policy_config"])
+    reference_policy = json.loads(reference["solver"]["policy_config"])
+    assert direct_policy.pop("backend") == "highs"
+    assert reference_policy.pop("backend") == "cvxpy"
+    assert direct_policy == reference_policy
+    for key in (
+        "scenario_count",
+        "scenario_original_count",
+        "scenario_reduction_error",
+        "scenario_policy",
+        "policy_version",
+        "non_anticipative_slots",
+        "tree_nodes",
+        "move_blocks",
+        "risk_model",
+        "service_cvar_weight",
+        "service_cvar_alpha",
+        "economic_cvar_weight",
+        "economic_cvar_alpha",
+    ):
+        assert direct["solver"][key] == reference["solver"][key]
     assert math.isclose(
         direct["solver"]["objective_ore"],
         reference["solver"]["objective_ore"],
@@ -527,6 +1308,8 @@ def test_direct_highs_matches_cvxpy_multistage_reference() -> None:
         reference["plan"]["actions"][0]["battery_w"],
         abs_tol=1e-3,
     )
+    assert_storage_replays(request, direct)
+    assert_storage_replays(reference_request, reference)
 
 
 def test_multistage_auto_keeps_binary_guards_for_unsafe_incentives() -> None:

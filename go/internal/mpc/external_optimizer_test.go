@@ -298,7 +298,8 @@ func TestExternalOptimizerEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Optimize: %v", err)
 	}
-	if plan.Solver == nil || plan.Solver.Engine != "cvxpy" || plan.Solver.Backend != "highs" {
+	if plan.Solver == nil || plan.Solver.Engine != "highspy" || plan.Solver.Backend != "highs" ||
+		plan.Solver.ScenarioPolicy != "shared" || plan.Solver.PolicyVersion != "shared-v1" {
 		t.Fatalf("unexpected solver metadata: %+v", plan.Solver)
 	}
 	if plan.Actions[0].BatteryW <= 0 || plan.Actions[1].BatteryW >= 0 {
