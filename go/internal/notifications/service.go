@@ -177,6 +177,21 @@ func NewProvider(cfg *config.Notifications) Provider {
 		}
 		name = "ntfy"
 	}
+	// Ntfy cannot publish without a topic — it has no default, and the URL
+	// is server + "/" + topic. A box carrying only the legacy default
+	// (provider "ntfy", server "https://ntfy.sh", blank topic) has ntfy
+	// inactive; installing a transport that fails every dispatch would just
+	// climb the failure counter while web push, engine-owned and keyed by
+	// stored subscriptions, delivers regardless. Treat it as no config-
+	// selected transport, and say so once so the drop isn't silent. Validate
+	// makes the same call, so a box in this state can still enable
+	// notifications.
+	if name == "ntfy" && (cfg.Ntfy == nil || strings.TrimSpace(cfg.Ntfy.Topic) == "") {
+		if cfg.Enabled {
+			slog.Warn("notifications: ntfy has no topic; treating ntfy as inactive, delivering via web push only")
+		}
+		return nil
+	}
 	providersMu.RLock()
 	f := providers[name]
 	providersMu.RUnlock()

@@ -1753,29 +1753,27 @@ func (c *Config) Validate() error {
 		}
 		if n.Enabled {
 			switch n.Provider {
-			case "":
-				// No provider named. That used to imply ntfy and demand
-				// its settings; web push ended that — it is engine-owned,
-				// keyed by stored subscriptions rather than config, so
-				// enabled-with-nothing-configured is now a real state.
-				// Ntfy settings that do exist must still be complete.
-				if n.Ntfy != nil {
+			case "", "ntfy":
+				// Web push is engine-owned — keyed by stored push
+				// subscriptions, not by this field — so "enabled" no
+				// longer implies a working ntfy. The box delivers over web
+				// push with no provider configured at all. Ntfy is a
+				// secondary, opt-in channel, and its one indispensable
+				// setting is the topic: it has no default and nothing can
+				// be published without it. So ntfy counts as *active* only
+				// once a topic is set. Until then it is inactive, and a box
+				// carrying the legacy default (provider "ntfy", server
+				// "https://ntfy.sh", blank topic — present on real boxes)
+				// can still enable notifications. NewProvider makes the
+				// same call at runtime and logs the inactive ntfy, so the
+				// drop is warned, not silent.
+				if n.Ntfy != nil && strings.TrimSpace(n.Ntfy.Topic) != "" {
+					// A topic means the operator does intend ntfy; a topic
+					// with no server to publish it to is a real mistake
+					// still worth catching.
 					if strings.TrimSpace(n.Ntfy.Server) == "" {
-						return errors.New("notifications.ntfy.server required when enabled")
+						return errors.New("notifications.ntfy.server required when notifications.ntfy.topic is set")
 					}
-					if strings.TrimSpace(n.Ntfy.Topic) == "" {
-						return errors.New("notifications.ntfy.topic required when enabled")
-					}
-				}
-			case "ntfy":
-				if n.Ntfy == nil {
-					return errors.New("notifications.ntfy required when provider=ntfy and enabled")
-				}
-				if strings.TrimSpace(n.Ntfy.Server) == "" {
-					return errors.New("notifications.ntfy.server required when enabled")
-				}
-				if strings.TrimSpace(n.Ntfy.Topic) == "" {
-					return errors.New("notifications.ntfy.topic required when enabled")
 				}
 			default:
 				return fmt.Errorf("notifications.provider %q not supported", n.Provider)

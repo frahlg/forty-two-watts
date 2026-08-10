@@ -960,14 +960,54 @@ func TestNotificationsDefaults(t *testing.T) {
 	}
 }
 
-func TestNotificationsValidateRejectsEmptyTopic(t *testing.T) {
+// validFuse is a complete, safe fuse block so notification tests fail on the
+// notification rule under test, not on an unrelated fuse check that runs first.
+func validFuse() Fuse { return Fuse{MaxAmps: 16, Phases: 1, Voltage: 230} }
+
+// A real box stores the legacy default: provider "ntfy", server set to the
+// public host, and no topic (it was never entered). Web push is engine-owned,
+// so enabling notifications must succeed on such a box — the topic-less ntfy
+// is inactive, not a fatal config error. Holds whether the provider field is
+// the legacy "ntfy" or the newer "".
+func TestNotificationsEnableWithIncompleteNtfySucceeds(t *testing.T) {
+	for _, provider := range []string{"ntfy", ""} {
+		c := &Config{
+			Site:          Site{SmoothingAlpha: 0.3},
+			Fuse:          validFuse(),
+			Notifications: &Notifications{Enabled: true, Provider: provider, Ntfy: &NtfyConfig{Server: "https://ntfy.sh", Topic: ""}},
+		}
+		if err := c.Validate(); err != nil {
+			t.Errorf("provider %q: unexpected error enabling with topic-less ntfy: %v", provider, err)
+		}
+	}
+}
+
+// A box that genuinely configured ntfy — server and topic both set — stays
+// valid, and the runtime still selects the ntfy transport.
+func TestNotificationsEnableWithCompleteNtfyValid(t *testing.T) {
 	c := &Config{
 		Site:          Site{SmoothingAlpha: 0.3},
-		Fuse:          Fuse{MaxAmps: 16},
-		Notifications: &Notifications{Enabled: true, Provider: "ntfy", Ntfy: &NtfyConfig{Server: "https://ntfy.sh", Topic: ""}},
+		Fuse:          validFuse(),
+		Notifications: &Notifications{Enabled: true, Provider: "ntfy", Ntfy: &NtfyConfig{Server: "https://ntfy.sh", Topic: "my-topic"}},
 	}
-	if err := c.Validate(); err == nil {
-		t.Error("expected error for empty topic")
+	if err := c.Validate(); err != nil {
+		t.Errorf("unexpected error for complete ntfy: %v", err)
+	}
+}
+
+// A topic with no server to publish it to is a half-finished, hand-edited
+// ntfy — a real mistake worth catching rather than silently dropping.
+func TestNotificationsNtfyTopicWithoutServerErrors(t *testing.T) {
+	for _, provider := range []string{"ntfy", ""} {
+		c := &Config{
+			Site:          Site{SmoothingAlpha: 0.3},
+			Fuse:          validFuse(),
+			Notifications: &Notifications{Enabled: true, Provider: provider, Ntfy: &NtfyConfig{Server: "", Topic: "my-topic"}},
+		}
+		err := c.Validate()
+		if err == nil || !strings.Contains(err.Error(), "notifications.ntfy.server required") {
+			t.Errorf("provider %q: want ntfy.server-required error, got %v", provider, err)
+		}
 	}
 }
 

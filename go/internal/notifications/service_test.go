@@ -420,6 +420,22 @@ func TestStrategyRegistry(t *testing.T) {
 	}
 }
 
+// A topic-less ntfy (the legacy default carried by real boxes) is inactive:
+// NewProvider installs no config-selected transport, so the service runs on
+// its engine-owned web push alone rather than a transport that fails every
+// dispatch. Holds whether the provider field is the legacy "ntfy" or "".
+func TestNewProviderTopiclessNtfyInactive(t *testing.T) {
+	for _, provider := range []string{"ntfy", ""} {
+		if p := NewProvider(&config.Notifications{
+			Enabled:  true,
+			Provider: provider,
+			Ntfy:     &config.NtfyConfig{Server: "https://ntfy.sh"},
+		}); p != nil {
+			t.Errorf("provider %q: topic-less ntfy must be inactive; got %+v", provider, p)
+		}
+	}
+}
+
 func TestEventBusSubscribe(t *testing.T) {
 	pub := &fakePub{}
 	svc, clk := newSvc(baseCfg(), pub)
