@@ -5,6 +5,7 @@
 //   - a diverging per-day sparkline (positive days green, negative red)
 //     anchored on a zero baseline.
 //   - a Week/Month toggle matching ftw-history-card's pill style
+//   - in compact mode, Today/7 days/Month-to-date monetary totals
 //
 // Attributes:
 //   default-range — "week" (default, 7 days) | "month" (so far)
@@ -17,6 +18,11 @@
 import { FtwElement, ftwDebugDelay } from "./ftw-element.js";
 import { apiFetch } from "./api-fetch.js";
 import { activeCurrency } from "./price-units.js";
+import {
+  SAVINGS_LOOKBACK_DAYS,
+  buildSavingsPeriods,
+  formatCompactMinor,
+} from "./savings-periods.js";
 
 class FtwSavingsCard extends FtwElement {
   static styles = `
@@ -124,6 +130,11 @@ class FtwSavingsCard extends FtwElement {
       font-weight: 500;
       color: var(--fg-dim);
     }
+    .compact-periods,
+    .compact-coverage-note,
+    .compact-status {
+      display: none;
+    }
 
     /* Sparkline — pure SVG. Bars above the zero line are green, below
        are red, both pulled from theme tokens so light-mode flips
@@ -220,6 +231,9 @@ class FtwSavingsCard extends FtwElement {
       padding: 8px 0;
     }
 
+    :host([compact]) {
+      container-type: inline-size;
+    }
     :host([compact]) .card-inner {
       height: 100%;
       box-sizing: border-box;
@@ -230,13 +244,95 @@ class FtwSavingsCard extends FtwElement {
       padding: 12px 14px;
     }
     :host([compact]) .toggle,
+    :host([compact]) .headline,
     :host([compact]) .pct,
     :host([compact]) .sub,
     :host([compact]) .spark-wrap {
       display: none !important;
     }
-    :host([compact]) .total {
-      font-size: 1.05rem;
+    :host([compact]) .label {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+    }
+    :host([compact]) .compact-currency {
+      color: var(--fg-muted);
+      letter-spacing: 0.06em;
+    }
+    :host([compact]) .compact-periods {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      align-items: end;
+      gap: 0;
+    }
+    :host([compact]) .compact-periods[hidden] {
+      display: none;
+    }
+    :host([compact]) .compact-period {
+      display: grid;
+      min-width: 0;
+      gap: 3px;
+    }
+    :host([compact]) .compact-period + .compact-period {
+      margin-left: 6px;
+      padding-left: 6px;
+      border-left: 1px solid var(--line);
+    }
+    :host([compact]) .compact-period-label {
+      overflow: hidden;
+      color: var(--fg-muted);
+      font-family: var(--mono);
+      font-size: 8px;
+      letter-spacing: 0.06em;
+      text-overflow: ellipsis;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+    :host([compact]) .compact-value {
+      overflow: hidden;
+      color: var(--fg-dim);
+      font-family: var(--mono);
+      font-size: clamp(0.7rem, 6cqi, 0.92rem);
+      font-variant-numeric: tabular-nums;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    :host([compact]) .compact-value.is-positive { color: var(--green-e); }
+    :host([compact]) .compact-value.is-negative { color: var(--red-e); }
+    :host([compact]) .compact-coverage-note:not([hidden]) {
+      display: block;
+      color: var(--fg-muted);
+      font-family: var(--mono);
+      font-size: 7px;
+      line-height: 1.2;
+    }
+    :host([compact]) .compact-status:not([hidden]) {
+      display: block;
+      overflow: hidden;
+      color: var(--fg-muted);
+      font-family: var(--sans);
+      font-size: 0.76rem;
+      line-height: 1.25;
+      text-overflow: ellipsis;
+    }
+
+    @container (max-width: 190px) {
+      :host([compact]) .card-inner {
+        padding: 10px 8px;
+      }
+      :host([compact]) .compact-period + .compact-period {
+        margin-left: 3px;
+        padding-left: 3px;
+      }
+      :host([compact]) .compact-period-label {
+        font-size: 7px;
+      }
+      :host([compact]) .compact-value {
+        font-size: 0.68rem;
+      }
     }
 
     @media (max-width: 900px) {
@@ -296,7 +392,7 @@ class FtwSavingsCard extends FtwElement {
   }
 
   _daysFor(range) {
-    if (this.hasAttribute("compact")) return 1;
+    if (this.hasAttribute("compact")) return SAVINGS_LOOKBACK_DAYS;
     if (range === "month") {
       const now = new Date();
       return now.getDate();
@@ -315,12 +411,28 @@ class FtwSavingsCard extends FtwElement {
     return `
       <div class="card-inner">
         <div class="head">
-          <div class="label" title="Actual historical net grid cost compared with buying the recorded house load from the grid with no PV and no battery.">${compact ? "Saved today" : "Saved vs no PV/battery"}</div>
+          <div class="label" title="Actual historical net grid cost compared with buying the recorded house load from the grid with no PV and no battery.">${compact ? `Savings <span class="compact-currency" data-role="compact-currency">${escapeHtml(activeCurrency())}</span>` : "Saved vs no PV/battery"}</div>
           <div class="toggle" role="tablist" data-active="${wk ? "week" : "month"}">
             <button type="button" role="tab" data-range="week"  aria-selected="${wk ? "true" : "false"}"${wk ? ' class="active"' : ""}>Week</button>
             <button type="button" role="tab" data-range="month" aria-selected="${!wk ? "true" : "false"}"${!wk ? ' class="active"' : ""}>Month</button>
           </div>
         </div>
+        <div class="compact-periods" data-role="compact-periods" role="list" aria-label="Savings by period" aria-live="polite">
+          <div class="compact-period" role="listitem">
+            <span class="compact-period-label">Today</span>
+            <strong class="compact-value" data-role="compact-today">—</strong>
+          </div>
+          <div class="compact-period" role="listitem">
+            <span class="compact-period-label">7 days</span>
+            <strong class="compact-value" data-role="compact-week">—</strong>
+          </div>
+          <div class="compact-period" role="listitem">
+            <span class="compact-period-label">Month</span>
+            <strong class="compact-value" data-role="compact-month">—</strong>
+          </div>
+        </div>
+        <div class="compact-coverage-note" data-role="compact-coverage" hidden>* Partial price data</div>
+        <div class="compact-status" data-role="compact-status" aria-live="polite" hidden></div>
         <div class="headline">
           <span class="total" data-role="total">—</span>
           <span class="pct"   data-role="pct"></span>
@@ -453,9 +565,69 @@ class FtwSavingsCard extends FtwElement {
     if (tip) tip.style.display = 'none';
   }
 
+  _showCompactStatus(message) {
+    if (!this.hasAttribute("compact") || !this.shadowRoot) return;
+    const periods = this.shadowRoot.querySelector('[data-role="compact-periods"]');
+    const coverage = this.shadowRoot.querySelector('[data-role="compact-coverage"]');
+    const status = this.shadowRoot.querySelector('[data-role="compact-status"]');
+    if (!periods || !status) return;
+    periods.hidden = true;
+    if (coverage) coverage.hidden = true;
+    status.hidden = false;
+    status.textContent = message;
+  }
+
+  _paintCompact(days) {
+    if (!this.hasAttribute("compact") || !this.shadowRoot) return;
+    const periodsEl = this.shadowRoot.querySelector('[data-role="compact-periods"]');
+    const statusEl = this.shadowRoot.querySelector('[data-role="compact-status"]');
+    const coverageEl = this.shadowRoot.querySelector('[data-role="compact-coverage"]');
+    const currencyEl = this.shadowRoot.querySelector('[data-role="compact-currency"]');
+    if (!periodsEl || !statusEl) return;
+
+    const currency = activeCurrency();
+    if (currencyEl) currencyEl.textContent = currency;
+    periodsEl.hidden = false;
+    statusEl.hidden = true;
+    statusEl.textContent = "";
+
+    const periods = buildSavingsPeriods(days);
+    const specs = [
+      ["today", "Today", periods.today],
+      ["week", "Last 7 days", periods.week],
+      ["month", "Month to date", periods.month],
+    ];
+    let hasPartial = false;
+
+    for (const [key, label, period] of specs) {
+      const valueEl = this.shadowRoot.querySelector(`[data-role="compact-${key}"]`);
+      if (!valueEl) continue;
+      if (!period.available) {
+        valueEl.textContent = "—";
+        valueEl.className = "compact-value";
+        valueEl.title = `${label}: no price data`;
+        valueEl.setAttribute("aria-label", valueEl.title);
+        continue;
+      }
+
+      const partial = !period.complete;
+      hasPartial = hasPartial || partial;
+      valueEl.textContent = formatCompactMinor(period.savedMinor) + (partial ? "*" : "");
+      const tone = Math.abs(period.savedMinor) < 50
+        ? ""
+        : (period.savedMinor > 0 ? " is-positive" : " is-negative");
+      valueEl.className = "compact-value" + tone;
+      valueEl.title = `${label}: ${fmtSavedSekOre(period.savedMinor)}` +
+        (partial ? `. Price data covers ${period.pricedDays} of ${period.totalDays} days` : "");
+      valueEl.setAttribute("aria-label", valueEl.title);
+    }
+    if (coverageEl) coverageEl.hidden = !hasPartial;
+  }
+
   _paint() {
     const root = this.shadowRoot;
     if (!root) return;
+    const compact = this.hasAttribute("compact");
     const totalEl  = root.querySelector('[data-role="total"]');
     const pctEl    = root.querySelector('[data-role="pct"]');
     const subEl    = root.querySelector('[data-role="sub"]');
@@ -467,6 +639,7 @@ class FtwSavingsCard extends FtwElement {
     if (!totalEl || !pctEl || !subEl || !sparkEl || !labelsEl || !sparkWrap) return;
 
     if (this._state === "loading") {
+      if (compact) this._showCompactStatus("Loading savings…");
       totalEl.textContent = "—";
       pctEl.textContent = "";
       subEl.textContent = "";
@@ -476,6 +649,7 @@ class FtwSavingsCard extends FtwElement {
       return;
     }
     if (this._state === "error") {
+      if (compact) this._showCompactStatus("Savings unavailable");
       totalEl.textContent = "failed to load";
       pctEl.textContent = "";
       subEl.textContent = "";
@@ -486,6 +660,7 @@ class FtwSavingsCard extends FtwElement {
       return;
     }
     if (this._state === "empty" || !this._payload) {
+      if (compact) this._showCompactStatus("Set a price zone to calculate savings");
       totalEl.textContent = "—";
       pctEl.textContent = "";
       subEl.innerHTML = 'No price provider configured — set <b>price.zone</b> to calculate historical savings.';
@@ -496,6 +671,7 @@ class FtwSavingsCard extends FtwElement {
       return;
     }
     if (this._state === "awaiting_prices") {
+      if (compact) this._showCompactStatus("Waiting for price data");
       totalEl.textContent = "—";
       pctEl.textContent = "";
       subEl.innerHTML = 'Awaiting price data for the selected range.';
@@ -506,8 +682,13 @@ class FtwSavingsCard extends FtwElement {
       return;
     }
 
-    sparkWrap.style.display = "";
     const { days, totals } = this._payload;
+    if (compact) {
+      this._paintCompact(days);
+      return;
+    }
+
+    sparkWrap.style.display = "";
     const savedOre = Number(totals && totals.saved_ore) || 0;
     const baselineOre  = Number(totals && (totals.baseline_cost_ore ?? totals.flat_cost_ore)) || 0;
     const actualOre = Number(totals && totals.actual_cost_ore) || 0;

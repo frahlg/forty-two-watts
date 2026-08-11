@@ -107,7 +107,7 @@ describe("simplified dashboard overview", () => {
     }
   });
 
-  it("adds compact daily readings without another status poller", () => {
+  it("adds compact daily energy and monetary savings periods without another status poller", () => {
     for (const id of [
       "bat-soc",
       "overview-e-import",
@@ -119,6 +119,10 @@ describe("simplified dashboard overview", () => {
     }
     assert.match(overview, /<ftw-savings-card[^>]*compact/);
     assert.match(savings, /observedAttributes[\s\S]*compact/);
+    assert.match(savings, /return SAVINGS_LOOKBACK_DAYS/);
+    for (const role of ["compact-today", "compact-week", "compact-month"]) {
+      assert.match(savings, new RegExp(`data-role=["']${role}["']`));
+    }
     assert.doesNotMatch(app, /fetch\(['"]\/api\/mpc\/plan/);
   });
 
