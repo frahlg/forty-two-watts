@@ -11,13 +11,14 @@ import sys
 import threading
 import time
 import traceback
+from collections import OrderedDict
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import cvxpy as cp
 
-from .deadline import SolveDeadline, SolveDeadlineExceeded
+from .deadline import SolveCancelled, SolveDeadline, SolveDeadlineExceeded
 from .model import solve
 from .protocol import ParsedRequest, ProtocolError, error_response, parse_request
 
@@ -32,8 +33,95 @@ from .protocol import ParsedRequest, ProtocolError, error_response, parse_reques
 # the window stop using this optimizer at once.
 MIN_PROTOCOL_VERSION = 1
 PROTOCOL_VERSION = 1
-FEATURES = ["champion", "recourse", "multistage", "commercial_constraints_v1"]
-SOLVE_LOCK = threading.Lock()
+FEATURES = [
+    "champion",
+    "recourse",
+    "multistage",
+    "commercial_constraints_v1",
+    "cancel_request",
+]
+
+
+class _SolveLock:
+    def __init__(self) -> None:
+        self._condition = threading.Condition()
+        self._held = False
+
+    def acquire_until(self, deadline: SolveDeadline) -> bool:
+        with self._condition:
+            while self._held:
+                self._condition.wait(
+                    timeout=min(
+                        deadline.remaining_s("optimizer queue"),
+                        threading.TIMEOUT_MAX,
+                    )
+                )
+            deadline.check("optimizer queue")
+            self._held = True
+            return True
+
+    def release(self) -> None:
+        with self._condition:
+            if not self._held:
+                raise RuntimeError("cannot release an unlocked solve lock")
+            self._held = False
+            self._condition.notify_all()
+
+    def locked(self) -> bool:
+        with self._condition:
+            return self._held
+
+    def notify_waiters(self) -> None:
+        with self._condition:
+            self._condition.notify_all()
+
+
+class _ActiveRequests:
+    def __init__(self, max_pending_cancels: int = 256) -> None:
+        self._lock = threading.Lock()
+        self._active: dict[str, list[SolveDeadline]] = {}
+        self._pending_cancels: OrderedDict[str, None] = OrderedDict()
+        self._max_pending_cancels = max_pending_cancels
+
+    def register(self, request_id: str, deadline: SolveDeadline) -> None:
+        with self._lock:
+            self._active.setdefault(request_id, []).append(deadline)
+            cancel_now = request_id in self._pending_cancels
+            self._pending_cancels.pop(request_id, None)
+        if cancel_now:
+            deadline.cancel()
+
+    def unregister(self, request_id: str, deadline: SolveDeadline) -> None:
+        with self._lock:
+            deadlines = self._active.get(request_id)
+            if deadlines is None:
+                return
+            self._active[request_id] = [
+                candidate for candidate in deadlines if candidate is not deadline
+            ]
+            if not self._active[request_id]:
+                del self._active[request_id]
+
+    def cancel(self, request_id: str) -> bool:
+        with self._lock:
+            deadlines = tuple(self._active.get(request_id, ()))
+            if not deadlines:
+                self._pending_cancels[request_id] = None
+                self._pending_cancels.move_to_end(request_id)
+                while len(self._pending_cancels) > self._max_pending_cancels:
+                    self._pending_cancels.popitem(last=False)
+        for deadline in deadlines:
+            try:
+                deadline.cancel()
+            except Exception:
+                # The token was set before HiGHS was asked to stop. Keep the
+                # cancel connection alive even if that best-effort call fails.
+                traceback.print_exc(file=sys.stderr)
+        return bool(deadlines)
+
+
+SOLVE_LOCK: Any = _SolveLock()
+ACTIVE_REQUESTS = _ActiveRequests()
 
 
 def release_unused_memory() -> None:
@@ -75,6 +163,8 @@ def handle(
         return response
     except ProtocolError as exc:
         return error_response(request_id, "invalid_request", str(exc))
+    except SolveCancelled as exc:
+        return error_response(request_id, "cancelled", str(exc))
     except SolveDeadlineExceeded as exc:
         return error_response(request_id, "deadline_exceeded", str(exc))
     except cp.error.SolverError as exc:
@@ -102,6 +192,52 @@ def handshake(raw: Any) -> dict[str, Any] | None:
     }
 
 
+def cancel_request(raw: Any) -> dict[str, Any] | None:
+    if not isinstance(raw, dict) or raw.get("type") != "cancel_request":
+        return None
+    request_id = raw.get("request_id")
+    if not isinstance(request_id, str) or not request_id:
+        return error_response(
+            "unknown",
+            "invalid_request",
+            "request_id must be a non-empty string",
+        )
+    protocol_version = raw.get("protocol_version", PROTOCOL_VERSION)
+    if (
+        isinstance(protocol_version, bool)
+        or not isinstance(protocol_version, int)
+        or not MIN_PROTOCOL_VERSION <= protocol_version <= PROTOCOL_VERSION
+    ):
+        return error_response(
+            request_id,
+            "invalid_request",
+            f"unsupported protocol_version {protocol_version!r}; expected "
+            f"{MIN_PROTOCOL_VERSION}..{PROTOCOL_VERSION}",
+        )
+    active = ACTIVE_REQUESTS.cancel(request_id)
+    notify_waiters = getattr(SOLVE_LOCK, "notify_waiters", None)
+    if notify_waiters is not None:
+        notify_waiters()
+    return {
+        "type": "cancel_ack",
+        "protocol_version": PROTOCOL_VERSION,
+        "request_id": request_id,
+        "ok": True,
+        "active": active,
+    }
+
+
+def _acquire_solve_lock(deadline: SolveDeadline) -> bool:
+    acquire_until = getattr(SOLVE_LOCK, "acquire_until", None)
+    if acquire_until is not None:
+        return bool(acquire_until(deadline))
+    wait_s = min(
+        deadline.remaining_s("optimizer queue"),
+        threading.TIMEOUT_MAX,
+    )
+    return bool(SOLVE_LOCK.acquire(timeout=wait_s))
+
+
 def process_stream(
     reader: Any,
     writer: Any,
@@ -119,69 +255,82 @@ def process_stream(
         else:
             response = handshake(raw)
             if response is None:
-                # Handshakes stay responsive while a solve is in progress,
-                # but solver state and its memory cleanup remain serialized.
+                response = cancel_request(raw)
+            if response is None:
+                # Handshakes stay responsive while a solve is in progress.
+                # Cancel frames also bypass the solve lock so they can stop its
+                # current owner or remove a queued request at once.
                 request_id = "unknown"
+                deadline: SolveDeadline | None = None
+                registered = False
                 try:
-                    parsed = parse_request(raw)
-                    request_id = parsed.request_id
-                    deadline = SolveDeadline.from_payload(
-                        parsed.payload,
-                        started_at=received_at,
-                        clock=clock,
-                    )
-                    wait_s = min(
-                        deadline.remaining_s("optimizer queue"),
-                        threading.TIMEOUT_MAX,
-                    )
-                except ProtocolError as exc:
-                    response = error_response(request_id, "invalid_request", str(exc))
-                except SolveDeadlineExceeded as exc:
-                    response = error_response(
-                        request_id,
-                        "deadline_exceeded",
-                        str(exc),
-                    )
-                else:
-                    if not SOLVE_LOCK.acquire(timeout=wait_s):
-                        response = error_response(
-                            parsed.request_id,
-                            "deadline_exceeded",
-                            "optimizer queue deadline exceeded",
-                        )
-                        writer.write(
-                            json.dumps(
-                                response,
-                                separators=(",", ":"),
-                                allow_nan=False,
-                            )
-                            + "\n"
-                        )
-                        writer.flush()
-                        continue
                     try:
-                        response = handle(
-                            raw,
-                            received_at=received_at,
+                        parsed = parse_request(raw)
+                        request_id = parsed.request_id
+                        deadline = SolveDeadline.from_payload(
+                            parsed.payload,
+                            started_at=received_at,
                             clock=clock,
-                            parsed=parsed,
-                            deadline=deadline,
                         )
-                        try:
-                            writer.write(
-                                json.dumps(
-                                    response,
-                                    separators=(",", ":"),
-                                    allow_nan=False,
-                                )
-                                + "\n"
+                        ACTIVE_REQUESTS.register(request_id, deadline)
+                        registered = True
+                        acquired = _acquire_solve_lock(deadline)
+                    except ProtocolError as exc:
+                        response = error_response(
+                            request_id,
+                            "invalid_request",
+                            str(exc),
+                        )
+                    except SolveCancelled as exc:
+                        response = error_response(
+                            request_id,
+                            "cancelled",
+                            str(exc),
+                        )
+                    except SolveDeadlineExceeded as exc:
+                        response = error_response(
+                            request_id,
+                            "deadline_exceeded",
+                            str(exc),
+                        )
+                    else:
+                        if not acquired:
+                            response = error_response(
+                                request_id,
+                                "deadline_exceeded",
+                                "optimizer queue deadline exceeded",
                             )
-                            writer.flush()
-                        finally:
-                            response = None
-                            release_unused_memory()
-                    finally:
-                        SOLVE_LOCK.release()
+                        else:
+                            try:
+                                response = handle(
+                                    raw,
+                                    received_at=received_at,
+                                    clock=clock,
+                                    parsed=parsed,
+                                    deadline=deadline,
+                                )
+                                try:
+                                    if not deadline.is_cancelled():
+                                        writer.write(
+                                            json.dumps(
+                                                response,
+                                                separators=(",", ":"),
+                                                allow_nan=False,
+                                            )
+                                            + "\n"
+                                        )
+                                        writer.flush()
+                                finally:
+                                    response = None
+                                    release_unused_memory()
+                            finally:
+                                SOLVE_LOCK.release()
+                            continue
+                finally:
+                    if registered:
+                        assert deadline is not None
+                        ACTIVE_REQUESTS.unregister(request_id, deadline)
+                if deadline is not None and deadline.is_cancelled():
                     continue
         writer.write(json.dumps(response, separators=(",", ":"), allow_nan=False) + "\n")
         writer.flush()

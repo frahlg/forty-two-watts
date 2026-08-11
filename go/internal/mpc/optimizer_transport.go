@@ -307,39 +307,104 @@ func (g *contextGate) Unlock() {
 
 type UnixTransport struct{ socketPath string }
 
+const unixCancelTimeout = 250 * time.Millisecond
+
+type unixCancelRequest struct {
+	Type            string `json:"type"`
+	RequestID       string `json:"request_id"`
+	ProtocolVersion int    `json:"protocol_version"`
+}
+
 func NewUnixTransport(socketPath string) *UnixTransport {
 	return &UnixTransport{socketPath: socketPath}
 }
 
-func (t *UnixTransport) exchange(ctx context.Context, payload []byte) ([]byte, error) {
+func (t *UnixTransport) exchange(ctx context.Context, payload []byte) ([]byte, bool, error) {
 	var d net.Dialer
 	conn, err := d.DialContext(ctx, "unix", t.socketPath)
 	if err != nil {
-		return nil, fmt.Errorf("dial %s: %w", t.socketPath, err)
+		return nil, false, fmt.Errorf("dial %s: %w", t.socketPath, err)
 	}
 	defer conn.Close()
 	if deadline, ok := ctx.Deadline(); ok {
-		_ = conn.SetDeadline(deadline)
+		// scanLine owns read cancellation. A read deadline could race ctx.Done
+		// and turn the caller's deadline into an unrelated I/O timeout.
+		_ = conn.SetWriteDeadline(deadline)
 	}
 	if _, err := conn.Write(append(append([]byte(nil), payload...), '\n')); err != nil {
-		return nil, fmt.Errorf("write unix optimizer: %w", err)
+		return nil, false, fmt.Errorf("write unix optimizer: %w", err)
 	}
 	scanner := bufio.NewScanner(conn)
 	scanner.Buffer(make([]byte, 64*1024), 16*1024*1024)
-	return scanLine(ctx, scanner)
+	line, err := scanLine(ctx, scanner)
+	return line, true, err
 }
 
 func (t *UnixTransport) RoundTrip(ctx context.Context, payload []byte) ([]byte, error) {
-	return t.exchange(ctx, payload)
+	line, sent, err := t.exchange(ctx, payload)
+	if err == nil {
+		return line, nil
+	}
+	ctxErr := ctx.Err()
+	if !sent || ctxErr == nil {
+		return nil, err
+	}
+	requestID := optimizerRequestID(payload)
+	if requestID == "" {
+		return nil, err
+	}
+
+	// The request may still be running in the shared sidecar after its caller
+	// has gone away. A fresh connection lets a current worker interrupt it;
+	// older workers reject the unknown frame without changing this error path.
+	_ = t.cancelRequest(requestID)
+	return nil, ctxErr
 }
 
 func (t *UnixTransport) Health(ctx context.Context) (OptimizerRuntimeInfo, error) {
 	payload, _ := json.Marshal(map[string]any{"type": "handshake", "protocol_version": OptimizerProtocolVersion})
-	line, err := t.exchange(ctx, payload)
+	line, _, err := t.exchange(ctx, payload)
 	if err != nil {
 		return OptimizerRuntimeInfo{}, err
 	}
 	return decodeOptimizerHandshake(line, "unix")
+}
+
+func optimizerRequestID(payload []byte) string {
+	var request struct {
+		RequestID string `json:"request_id"`
+	}
+	if json.Unmarshal(payload, &request) != nil {
+		return ""
+	}
+	return request.RequestID
+}
+
+func (t *UnixTransport) cancelRequest(requestID string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), unixCancelTimeout)
+	defer cancel()
+
+	var d net.Dialer
+	conn, err := d.DialContext(ctx, "unix", t.socketPath)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = conn.SetWriteDeadline(deadline)
+	}
+	payload, err := json.Marshal(unixCancelRequest{
+		Type:            "cancel_request",
+		RequestID:       requestID,
+		ProtocolVersion: OptimizerProtocolVersion,
+	})
+	if err != nil {
+		return err
+	}
+	if _, err := conn.Write(append(payload, '\n')); err != nil {
+		return fmt.Errorf("write unix optimizer cancellation: %w", err)
+	}
+	return nil
 }
 
 func decodeOptimizerHandshake(line []byte, transport string) (OptimizerRuntimeInfo, error) {

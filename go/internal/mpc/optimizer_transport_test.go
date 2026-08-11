@@ -131,6 +131,307 @@ func TestUnixTransportHandshakeAndRoundTrip(t *testing.T) {
 	}
 }
 
+func TestUnixTransportCancelsSentRequestOnCallerCancellation(t *testing.T) {
+	path := fmt.Sprintf("/tmp/ftw-opt-cancel-%d.sock", time.Now().UnixNano())
+	t.Cleanup(func() { _ = os.Remove(path) })
+	listener, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	requestRead := make(chan []byte, 1)
+	cancelRead := make(chan []byte, 1)
+	serverDone := make(chan error, 1)
+	go func() {
+		requestConn, err := listener.Accept()
+		if err != nil {
+			serverDone <- err
+			return
+		}
+		defer requestConn.Close()
+		requestScanner := bufio.NewScanner(requestConn)
+		if !requestScanner.Scan() {
+			serverDone <- requestScanner.Err()
+			return
+		}
+		requestRead <- append([]byte(nil), requestScanner.Bytes()...)
+
+		cancelConn, err := listener.Accept()
+		if err != nil {
+			serverDone <- err
+			return
+		}
+		defer cancelConn.Close()
+		cancelScanner := bufio.NewScanner(cancelConn)
+		if !cancelScanner.Scan() {
+			serverDone <- cancelScanner.Err()
+			return
+		}
+		cancelRead <- append([]byte(nil), cancelScanner.Bytes()...)
+		serverDone <- nil
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	payload := []byte(`{"schema_version":1,"request_id":"plan-42"}`)
+	go func() {
+		_, err := NewUnixTransport(path).RoundTrip(ctx, payload)
+		result <- err
+	}()
+
+	select {
+	case got := <-requestRead:
+		if string(got) != string(payload) {
+			t.Fatalf("request = %s, want %s", got, payload)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("sidecar did not receive the optimizer request")
+	}
+	cancel()
+
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("RoundTrip error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("RoundTrip did not return after cancellation")
+	}
+
+	var frame map[string]any
+	select {
+	case raw := <-cancelRead:
+		if err := json.Unmarshal(raw, &frame); err != nil {
+			t.Fatalf("decode cancel frame %q: %v", raw, err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("sidecar did not receive a cancel request")
+	}
+	if len(frame) != 3 || frame["type"] != "cancel_request" || frame["request_id"] != "plan-42" || frame["protocol_version"] != float64(OptimizerProtocolVersion) {
+		t.Fatalf("cancel frame = %#v", frame)
+	}
+	if err := <-serverDone; err != nil {
+		t.Fatalf("sidecar server: %v", err)
+	}
+}
+
+func TestUnixTransportCancelsSentRequestOnCallerDeadline(t *testing.T) {
+	path := fmt.Sprintf("/tmp/ftw-opt-deadline-%d.sock", time.Now().UnixNano())
+	t.Cleanup(func() { _ = os.Remove(path) })
+	listener, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	requestRead := make(chan struct{})
+	cancelRead := make(chan []byte, 1)
+	serverDone := make(chan error, 1)
+	go func() {
+		requestConn, err := listener.Accept()
+		if err != nil {
+			serverDone <- err
+			return
+		}
+		defer requestConn.Close()
+		requestScanner := bufio.NewScanner(requestConn)
+		if !requestScanner.Scan() {
+			serverDone <- requestScanner.Err()
+			return
+		}
+		close(requestRead)
+
+		cancelConn, err := listener.Accept()
+		if err != nil {
+			serverDone <- err
+			return
+		}
+		defer cancelConn.Close()
+		cancelScanner := bufio.NewScanner(cancelConn)
+		if !cancelScanner.Scan() {
+			serverDone <- cancelScanner.Err()
+			return
+		}
+		cancelRead <- append([]byte(nil), cancelScanner.Bytes()...)
+		serverDone <- nil
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		_, err := NewUnixTransport(path).RoundTrip(ctx, []byte(`{"request_id":"deadline-plan"}`))
+		result <- err
+	}()
+	select {
+	case <-requestRead:
+	case <-time.After(time.Second):
+		t.Fatal("sidecar did not receive the optimizer request")
+	}
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("RoundTrip error = %v, want context.DeadlineExceeded", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("RoundTrip did not return after its deadline")
+	}
+
+	select {
+	case raw := <-cancelRead:
+		var frame unixCancelRequest
+		if err := json.Unmarshal(raw, &frame); err != nil {
+			t.Fatalf("decode cancel frame %q: %v", raw, err)
+		}
+		if frame.Type != "cancel_request" || frame.RequestID != "deadline-plan" || frame.ProtocolVersion != OptimizerProtocolVersion {
+			t.Fatalf("cancel frame = %+v", frame)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("sidecar did not receive a cancel request")
+	}
+	if err := <-serverDone; err != nil {
+		t.Fatalf("sidecar server: %v", err)
+	}
+}
+
+func TestUnixTransportDoesNotCancelRequestWithoutID(t *testing.T) {
+	path := fmt.Sprintf("/tmp/ftw-opt-no-id-%d.sock", time.Now().UnixNano())
+	t.Cleanup(func() { _ = os.Remove(path) })
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	requestRead := make(chan struct{})
+	checkSecond := make(chan struct{})
+	serverDone := make(chan error, 1)
+	go func() {
+		requestConn, err := listener.Accept()
+		if err != nil {
+			serverDone <- err
+			return
+		}
+		defer requestConn.Close()
+		requestScanner := bufio.NewScanner(requestConn)
+		if !requestScanner.Scan() {
+			serverDone <- requestScanner.Err()
+			return
+		}
+		close(requestRead)
+		<-checkSecond
+		if err := listener.SetDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
+			serverDone <- err
+			return
+		}
+		second, err := listener.Accept()
+		if err == nil {
+			_ = second.Close()
+			serverDone <- errors.New("received unexpected cancel connection")
+			return
+		}
+		if timeout, ok := err.(net.Error); !ok || !timeout.Timeout() {
+			serverDone <- err
+			return
+		}
+		serverDone <- nil
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		_, err := NewUnixTransport(path).RoundTrip(ctx, []byte(`{"schema_version":1}`))
+		result <- err
+	}()
+	select {
+	case <-requestRead:
+	case <-time.After(time.Second):
+		t.Fatal("sidecar did not receive the optimizer request")
+	}
+	cancel()
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("RoundTrip error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("RoundTrip did not return after cancellation")
+	}
+	close(checkSecond)
+	if err := <-serverDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestUnixTransportDoesNotCancelAfterOrdinaryReadFailure(t *testing.T) {
+	path := fmt.Sprintf("/tmp/ftw-opt-read-failure-%d.sock", time.Now().UnixNano())
+	t.Cleanup(func() { _ = os.Remove(path) })
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	requestRead := make(chan struct{})
+	checkSecond := make(chan struct{})
+	serverDone := make(chan error, 1)
+	go func() {
+		requestConn, err := listener.Accept()
+		if err != nil {
+			serverDone <- err
+			return
+		}
+		requestScanner := bufio.NewScanner(requestConn)
+		if !requestScanner.Scan() {
+			_ = requestConn.Close()
+			serverDone <- requestScanner.Err()
+			return
+		}
+		close(requestRead)
+		_ = requestConn.Close()
+		<-checkSecond
+		if err := listener.SetDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
+			serverDone <- err
+			return
+		}
+		second, err := listener.Accept()
+		if err == nil {
+			_ = second.Close()
+			serverDone <- errors.New("received unexpected cancel connection")
+			return
+		}
+		if timeout, ok := err.(net.Error); !ok || !timeout.Timeout() {
+			serverDone <- err
+			return
+		}
+		serverDone <- nil
+	}()
+
+	result := make(chan error, 1)
+	go func() {
+		_, err := NewUnixTransport(path).RoundTrip(context.Background(), []byte(`{"request_id":"plan-42"}`))
+		result <- err
+	}()
+	select {
+	case <-requestRead:
+	case <-time.After(time.Second):
+		t.Fatal("sidecar did not receive the optimizer request")
+	}
+	select {
+	case err := <-result:
+		if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("RoundTrip error = %v, want ordinary read failure", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("RoundTrip did not return after the sidecar closed")
+	}
+	close(checkSecond)
+	if err := <-serverDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestProcessTransportHealthPerformsCompatibleHandshake(t *testing.T) {
 	if len(os.Args) > 0 && os.Args[len(os.Args)-1] == "process-health-helper" {
 		scanner := bufio.NewScanner(os.Stdin)

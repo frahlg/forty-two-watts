@@ -9,7 +9,7 @@ import highspy
 import numpy as np
 
 from . import SCHEMA_VERSION
-from .deadline import SolveDeadline, SolveDeadlineExceeded
+from .deadline import SolveCancelled, SolveDeadline, SolveDeadlineExceeded
 from .model import (
     _arbitrage_spread_ore_kwh,
     _solver_options,
@@ -924,12 +924,42 @@ def _run_optimal(
     phase: str,
     deadline: SolveDeadline | float,
 ) -> None:
-    run_status = highs.run()
+    _remaining_time_s(deadline)
+    if isinstance(deadline, SolveDeadline):
+        if not highs.HandleUserInterrupt:
+            highs.HandleUserInterrupt = True
+        deadline.attach_highs(highs)
+        try:
+            try:
+                deadline.check(f"direct HiGHS {phase} solve")
+                solver_thread = highs.startSolve()
+                # startSolve resets HiGHS' stop flag. Repeat a cancellation that
+                # arrived after attachment but before the solver thread started.
+                if deadline.is_cancelled():
+                    highs.cancelSolve()
+                run_status = highs.joinSolve(solver_thread)
+            except Exception:
+                # Cancellation or expiry is the request result even when HiGHS
+                # reports its own concurrent start/join error first.
+                deadline.check(f"direct HiGHS {phase} solve")
+                raise
+        finally:
+            deadline.detach_highs(highs)
+        deadline.check(f"direct HiGHS {phase} solve")
+    else:
+        run_status = highs.run()
     status = highs.getModelStatus()
+    if status in {
+        highspy.HighsModelStatus.kInterrupt,
+        highspy.HighsModelStatus.kHighsInterrupt,
+    }:
+        raise SolveCancelled(f"direct HiGHS {phase} solve was cancelled")
     if status == highspy.HighsModelStatus.kTimeLimit:
         raise SolveDeadlineExceeded(
             f"direct HiGHS {phase} solve deadline exceeded"
         )
+    if run_status is None:
+        raise DirectHighsError(f"HiGHS {phase} solve returned no status")
     _require_ok(run_status, f"run {phase} solve")
     if status != highspy.HighsModelStatus.kOptimal:
         raise DirectHighsError(f"HiGHS {phase} solve failed with status {status}")
