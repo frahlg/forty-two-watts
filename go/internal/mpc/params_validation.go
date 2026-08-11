@@ -364,6 +364,9 @@ func validateLoadpointSpecs(loadpoints []*LoadpointSpec, assetIDs map[string]str
 				(loadpoint.TargetSoCPct < minPct || loadpoint.TargetSoCPct > maxPct)) {
 			return fmt.Errorf("%s.target_soc_pct must be zero or within the loadpoint SoC bounds", field)
 		}
+		if loadpoint.TargetSoCPct > 0 && loadpoint.TargetSlotIdx < 0 {
+			return fmt.Errorf("%s.target_slot_idx must be non-negative when target_soc_pct is set", field)
+		}
 		if err := requireNonNegativePlanningValue(field+".max_charge_w", loadpoint.MaxChargeW); err != nil {
 			return err
 		}

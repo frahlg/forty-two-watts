@@ -39,10 +39,10 @@ type LoadpointSpec struct {
 	InitialSoCPct float64 // EV SoC at the first slot
 	PluggedIn     bool    // when false, Optimize treats the loadpoint as absent
 
-	// User intent. Zero target (< 1%) = no deadline — charge
+	// User intent. A zero target means no deadline — charge
 	// opportunistically based on price/PV surplus only.
 	TargetSoCPct  float64
-	TargetSlotIdx int // slot index by which target must be met; 0 or negative = no deadline
+	TargetSlotIdx int // zero-based slot by whose end the target must be met; ignored when target is zero
 
 	// Electrical constraints. AllowedStepsW MUST include 0 (off) and
 	// should enumerate the discrete charger power levels. If empty,

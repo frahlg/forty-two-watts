@@ -99,6 +99,25 @@ func TestValidatePlanningParamsAcceptsSupportedPhysicalStates(t *testing.T) {
 			p.Loadpoints = []*LoadpointSpec{lp}
 			p.Loadpoint = lp
 		}},
+		{"loadpoint zero target ignores negative deadline", func(p *Params) {
+			lp := validPlanningLoadpoint()
+			lp.TargetSoCPct = 0
+			lp.TargetSlotIdx = -1
+			p.Loadpoints = []*LoadpointSpec{lp}
+			p.Loadpoint = lp
+		}},
+		{"loadpoint first-slot deadline", func(p *Params) {
+			lp := validPlanningLoadpoint()
+			lp.TargetSlotIdx = 0
+			p.Loadpoints = []*LoadpointSpec{lp}
+			p.Loadpoint = lp
+		}},
+		{"loadpoint deadline past horizon", func(p *Params) {
+			lp := validPlanningLoadpoint()
+			lp.TargetSlotIdx = 10000
+			p.Loadpoints = []*LoadpointSpec{lp}
+			p.Loadpoint = lp
+		}},
 		{"equivalent normalized loadpoint fallback", func(p *Params) {
 			lp := validPlanningLoadpoint()
 			lp.MinPct, lp.MaxPct = 0, 0
@@ -245,6 +264,7 @@ func TestValidatePlanningParamsRejectsInvalidLoadpointPhysics(t *testing.T) {
 			p.Loadpoints[0].MaxPct, p.Loadpoints[0].TargetSoCPct = 70, 80
 		}},
 		{"infinite target", "target_soc_pct", func(p *Params) { p.Loadpoints[0].TargetSoCPct = math.Inf(1) }},
+		{"target with negative deadline", "target_slot_idx", func(p *Params) { p.Loadpoints[0].TargetSlotIdx = -1 }},
 		{"negative max power", ".max_charge_w", func(p *Params) { p.Loadpoints[0].MaxChargeW = -1 }},
 		{"infinite max power", ".max_charge_w", func(p *Params) { p.Loadpoints[0].MaxChargeW = math.Inf(1) }},
 		{"negative efficiency", ".charge_efficiency", func(p *Params) { p.Loadpoints[0].ChargeEfficiency = -0.1 }},
@@ -451,6 +471,13 @@ func TestReplanRejectsInvalidPhysicsBeforeSolver(t *testing.T) {
 			s.Loadpoints = func(int) []*LoadpointSpec {
 				lp := validPlanningLoadpoint()
 				lp.MaxPct, lp.TargetSoCPct = 70, 80
+				return []*LoadpointSpec{lp}
+			}
+		}},
+		{"loadpoint target with negative deadline", func(s *Service) {
+			s.Loadpoints = func(int) []*LoadpointSpec {
+				lp := validPlanningLoadpoint()
+				lp.TargetSlotIdx = -1
 				return []*LoadpointSpec{lp}
 			}
 		}},
