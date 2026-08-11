@@ -43,14 +43,16 @@ func pushVehicle(t *testing.T, s *Store, driver string, soc, limit float64,
 		"stale":            stale,
 	})
 	s.Update(driver, DerVehicle, 0, &socPct, data)
-	// Mark health online + age the reading by reaching into the
-	// store's UpdatedAt directly via a follow-up Update with a
+	// Mark health online + age the reading and SoC observation by
+	// reaching into the store directly; a follow-up Update with a
 	// known timestamp would be invasive; instead the test passes
 	// `age` by comparing relative to (now - age) inside the helper.
 	if age > 0 {
 		s.mu.Lock()
 		if r := s.readings[key(driver, DerVehicle)]; r != nil {
-			r.UpdatedAt = time.Now().Add(-age)
+			agedAt := time.Now().Add(-age)
+			r.UpdatedAt = agedAt
+			r.SoCUpdatedAt = agedAt
 		}
 		s.mu.Unlock()
 	}
@@ -109,6 +111,44 @@ func TestPickBestVehicleSkipsStaleByWallclock(t *testing.T) {
 	pick := PickBestVehicle(s, time.Now())
 	if pick.Driver != "" {
 		t.Errorf("stale-by-wallclock reading must not be picked, got %q", pick.Driver)
+	}
+}
+
+func TestPickBestVehicleDoesNotFreshenCarriedSoC(t *testing.T) {
+	s := NewStore()
+	pushVehicle(t, s, "asleep", 50, 80, "Charging", false, 0)
+	staleAt := time.Now().Add(-VehicleMaxAge - time.Minute)
+	s.mu.Lock()
+	s.readings[key("asleep", DerVehicle)].SoCUpdatedAt = staleAt
+	s.mu.Unlock()
+
+	data, err := json.Marshal(map[string]any{
+		"charging_state":   "Charging",
+		"charge_limit_pct": 80,
+		"soc_fresh":        false,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cachedSoC := 50.0
+	s.Update("asleep", DerVehicle, 0, &cachedSoC, data)
+	r := s.Get("asleep", DerVehicle)
+	if r == nil || !r.SoCUpdatedAt.Equal(staleAt) {
+		t.Fatalf("power-only update changed SoC source time: %+v", r)
+	}
+	if !r.UpdatedAt.After(staleAt) {
+		t.Fatalf("reading timestamp did not advance: %+v", r)
+	}
+	if pick := PickBestVehicle(s, time.Now()); pick.Driver != "" {
+		t.Fatalf("carried stale SoC must not stay selectable, got %+v", pick)
+	}
+}
+
+func TestPickBestVehicleSkipsDriverMarkedStale(t *testing.T) {
+	s := NewStore()
+	pushVehicle(t, s, "driver-stale", 50, 80, "Charging", true, 0)
+	if pick := PickBestVehicle(s, time.Now()); pick.Driver != "" {
+		t.Fatalf("driver-marked stale SoC must not be selectable, got %+v", pick)
 	}
 }
 

@@ -24,9 +24,11 @@ const (
 	// DerVehicle is a read-only reading from the connected vehicle
 	// itself (e.g. via TeslaBLEProxy), distinct from DerEV which is
 	// the charger. Carries SoC + `charge_limit_pct`/`charging_state`/
-	// `time_to_full_min`/`stale` in Data. RawW is always 0 — vehicle
-	// readings don't conflict with dispatch math, they only inform
-	// the loadpoint manager's SoC-source selection and the UI.
+	// `time_to_full_min`/`stale` in Data. `soc_fresh=false` marks a
+	// cached replay rather than a new upstream observation. RawW is
+	// always 0 — vehicle readings don't conflict with dispatch math,
+	// they only inform the loadpoint manager's SoC-source selection
+	// and the UI.
 	DerVehicle
 )
 
@@ -80,13 +82,14 @@ func ParseDerType(s string) (DerType, error) {
 
 // DerReading is one DER telemetry snapshot (raw + smoothed + optional SoC).
 type DerReading struct {
-	Driver    string
-	DerType   DerType
-	RawW      float64
-	SmoothedW float64
-	SoC       *float64 // optional; 0..1 for batteries/V2X, 0..100 for DerVehicle
-	Data      json.RawMessage
-	UpdatedAt time.Time
+	Driver       string
+	DerType      DerType
+	RawW         float64
+	SmoothedW    float64
+	SoC          *float64  // optional; 0..1 for batteries/V2X, 0..100 for DerVehicle
+	SoCUpdatedAt time.Time // last fresh SoC receipt time; preserved across cached updates
+	Data         json.RawMessage
+	UpdatedAt    time.Time
 }
 
 // DriverStatus describes the health of one driver.
@@ -353,12 +356,39 @@ func finite(v float64) bool {
 	return !math.IsNaN(v) && !math.IsInf(v, 0)
 }
 
+// freshSoCObservation reports whether this emit contains a new SoC
+// observation. Legacy drivers omit soc_fresh, so a non-nil SoC stays fresh by
+// default. Vehicle drivers that replay a cached value set soc_fresh=false.
+// Invalid explicit freshness data fails closed.
+func freshSoCObservation(t DerType, soc *float64, data json.RawMessage) bool {
+	if soc == nil {
+		return false
+	}
+	if t != DerVehicle || len(data) == 0 {
+		return true
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return false
+	}
+	raw, ok := fields["soc_fresh"]
+	if !ok {
+		return true
+	}
+	var fresh bool
+	if err := json.Unmarshal(raw, &fresh); err != nil {
+		return false
+	}
+	return fresh
+}
+
 // Update feeds a new reading. Applies Kalman smoothing and stores both raw
 // and smoothed values.
 func (s *Store) Update(driver string, t DerType, rawW float64, soc *float64, data json.RawMessage) {
 	if err := ValidateReading(t, rawW, soc); err != nil {
 		return
 	}
+	socFresh := freshSoCObservation(t, soc, data)
 	k := key(driver, t)
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -368,24 +398,34 @@ func (s *Store) Update(driver string, t DerType, rawW float64, soc *float64, dat
 		s.filters[k] = f
 	}
 	smoothed := f.Update(rawW)
-	// Preserve last-known SoC when the new emit doesn't include one.
+	now := time.Now()
+	var socUpdatedAt time.Time
+	if socFresh {
+		socUpdatedAt = now
+	}
+	// Preserve last-known SoC when the new emit doesn't include one or marks a
+	// non-nil value as a cached replay.
 	// Some devices (e.g. Ferroamp ESO) publish SoC less frequently than
 	// the power-flow telemetry; a missing field this tick doesn't mean
-	// the battery has no SoC, just that we haven't heard a fresh number.
-	if soc == nil {
+	// the battery has no SoC. Keep its original observation time so callers and
+	// persisted metrics can still distinguish it from a fresh number.
+	if !socFresh {
 		if prev, ok := s.readings[k]; ok && prev.SoC != nil {
 			soc = prev.SoC
+			socUpdatedAt = prev.SoCUpdatedAt
+		} else {
+			soc = nil
 		}
 	}
-	now := time.Now()
 	s.readings[k] = &DerReading{
-		Driver:    driver,
-		DerType:   t,
-		RawW:      rawW,
-		SmoothedW: smoothed,
-		SoC:       soc,
-		Data:      data,
-		UpdatedAt: now,
+		Driver:       driver,
+		DerType:      t,
+		RawW:         rawW,
+		SmoothedW:    smoothed,
+		SoC:          soc,
+		SoCUpdatedAt: socUpdatedAt,
+		Data:         data,
+		UpdatedAt:    now,
 	}
 
 	// Auto-buffer the standard fields (raw, not smoothed — we store ground
@@ -395,7 +435,7 @@ func (s *Store) Update(driver string, t DerType, rawW float64, soc *float64, dat
 	s.pending = append(s.pending,
 		MetricSample{Driver: driver, Metric: t.String() + "_w", TsMs: tsMs, Value: rawW},
 	)
-	if soc != nil {
+	if socFresh {
 		s.pending = append(s.pending,
 			MetricSample{Driver: driver, Metric: t.String() + "_soc", TsMs: tsMs, Value: *soc},
 		)

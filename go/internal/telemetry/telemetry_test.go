@@ -288,20 +288,100 @@ func TestStorePreservesSoCWhenMissing(t *testing.T) {
 	s := NewStore()
 	soc := 0.97
 	s.Update("ferroamp", DerBattery, -1500, &soc, nil)
-	if r := s.Get("ferroamp", DerBattery); r == nil || r.SoC == nil || *r.SoC != 0.97 {
+	r := s.Get("ferroamp", DerBattery)
+	if r == nil || r.SoC == nil || *r.SoC != 0.97 {
 		t.Fatalf("first update: SoC not stored, got %+v", r)
+	}
+	if r.SoCUpdatedAt.IsZero() || !r.SoCUpdatedAt.Equal(r.UpdatedAt) {
+		t.Fatalf("first update: SoC source time = %v, reading time = %v", r.SoCUpdatedAt, r.UpdatedAt)
+	}
+	firstSoCUpdatedAt := r.SoCUpdatedAt
+	if samples := s.FlushSamples(); len(samples) != 2 || samples[1].Metric != "battery_soc" {
+		t.Fatalf("first update samples = %+v, want power plus fresh SoC", samples)
 	}
 	// Next tick: power update only, no SoC.
 	s.Update("ferroamp", DerBattery, -1450, nil, nil)
-	r := s.Get("ferroamp", DerBattery)
+	r = s.Get("ferroamp", DerBattery)
 	if r == nil || r.SoC == nil || *r.SoC != 0.97 {
 		t.Errorf("SoC should be preserved across nil-update, got %+v", r)
+	}
+	if !r.SoCUpdatedAt.Equal(firstSoCUpdatedAt) {
+		t.Errorf("power-only update changed SoC source time: got %v want %v", r.SoCUpdatedAt, firstSoCUpdatedAt)
+	}
+	if samples := s.FlushSamples(); len(samples) != 1 || samples[0].Metric != "battery_w" {
+		t.Fatalf("power-only samples = %+v, want no synthetic SoC sample", samples)
 	}
 	// Fresh SoC overwrites.
 	soc2 := 0.95
 	s.Update("ferroamp", DerBattery, -1400, &soc2, nil)
-	if r := s.Get("ferroamp", DerBattery); r == nil || r.SoC == nil || *r.SoC != 0.95 {
+	r = s.Get("ferroamp", DerBattery)
+	if r == nil || r.SoC == nil || *r.SoC != 0.95 {
 		t.Errorf("fresh SoC should overwrite, got %+v", r)
+	}
+	if r == nil || !r.SoCUpdatedAt.Equal(r.UpdatedAt) {
+		t.Fatalf("fresh SoC source time = %v, reading time = %v", r.SoCUpdatedAt, r.UpdatedAt)
+	}
+	if samples := s.FlushSamples(); len(samples) != 2 || samples[1].Metric != "battery_soc" {
+		t.Fatalf("fresh update samples = %+v, want power plus SoC", samples)
+	}
+}
+
+func TestStorePreservesVehicleSoCWhenDriverReplaysCache(t *testing.T) {
+	s := NewStore()
+	freshSoC := 61.0
+	s.Update("tesla", DerVehicle, 0, &freshSoC, json.RawMessage(`{"soc_fresh":true}`))
+	first := s.Get("tesla", DerVehicle)
+	if first == nil || first.SoC == nil || first.SoCUpdatedAt.IsZero() {
+		t.Fatalf("fresh vehicle update = %+v", first)
+	}
+	firstSoCUpdatedAt := first.SoCUpdatedAt
+	if samples := s.FlushSamples(); len(samples) != 2 || samples[1].Metric != "vehicle_soc" {
+		t.Fatalf("fresh vehicle samples = %+v, want power plus SoC", samples)
+	}
+
+	cachedSoC := 62.0 // cached replays must not replace the last proven value
+	s.Update("tesla", DerVehicle, 0, &cachedSoC, json.RawMessage(`{"soc_fresh":false}`))
+	got := s.Get("tesla", DerVehicle)
+	if got == nil || got.SoC == nil || *got.SoC != freshSoC {
+		t.Fatalf("cached vehicle replay replaced SoC: %+v", got)
+	}
+	if !got.SoCUpdatedAt.Equal(firstSoCUpdatedAt) {
+		t.Fatalf("cached replay changed SoC observation time: got %v want %v", got.SoCUpdatedAt, firstSoCUpdatedAt)
+	}
+	if samples := s.FlushSamples(); len(samples) != 1 || samples[0].Metric != "vehicle_w" {
+		t.Fatalf("cached vehicle samples = %+v, want no synthetic SoC sample", samples)
+	}
+}
+
+func TestStoreFailsClosedOnInvalidVehicleSoCFreshness(t *testing.T) {
+	for _, data := range []json.RawMessage{
+		json.RawMessage(`{"soc_fresh":"yes"}`),
+		json.RawMessage(`{"soc_fresh":null}`),
+		json.RawMessage(`{`),
+	} {
+		s := NewStore()
+		soc := 61.0
+		s.Update("vehicle", DerVehicle, 0, &soc, data)
+		got := s.Get("vehicle", DerVehicle)
+		if got == nil || got.SoC != nil || !got.SoCUpdatedAt.IsZero() {
+			t.Fatalf("invalid freshness %q produced a fresh observation: %+v", data, got)
+		}
+		if samples := s.FlushSamples(); len(samples) != 1 || samples[0].Metric != "vehicle_w" {
+			t.Fatalf("invalid freshness %q samples = %+v, want power only", data, samples)
+		}
+	}
+}
+
+func TestStoreDropsCachedVehicleSoCWithoutFreshPredecessor(t *testing.T) {
+	s := NewStore()
+	cachedSoC := 61.0
+	s.Update("vehicle", DerVehicle, 0, &cachedSoC, json.RawMessage(`{"soc_fresh":false}`))
+	got := s.Get("vehicle", DerVehicle)
+	if got == nil || got.SoC != nil || !got.SoCUpdatedAt.IsZero() {
+		t.Fatalf("cached SoC without a fresh predecessor = %+v, want no SoC", got)
+	}
+	if samples := s.FlushSamples(); len(samples) != 1 || samples[0].Metric != "vehicle_w" {
+		t.Fatalf("cached first samples = %+v, want power only", samples)
 	}
 }
 

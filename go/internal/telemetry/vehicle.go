@@ -23,8 +23,8 @@ type VehiclePick struct {
 	SoCPct         float64 // bounded [0,100]
 	ChargeLimitPct float64 // bounded [0,100]
 	ChargingState  string
-	Stale          bool      // driver says "this is last-known, vehicle unreachable"
-	UpdatedAt      time.Time // wall-clock of the underlying reading
+	Stale          bool      // false for usable picks; retained in the result shape
+	UpdatedAt      time.Time // wall-clock of the last fresh SoC observation
 }
 
 // VehicleConnectedRank scores how likely a DerVehicle driver is to be
@@ -63,10 +63,12 @@ func VehicleConnectedRank(chargingState string) int {
 //   - SoC bounded to [0,100] — a misbehaving driver reporting 200 % or
 //     -50 % must not be able to overcharge or freeze EV charging.
 //   - ChargeLimitPct bounded to [0,100] — same risk.
-//   - Stale by `now − UpdatedAt > VehicleMaxAge` — wallclock check on
-//     the reading's own timestamp, even when the driver didn't set the
-//     `stale` flag. A driver that stops publishing mustn't keep the
-//     last-known SoC live forever.
+//   - Stale by `now − SoCUpdatedAt > VehicleMaxAge` — wallclock check on
+//     the last fresh SoC observation, even when newer power or metadata
+//     updates carry the last-known value forward. A driver that stops
+//     publishing SoC mustn't keep it live forever.
+//   - Explicit `stale=true` — a driver that knows its upstream value is stale
+//     can stop control from using it before the wallclock limit.
 //   - Driver health-online check — offline drivers contribute nothing.
 //
 // Lives in telemetry/ rather than api/ or cmd/ because both packages
@@ -112,7 +114,8 @@ func pickBestVehicle(s *Store, minRank int, now time.Time) VehiclePick {
 		if h := s.DriverHealth(vr.Driver); h == nil || !h.IsOnline() {
 			continue
 		}
-		if !vr.UpdatedAt.IsZero() && now.Sub(vr.UpdatedAt) > VehicleMaxAge {
+		socUpdatedAt := vr.SoCUpdatedAt
+		if socUpdatedAt.IsZero() || now.Sub(socUpdatedAt) > VehicleMaxAge {
 			// Reading is older than we're willing to trust as ground
 			// truth — driver probably stopped publishing. Skip rather
 			// than risk acting on a stale SoC.
@@ -126,11 +129,14 @@ func pickBestVehicle(s *Store, minRank int, now time.Time) VehiclePick {
 		if len(vr.Data) > 0 {
 			_ = json.Unmarshal(vr.Data, &meta)
 		}
+		if meta.Stale {
+			continue
+		}
 		rank := VehicleConnectedRank(meta.ChargingState)
 		if rank < 0 || rank < minRank {
 			continue
 		}
-		if rank < bestRank || (rank == bestRank && !vr.UpdatedAt.After(best.UpdatedAt)) {
+		if rank < bestRank || (rank == bestRank && !socUpdatedAt.After(best.UpdatedAt)) {
 			continue
 		}
 		soc := *vr.SoC
@@ -151,7 +157,7 @@ func pickBestVehicle(s *Store, minRank int, now time.Time) VehiclePick {
 			ChargeLimitPct: limit,
 			ChargingState:  meta.ChargingState,
 			Stale:          meta.Stale,
-			UpdatedAt:      vr.UpdatedAt,
+			UpdatedAt:      socUpdatedAt,
 		}
 		bestRank = rank
 	}
