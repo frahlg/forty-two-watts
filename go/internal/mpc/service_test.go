@@ -72,6 +72,35 @@ func TestBuildSlotsKeepsTwinWhenPredictionIsSane(t *testing.T) {
 	}
 }
 
+func TestLookupCloudBeforeFirstForecastDoesNotUseLaterRow(t *testing.T) {
+	firstTs := time.Date(2026, 4, 15, 10, 0, 0, 0, time.UTC).UnixMilli()
+	lastCloud := 91.0
+	forecasts := []state.ForecastPoint{
+		{SlotTsMs: firstTs, SlotLenMin: 60},
+		{SlotTsMs: firstTs + int64(time.Hour/time.Millisecond), SlotLenMin: 60, CloudCoverPct: &lastCloud},
+	}
+
+	got := lookupCloud(forecasts, firstTs-int64(15*time.Minute/time.Millisecond))
+	if got != 50 {
+		t.Fatalf("lookupCloud before first row = %.1f, want neutral prior 50", got)
+	}
+}
+
+func TestLookupPVBeforeFirstForecastReturnsZero(t *testing.T) {
+	firstTs := time.Date(2026, 4, 15, 10, 0, 0, 0, time.UTC).UnixMilli()
+	firstPV := 1200.0
+	lastPV := 2400.0
+	forecasts := []state.ForecastPoint{
+		{SlotTsMs: firstTs, SlotLenMin: 60, PVWEstimated: &firstPV},
+		{SlotTsMs: firstTs + int64(time.Hour/time.Millisecond), SlotLenMin: 60, PVWEstimated: &lastPV},
+	}
+
+	got := lookupPV(forecasts, firstTs-int64(15*time.Minute/time.Millisecond))
+	if got != 0 {
+		t.Fatalf("lookupPV before first row = %.1f, want 0", got)
+	}
+}
+
 // applyPVDownside is the Alt-2 safety mechanism: plan against forecast PV minus
 // k·σ (recent PV-forecast error std) so the DP doesn't run the battery down
 // betting on PV that may not arrive. The reserve emerges from the forecast

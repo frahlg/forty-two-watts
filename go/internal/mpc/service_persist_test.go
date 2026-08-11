@@ -135,6 +135,48 @@ func TestReplanWithoutSaveDiagDoesNotPanic(t *testing.T) {
 	_ = svc.Replan(context.Background())
 }
 
+func TestReplanLoadsHourlyWeatherCoveringCurrentPriceSlot(t *testing.T) {
+	st, err := state.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	now := time.Now().UTC().Truncate(time.Minute)
+	priceStart := now.Add(-5 * time.Minute)
+	if err := st.SavePrices([]state.PricePoint{{
+		Zone: "SE3", SlotTsMs: priceStart.UnixMilli(), SlotLenMin: 15,
+		SpotOreKwh: 50, TotalOreKwh: 100, Source: "test",
+		FetchedAtMs: now.UnixMilli(),
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	pvW := 1234.0
+	if err := st.SaveForecasts([]state.ForecastPoint{{
+		SlotTsMs:   priceStart.Add(-30 * time.Minute).UnixMilli(),
+		SlotLenMin: 60, PVWEstimated: &pvW, Source: "weather-test",
+		FetchedAtMs: now.Add(-35 * time.Minute).UnixMilli(),
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	svc := New(st, nil, "SE3", Params{
+		Mode: ModeSelfConsumption, SoCLevels: 11, CapacityWh: 10000,
+		SoCMinPct: 10, SoCMaxPct: 95, InitialSoCPct: 50,
+		ActionLevels: 5, MaxChargeW: 2000, MaxDischargeW: 2000,
+		ChargeEfficiency: 0.95, DischargeEfficiency: 0.95,
+	})
+	svc.BaseLoad = 500
+
+	plan := svc.Replan(context.Background())
+	if plan == nil || len(plan.Actions) != 1 {
+		t.Fatalf("Replan returned %#v, want one action", plan)
+	}
+	if got := plan.Actions[0].PVW; got != -pvW {
+		t.Fatalf("current slot PVW = %.1f, want %.1f from covering hourly row", got, -pvW)
+	}
+}
+
 func TestPrimaryOptimizerKeepsDPAsDiagnosticShadow(t *testing.T) {
 	st, err := state.Open(filepath.Join(t.TempDir(), "t.db"))
 	if err != nil {

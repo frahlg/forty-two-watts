@@ -44,6 +44,11 @@ type LoadPredictor func(t time.Time) float64
 // Leave nil to cap the plan horizon at what's been published.
 type PricePredictor func(zone string, t time.Time) float64
 
+// plannerWeatherLookback keeps the hourly weather row that can overlap the
+// first price slot in a plan or twin-drift comparison. Production forecast
+// writers store 60-minute rows.
+const plannerWeatherLookback = time.Hour
+
 // LoadpointProbe returns the EV loadpoint state the DP should extend
 // itself with. Called once per replan with the slot length (minutes)
 // the DP will actually use — so the probe can map any user wall-clock
@@ -892,7 +897,7 @@ func (s *Service) checkTwinDrift(ctx context.Context) {
 	var forecasts []state.ForecastPoint
 	if s.Store != nil && pvFn != nil {
 		untilMs := pp.slotStart[len(pp.slotStart)-1].UnixMilli() + 24*3600*1000
-		sinceMs := pp.slotStart[0].UnixMilli() - 15*60*1000
+		sinceMs := pp.slotStart[0].Add(-plannerWeatherLookback).UnixMilli()
 		if fs, err := s.Store.LoadForecasts(sinceMs, untilMs); err == nil {
 			forecasts = fs
 		}
@@ -1073,7 +1078,12 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 		return nil
 	}
 
-	forecasts, err := s.Store.LoadForecasts(sinceMs, untilMs)
+	// Price rows may start up to 15 minutes before now, while weather rows
+	// are normally hourly. Include the preceding weather hour so the row that
+	// covers an in-flight price slot is not dropped just because its own start
+	// is older than the price margin.
+	forecastSinceMs := sinceMs - plannerWeatherLookback.Milliseconds()
+	forecasts, err := s.Store.LoadForecasts(forecastSinceMs, untilMs)
 	if err != nil {
 		slog.Warn("mpc: load forecasts", "err", err)
 		// continue without PV forecast
@@ -1911,10 +1921,17 @@ func lookupCloud(forecasts []state.ForecastPoint, ts int64) float64 {
 			}
 			return 50
 		}
-		if ts < f.SlotTsMs && i > 0 {
+		if ts < f.SlotTsMs {
+			if i == 0 {
+				if f.CloudCoverPct != nil {
+					return *f.CloudCoverPct
+				}
+				return 50
+			}
 			if prev := forecasts[i-1]; prev.CloudCoverPct != nil {
 				return *prev.CloudCoverPct
 			}
+			return 50
 		}
 	}
 	if last := forecasts[len(forecasts)-1]; last.CloudCoverPct != nil {
@@ -1947,10 +1964,14 @@ func lookupPV(forecasts []state.ForecastPoint, ts int64) float64 {
 		}
 		// Fall back: if between rows, use the preceding row (interpolation
 		// within the forecast range only).
-		if ts < f.SlotTsMs && i > 0 {
+		if ts < f.SlotTsMs {
+			if i == 0 {
+				return 0
+			}
 			if prev := forecasts[i-1]; prev.PVWEstimated != nil {
 				return *prev.PVWEstimated
 			}
+			return 0
 		}
 	}
 	// After last row — return 0 (no forecast coverage).

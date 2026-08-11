@@ -378,6 +378,45 @@ func TestTwinDriftReplanIgnoresTinyShift(t *testing.T) {
 	}
 }
 
+func TestTwinDriftKeepsWeatherRowCoveringFirstSlot(t *testing.T) {
+	s := twinDriftService(t)
+	slotStart := time.Now().UTC().Truncate(time.Hour).Add(45 * time.Minute)
+	coveringCloud := 10.0
+	nextCloud := 90.0
+	if err := s.Store.SaveForecasts([]state.ForecastPoint{
+		{
+			SlotTsMs:   slotStart.Add(-45 * time.Minute).UnixMilli(),
+			SlotLenMin: 60, CloudCoverPct: &coveringCloud,
+			Source: "weather-test", FetchedAtMs: time.Now().UnixMilli(),
+		},
+		{
+			SlotTsMs:   slotStart.Add(15 * time.Minute).UnixMilli(),
+			SlotLenMin: 60, CloudCoverPct: &nextCloud,
+			Source: "weather-test", FetchedAtMs: time.Now().UnixMilli(),
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	s.plannedPredictions = &plannedPredictions{
+		pv:        []float64{coveringCloud * 100},
+		load:      []float64{0},
+		slotStart: []time.Time{slotStart},
+		builtAt:   time.Now(),
+	}
+	s.PV = func(_ time.Time, cloud float64) float64 { return cloud * 100 }
+	s.Load = nil
+	s.TwinDriftPVW = 100
+	s.TwinDriftLoadW = 0
+	s.last = &Plan{GeneratedAtMs: time.Now().UnixMilli()}
+	s.lastReason = "scheduled"
+
+	s.checkTwinDrift(context.Background())
+	if s.lastReason != "scheduled" {
+		t.Fatalf("covering weather row must not cause false twin drift, got %q", s.lastReason)
+	}
+}
+
 func TestTwinDriftReplanRespectsCooldown(t *testing.T) {
 	s := twinDriftService(t)
 	s.MinReplanGap = 30 * time.Second
