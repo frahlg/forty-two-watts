@@ -849,6 +849,7 @@ func TestSlotDirectiveAt(t *testing.T) {
 			Mode: ModeArbitrage, CapacityWh: 10000, ChargeEfficiency: 1,
 		},
 		last: &Plan{
+			DecisionID:    testDecisionID1,
 			GeneratedAtMs: now.Add(-time.Minute).UnixMilli(),
 			Actions: []Action{
 				{
@@ -874,6 +875,9 @@ func TestSlotDirectiveAt(t *testing.T) {
 	d, ok := s.SlotDirectiveAt(now)
 	if !ok {
 		t.Fatal("SlotDirectiveAt returned ok=false, want true")
+	}
+	if d.DecisionID != testDecisionID1 {
+		t.Errorf("DecisionID = %q, want %q", d.DecisionID, testDecisionID1)
 	}
 	if want := 200.0; math.Abs(d.BatteryEnergyWh-want) > 0.01 {
 		t.Errorf("BatteryEnergyWh = %f, want %f", d.BatteryEnergyWh, want)

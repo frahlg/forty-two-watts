@@ -225,14 +225,20 @@ func TestReplanNewestRequestWinsWhenOlderSolveFinishesLast(t *testing.T) {
 	svc.Horizon = 4 * time.Hour
 	svc.BaseLoad = 500
 	svc.Optimizer = optimizer
+	var decisionIDCalls atomic.Int32
+	svc.decisionIDFactory = func() string {
+		decisionIDCalls.Add(1)
+		return testDecisionID1
+	}
 
 	type savedDiagnostic struct {
-		mode   Mode
-		reason string
+		mode       Mode
+		reason     string
+		decisionID string
 	}
 	saved := make(chan savedDiagnostic, 2)
 	svc.SaveDiag = func(d *Diagnostic, reason string) error {
-		saved <- savedDiagnostic{mode: d.Params.Mode, reason: reason}
+		saved <- savedDiagnostic{mode: d.Params.Mode, reason: reason, decisionID: d.DecisionID}
 		return nil
 	}
 
@@ -256,7 +262,10 @@ func TestReplanNewestRequestWinsWhenOlderSolveFinishesLast(t *testing.T) {
 	if published == nil || published.Solver == nil || published.Solver.Status != "new-arbitrage" {
 		t.Fatalf("newer plan was not published: %+v", published)
 	}
-	if got := <-saved; got.mode != ModeArbitrage || got.reason != "mode_changed" {
+	if published.DecisionID != testDecisionID1 {
+		t.Fatalf("published decision ID = %q, want %q", published.DecisionID, testDecisionID1)
+	}
+	if got := <-saved; got.mode != ModeArbitrage || got.reason != "mode_changed" || got.decisionID != published.DecisionID {
 		t.Fatalf("saved diagnostic = %+v, want arbitrage/mode_changed", got)
 	}
 
@@ -275,6 +284,9 @@ func TestReplanNewestRequestWinsWhenOlderSolveFinishesLast(t *testing.T) {
 	}
 	if latest := svc.Latest(); latest != published {
 		t.Fatal("older solve replaced the newer published plan")
+	}
+	if got := decisionIDCalls.Load(); got != 1 {
+		t.Fatalf("decision ID factory calls = %d, want 1 accepted plan", got)
 	}
 	if d := svc.Diagnose(); d == nil || d.Params.Mode != ModeArbitrage || d.LastReason != "mode_changed" {
 		t.Fatalf("diagnostic was replaced by the older solve: %+v", d)

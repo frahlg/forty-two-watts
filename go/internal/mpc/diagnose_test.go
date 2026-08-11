@@ -191,6 +191,7 @@ func TestRestoreDiagnosticRehydratesActivePlan(t *testing.T) {
 	now := time.Now()
 	start := now.Add(-5 * time.Minute).Truncate(time.Minute)
 	d := &Diagnostic{
+		DecisionID:            testDecisionID1,
 		ComputedAtMs:          now.Add(-1 * time.Minute).UnixMilli(),
 		InputProvenanceSchema: inputProvenanceSchemaVersion,
 		Zone:                  "SE4",
@@ -257,6 +258,7 @@ func TestRestoreDiagnosticRehydratesActivePlan(t *testing.T) {
 		t.Fatal(err)
 	}
 	var wire struct {
+		DecisionID            string                       `json:"decision_id"`
 		InputProvenanceSchema int                          `json:"input_provenance_schema"`
 		Slots                 []map[string]json.RawMessage `json:"slots"`
 	}
@@ -265,6 +267,9 @@ func TestRestoreDiagnosticRehydratesActivePlan(t *testing.T) {
 	}
 	if len(wire.Slots) == 0 {
 		t.Fatal("diagnostic JSON has no slots")
+	}
+	if wire.DecisionID != testDecisionID1 {
+		t.Fatalf("diagnostic JSON decision ID = %q, want %q", wire.DecisionID, testDecisionID1)
 	}
 	if wire.InputProvenanceSchema != inputProvenanceSchemaVersion {
 		t.Fatalf("diagnostic JSON provenance schema = %d, want %d", wire.InputProvenanceSchema, inputProvenanceSchemaVersion)
@@ -311,12 +316,19 @@ func TestRestoreDiagnosticRehydratesActivePlan(t *testing.T) {
 	if latest.GeneratedAtMs != d.ComputedAtMs {
 		t.Fatalf("GeneratedAtMs = %d, want %d", latest.GeneratedAtMs, d.ComputedAtMs)
 	}
+	if latest.DecisionID != d.DecisionID {
+		t.Fatalf("restored DecisionID = %q, want %q", latest.DecisionID, d.DecisionID)
+	}
 	dir, ok := svc.SlotDirectiveAt(now)
 	if !ok {
 		t.Fatal("SlotDirectiveAt returned ok=false after restore")
 	}
 	if dir.BatteryEnergyWh != 0 {
 		t.Fatalf("BatteryEnergyWh = %v, want 0", dir.BatteryEnergyWh)
+	}
+	if dir.DecisionID != d.DecisionID || dir.SlotStart.UnixMilli() != d.Slots[0].SlotStartMs {
+		t.Fatalf("directive identity = (%q, %d), want (%q, %d)",
+			dir.DecisionID, dir.SlotStart.UnixMilli(), d.DecisionID, d.Slots[0].SlotStartMs)
 	}
 	if dir.GridW != -3600 {
 		t.Fatalf("GridW = %v, want -3600", dir.GridW)
@@ -335,12 +347,66 @@ func TestRestoreDiagnosticRehydratesActivePlan(t *testing.T) {
 	if diag == nil || len(diag.Slots) != 2 {
 		t.Fatalf("Diagnose after restore = %+v, want 2 slots", diag)
 	}
+	if diag.DecisionID != d.DecisionID {
+		t.Fatalf("diagnostic decision ID after restore = %q, want %q", diag.DecisionID, d.DecisionID)
+	}
 	if diag.InputProvenanceSchema != inputProvenanceSchemaVersion {
 		t.Fatalf("input provenance schema after JSON restore = %d, want %d", diag.InputProvenanceSchema, inputProvenanceSchemaVersion)
 	}
 	if row := diag.Slots[0]; row.PriceInputSource != "entsoe" || row.PriceInputAvailableAtMs != 111 ||
 		row.WeatherRowSource != "met.no" || row.WeatherRowAvailableAtMs != 222 {
 		t.Fatalf("input provenance after JSON restore = %+v", row)
+	}
+}
+
+func TestRestoreDiagnosticRejectsInvalidDecisionIdentity(t *testing.T) {
+	now := time.Now()
+	start := now.Add(-5 * time.Minute).Truncate(time.Minute).UnixMilli()
+	validSlot := DiagnosticSlot{SlotStartMs: start, LenMin: 15}
+	canonicalID := "550e8400-e29b-41d4-a716-446655440000"
+	tests := []struct {
+		name       string
+		decisionID string
+		slots      []DiagnosticSlot
+	}{
+		{name: "invalid uuid", decisionID: "not-a-uuid", slots: []DiagnosticSlot{validSlot}},
+		{name: "nil uuid", decisionID: "00000000-0000-0000-0000-000000000000", slots: []DiagnosticSlot{validSlot}},
+		{name: "uppercase uuid", decisionID: "550E8400-E29B-41D4-A716-446655440000", slots: []DiagnosticSlot{validSlot}},
+		{name: "compact uuid", decisionID: "550e8400e29b41d4a716446655440000", slots: []DiagnosticSlot{validSlot}},
+		{name: "braced uuid", decisionID: "{" + canonicalID + "}", slots: []DiagnosticSlot{validSlot}},
+		{name: "urn uuid", decisionID: "urn:uuid:" + canonicalID, slots: []DiagnosticSlot{validSlot}},
+		{name: "duplicate slot start", decisionID: testDecisionID1, slots: []DiagnosticSlot{validSlot, validSlot}},
+		{name: "overlapping slots", decisionID: testDecisionID1, slots: []DiagnosticSlot{
+			validSlot,
+			{SlotStartMs: start + 10*60*1000, LenMin: 15},
+		}},
+		{name: "out of order slots", decisionID: testDecisionID1, slots: []DiagnosticSlot{
+			{SlotStartMs: start + 15*60*1000, LenMin: 15},
+			validSlot,
+		}},
+		{name: "inconsistent slot end", decisionID: testDecisionID1, slots: []DiagnosticSlot{{
+			SlotStartMs: start, SlotEndMs: start + 20*60*1000, LenMin: 15,
+		}}},
+		{name: "non-positive slot start", decisionID: testDecisionID1, slots: []DiagnosticSlot{{SlotStartMs: 0, LenMin: 15}}},
+		{name: "invalid slot length", decisionID: testDecisionID1, slots: []DiagnosticSlot{{SlotStartMs: start}}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			d := &Diagnostic{
+				DecisionID:     tc.decisionID,
+				ComputedAtMs:   now.Add(-time.Minute).UnixMilli(),
+				LastReplanAtMs: now.Add(-time.Minute).UnixMilli(),
+				Params:         DiagnosticParams{Mode: ModeSelfConsumption},
+				Slots:          tc.slots,
+			}
+			svc := &Service{Defaults: Params{Mode: ModeSelfConsumption}}
+			if svc.RestoreDiagnostic(d, now, "test") {
+				t.Fatalf("RestoreDiagnostic accepted invalid identity: %+v", d)
+			}
+			if svc.Latest() != nil {
+				t.Fatal("invalid identified diagnostic published an active plan")
+			}
+		})
 	}
 }
 
@@ -419,6 +485,9 @@ func TestRestoreDiagnosticMergesNewerDefaultsForMissingFields(t *testing.T) {
 	if diag == nil {
 		t.Fatal("Diagnose returned nil after restore")
 	}
+	if diag.DecisionID != "" {
+		t.Errorf("legacy snapshot gained decision ID %q", diag.DecisionID)
+	}
 	if diag.Params.PVChargeBonusOreKwh != 30 {
 		t.Errorf("PVChargeBonusOreKwh after restore = %v, want 30 (merged from Defaults; snapshot had 0)", diag.Params.PVChargeBonusOreKwh)
 	}
@@ -439,6 +508,9 @@ func TestRestoreDiagnosticMergesNewerDefaultsForMissingFields(t *testing.T) {
 	}
 	if _, ok := legacyWire["input_provenance_schema"]; ok {
 		t.Error("legacy diagnostic JSON gained input_provenance_schema")
+	}
+	if _, ok := legacyWire["decision_id"]; ok {
+		t.Error("legacy diagnostic JSON gained decision_id")
 	}
 	var legacySlots []map[string]json.RawMessage
 	if err := json.Unmarshal(legacyWire["slots"], &legacySlots); err != nil {

@@ -3,6 +3,8 @@ package mpc
 import (
 	"encoding/json"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // DiagnosticSlot joins the per-slot inputs the DP saw with the action
@@ -88,6 +90,7 @@ type DiagnosticParams struct {
 // Diagnostic is the full post-mortem of the most recent Optimize call.
 // Returned by Service.Diagnose for the /api/mpc/diagnose endpoint.
 type Diagnostic struct {
+	DecisionID            string            `json:"decision_id,omitempty"`
 	ComputedAtMs          int64             `json:"computed_at_ms"`
 	InputProvenanceSchema int               `json:"input_provenance_schema,omitempty"`
 	Zone                  string            `json:"zone"`
@@ -185,6 +188,7 @@ func buildDiagnostic(plan *Plan, slots []Slot, p Params, zone string,
 		loadpointID = p.Loadpoint.ID
 	}
 	return &Diagnostic{
+		DecisionID:            plan.DecisionID,
 		ComputedAtMs:          plan.GeneratedAtMs,
 		InputProvenanceSchema: inputProvenanceSchema,
 		Zone:                  zone,
@@ -300,6 +304,13 @@ func planFromDiagnostic(d *Diagnostic) (*Plan, []Slot, Params, time.Time, bool) 
 	if d == nil || d.InputProvenanceSchema < 0 || d.InputProvenanceSchema > inputProvenanceSchemaVersion {
 		return nil, nil, Params{}, time.Time{}, false
 	}
+	identified := d.DecisionID != ""
+	if identified {
+		parsed, err := uuid.Parse(d.DecisionID)
+		if err != nil || parsed == uuid.Nil || parsed.Variant() != uuid.RFC4122 || d.DecisionID != parsed.String() {
+			return nil, nil, Params{}, time.Time{}, false
+		}
+	}
 	generatedAtMs := d.ComputedAtMs
 	if generatedAtMs <= 0 {
 		generatedAtMs = d.LastReplanAtMs
@@ -336,13 +347,19 @@ func planFromDiagnostic(d *Diagnostic) (*Plan, []Slot, Params, time.Time, bool) 
 	actions := make([]Action, 0, len(d.Slots))
 	for _, ds := range d.Slots {
 		if ds.SlotStartMs <= 0 {
+			if identified {
+				return nil, nil, Params{}, time.Time{}, false
+			}
 			continue
 		}
 		lenMin := ds.LenMin
-		if lenMin <= 0 && ds.SlotEndMs > ds.SlotStartMs {
+		if !identified && lenMin <= 0 && ds.SlotEndMs > ds.SlotStartMs {
 			lenMin = int((ds.SlotEndMs - ds.SlotStartMs) / 60000)
 		}
 		if lenMin <= 0 {
+			if identified {
+				return nil, nil, Params{}, time.Time{}, false
+			}
 			continue
 		}
 		slots = append(slots, Slot{
@@ -359,7 +376,7 @@ func planFromDiagnostic(d *Diagnostic) (*Plan, []Slot, Params, time.Time, bool) 
 			WeatherRowSource:        ds.WeatherRowSource,
 			WeatherRowAvailableAtMs: ds.WeatherRowAvailableAtMs,
 		})
-		actions = append(actions, Action{
+		action := Action{
 			SlotStartMs:         ds.SlotStartMs,
 			SlotLenMin:          lenMin,
 			PriceOre:            ds.PriceOre,
@@ -380,16 +397,29 @@ func planFromDiagnostic(d *Diagnostic) (*Plan, []Slot, Params, time.Time, bool) 
 			LoadpointSoCPctByID: ds.LoadpointSoCPctByID,
 			StoragePowerW:       ds.StoragePowerW,
 			StorageEnergyWh:     ds.StorageEnergyWh,
-		})
+		}
+		if identified && ds.SlotEndMs > 0 {
+			slotEndMs, err := checkedSlotEndMs(action.SlotStartMs, action.SlotLenMin)
+			if err != nil || ds.SlotEndMs != slotEndMs {
+				return nil, nil, Params{}, time.Time{}, false
+			}
+		}
+		actions = append(actions, action)
 	}
 	if len(actions) == 0 {
 		return nil, nil, Params{}, time.Time{}, false
+	}
+	if identified {
+		if err := validatePlanSlotAlignment(slots, actions); err != nil {
+			return nil, nil, Params{}, time.Time{}, false
+		}
 	}
 	horizon := d.Horizon
 	if horizon <= 0 {
 		horizon = len(actions)
 	}
 	plan := &Plan{
+		DecisionID:         d.DecisionID,
 		GeneratedAtMs:      generatedAtMs,
 		Mode:               params.Mode,
 		HorizonSlots:       horizon,

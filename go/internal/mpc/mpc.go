@@ -341,6 +341,12 @@ type Baselines struct {
 
 // Plan is the output.
 type Plan struct {
+	// DecisionID identifies one plan accepted by the Core service. It is assigned
+	// after the latest-generation gate, so solver attempts that never become
+	// active do not get an execution-facing identity. Together with an
+	// Action's SlotStartMs it forms the stable key for one planned decision.
+	// Direct Optimize callers leave it empty; the service fills it on publish.
+	DecisionID         string            `json:"decision_id,omitempty"`
 	GeneratedAtMs      int64             `json:"generated_at_ms"`
 	Mode               Mode              `json:"mode"`
 	HorizonSlots       int               `json:"horizon_slots"`

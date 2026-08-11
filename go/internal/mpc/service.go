@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/srcfl/ftw/go/internal/state"
 	"github.com/srcfl/ftw/go/internal/telemetry"
 )
@@ -190,6 +191,9 @@ type Service struct {
 	activeReplanCancel     context.CancelFunc
 	stopping               bool
 	replanWG               sync.WaitGroup
+	// decisionIDFactory is a test seam. Production uses a random UUID for every
+	// accepted plan. It is read only while mu is held at the publish gate.
+	decisionIDFactory func() string
 
 	// ExportBonusOreKwh and ExportFeeOreKwh flow in from config.Price.
 	// Used to compute default ExportOrePerKWh when Params doesn't set it.
@@ -287,6 +291,7 @@ func New(st *state.Store, tl *telemetry.Store, zone string, p Params) *Service {
 		TwinDriftLoadW:               200,
 		TwinDriftHorizonSlots:        16, // ~4 h at 15-min slots — short enough to keep RMSE meaningful
 		RecourseNonAnticipativeSlots: 1,
+		decisionIDFactory:            uuid.NewString,
 		stop:                         make(chan struct{}),
 		done:                         make(chan struct{}),
 		stopped:                      make(chan struct{}),
@@ -375,6 +380,11 @@ const MaxPlanAge = 30 * time.Minute
 // = discharge. Magnitude is the total energy expected to move into (or
 // out of) the battery fleet across the slot.
 type SlotDirective struct {
+	// DecisionID pairs this slot instruction with the accepted plan that
+	// produced it. DecisionID plus SlotStart identifies the planned action;
+	// later control and command layers can carry that pair without relying on
+	// wall-clock generation times.
+	DecisionID      string
 	SlotStart       time.Time
 	SlotEnd         time.Time
 	BatteryEnergyWh float64 // total energy for the slot (site-signed)
@@ -456,6 +466,7 @@ func (s *Service) SlotDirectiveAt(now time.Time) (SlotDirective, bool) {
 		// energy_wh = power_w * hours. a.SlotLenMin/60 gives hours.
 		energyWh := a.BatteryW * float64(a.SlotLenMin) / 60.0
 		d := SlotDirective{
+			DecisionID:             p.DecisionID,
 			SlotStart:              time.UnixMilli(a.SlotStartMs),
 			SlotEnd:                time.UnixMilli(endMs),
 			BatteryEnergyWh:        energyWh,
@@ -1093,6 +1104,10 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 	if len(slots) == 0 {
 		return nil
 	}
+	if err := validateSlotChronology(slots); err != nil {
+		slog.Error("mpc: invalid slot chronology; keeping previous plan", "err", err)
+		return s.Latest()
+	}
 	// The mathematical optimizer receives raw PV plus explicit scenarios. Keep
 	// a separate downside copy for the emergency Go-DP path, preserving the
 	// previous safety behavior if the worker is unavailable.
@@ -1361,6 +1376,14 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 			}
 		}
 	}
+	if err := validatePlanSlotAlignment(slots, plan.Actions); err != nil {
+		slog.Error("mpc: rejected plan with invalid slot timeline",
+			"generation", request.generation,
+			"mode", p.Mode,
+			"reason", request.reason,
+			"err", err)
+		return s.Latest()
+	}
 
 	// Tag each action with the effective EMS mode so the UI can render
 	// a mode-band showing which strategy drives each slot.
@@ -1402,6 +1425,7 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 			"reason", request.reason)
 		return s.Latest()
 	}
+	plan.DecisionID = s.nextDecisionIDLocked()
 	if publishShadow {
 		if s.shadowEvaluator == nil {
 			s.shadowEvaluator = newStatefulShadowEvaluator()
@@ -1444,6 +1468,7 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 		meanConf = sumConf / float64(n)
 	}
 	slog.Info("mpc: replanned",
+		"decision_id", plan.DecisionID,
 		"slots", len(slots),
 		"soc_start", p.InitialSoCPct,
 		"cost_ore", plan.TotalCostOre,
@@ -1473,6 +1498,18 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 		}
 	}
 	return &plan
+}
+
+// nextDecisionIDLocked returns an opaque ID for a plan that has passed the
+// latest-generation publish gate. Callers hold s.mu so tests can replace the
+// factory without adding another lock to the replan hot path.
+func (s *Service) nextDecisionIDLocked() string {
+	if s.decisionIDFactory != nil {
+		if id := s.decisionIDFactory(); id != "" {
+			return id
+		}
+	}
+	return uuid.NewString()
 }
 
 // observeShadow samples realized exogenous power for closed-loop scoring. It
