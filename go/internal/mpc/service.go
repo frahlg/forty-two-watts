@@ -1642,9 +1642,11 @@ func buildSlots(prices []state.PricePoint, forecasts []state.ForecastPoint, base
 		slotMidMs := pr.SlotTsMs + int64(slotLen)*30*1000 // start + half-slot in ms
 		slotMidT := time.UnixMilli(slotMidMs).UTC()
 		var pvW float64
-		forecastPVW := lookupPV(forecasts, pr.SlotTsMs)
+		forecastPVW, forecastInput := lookupPVInput(forecasts, pr.SlotTsMs)
+		var weatherInput *state.ForecastPoint
 		if pv != nil {
-			cloud := lookupCloud(forecasts, pr.SlotTsMs)
+			cloud, cloudInput := lookupCloudInput(forecasts, pr.SlotTsMs)
+			weatherInput = cloudInput
 			radiationBacked := lookupHasRadiation(forecasts, pr.SlotTsMs)
 			base := pv(slotT, cloud)
 			if pvCorrect != nil {
@@ -1660,6 +1662,7 @@ func buildSlots(prices []state.PricePoint, forecasts []state.ForecastPoint, base
 			}
 			pvW = selectPlannerPVW(forecastPVW, base, radiationBacked)
 		} else {
+			weatherInput = forecastInput
 			pvW = forecastPVW
 		}
 		loadW := baseLoad
@@ -1673,15 +1676,23 @@ func buildSlots(prices []state.PricePoint, forecasts []state.ForecastPoint, base
 		if pr.Source == "forecast" {
 			conf = 0.6
 		}
-		out = append(out, Slot{
-			StartMs:    pr.SlotTsMs,
-			LenMin:     slotLen,
-			PriceOre:   pr.TotalOreKwh,
-			SpotOre:    pr.SpotOreKwh,
-			PVW:        -math.Abs(pvW),
-			LoadW:      loadW,
-			Confidence: conf,
-		})
+		slot := Slot{
+			StartMs:                 pr.SlotTsMs,
+			LenMin:                  slotLen,
+			PriceOre:                pr.TotalOreKwh,
+			SpotOre:                 pr.SpotOreKwh,
+			PVW:                     -math.Abs(pvW),
+			LoadW:                   loadW,
+			Confidence:              conf,
+			InputProvenanceSchema:   inputProvenanceSchemaVersion,
+			PriceInputSource:        pr.Source,
+			PriceInputAvailableAtMs: pr.FetchedAtMs,
+		}
+		if weatherInput != nil {
+			slot.WeatherRowSource = weatherInput.Source
+			slot.WeatherRowAvailableAtMs = weatherInput.FetchedAtMs
+		}
+		out = append(out, slot)
 	}
 	return out
 }
@@ -1906,10 +1917,20 @@ func lookupHasRadiation(forecasts []state.ForecastPoint, ts int64) bool {
 // `ts`, falling back to the nearest neighbour. 50% is the neutral
 // prior if no forecast is available at all.
 func lookupCloud(forecasts []state.ForecastPoint, ts int64) float64 {
+	cloud, _ := lookupCloudInput(forecasts, ts)
+	return cloud
+}
+
+// lookupCloudInput returns the cloud value and the cached row consulted for
+// that value. A row with no cloud value still counts as consulted and yields
+// the neutral 50% prior; this prevents a later row from being mislabeled as
+// the slot's weather input.
+func lookupCloudInput(forecasts []state.ForecastPoint, ts int64) (float64, *state.ForecastPoint) {
 	if len(forecasts) == 0 {
-		return 50
+		return 50, nil
 	}
-	for i, f := range forecasts {
+	for i := range forecasts {
+		f := &forecasts[i]
 		slotLen := f.SlotLenMin
 		if slotLen <= 0 {
 			slotLen = 60
@@ -1917,27 +1938,29 @@ func lookupCloud(forecasts []state.ForecastPoint, ts int64) float64 {
 		end := f.SlotTsMs + int64(slotLen)*60*1000
 		if ts >= f.SlotTsMs && ts < end {
 			if f.CloudCoverPct != nil {
-				return *f.CloudCoverPct
+				return *f.CloudCoverPct, f
 			}
-			return 50
+			return 50, f
 		}
 		if ts < f.SlotTsMs {
 			if i == 0 {
 				if f.CloudCoverPct != nil {
-					return *f.CloudCoverPct
+					return *f.CloudCoverPct, f
 				}
-				return 50
+				return 50, f
 			}
-			if prev := forecasts[i-1]; prev.CloudCoverPct != nil {
-				return *prev.CloudCoverPct
+			prev := &forecasts[i-1]
+			if prev.CloudCoverPct != nil {
+				return *prev.CloudCoverPct, prev
 			}
-			return 50
+			return 50, prev
 		}
 	}
-	if last := forecasts[len(forecasts)-1]; last.CloudCoverPct != nil {
-		return *last.CloudCoverPct
+	last := &forecasts[len(forecasts)-1]
+	if last.CloudCoverPct != nil {
+		return *last.CloudCoverPct, last
 	}
-	return 50
+	return 50, last
 }
 
 // lookupPV finds the forecast row whose slot covers ts and returns its PV
@@ -1946,11 +1969,20 @@ func lookupCloud(forecasts []state.ForecastPoint, ts int64) float64 {
 // forecast slot, because doing so would project stale PV into nighttime or
 // far-future slots where the forecast didn't cover.
 func lookupPV(forecasts []state.ForecastPoint, ts int64) float64 {
+	pvW, _ := lookupPVInput(forecasts, ts)
+	return pvW
+}
+
+// lookupPVInput returns the cached row used for the direct PV estimate. It
+// returns no row outside forecast coverage because lookupPV intentionally does
+// not carry PV backward before the first row or forward after the last row.
+func lookupPVInput(forecasts []state.ForecastPoint, ts int64) (float64, *state.ForecastPoint) {
 	if len(forecasts) == 0 {
-		return 0
+		return 0, nil
 	}
 	// Binary-search would be faster, but len is typically ≤ 49 (met.no).
-	for i, f := range forecasts {
+	for i := range forecasts {
+		f := &forecasts[i]
 		slotLen := f.SlotLenMin
 		if slotLen <= 0 {
 			slotLen = 60
@@ -1958,24 +1990,25 @@ func lookupPV(forecasts []state.ForecastPoint, ts int64) float64 {
 		end := f.SlotTsMs + int64(slotLen)*60*1000
 		if ts >= f.SlotTsMs && ts < end {
 			if f.PVWEstimated != nil {
-				return *f.PVWEstimated
+				return *f.PVWEstimated, f
 			}
-			return 0
+			return 0, f
 		}
 		// Fall back: if between rows, use the preceding row (interpolation
 		// within the forecast range only).
 		if ts < f.SlotTsMs {
 			if i == 0 {
-				return 0
+				return 0, nil
 			}
-			if prev := forecasts[i-1]; prev.PVWEstimated != nil {
-				return *prev.PVWEstimated
+			prev := &forecasts[i-1]
+			if prev.PVWEstimated != nil {
+				return *prev.PVWEstimated, prev
 			}
-			return 0
+			return 0, prev
 		}
 	}
 	// After last row — return 0 (no forecast coverage).
-	return 0
+	return 0, nil
 }
 
 // currentSoCPct averages SoC across battery readings in the telemetry store.

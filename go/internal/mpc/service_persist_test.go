@@ -3,6 +3,7 @@ package mpc
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
@@ -12,6 +13,14 @@ import (
 )
 
 type testPrimaryOptimizer struct{}
+
+type failingPrimaryOptimizer struct{}
+
+func (failingPrimaryOptimizer) Optimize(context.Context, []Slot, Params) (Plan, error) {
+	return Plan{}, errors.New("test optimizer failure")
+}
+
+func (failingPrimaryOptimizer) Close() error { return nil }
 
 func (testPrimaryOptimizer) Optimize(_ context.Context, slots []Slot, p Params) (Plan, error) {
 	plan := Optimize(slots, p)
@@ -56,17 +65,29 @@ func TestReplanCallsSaveDiag(t *testing.T) {
 	}
 	defer st.Close()
 
-	// Seed a few price rows so buildSlots produces a non-empty plan.
-	now := time.Now().UTC().Truncate(time.Hour)
+	// Seed price and weather rows with fixed provenance. The weather row starts
+	// before the price query margin but still covers the first price slot.
+	now := time.Now().UTC().Truncate(time.Minute)
+	priceStart := now.Add(-5 * time.Minute)
+	priceFetchedAt := now.Add(-10 * time.Minute).UnixMilli()
 	for i := 0; i < 4; i++ {
 		err := st.SavePrices([]state.PricePoint{{
-			Zone: "SE3", SlotTsMs: now.Add(time.Duration(i) * time.Hour).UnixMilli(),
-			SlotLenMin: 60, SpotOreKwh: 50, TotalOreKwh: 100,
-			Source: "test", FetchedAtMs: now.UnixMilli(),
+			Zone: "SE3", SlotTsMs: priceStart.Add(time.Duration(i) * 15 * time.Minute).UnixMilli(),
+			SlotLenMin: 15, SpotOreKwh: 50, TotalOreKwh: 100,
+			Source: "entsoe", FetchedAtMs: priceFetchedAt,
 		}})
 		if err != nil {
 			t.Fatalf("SavePrices: %v", err)
 		}
+	}
+	weatherFetchedAt := now.Add(-20 * time.Minute).UnixMilli()
+	pvW := 1200.0
+	if err := st.SaveForecasts([]state.ForecastPoint{{
+		SlotTsMs:   priceStart.Add(-30 * time.Minute).UnixMilli(),
+		SlotLenMin: 60, PVWEstimated: &pvW,
+		Source: "met.no", FetchedAtMs: weatherFetchedAt,
+	}}); err != nil {
+		t.Fatalf("SaveForecasts: %v", err)
 	}
 
 	svc := New(st, nil, "SE3", Params{
@@ -95,7 +116,12 @@ func TestReplanCallsSaveDiag(t *testing.T) {
 		if len(d.Slots) == 0 {
 			t.Error("Diagnostic.Slots empty — DP ran but no slots reached the snapshot")
 		}
-		return nil
+		js, err := json.Marshal(d)
+		if err != nil {
+			return err
+		}
+		return st.SaveDiagnostic(d.ComputedAtMs, reason, d.Zone,
+			d.TotalCostOre, d.Horizon, string(js))
 	}
 
 	if plan := svc.Replan(context.Background()); plan == nil {
@@ -109,6 +135,25 @@ func TestReplanCallsSaveDiag(t *testing.T) {
 	}
 	if z, _ := gotZone.Load().(string); z != "SE3" {
 		t.Errorf("SaveDiag zone = %q, want SE3", z)
+	}
+	row, err := st.LoadDiagnosticAt(time.Now().Add(time.Minute).UnixMilli())
+	if err != nil || row == nil {
+		t.Fatalf("LoadDiagnosticAt: row=%+v err=%v", row, err)
+	}
+	var persisted Diagnostic
+	if err := json.Unmarshal([]byte(row.JSON), &persisted); err != nil {
+		t.Fatal(err)
+	}
+	if len(persisted.Slots) == 0 {
+		t.Fatal("persisted diagnostic has no slots")
+	}
+	if persisted.InputProvenanceSchema != inputProvenanceSchemaVersion {
+		t.Fatalf("input provenance schema = %d, want %d", persisted.InputProvenanceSchema, inputProvenanceSchemaVersion)
+	}
+	if got := persisted.Slots[0]; got.PriceInputSource != "entsoe" ||
+		got.PriceInputAvailableAtMs != priceFetchedAt || got.WeatherRowSource != "met.no" ||
+		got.WeatherRowAvailableAtMs != weatherFetchedAt {
+		t.Fatalf("persisted input provenance = %+v", got)
 	}
 }
 
@@ -133,6 +178,75 @@ func TestReplanWithoutSaveDiagDoesNotPanic(t *testing.T) {
 		ChargeEfficiency: 0.95, DischargeEfficiency: 0.95,
 	})
 	_ = svc.Replan(context.Background())
+}
+
+func TestReplanRetainsInputProvenanceAcrossOptimizerPaths(t *testing.T) {
+	tests := []struct {
+		name         string
+		optimizer    PlanOptimizer
+		wantFallback bool
+	}{
+		{name: "primary", optimizer: testPrimaryOptimizer{}},
+		{name: "go fallback", optimizer: failingPrimaryOptimizer{}, wantFallback: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			st, err := state.Open(filepath.Join(t.TempDir(), "t.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer st.Close()
+
+			now := time.Now().UTC().Truncate(time.Minute)
+			priceStart := now.Add(-5 * time.Minute)
+			priceFetchedAt := now.Add(-10 * time.Minute).UnixMilli()
+			if err := st.SavePrices([]state.PricePoint{{
+				Zone: "SE3", SlotTsMs: priceStart.UnixMilli(), SlotLenMin: 15,
+				SpotOreKwh: 50, TotalOreKwh: 100,
+				Source: "entsoe", FetchedAtMs: priceFetchedAt,
+			}}); err != nil {
+				t.Fatal(err)
+			}
+			weatherFetchedAt := now.Add(-20 * time.Minute).UnixMilli()
+			pvW := 1200.0
+			if err := st.SaveForecasts([]state.ForecastPoint{{
+				SlotTsMs:   priceStart.Add(-30 * time.Minute).UnixMilli(),
+				SlotLenMin: 60, PVWEstimated: &pvW,
+				Source: "met.no", FetchedAtMs: weatherFetchedAt,
+			}}); err != nil {
+				t.Fatal(err)
+			}
+
+			svc := New(st, nil, "SE3", Params{
+				Mode: ModeSelfConsumption, SoCLevels: 11, CapacityWh: 10000,
+				SoCMinPct: 10, SoCMaxPct: 95, InitialSoCPct: 50,
+				ActionLevels: 5, MaxChargeW: 2000, MaxDischargeW: 2000,
+				ChargeEfficiency: 0.95, DischargeEfficiency: 0.95,
+			})
+			svc.BaseLoad = 500
+			svc.Optimizer = tc.optimizer
+
+			plan := svc.Replan(context.Background())
+			if plan == nil || plan.Solver == nil {
+				t.Fatalf("Replan returned %+v", plan)
+			}
+			if plan.Solver.Fallback != tc.wantFallback {
+				t.Fatalf("fallback = %v, want %v; solver=%+v", plan.Solver.Fallback, tc.wantFallback, plan.Solver)
+			}
+			d := svc.Diagnose()
+			if d == nil || len(d.Slots) != 1 {
+				t.Fatalf("Diagnose returned %+v", d)
+			}
+			if d.InputProvenanceSchema != inputProvenanceSchemaVersion {
+				t.Fatalf("input provenance schema = %d, want %d", d.InputProvenanceSchema, inputProvenanceSchemaVersion)
+			}
+			if got := d.Slots[0]; got.PriceInputSource != "entsoe" ||
+				got.PriceInputAvailableAtMs != priceFetchedAt || got.WeatherRowSource != "met.no" ||
+				got.WeatherRowAvailableAtMs != weatherFetchedAt {
+				t.Fatalf("input provenance = %+v", got)
+			}
+		})
+	}
 }
 
 func TestReplanLoadsHourlyWeatherCoveringCurrentPriceSlot(t *testing.T) {

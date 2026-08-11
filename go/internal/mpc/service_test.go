@@ -72,6 +72,132 @@ func TestBuildSlotsKeepsTwinWhenPredictionIsSane(t *testing.T) {
 	}
 }
 
+func TestBuildSlotsCarriesInputProvenance(t *testing.T) {
+	start := time.Date(2026, 4, 15, 10, 0, 0, 0, time.UTC).UnixMilli()
+	firstPV := 1200.0
+	secondPV := 2400.0
+	prices := []state.PricePoint{
+		{
+			SlotTsMs: start, SlotLenMin: 15, SpotOreKwh: 50, TotalOreKwh: 100,
+			Source: "entsoe", FetchedAtMs: 111,
+		},
+		{
+			SlotTsMs: start + time.Hour.Milliseconds(), SlotLenMin: 15,
+			SpotOreKwh: 70, TotalOreKwh: 130, Source: "forecast", FetchedAtMs: 222,
+		},
+	}
+	forecasts := []state.ForecastPoint{
+		{
+			SlotTsMs: start, SlotLenMin: 60, PVWEstimated: &firstPV,
+			Source: "met.no", FetchedAtMs: 333,
+		},
+		{
+			SlotTsMs: start + time.Hour.Milliseconds(), SlotLenMin: 60,
+			PVWEstimated: &secondPV, Source: "open-meteo", FetchedAtMs: 444,
+		},
+	}
+
+	slots := buildSlots(prices, forecasts, 500, start, nil, nil, nil)
+	if len(slots) != 2 {
+		t.Fatalf("buildSlots returned %d slots, want 2", len(slots))
+	}
+	if got := slots[0]; got.InputProvenanceSchema != inputProvenanceSchemaVersion ||
+		got.PriceInputSource != "entsoe" || got.PriceInputAvailableAtMs != 111 ||
+		got.WeatherRowSource != "met.no" || got.WeatherRowAvailableAtMs != 333 ||
+		got.Confidence != 1 {
+		t.Fatalf("first slot provenance = %+v", got)
+	}
+	if got := slots[1]; got.InputProvenanceSchema != inputProvenanceSchemaVersion ||
+		got.PriceInputSource != "forecast" || got.PriceInputAvailableAtMs != 222 ||
+		got.WeatherRowSource != "open-meteo" || got.WeatherRowAvailableAtMs != 444 ||
+		got.Confidence != 0.6 {
+		t.Fatalf("second slot provenance = %+v", got)
+	}
+
+	withoutWeather := buildSlots(prices[:1], nil, 500, start, nil, nil, nil)
+	if len(withoutWeather) != 1 {
+		t.Fatalf("buildSlots without weather returned %d slots, want 1", len(withoutWeather))
+	}
+	if got := withoutWeather[0]; got.InputProvenanceSchema != inputProvenanceSchemaVersion ||
+		got.PriceInputSource != "entsoe" || got.PriceInputAvailableAtMs != 111 ||
+		got.WeatherRowSource != "" || got.WeatherRowAvailableAtMs != 0 {
+		t.Fatalf("slot without weather provenance = %+v", got)
+	}
+}
+
+func TestSynthesizedPriceCarriesCreationProvenance(t *testing.T) {
+	now := time.Date(2026, 4, 15, 10, 0, 0, 0, time.UTC)
+	prices := extendPricesWithForecast(nil, "SE3",
+		func(string, time.Time) float64 { return 42 },
+		now.UnixMilli(), now.Add(time.Hour).UnixMilli(), 0, 0)
+	if len(prices) != 1 {
+		t.Fatalf("extendPricesWithForecast returned %d rows, want 1", len(prices))
+	}
+	slots := buildSlots(prices, nil, 500, now.UnixMilli(), nil, nil, nil)
+	if len(slots) != 1 {
+		t.Fatalf("buildSlots returned %d slots, want 1", len(slots))
+	}
+	if got := slots[0]; got.InputProvenanceSchema != inputProvenanceSchemaVersion ||
+		got.PriceInputSource != "forecast" ||
+		got.PriceInputAvailableAtMs != now.UnixMilli() || got.Confidence != 0.6 {
+		t.Fatalf("synthesized price provenance = %+v", got)
+	}
+}
+
+func TestBuildSlotsWeatherProvenanceFollowsTwinCloudInput(t *testing.T) {
+	weatherStart := time.Date(2026, 4, 15, 10, 0, 0, 0, time.UTC)
+	priceStart := weatherStart.Add(75 * time.Minute)
+	cloud := 25.0
+	prices := []state.PricePoint{{
+		SlotTsMs: priceStart.UnixMilli(), SlotLenMin: 15,
+		SpotOreKwh: 50, TotalOreKwh: 100, Source: "entsoe", FetchedAtMs: 111,
+	}}
+	forecasts := []state.ForecastPoint{{
+		SlotTsMs: weatherStart.UnixMilli(), SlotLenMin: 60,
+		CloudCoverPct: &cloud, Source: "met.no", FetchedAtMs: 333,
+	}}
+
+	slots := buildSlots(prices, forecasts, 500, priceStart.UnixMilli(),
+		func(_ time.Time, cloudPct float64) float64 { return cloudPct * 10 }, nil, nil)
+	if len(slots) != 1 {
+		t.Fatalf("buildSlots returned %d slots, want 1", len(slots))
+	}
+	if got := slots[0]; got.InputProvenanceSchema != inputProvenanceSchemaVersion ||
+		got.WeatherRowSource != "met.no" || got.WeatherRowAvailableAtMs != 333 {
+		t.Fatalf("twin weather provenance = %+v", got)
+	}
+}
+
+func TestBuildSlotsWeatherProvenanceKeepsNearestNilCloudRow(t *testing.T) {
+	firstTs := time.Date(2026, 4, 15, 10, 0, 0, 0, time.UTC).UnixMilli()
+	laterCloud := 91.0
+	priceTs := firstTs - int64(15*time.Minute/time.Millisecond)
+	prices := []state.PricePoint{{
+		SlotTsMs: priceTs, SlotLenMin: 15,
+		SpotOreKwh: 50, TotalOreKwh: 100,
+	}}
+	forecasts := []state.ForecastPoint{
+		{
+			SlotTsMs: firstTs, SlotLenMin: 60,
+			Source: "nearest", FetchedAtMs: 111,
+		},
+		{
+			SlotTsMs: firstTs + int64(time.Hour/time.Millisecond), SlotLenMin: 60,
+			CloudCoverPct: &laterCloud, Source: "later", FetchedAtMs: 222,
+		},
+	}
+
+	slots := buildSlots(prices, forecasts, 500, priceTs,
+		func(_ time.Time, cloudPct float64) float64 { return cloudPct * 10 }, nil, nil)
+	if len(slots) != 1 {
+		t.Fatalf("buildSlots returned %d slots, want 1", len(slots))
+	}
+	if got := slots[0]; got.PVW != -500 || got.WeatherRowSource != "nearest" ||
+		got.WeatherRowAvailableAtMs != 111 {
+		t.Fatalf("nearest nil-cloud provenance = %+v", got)
+	}
+}
+
 func TestLookupCloudBeforeFirstForecastDoesNotUseLaterRow(t *testing.T) {
 	firstTs := time.Date(2026, 4, 15, 10, 0, 0, 0, time.UTC).UnixMilli()
 	lastCloud := 91.0

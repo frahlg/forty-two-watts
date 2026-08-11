@@ -1,6 +1,8 @@
 package mpc
 
 import (
+	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -26,9 +28,15 @@ func TestDiagnoseJoinsSlotsAndActions(t *testing.T) {
 	// we're testing the join shape.
 	slots := []Slot{
 		{StartMs: start, LenMin: 15, PriceOre: 100, SpotOre: 50,
-			PVW: -200, LoadW: 400, Confidence: 1.0},
+			PVW: -200, LoadW: 400, Confidence: 1.0,
+			InputProvenanceSchema: inputProvenanceSchemaVersion,
+			PriceInputSource:      "entsoe", PriceInputAvailableAtMs: 111,
+			WeatherRowSource: "met.no", WeatherRowAvailableAtMs: 222},
 		{StartMs: start + 15*60*1000, LenMin: 15, PriceOre: 150,
-			SpotOre: 80, PVW: -100, LoadW: 500, Confidence: 0.6},
+			SpotOre: 80, PVW: -100, LoadW: 500, Confidence: 0.6,
+			InputProvenanceSchema: inputProvenanceSchemaVersion,
+			PriceInputSource:      "forecast", PriceInputAvailableAtMs: 333,
+			WeatherRowSource: "open-meteo", WeatherRowAvailableAtMs: 444},
 	}
 	p := Params{
 		Mode:                ModeSelfConsumption,
@@ -70,6 +78,9 @@ func TestDiagnoseJoinsSlotsAndActions(t *testing.T) {
 	if d.LastReason != "unit-test" {
 		t.Errorf("LastReason: got %q want unit-test", d.LastReason)
 	}
+	if d.InputProvenanceSchema != inputProvenanceSchemaVersion {
+		t.Errorf("InputProvenanceSchema: got %d want %d", d.InputProvenanceSchema, inputProvenanceSchemaVersion)
+	}
 	if got := len(d.Slots); got != len(slots) {
 		t.Fatalf("Slots length: got %d want %d", got, len(slots))
 	}
@@ -91,6 +102,10 @@ func TestDiagnoseJoinsSlotsAndActions(t *testing.T) {
 	if row.LoadW != 400 {
 		t.Errorf("row0 LoadW: got %.1f want 400", row.LoadW)
 	}
+	if row.PriceInputSource != "entsoe" || row.PriceInputAvailableAtMs != 111 ||
+		row.WeatherRowSource != "met.no" || row.WeatherRowAvailableAtMs != 222 {
+		t.Errorf("row0 input provenance: %+v", row)
+	}
 	// Outputs come from the plan's action — we don't assert exact
 	// values (that's what the mpc_test suite covers), just that they
 	// were populated.
@@ -101,9 +116,47 @@ func TestDiagnoseJoinsSlotsAndActions(t *testing.T) {
 	if d.Slots[1].Confidence != 0.6 {
 		t.Errorf("row1 Confidence: got %.2f want 0.6", d.Slots[1].Confidence)
 	}
+	if row := d.Slots[1]; row.PriceInputSource != "forecast" || row.PriceInputAvailableAtMs != 333 ||
+		row.WeatherRowSource != "open-meteo" || row.WeatherRowAvailableAtMs != 444 {
+		t.Errorf("row1 input provenance: %+v", row)
+	}
 	if d.Slots[1].SlotStartMs != start+15*60*1000 {
 		t.Errorf("row1 SlotStartMs: got %d want %d",
 			d.Slots[1].SlotStartMs, start+15*60*1000)
+	}
+}
+
+func TestDiagnosticProvenanceSchemaMarksCurrentMissingRows(t *testing.T) {
+	d := buildDiagnostic(
+		&Plan{GeneratedAtMs: 1, HorizonSlots: 1, Actions: []Action{{}}},
+		[]Slot{{
+			StartMs:               1,
+			LenMin:                15,
+			InputProvenanceSchema: inputProvenanceSchemaVersion,
+		}},
+		Params{}, "SE3", 1, "test",
+	)
+	raw, err := json.Marshal(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wire struct {
+		InputProvenanceSchema int                          `json:"input_provenance_schema"`
+		Slots                 []map[string]json.RawMessage `json:"slots"`
+	}
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		t.Fatal(err)
+	}
+	if wire.InputProvenanceSchema != inputProvenanceSchemaVersion {
+		t.Fatalf("input provenance schema = %d, want %d", wire.InputProvenanceSchema, inputProvenanceSchemaVersion)
+	}
+	for _, key := range []string{
+		"price_input_source", "price_input_available_at_ms",
+		"weather_row_source", "weather_row_available_at_ms",
+	} {
+		if _, ok := wire.Slots[0][key]; ok {
+			t.Errorf("current slot with unknown provenance emitted %q", key)
+		}
 	}
 }
 
@@ -138,12 +191,13 @@ func TestRestoreDiagnosticRehydratesActivePlan(t *testing.T) {
 	now := time.Now()
 	start := now.Add(-5 * time.Minute).Truncate(time.Minute)
 	d := &Diagnostic{
-		ComputedAtMs:   now.Add(-1 * time.Minute).UnixMilli(),
-		Zone:           "SE4",
-		Horizon:        2,
-		TotalCostOre:   -12.3,
-		LastReplanAtMs: now.Add(-1 * time.Minute).UnixMilli(),
-		LastReason:     "scheduled",
+		ComputedAtMs:          now.Add(-1 * time.Minute).UnixMilli(),
+		InputProvenanceSchema: inputProvenanceSchemaVersion,
+		Zone:                  "SE4",
+		Horizon:               2,
+		TotalCostOre:          -12.3,
+		LastReplanAtMs:        now.Add(-1 * time.Minute).UnixMilli(),
+		LastReason:            "scheduled",
 		Params: DiagnosticParams{
 			Mode:                ModeSelfConsumption,
 			InitialSoCPct:       42,
@@ -160,22 +214,24 @@ func TestRestoreDiagnosticRehydratesActivePlan(t *testing.T) {
 		},
 		Slots: []DiagnosticSlot{
 			{
-				Idx:         0,
-				SlotStartMs: start.UnixMilli(),
-				SlotEndMs:   start.Add(15 * time.Minute).UnixMilli(),
-				LenMin:      15,
-				PriceOre:    120,
-				SpotOre:     80,
-				Confidence:  1,
-				PVW:         -4500,
-				LoadW:       900,
-				BatteryW:    0,
-				GridW:       -3600,
-				SoCPct:      42,
-				CostOre:     -72,
-				Reason:      "export surplus",
-				EMSMode:     "self_consumption",
-				PVLimitW:    4100,
+				Idx:              0,
+				SlotStartMs:      start.UnixMilli(),
+				SlotEndMs:        start.Add(15 * time.Minute).UnixMilli(),
+				LenMin:           15,
+				PriceOre:         120,
+				SpotOre:          80,
+				Confidence:       1,
+				PVW:              -4500,
+				LoadW:            900,
+				BatteryW:         0,
+				GridW:            -3600,
+				SoCPct:           42,
+				CostOre:          -72,
+				Reason:           "export surplus",
+				EMSMode:          "self_consumption",
+				PVLimitW:         4100,
+				PriceInputSource: "entsoe", PriceInputAvailableAtMs: 111,
+				WeatherRowSource: "met.no", WeatherRowAvailableAtMs: 222,
 			},
 			{
 				Idx:         1,
@@ -196,6 +252,51 @@ func TestRestoreDiagnosticRehydratesActivePlan(t *testing.T) {
 			},
 		},
 	}
+	raw, err := json.Marshal(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wire struct {
+		InputProvenanceSchema int                          `json:"input_provenance_schema"`
+		Slots                 []map[string]json.RawMessage `json:"slots"`
+	}
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		t.Fatal(err)
+	}
+	if len(wire.Slots) == 0 {
+		t.Fatal("diagnostic JSON has no slots")
+	}
+	if wire.InputProvenanceSchema != inputProvenanceSchemaVersion {
+		t.Fatalf("diagnostic JSON provenance schema = %d, want %d", wire.InputProvenanceSchema, inputProvenanceSchemaVersion)
+	}
+	for _, key := range []string{
+		"price_input_source", "price_input_available_at_ms",
+		"weather_row_source", "weather_row_available_at_ms",
+	} {
+		if _, ok := wire.Slots[0][key]; !ok {
+			t.Errorf("diagnostic JSON slot lacks %q", key)
+		}
+	}
+	wantWireValues := map[string]any{
+		"price_input_source":          "entsoe",
+		"price_input_available_at_ms": float64(111),
+		"weather_row_source":          "met.no",
+		"weather_row_available_at_ms": float64(222),
+	}
+	for key, want := range wantWireValues {
+		var got any
+		if err := json.Unmarshal(wire.Slots[0][key], &got); err != nil {
+			t.Fatalf("decode diagnostic JSON key %q: %v", key, err)
+		}
+		if got != want {
+			t.Errorf("diagnostic JSON key %q = %#v, want %#v", key, got, want)
+		}
+	}
+	var roundTripped Diagnostic
+	if err := json.Unmarshal(raw, &roundTripped); err != nil {
+		t.Fatal(err)
+	}
+	d = &roundTripped
 	svc := &Service{
 		Zone:     "SE4",
 		Defaults: Params{Mode: ModeSelfConsumption},
@@ -233,6 +334,36 @@ func TestRestoreDiagnosticRehydratesActivePlan(t *testing.T) {
 	diag := svc.Diagnose()
 	if diag == nil || len(diag.Slots) != 2 {
 		t.Fatalf("Diagnose after restore = %+v, want 2 slots", diag)
+	}
+	if diag.InputProvenanceSchema != inputProvenanceSchemaVersion {
+		t.Fatalf("input provenance schema after JSON restore = %d, want %d", diag.InputProvenanceSchema, inputProvenanceSchemaVersion)
+	}
+	if row := diag.Slots[0]; row.PriceInputSource != "entsoe" || row.PriceInputAvailableAtMs != 111 ||
+		row.WeatherRowSource != "met.no" || row.WeatherRowAvailableAtMs != 222 {
+		t.Fatalf("input provenance after JSON restore = %+v", row)
+	}
+}
+
+func TestRestoreDiagnosticRejectsUnsupportedInputProvenanceSchema(t *testing.T) {
+	for _, schema := range []int{-1, inputProvenanceSchemaVersion + 1} {
+		t.Run(fmt.Sprintf("schema_%d", schema), func(t *testing.T) {
+			now := time.Now()
+			d := &Diagnostic{
+				ComputedAtMs:          now.UnixMilli(),
+				InputProvenanceSchema: schema,
+				Slots: []DiagnosticSlot{{
+					SlotStartMs: now.UnixMilli(),
+					LenMin:      15,
+				}},
+			}
+			svc := &Service{}
+			if svc.RestoreDiagnostic(d, now, "test") {
+				t.Fatalf("RestoreDiagnostic accepted unsupported provenance schema %d", schema)
+			}
+			if svc.Latest() != nil {
+				t.Fatal("unsupported diagnostic published an active plan")
+			}
+		})
 	}
 }
 
@@ -290,6 +421,36 @@ func TestRestoreDiagnosticMergesNewerDefaultsForMissingFields(t *testing.T) {
 	}
 	if diag.Params.PVChargeBonusOreKwh != 30 {
 		t.Errorf("PVChargeBonusOreKwh after restore = %v, want 30 (merged from Defaults; snapshot had 0)", diag.Params.PVChargeBonusOreKwh)
+	}
+	if diag.InputProvenanceSchema != 0 {
+		t.Errorf("legacy snapshot provenance schema = %d, want 0", diag.InputProvenanceSchema)
+	}
+	if row := diag.Slots[0]; row.PriceInputSource != "" || row.PriceInputAvailableAtMs != 0 ||
+		row.WeatherRowSource != "" || row.WeatherRowAvailableAtMs != 0 {
+		t.Errorf("legacy snapshot gained input provenance: %+v", row)
+	}
+	raw, err := json.Marshal(diag)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var legacyWire map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &legacyWire); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := legacyWire["input_provenance_schema"]; ok {
+		t.Error("legacy diagnostic JSON gained input_provenance_schema")
+	}
+	var legacySlots []map[string]json.RawMessage
+	if err := json.Unmarshal(legacyWire["slots"], &legacySlots); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{
+		"price_input_source", "price_input_available_at_ms",
+		"weather_row_source", "weather_row_available_at_ms",
+	} {
+		if _, ok := legacySlots[0][key]; ok {
+			t.Errorf("legacy diagnostic JSON slot gained %q", key)
+		}
 	}
 }
 

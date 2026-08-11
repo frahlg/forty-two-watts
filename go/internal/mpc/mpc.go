@@ -97,6 +97,10 @@ const (
 // trick as SlotDirective) — keep the two in sync.
 const IdleGateThresholdW = 100.0
 
+// inputProvenanceSchemaVersion identifies the diagnostic meaning of the
+// source and availability fields carried by Slot.
+const inputProvenanceSchemaVersion = 1
+
 // Slot is one input time slot for the optimizer.
 type Slot struct {
 	StartMs  int64
@@ -105,6 +109,18 @@ type Slot struct {
 	SpotOre  float64 // raw spot öre/kWh — used for EXPORT revenue (before bonus/fee)
 	PVW      float64 // negative (site sign). 0 if no forecast.
 	LoadW    float64 // positive (site sign). Defaults to a flat baseline.
+
+	// Input provenance is diagnostic metadata; it does not change optimizer
+	// math. AvailableAtMs is when Core fetched or created the row, not a
+	// provider issue time or model revision. WeatherRow identifies only the
+	// cached row consulted while constructing PVW; PVW may also include a
+	// learned twin, defaults, residual correction, forecast/twin blending, and
+	// a Go-DP downside adjustment.
+	InputProvenanceSchema   int
+	PriceInputSource        string
+	PriceInputAvailableAtMs int64
+	WeatherRowSource        string
+	WeatherRowAvailableAtMs int64
 
 	// Confidence in [0, 1]. 1.0 = real day-ahead price; < 1.0 = ML-
 	// forecasted price where we're less sure of both level and shape.
