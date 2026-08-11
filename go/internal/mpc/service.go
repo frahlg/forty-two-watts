@@ -7,6 +7,7 @@ import (
 	"math"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/srcfl/ftw/go/internal/state"
@@ -177,11 +178,13 @@ type Service struct {
 
 	lastReplanAt time.Time
 	lastReason   string // reason paired with the currently published plan
-	// latestReplanGeneration identifies the newest requested solve. A solve
-	// may run after a newer request starts, but it cannot publish over it.
-	// This guard does not cancel solver work; transport deadlines and worker
-	// queue ownership remain separate concerns.
+	// latestReplanGeneration identifies the newest requested solve. Starting a
+	// newer generation cancels the older request; the generation check remains
+	// the final guard for work that does not stop promptly on context cancel.
 	latestReplanGeneration uint64 // guarded by mu
+	activeReplanCancel     context.CancelFunc
+	stopping               bool
+	replanWG               sync.WaitGroup
 
 	// ExportBonusOreKwh and ExportFeeOreKwh flow in from config.Price.
 	// Used to compute default ExportOrePerKWh when Params doesn't set it.
@@ -216,6 +219,9 @@ type Service struct {
 
 	stop chan struct{}
 	done chan struct{}
+	// stopped closes after every accepted replan has returned and the optional
+	// optimizer has closed. Concurrent Stop callers wait on this boundary.
+	stopped chan struct{}
 }
 
 // plannedPredictions captures the PV + load twin predictions the most
@@ -237,6 +243,12 @@ type replanRequest struct {
 	params     Params
 	fleet      []BatteryFleetMember
 	reason     string
+	ctx        context.Context
+	cancel     context.CancelFunc
+	// canceledByService distinguishes supersession/Stop from the caller's
+	// context. Caller cancellation keeps the prior Go-fallback behavior.
+	canceledByService *atomic.Bool
+	accepted          bool
 }
 
 func (s *Service) driverOnline(name string) bool {
@@ -272,6 +284,7 @@ func New(st *state.Store, tl *telemetry.Store, zone string, p Params) *Service {
 		RecourseNonAnticipativeSlots: 1,
 		stop:                         make(chan struct{}),
 		done:                         make(chan struct{}),
+		stopped:                      make(chan struct{}),
 	}
 }
 
@@ -606,9 +619,9 @@ func (s *Service) SetMode(ctx context.Context, mode Mode) {
 	}
 	s.mu.Lock()
 	s.Defaults.Mode = mode
-	request := s.beginReplanLocked("mode_changed")
+	request := s.beginReplanLocked(ctx, "mode_changed")
 	s.mu.Unlock()
-	s.runReplan(ctx, request)
+	s.runReplan(request)
 }
 
 // Start runs the planner in a goroutine. Does an initial plan immediately.
@@ -624,11 +637,27 @@ func (s *Service) Stop() {
 	if s == nil {
 		return
 	}
+	s.mu.Lock()
+	if s.stopping {
+		stopped := s.stopped
+		s.mu.Unlock()
+		<-stopped
+		return
+	}
+	s.stopping = true
+	if s.activeReplanCancel != nil {
+		s.activeReplanCancel()
+	}
+	s.mu.Unlock()
 	close(s.stop)
 	<-s.done
+	// beginReplanLocked performs Add while holding the same lock that set
+	// stopping, so no new Add can race with this Wait.
+	s.replanWG.Wait()
 	if s.Optimizer != nil {
 		_ = s.Optimizer.Close()
 	}
+	close(s.stopped)
 }
 
 func (s *Service) loop(ctx context.Context) {
@@ -931,32 +960,93 @@ func (s *Service) ReplanWithReason(ctx context.Context, reason string) *Plan {
 }
 
 func (s *Service) replan(ctx context.Context, reason string) *Plan {
-	return s.runReplan(ctx, s.beginReplan(reason))
+	return s.runReplan(s.beginReplan(ctx, reason))
 }
 
-func (s *Service) beginReplan(reason string) replanRequest {
+func (s *Service) beginReplan(ctx context.Context, reason string) replanRequest {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.beginReplanLocked(reason)
+	return s.beginReplanLocked(ctx, reason)
 }
 
 // beginReplanLocked assigns the generation and snapshots the effective
 // defaults under the same lock. Callers that change Defaults first, such as
 // SetMode, use this form so no old solve can commit in between those actions.
-func (s *Service) beginReplanLocked(reason string) replanRequest {
+func (s *Service) beginReplanLocked(ctx context.Context, reason string) replanRequest {
 	if reason == "" {
 		reason = "manual"
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	requestCtx, cancel := context.WithCancel(ctx)
+	if s.stopping {
+		cancel()
+		return replanRequest{
+			params: s.Defaults,
+			fleet:  append([]BatteryFleetMember(nil), s.BatteryFleet...),
+			reason: reason,
+			ctx:    requestCtx,
+			cancel: cancel,
+		}
+	}
+	if s.activeReplanCancel != nil {
+		s.activeReplanCancel()
+	}
+	canceledByService := &atomic.Bool{}
+	serviceCancel := func() {
+		canceledByService.Store(true)
+		cancel()
+	}
 	s.latestReplanGeneration++
+	s.activeReplanCancel = serviceCancel
+	s.replanWG.Add(1)
 	return replanRequest{
-		generation: s.latestReplanGeneration,
-		params:     s.Defaults,
-		fleet:      append([]BatteryFleetMember(nil), s.BatteryFleet...),
-		reason:     reason,
+		generation:        s.latestReplanGeneration,
+		params:            s.Defaults,
+		fleet:             append([]BatteryFleetMember(nil), s.BatteryFleet...),
+		reason:            reason,
+		ctx:               requestCtx,
+		cancel:            cancel,
+		canceledByService: canceledByService,
+		accepted:          true,
 	}
 }
 
-func (s *Service) runReplan(ctx context.Context, request replanRequest) *Plan {
+func (r replanRequest) wasCanceledByService() bool {
+	return r.canceledByService != nil && r.canceledByService.Load()
+}
+
+func (s *Service) finishReplan(request replanRequest) {
+	defer s.replanWG.Done()
+	request.cancel()
+	s.mu.Lock()
+	if request.generation == s.latestReplanGeneration {
+		s.activeReplanCancel = nil
+	}
+	s.mu.Unlock()
+}
+
+func (s *Service) canceledReplan(request replanRequest, stage string) *Plan {
+	slog.Debug("mpc: canceled replan",
+		"generation", request.generation,
+		"mode", request.params.Mode,
+		"reason", request.reason,
+		"stage", stage,
+		"err", request.ctx.Err())
+	return s.Latest()
+}
+
+func (s *Service) runReplan(request replanRequest) *Plan {
+	if !request.accepted {
+		request.cancel()
+		return s.Latest()
+	}
+	defer s.finishReplan(request)
+	ctx := request.ctx
+	if request.wasCanceledByService() {
+		return s.canceledReplan(request, "start")
+	}
 	now := time.Now()
 	untilMs := now.Add(s.Horizon).UnixMilli()
 	sinceMs := now.UnixMilli() - 15*60*1000 // small margin — slot starting ≤15min ago still in-flight
@@ -965,6 +1055,9 @@ func (s *Service) runReplan(ctx context.Context, request replanRequest) *Plan {
 	if err != nil {
 		slog.Warn("mpc: load prices", "err", err)
 		return nil
+	}
+	if request.wasCanceledByService() {
+		return s.canceledReplan(request, "load-prices")
 	}
 	// Extend prices into the horizon using the learned forecast when
 	// the day-ahead source hasn't published that far yet. Otherwise
@@ -1125,6 +1218,9 @@ func (s *Service) runReplan(ctx context.Context, request replanRequest) *Plan {
 		"loadpoint_active", p.Loadpoint != nil,
 		"loadpoint_id", loadpointID,
 	)
+	if request.wasCanceledByService() {
+		return s.canceledReplan(request, "build-input")
+	}
 	var plan Plan
 	var shadowRecoursePlan *Plan
 	var shadowError string
@@ -1138,6 +1234,9 @@ func (s *Service) runReplan(ctx context.Context, request replanRequest) *Plan {
 		}
 	} else {
 		candidate, err := s.Optimizer.Optimize(ctx, slots, p)
+		if request.wasCanceledByService() {
+			return s.canceledReplan(request, "primary-solve")
+		}
 		if err == nil {
 			dpEvaluation := Optimize(slots, p)
 			dpEvaluation.Solver = &SolverInfo{
@@ -1168,6 +1267,9 @@ func (s *Service) runReplan(ctx context.Context, request replanRequest) *Plan {
 				mode, _, _ := actionToSlot(*candidate.DPShadow.FirstAction, p.Mode)
 				candidate.DPShadow.FirstAction.EMSMode = mode
 			}
+			if request.wasCanceledByService() {
+				return s.canceledReplan(request, "dp-shadow")
+			}
 
 			if s.EnableRecourseShadow {
 				publishShadow = true
@@ -1195,6 +1297,9 @@ func (s *Service) runReplan(ctx context.Context, request replanRequest) *Plan {
 						} else {
 							recourse, recourseErr = challenger.OptimizeRecourse(ctx, slots, p, s.RecourseNonAnticipativeSlots)
 						}
+					}
+					if request.wasCanceledByService() {
+						return s.canceledReplan(request, "recourse-shadow")
 					}
 					if recourseErr != nil {
 						slog.Warn("mpc: stochastic challenger failed", "policy", policy, "err", recourseErr)
@@ -1233,6 +1338,9 @@ func (s *Service) runReplan(ctx context.Context, request replanRequest) *Plan {
 			}
 			plan = candidate
 		} else {
+			if request.wasCanceledByService() {
+				return s.canceledReplan(request, "primary-fallback")
+			}
 			slog.Error("mpc: primary optimizer failed; using Go DP fallback", "err", err)
 			slots = fallbackSlots
 			plan = Optimize(slots, p)
@@ -1270,6 +1378,10 @@ func (s *Service) runReplan(ctx context.Context, request replanRequest) *Plan {
 	pp := s.snapshotPredictions(slots, forecasts)
 
 	s.mu.Lock()
+	if s.stopping || request.wasCanceledByService() {
+		s.mu.Unlock()
+		return s.canceledReplan(request, "publish")
+	}
 	if request.generation != s.latestReplanGeneration {
 		latest := s.latestReplanGeneration
 		s.mu.Unlock()
