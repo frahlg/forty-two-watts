@@ -43,6 +43,16 @@ func validatePlanningSlots(slots []Slot) error {
 	return nil
 }
 
+// validateServiceGridLimits checks the raw site limits before slot clamping.
+// The clamp treats non-positive values as unset and compares export limits to
+// the fuse, so invalid values must not be allowed to disappear in that logic.
+func validateServiceGridLimits(fuseMaxW, maxExportW float64) error {
+	if err := requireNonNegativePlanningValue("fuse_max_w", fuseMaxW); err != nil {
+		return err
+	}
+	return requireNonNegativePlanningValue("max_export_w", maxExportW)
+}
+
 func validateBatteryFleetMembers(fleet []BatteryFleetMember) error {
 	seen := make(map[string]struct{}, len(fleet))
 	for i, battery := range fleet {

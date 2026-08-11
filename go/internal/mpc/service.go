@@ -1063,6 +1063,15 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 	if request.wasCanceledByService() {
 		return s.canceledReplan(request, "start")
 	}
+	fuseMaxW, maxExportW := s.FuseMaxW, s.MaxExportW
+	if err := validateServiceGridLimits(fuseMaxW, maxExportW); err != nil {
+		slog.Error("mpc: invalid grid limits; keeping previous plan",
+			"generation", request.generation,
+			"mode", request.params.Mode,
+			"reason", request.reason,
+			"err", err)
+		return s.Latest()
+	}
 	now := time.Now()
 	untilMs := now.Add(s.Horizon).UnixMilli()
 	sinceMs := now.UnixMilli() - 15*60*1000 // small margin — slot starting ≤15min ago still in-flight
@@ -1131,8 +1140,8 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 	// export below the breaker rating (the recurring Ferroamp 0x8030
 	// fault). Pre-fix this only set MaxImportW, producing plans like a
 	// 14:45 slot grid=-14.2 kW past an 11 kW fuse.
-	clampSlotGridLimits(slots, s.FuseMaxW, s.MaxExportW)
-	clampSlotGridLimits(fallbackSlots, s.FuseMaxW, s.MaxExportW)
+	clampSlotGridLimits(slots, fuseMaxW, maxExportW)
+	clampSlotGridLimits(fallbackSlots, fuseMaxW, maxExportW)
 
 	p := request.params
 	if p.Mode == "" {

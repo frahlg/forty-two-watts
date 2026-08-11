@@ -48,6 +48,50 @@ func validPlanningLoadpoint() *LoadpointSpec {
 	}
 }
 
+func TestValidateServiceGridLimits(t *testing.T) {
+	valid := []struct {
+		name       string
+		fuseMaxW   float64
+		maxExportW float64
+	}{
+		{name: "disabled", fuseMaxW: 0, maxExportW: 0},
+		{name: "fuse only", fuseMaxW: 11000, maxExportW: 0},
+		{name: "tighter export ceiling", fuseMaxW: 11000, maxExportW: 8000},
+		{name: "export ceiling above fuse", fuseMaxW: 11000, maxExportW: 12000},
+	}
+	for _, tc := range valid {
+		t.Run("accept "+tc.name, func(t *testing.T) {
+			if err := validateServiceGridLimits(tc.fuseMaxW, tc.maxExportW); err != nil {
+				t.Fatalf("valid grid limits rejected: %v", err)
+			}
+		})
+	}
+
+	invalid := []struct {
+		name       string
+		fuseMaxW   float64
+		maxExportW float64
+		want       string
+	}{
+		{name: "negative fuse", fuseMaxW: -1, want: "fuse_max_w"},
+		{name: "nan fuse", fuseMaxW: math.NaN(), want: "fuse_max_w"},
+		{name: "positive infinite fuse", fuseMaxW: math.Inf(1), want: "fuse_max_w"},
+		{name: "negative infinite fuse", fuseMaxW: math.Inf(-1), want: "fuse_max_w"},
+		{name: "negative export", fuseMaxW: 11000, maxExportW: -1, want: "max_export_w"},
+		{name: "nan export", fuseMaxW: 11000, maxExportW: math.NaN(), want: "max_export_w"},
+		{name: "positive infinite export", fuseMaxW: 11000, maxExportW: math.Inf(1), want: "max_export_w"},
+		{name: "negative infinite export", fuseMaxW: 11000, maxExportW: math.Inf(-1), want: "max_export_w"},
+	}
+	for _, tc := range invalid {
+		t.Run("reject "+tc.name, func(t *testing.T) {
+			err := validateServiceGridLimits(tc.fuseMaxW, tc.maxExportW)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %v, want path %q", err, tc.want)
+			}
+		})
+	}
+}
+
 func TestValidatePlanningParamsAcceptsSupportedPhysicalStates(t *testing.T) {
 	modes := []Mode{ModeSelfConsumption, ModeCheapCharge, ModePassiveArbitrage, ModeArbitrage}
 	for _, mode := range modes {
@@ -443,6 +487,12 @@ func TestReplanRejectsInvalidPhysicsBeforeSolver(t *testing.T) {
 		{"efficiency above one", func(s *Service) { s.Defaults.ChargeEfficiency = 1.01 }},
 		{"reversed soc bounds", func(s *Service) { s.Defaults.SoCMinPct = 96 }},
 		{"negative power", func(s *Service) { s.Defaults.MaxDischargeW = -1 }},
+		{"negative fuse limit", func(s *Service) { s.FuseMaxW = -1 }},
+		{"nan fuse limit", func(s *Service) { s.FuseMaxW = math.NaN() }},
+		{"infinite fuse limit", func(s *Service) { s.FuseMaxW = math.Inf(1) }},
+		{"negative export limit", func(s *Service) { s.FuseMaxW, s.MaxExportW = 11000, -1 }},
+		{"nan export limit", func(s *Service) { s.FuseMaxW, s.MaxExportW = 11000, math.NaN() }},
+		{"infinite export limit", func(s *Service) { s.FuseMaxW, s.MaxExportW = 11000, math.Inf(1) }},
 		{"nan pv uncertainty", func(s *Service) {
 			s.PVUncertaintyW = func() float64 { return math.NaN() }
 		}},
@@ -586,6 +636,11 @@ func TestReplanRejectsInvalidPhysicsBeforeGoDP(t *testing.T) {
 	svc.Defaults.DischargeEfficiency = 1.01
 	if got := svc.Replan(context.Background()); got != accepted || svc.Latest() != accepted {
 		t.Fatalf("invalid Go-DP inputs replaced prior plan: got=%p accepted=%p latest=%p", got, accepted, svc.Latest())
+	}
+	svc.Defaults.DischargeEfficiency = validPlanningParams().DischargeEfficiency
+	svc.FuseMaxW, svc.MaxExportW = 11000, math.NaN()
+	if got := svc.Replan(context.Background()); got != accepted || svc.Latest() != accepted {
+		t.Fatalf("invalid Go-DP grid limits replaced prior plan: got=%p accepted=%p latest=%p", got, accepted, svc.Latest())
 	}
 	if idCalls.Load() != 1 || saveCalls.Load() != 1 {
 		t.Fatalf("calls after rejection: id=%d save=%d, want 1/1", idCalls.Load(), saveCalls.Load())
