@@ -1112,7 +1112,14 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 	// a separate downside copy for the emergency Go-DP path, preserving the
 	// previous safety behavior if the worker is unavailable.
 	fallbackSlots := append([]Slot(nil), slots...)
-	s.applyPVDownsideToSlots(fallbackSlots)
+	var pvUncertaintyW float64
+	pvUncertainty := s.PVUncertaintyW
+	if pvUncertainty != nil {
+		// One replan must use one uncertainty snapshot. Reading the live model
+		// twice could give the external scenarios and Go fallback different
+		// physics for the same request.
+		pvUncertaintyW = pvUncertainty()
+	}
 
 	// Plumb the site fuse + export ceiling into per-slot limits so the DP
 	// joint-plans battery + EV under the grid constraints instead of
@@ -1128,13 +1135,20 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 	clampSlotGridLimits(fallbackSlots, s.FuseMaxW, s.MaxExportW)
 
 	p := request.params
+	if p.Mode == "" {
+		p.Mode = ModeSelfConsumption
+	}
 	fleet := request.fleet
 	if len(fleet) > 0 {
+		if err := validateBatteryFleetMembers(fleet); err != nil {
+			slog.Error("mpc: invalid optimization parameters; keeping previous plan", "err", err)
+			return s.Latest()
+		}
 		var ok bool
 		p, ok = s.onlineFleetParams(p, fleet)
 		if !ok {
 			slog.Warn("mpc: no online battery capacity with SoC — keeping previous plan")
-			return nil
+			return s.Latest()
 		}
 	} else {
 		p.InitialSoCPct = currentSoCPct(s.Tele, p.InitialSoCPct)
@@ -1149,9 +1163,10 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 	p.MinArbitrageSpreadOreKwh = s.MinArbitrageSpreadOreKwh
 	p.ExportFloorOreKwh = s.ExportFloorOreKwh
 	p.PVForecastSafetyK = s.PVForecastSafetyK
-	if s.PVUncertaintyW != nil {
-		p.PVUncertaintyW = math.Max(0, s.PVUncertaintyW())
+	if pvUncertainty != nil {
+		p.PVUncertaintyW = pvUncertaintyW
 	}
+	applyPVDownside(fallbackSlots, p.PVForecastSafetyK, p.PVUncertaintyW)
 
 	// Default terminal valuation. Mode-dependent because self-consumption
 	// is a constrained game: the battery can only offset local load, not
@@ -1205,6 +1220,13 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 				p.Loadpoints = []*LoadpointSpec{spec}
 			}
 		}
+		// Check the probe output before activeLoadpoints filters it. A plugged-in
+		// spec with broken physics must stop planning, not disappear and make the
+		// service silently solve a different battery-only problem.
+		if err := validateLoadpointSpecs(planningLoadpointSpecs(p), make(map[string]string)); err != nil {
+			slog.Error("mpc: invalid optimization parameters; keeping previous plan", "err", err)
+			return s.Latest()
+		}
 		active := p.activeLoadpoints()
 		if len(active) > 0 {
 			p.Loadpoints = active
@@ -1229,6 +1251,26 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 		p.Mode != ModeSelfConsumption && p.Mode != ModeCheapCharge && p.Mode != ModePassiveArbitrage {
 		p.TerminalSoCPrice = selfConsumptionTerminalPrice(prices,
 			s.ExportBonusOreKwh, s.ExportFeeOreKwh)
+	}
+	if err := validatePlanningSlots(slots); err != nil {
+		slog.Error("mpc: invalid optimization inputs; keeping previous plan", "basis", "primary", "err", err)
+		return s.Latest()
+	}
+	if err := validatePlanningSlots(fallbackSlots); err != nil {
+		slog.Error("mpc: invalid optimization inputs; keeping previous plan", "basis", "go-fallback", "err", err)
+		return s.Latest()
+	}
+	if err := validatePlanningParams(p); err != nil {
+		slog.Error("mpc: invalid optimization parameters; keeping previous plan", "err", err)
+		return s.Latest()
+	}
+	recoveryRequired := planningParamsRequireRecovery(p)
+	if recoveryRequired && s.Optimizer == nil {
+		slog.Error("mpc: battery state requires operating-bound recovery that Go DP cannot model; keeping previous plan",
+			"soc_start", p.InitialSoCPct,
+			"soc_min", p.SoCMinPct,
+			"soc_max", p.SoCMaxPct)
+		return s.Latest()
 	}
 
 	slog.Info("mpc: optimize params",
@@ -1263,34 +1305,56 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 			return s.canceledReplan(request, "primary-solve")
 		}
 		if err == nil {
-			dpEvaluation := Optimize(slots, p)
-			dpEvaluation.Solver = &SolverInfo{
-				Engine: "go-dp", Backend: "bellman", Status: "optimal-grid",
-				Formulation: "discrete-dp",
-			}
-			candidate.DPEvaluationShadow = compareDPShadow(candidate, dpEvaluation)
-			candidate.DPEvaluationShadow.ForecastBasis = "same base forecast input"
-			candidate.DPEvaluationShadow.Solver = dpEvaluation.Solver
-			candidate.DPEvaluationShadow.TotalCostOre = dpEvaluation.TotalCostOre
-			candidate.DPEvaluationShadow.ActiveMinusShadowOre = candidate.TotalCostOre - dpEvaluation.TotalCostOre
-			if candidate.DPEvaluationShadow.FirstAction != nil {
-				mode, _, _ := actionToSlot(*candidate.DPEvaluationShadow.FirstAction, p.Mode)
-				candidate.DPEvaluationShadow.FirstAction.EMSMode = mode
-			}
+			if recoveryRequired {
+				candidate.DPEvaluationShadow = nil
+				candidate.DPShadow = nil
+				candidate.Baselines = nil
+				slog.Info("mpc: skipping Go DP shadows while battery state recovers into operating bounds",
+					"soc_start", p.InitialSoCPct,
+					"soc_min", p.SoCMinPct,
+					"soc_max", p.SoCMaxPct)
+			} else {
+				dpEvaluation := Optimize(slots, p)
+				dpEvaluation.Solver = &SolverInfo{
+					Engine: "go-dp", Backend: "bellman", Status: "optimal-grid",
+					Formulation: "discrete-dp",
+				}
+				candidate.DPEvaluationShadow = compareDPShadow(candidate, dpEvaluation)
+				candidate.DPEvaluationShadow.ForecastBasis = "same base forecast input"
+				candidate.DPEvaluationShadow.Solver = dpEvaluation.Solver
+				candidate.DPEvaluationShadow.TotalCostOre = dpEvaluation.TotalCostOre
+				candidate.DPEvaluationShadow.ActiveMinusShadowOre = candidate.TotalCostOre - dpEvaluation.TotalCostOre
+				if candidate.DPEvaluationShadow.FirstAction != nil {
+					mode, _, _ := actionToSlot(*candidate.DPEvaluationShadow.FirstAction, p.Mode)
+					candidate.DPEvaluationShadow.FirstAction.EMSMode = mode
+				}
 
-			dpShadow := Optimize(fallbackSlots, p)
-			dpShadow.Solver = &SolverInfo{
-				Engine: "go-dp", Backend: "bellman", Status: "optimal-grid",
-				Formulation: "discrete-dp",
-			}
-			candidate.DPShadow = compareDPShadow(candidate, dpShadow)
-			candidate.DPShadow.ForecastBasis = "downside-pv fallback input"
-			candidate.DPShadow.Solver = dpShadow.Solver
-			candidate.DPShadow.TotalCostOre = dpShadow.TotalCostOre
-			candidate.DPShadow.ActiveMinusShadowOre = candidate.TotalCostOre - dpShadow.TotalCostOre
-			if candidate.DPShadow.FirstAction != nil {
-				mode, _, _ := actionToSlot(*candidate.DPShadow.FirstAction, p.Mode)
-				candidate.DPShadow.FirstAction.EMSMode = mode
+				dpShadow := Optimize(fallbackSlots, p)
+				dpShadow.Solver = &SolverInfo{
+					Engine: "go-dp", Backend: "bellman", Status: "optimal-grid",
+					Formulation: "discrete-dp",
+				}
+				candidate.DPShadow = compareDPShadow(candidate, dpShadow)
+				candidate.DPShadow.ForecastBasis = "downside-pv fallback input"
+				candidate.DPShadow.Solver = dpShadow.Solver
+				candidate.DPShadow.TotalCostOre = dpShadow.TotalCostOre
+				candidate.DPShadow.ActiveMinusShadowOre = candidate.TotalCostOre - dpShadow.TotalCostOre
+				if candidate.DPShadow.FirstAction != nil {
+					mode, _, _ := actionToSlot(*candidate.DPShadow.FirstAction, p.Mode)
+					candidate.DPShadow.FirstAction.EMSMode = mode
+				}
+
+				optimizerSolveMs := 0.0
+				if candidate.Solver != nil {
+					optimizerSolveMs = candidate.Solver.SolveMs
+				}
+				slog.Info("mpc: active optimizer vs DP shadow",
+					"optimizer_cost_ore", candidate.TotalCostOre,
+					"dp_evaluation_cost_ore", dpEvaluation.TotalCostOre,
+					"active_minus_evaluation_ore", candidate.DPEvaluationShadow.ActiveMinusShadowOre,
+					"dp_shadow_cost_ore", dpShadow.TotalCostOre,
+					"active_minus_shadow_ore", candidate.DPShadow.ActiveMinusShadowOre,
+					"optimizer_solve_ms", optimizerSolveMs)
 			}
 			if request.wasCanceledByService() {
 				return s.canceledReplan(request, "dp-shadow")
@@ -1343,17 +1407,6 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 					}
 				}
 			}
-			optimizerSolveMs := 0.0
-			if candidate.Solver != nil {
-				optimizerSolveMs = candidate.Solver.SolveMs
-			}
-			slog.Info("mpc: active optimizer vs DP shadow",
-				"optimizer_cost_ore", candidate.TotalCostOre,
-				"dp_evaluation_cost_ore", dpEvaluation.TotalCostOre,
-				"active_minus_evaluation_ore", candidate.DPEvaluationShadow.ActiveMinusShadowOre,
-				"dp_shadow_cost_ore", dpShadow.TotalCostOre,
-				"active_minus_shadow_ore", candidate.DPShadow.ActiveMinusShadowOre,
-				"optimizer_solve_ms", optimizerSolveMs)
 			if candidate.RecourseShadow != nil {
 				slog.Info("mpc: champion vs stochastic shadow",
 					"champion_cost_ore", candidate.TotalCostOre,
@@ -1365,6 +1418,14 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 		} else {
 			if request.wasCanceledByService() {
 				return s.canceledReplan(request, "primary-fallback")
+			}
+			if recoveryRequired {
+				slog.Error("mpc: primary optimizer failed and Go DP cannot model operating-bound recovery; keeping previous plan",
+					"err", err,
+					"soc_start", p.InitialSoCPct,
+					"soc_min", p.SoCMinPct,
+					"soc_max", p.SoCMaxPct)
+				return s.Latest()
 			}
 			slog.Error("mpc: primary optimizer failed; using Go DP fallback", "err", err)
 			slots = fallbackSlots
@@ -1397,7 +1458,7 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 	// self-consumption mode: the SC baseline is the plan itself, which
 	// makes the badge trivially zero and distracts from the price
 	// signal. For SC runs the UI still has the plan cost on its own.
-	if p.Mode != ModeSelfConsumption {
+	if p.Mode != ModeSelfConsumption && !recoveryRequired {
 		bl := ComputeBaselines(slots, p)
 		plan.Baselines = &bl
 	}
