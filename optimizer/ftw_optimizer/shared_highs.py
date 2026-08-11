@@ -7,8 +7,11 @@ from typing import Any
 
 import numpy as np
 
-from .direct_highs import solve_direct_highs
-from .model import _STORAGE_INITIAL_ABOVE_MAXIMUM_KEY
+from .direct_highs import (
+    SharedBaselineReplayError,
+    solve_direct_highs,
+)
+from .model import _STORAGE_INITIAL_ABOVE_MAXIMUM_KEY, _solver_options
 from .multistage import _prepare
 from .protocol import ProtocolError, finite_number, require_dict, require_list
 from .scenario_tree import ScenarioTree
@@ -19,7 +22,7 @@ class DirectSharedIneligible(RuntimeError):
 
 
 def solve_shared_highs(payload: dict[str, Any], started: float) -> dict[str, Any]:
-    """Solve the shared storage-only LP through the sparse HiGHS builder."""
+    """Solve shared storage through the sparse HiGHS builder."""
     prepared_started = time.perf_counter()
     direct_payload, risk_alpha = _direct_payload(payload)
     prepared = replace(
@@ -52,6 +55,12 @@ def solve_shared_highs(payload: dict[str, Any], started: float) -> dict[str, Any
             "direct shared backend requires a cycle-safe continuous tariff"
         )
 
+    shared_pv_generation = np.minimum.reduce(
+        [
+            np.maximum(0.0, -scenario.pv)
+            for scenario in prepared.scenario_set.scenarios
+        ]
+    )
     scenario_count = len(prepared.scenario_set.scenarios)
     shared_tree = ScenarioTree(
         node_at=np.zeros((scenario_count, prepared.n), dtype=np.int64),
@@ -62,12 +71,6 @@ def solve_shared_highs(payload: dict[str, Any], started: float) -> dict[str, Any
 
     # Match the shared champion's fallback site bound. Explicit slot limits
     # still take precedence in both implementations.
-    shared_pv_generation = np.minimum.reduce(
-        [
-            np.maximum(0.0, -scenario.pv)
-            for scenario in prepared.scenario_set.scenarios
-        ]
-    )
     max_site_power = max(
         1000.0,
         float(np.max(prepared.base_load + shared_pv_generation))
@@ -116,13 +119,30 @@ def solve_shared_highs(payload: dict[str, Any], started: float) -> dict[str, Any
         ),
     )
     prepare_ms = (time.perf_counter() - prepared_started) * 1000.0
-    return solve_direct_highs(
-        prepared,
-        started,
-        prepare_ms,
-        "shared",
-        shared=True,
+    deadline = started + float(
+        _solver_options(prepared.settings, "HIGHS")["time_limit"]
     )
+    try:
+        return solve_direct_highs(
+            prepared,
+            started,
+            prepare_ms,
+            "shared",
+            shared=True,
+            deadline=deadline,
+        )
+    except SharedBaselineReplayError as exc:
+        return solve_direct_highs(
+            prepared,
+            started,
+            prepare_ms,
+            "shared",
+            shared=True,
+            exact_shared_baseline=True,
+            deadline=deadline,
+            prior_build_ms=exc.build_ms,
+            prior_solver_ms=exc.solver_ms,
+        )
 
 
 def _direct_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], float]:

@@ -4,10 +4,12 @@ import copy
 import json
 import math
 import threading
+import time
 
 import numpy as np
 import pytest
 
+from ftw_optimizer.direct_highs import DirectHighsError, _remaining_time_s
 from ftw_optimizer.multistage import clear_multistage_cache
 from ftw_optimizer.model import _canonicalize_storage_payload
 from ftw_optimizer.scenario_tree import (
@@ -152,6 +154,16 @@ def base_request() -> dict:
         "flex_loads": [],
         "thermal_loads": [],
     }
+
+
+def test_direct_highs_accepts_a_positive_sub_50ms_budget() -> None:
+    remaining = _remaining_time_s(time.perf_counter() + 0.01)
+    assert 0.0 < remaining <= 0.01
+
+
+def test_direct_highs_rejects_an_exhausted_budget() -> None:
+    with pytest.raises(DirectHighsError, match="time budget exhausted"):
+        _remaining_time_s(time.perf_counter() - 0.001)
 
 
 def assert_storage_replays(request: dict, response: dict, tolerance_wh: float = 2.1) -> None:
@@ -489,6 +501,145 @@ def test_shared_direct_highs_matches_strict_pv_surplus_and_limit() -> None:
     assert_storage_replays(reference_request, reference)
 
 
+def shared_curtailment_request(mode: str, base_load_w: float) -> dict:
+    request = base_request()
+    request["request_id"] = f"shared-curtail-{mode}-{base_load_w}"
+    request["settings"].update(
+        {
+            "mode": mode,
+            "formulation": "relaxed",
+            "shared_backend": "auto",
+        }
+    )
+    request["slots"] = [
+        {
+            "start_ms": 1,
+            "len_min": 60,
+            "price_ore": 100,
+            "spot_ore": 20,
+            "confidence": 1,
+            "pv_w": -1000,
+            "load_w": base_load_w,
+            "max_import_w": 8000,
+            "max_export_w": 100,
+        }
+    ]
+    request["scenarios"] = [
+        {
+            "id": "base",
+            "probability": 0.5,
+            "pv_w": [-1000],
+            "load_w": [base_load_w],
+        },
+        {
+            "id": "sunny",
+            "probability": 0.5,
+            "pv_w": [-1600],
+            "load_w": [500],
+        },
+    ]
+    request["storages"][0].update(
+        {
+            "initial_energy_wh": 5000,
+            "max_charge_w": 0,
+            "max_discharge_w": 0,
+            "terminal_price_ore_kwh": 0,
+        }
+    )
+    return request
+
+
+@pytest.mark.parametrize(
+    "mode",
+    ["self_consumption", "cheap_charge", "passive_arbitrage"],
+)
+def test_shared_direct_highs_models_post_curtailment_baseline(mode: str) -> None:
+    request = shared_curtailment_request(mode, 2000)
+    request["request_id"] = f"shared-post-curtail-{mode}-direct"
+    request["settings"]["shared_backend"] = "highs"
+    reference_request = copy.deepcopy(request)
+    reference_request["request_id"] = f"shared-post-curtail-{mode}-cvxpy"
+    reference_request["settings"]["shared_backend"] = "cvxpy"
+
+    direct = handle(request)
+    reference = handle(reference_request)
+
+    assert direct["ok"], direct
+    assert reference["ok"], reference
+    assert direct["solver"]["engine"] == "highspy"
+    assert reference["solver"]["engine"] == "cvxpy"
+    assert_shared_plan_parity(direct, reference)
+    assert math.isclose(direct["plan"]["actions"][0]["grid_w"], 2000)
+    assert_storage_replays(request, direct)
+    assert_storage_replays(reference_request, reference)
+
+
+@pytest.mark.parametrize(
+    "mode",
+    ["self_consumption", "cheap_charge", "passive_arbitrage"],
+)
+def test_shared_curtailment_direction_change_matches_cvxpy(mode: str) -> None:
+    request = shared_curtailment_request(mode, 900)
+    request["request_id"] = f"shared-curtail-cross-{mode}-auto"
+    reference_request = copy.deepcopy(request)
+    reference_request["request_id"] = f"shared-curtail-cross-{mode}-cvxpy"
+    reference_request["settings"]["shared_backend"] = "cvxpy"
+
+    direct = handle(request)
+    reference = handle(reference_request)
+
+    assert direct["ok"], direct
+    assert reference["ok"], reference
+    assert direct["solver"]["engine"] == "highspy"
+    assert direct["solver"]["formulation"] == "convex"
+    assert direct["solver"]["mip_gap"] is None
+    assert reference["solver"]["engine"] == "cvxpy"
+    assert math.isclose(
+        direct["solver"]["objective_ore"],
+        reference["solver"]["objective_ore"],
+        abs_tol=1e-4,
+    )
+    assert_shared_plan_parity(direct, reference)
+    assert math.isclose(direct["plan"]["actions"][0]["grid_w"], 900)
+    assert_storage_replays(request, direct)
+    assert_storage_replays(reference_request, reference)
+
+
+def test_shared_baseline_replay_retries_with_exact_highs() -> None:
+    request = shared_curtailment_request("self_consumption", 900)
+    request["request_id"] = "shared-curtail-exact-retry"
+    request["settings"]["shared_backend"] = "highs"
+    request["storages"][0].update(
+        {
+            "max_charge_w": 5000,
+            "terminal_price_ore_kwh": 1000,
+        }
+    )
+    reference_request = copy.deepcopy(request)
+    reference_request["request_id"] = "shared-curtail-exact-cvxpy"
+    reference_request["settings"]["shared_backend"] = "cvxpy"
+
+    direct = handle(request)
+    reference = handle(reference_request)
+
+    assert direct["ok"], direct
+    assert reference["ok"], reference
+    assert direct["solver"]["engine"] == "highspy"
+    assert direct["solver"]["formulation"] == "milp"
+    assert direct["solver"]["mip_gap"] is not None
+    assert direct["solver"]["build_ms"] > 0
+    assert direct["solver"]["solver_ms"] > 0
+    assert reference["solver"]["engine"] == "cvxpy"
+    assert math.isclose(
+        direct["solver"]["objective_ore"],
+        reference["solver"]["objective_ore"],
+        abs_tol=1e-4,
+    )
+    assert_shared_plan_parity(direct, reference)
+    assert math.isclose(direct["plan"]["actions"][0]["battery_w"], 50)
+    assert math.isclose(direct["plan"]["actions"][0]["grid_w"], 900)
+
+
 def test_shared_auto_falls_back_at_each_direct_eligibility_boundary() -> None:
     cases: list[tuple[str, dict]] = []
 
@@ -725,6 +876,7 @@ def test_shared_direct_realistic_horizon_matches_cvxpy(
     assert direct_solver["backend"] == "highs"
     assert direct_solver["status"] == "optimal"
     assert direct_solver["formulation"] == "convex"
+    assert direct_solver["mip_gap"] is None
     assert direct_solver["dpp"] is False
     assert direct_solver["cache_hit"] is False
     assert direct_solver["model_variables"] > 0

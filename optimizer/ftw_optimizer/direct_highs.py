@@ -23,6 +23,16 @@ class DirectHighsError(RuntimeError):
 SIMULTANEOUS_STORAGE_CYCLE_ERROR = (
     "HiGHS returned simultaneous storage charge and discharge"
 )
+SHARED_BASELINE_REPLAY_ERROR = (
+    "direct shared mode violates the post-curtailment baseline"
+)
+
+
+class SharedBaselineReplayError(DirectHighsError):
+    def __init__(self, build_ms: float, solver_ms: float) -> None:
+        super().__init__(SHARED_BASELINE_REPLAY_ERROR)
+        self.build_ms = build_ms
+        self.solver_ms = solver_ms
 
 
 @dataclass
@@ -51,11 +61,20 @@ class SparseModel:
         self.lower: list[float] = []
         self.upper: list[float] = []
         self.rows: list[tuple[dict[int, float], float, float]] = []
+        self.integer: list[int] = []
 
-    def variable(self, lower: float = 0.0, upper: float = highspy.kHighsInf) -> int:
+    def variable(
+        self,
+        lower: float = 0.0,
+        upper: float = highspy.kHighsInf,
+        *,
+        integer: bool = False,
+    ) -> int:
         index = len(self.lower)
         self.lower.append(lower)
         self.upper.append(upper)
+        if integer:
+            self.integer.append(index)
         return index
 
     def row(
@@ -68,17 +87,38 @@ class SparseModel:
         self.rows.append((coefficients, lower, upper))
         return index
 
-    def build(self, costs: np.ndarray, settings: dict[str, Any]) -> highspy.Highs:
+    def build(
+        self,
+        costs: np.ndarray,
+        settings: dict[str, Any],
+        *,
+        time_limit_s: float,
+    ) -> highspy.Highs:
         highs = highspy.Highs()
         highs.setOptionValue("output_flag", False)
         options = _solver_options(settings, "HIGHS")
-        highs.setOptionValue("time_limit", float(options["time_limit"]))
+        highs.setOptionValue(
+            "time_limit", min(float(options["time_limit"]), time_limit_s)
+        )
         highs.setOptionValue("mip_rel_gap", float(options["mip_rel_gap"]))
         lower = np.asarray(self.lower, dtype=np.float64)
         upper = np.asarray(self.upper, dtype=np.float64)
         _require_ok(highs.addVars(len(lower), lower, upper), "add variables")
         indices = np.arange(len(lower), dtype=np.int32)
         _require_ok(highs.changeColsCost(len(lower), indices, costs), "set objective")
+        if self.integer:
+            integer_indices = np.asarray(self.integer, dtype=np.int32)
+            integer_types = np.full(
+                len(integer_indices),
+                highspy.HighsVarType.kInteger,
+                dtype=np.uint8,
+            )
+            _require_ok(
+                highs.changeColsIntegrality(
+                    len(integer_indices), integer_indices, integer_types
+                ),
+                "set integer variables",
+            )
 
         starts = np.zeros(len(self.rows) + 1, dtype=np.int32)
         row_indices: list[int] = []
@@ -115,6 +155,10 @@ def solve_direct_highs(
     decomposition: str,
     *,
     shared: bool = False,
+    exact_shared_baseline: bool = False,
+    deadline: float | None = None,
+    prior_build_ms: float = 0.0,
+    prior_solver_ms: float = 0.0,
 ) -> dict[str, Any]:
     if _storage_starts_above_maximum(prepared.storages):
         raise DirectHighsError(
@@ -122,6 +166,10 @@ def solve_direct_highs(
         )
     if prepared.discrete or prepared.unsafe_cycle or prepared.unsafe_meter_split:
         raise DirectHighsError("direct HiGHS path requires a cycle-safe continuous tariff")
+    if deadline is None:
+        deadline = started + float(
+            _solver_options(prepared.settings, "HIGHS")["time_limit"]
+        )
     build_started = time.perf_counter()
     model = SparseModel()
     m = len(prepared.scenario_set.scenarios)
@@ -247,10 +295,13 @@ def solve_direct_highs(
                     _add(service, upper_recovery[t], 1.0 / (capacity * n))
 
             if spec.get("target_energy_wh") is not None:
-                deadline = int(spec.get("target_slot", n - 1))
+                target_slot = int(spec.get("target_slot", n - 1))
                 shortfall = model.variable()
                 target = float(spec["target_energy_wh"])
-                model.row({energy[deadline + 1]: 1.0, shortfall: 1.0}, target)
+                model.row(
+                    {energy[target_slot + 1]: 1.0, shortfall: 1.0},
+                    target,
+                )
                 _add(service, shortfall, 1.0 / capacity)
 
             cycle_coefficient = spread + max(0.0, float(spec.get("cycle_cost_ore_kwh", 0)))
@@ -299,10 +350,70 @@ def solve_direct_highs(
         grid_import: list[int] = []
         grid_export: list[int] = []
         for t in range(n):
+            net = float(scenario.load[t] - pv_generation[t])
+            shared_baseline_mode = shared and prepared.mode in {
+                "self_consumption",
+                "cheap_charge",
+                "passive_arbitrage",
+            }
+            baseline_stays_import = False
+            baseline_crosses = False
+            baseline_import_index: int | None = None
+            baseline_export_index: int | None = None
+            if shared_baseline_mode:
+                curtail_ceiling = float(
+                    curtail_upper[
+                        (int(prepared.tree.node_at[si, t]), t)
+                    ]
+                )
+                baseline_crosses = net < 0 < net + curtail_ceiling
+                if baseline_crosses and exact_shared_baseline:
+                    baseline_import_max = net + curtail_ceiling
+                    baseline_export_max = -net
+                    baseline_import_index = model.variable(
+                        0.0, baseline_import_max
+                    )
+                    baseline_export_index = model.variable(
+                        0.0, baseline_export_max
+                    )
+                    baseline_import_mode = model.variable(
+                        0.0, 1.0, integer=True
+                    )
+                    model.row(
+                        {
+                            baseline_import_index: 1.0,
+                            baseline_export_index: -1.0,
+                            curtail[t]: -1.0,
+                        },
+                        net,
+                        net,
+                    )
+                    model.row(
+                        {
+                            baseline_import_index: 1.0,
+                            baseline_import_mode: -baseline_import_max,
+                        },
+                        upper=0.0,
+                    )
+                    model.row(
+                        {
+                            baseline_export_index: 1.0,
+                            baseline_import_mode: baseline_export_max,
+                        },
+                        upper=baseline_export_max,
+                    )
+                baseline_stays_import = net >= 0
+
             import_upper = float(prepared.import_bound[t])
             export_upper = float(prepared.export_bound[t])
             if prepared.mode == "self_consumption":
-                import_upper = min(import_upper, float(base_import[t]) + 50.0)
+                if shared_baseline_mode:
+                    if not baseline_crosses and not baseline_stays_import:
+                        import_upper = min(import_upper, 50.0)
+                else:
+                    import_upper = min(
+                        import_upper, float(base_import[t]) + 50.0
+                    )
             import_index = model.variable(0.0, import_upper)
             export_index = model.variable(0.0, export_upper)
             grid_import.append(import_index)
@@ -316,9 +427,59 @@ def solve_direct_highs(
                 _add(balance, index, -1.0)
             for index in total_discharge[t]:
                 _add(balance, index, 1.0)
-            net = float(scenario.load[t] - pv_generation[t])
             model.row(balance, net, net)
-            if prepared.mode == "self_consumption":
+            if shared_baseline_mode and prepared.mode == "self_consumption":
+                if baseline_crosses and exact_shared_baseline:
+                    assert baseline_import_index is not None
+                    assert baseline_export_index is not None
+                    model.row(
+                        {import_index: 1.0, baseline_import_index: -1.0},
+                        upper=50.0,
+                    )
+                    model.row(
+                        {export_index: 1.0, baseline_export_index: -1.0},
+                        upper=50.0,
+                    )
+                elif baseline_crosses:
+                    model.row(
+                        {import_index: 1.0, curtail[t]: -1.0},
+                        upper=50.0,
+                    )
+                    model.row(
+                        {export_index: 1.0},
+                        upper=-net + 50.0,
+                    )
+                elif baseline_stays_import:
+                    model.row(
+                        {import_index: 1.0, curtail[t]: -1.0},
+                        upper=net + 50.0,
+                    )
+                    model.row({export_index: 1.0}, upper=50.0)
+                else:
+                    model.row(
+                        {export_index: 1.0, curtail[t]: 1.0},
+                        upper=-net + 50.0,
+                    )
+            elif shared_baseline_mode:
+                if baseline_crosses and exact_shared_baseline:
+                    assert baseline_export_index is not None
+                    model.row(
+                        {export_index: 1.0, baseline_export_index: -1.0},
+                        upper=1e-6,
+                    )
+                elif baseline_crosses:
+                    model.row(
+                        {export_index: 1.0},
+                        upper=-net + 1e-6,
+                    )
+                elif baseline_stays_import:
+                    model.row({export_index: 1.0}, upper=1e-6)
+                else:
+                    model.row(
+                        {export_index: 1.0, curtail[t]: 1.0},
+                        upper=-net + 1e-6,
+                    )
+            elif prepared.mode == "self_consumption":
                 model.row(
                     {export_index: 1.0, curtail[t]: 1.0},
                     upper=float(pv_surplus[t]) + 50.0,
@@ -437,7 +598,11 @@ def solve_direct_highs(
     if len(economic_costs) < len(model.lower):
         economic_costs = np.pad(economic_costs, (0, len(model.lower) - len(economic_costs)))
 
-    highs = model.build(service_costs, prepared.settings)
+    highs = model.build(
+        service_costs,
+        prepared.settings,
+        time_limit_s=_remaining_time_s(deadline),
+    )
     build_ms = (time.perf_counter() - build_started) * 1000.0
     solver_started = time.perf_counter()
     _run_optimal(highs, "service")
@@ -456,11 +621,30 @@ def solve_direct_highs(
         highs.changeColsCost(len(model.lower), column_indices, economic_costs),
         "set economic objective",
     )
+    _require_ok(
+        highs.setOptionValue("time_limit", _remaining_time_s(deadline)),
+        "set economic time limit",
+    )
     _run_optimal(highs, "economic")
     solver_ms = (time.perf_counter() - solver_started) * 1000.0
+    mip_gap = float(highs.getInfo().mip_gap) if model.integer else None
     solution = np.asarray(highs.getSolution().col_value, dtype=np.float64)
     if len(solution) != len(model.lower) or not np.all(np.isfinite(solution)):
         raise DirectHighsError("HiGHS returned a non-finite solution")
+    if shared:
+        try:
+            _validate_shared_baseline_solution(
+                prepared, scenario_vars, solution
+            )
+        except DirectHighsError as exc:
+            if (
+                not exact_shared_baseline
+                and str(exc) == SHARED_BASELINE_REPLAY_ERROR
+            ):
+                raise SharedBaselineReplayError(
+                    build_ms, solver_ms
+                ) from exc
+            raise
 
     return _response(
         prepared,
@@ -470,11 +654,13 @@ def solve_direct_highs(
         best_service,
         started,
         prepare_ms,
-        build_ms,
-        solver_ms,
+        prior_build_ms + build_ms,
+        prior_solver_ms + solver_ms,
         decomposition,
         len(model.lower),
         len(model.rows),
+        len(model.integer),
+        mip_gap,
         shared,
     )
 
@@ -492,6 +678,8 @@ def _response(
     decomposition: str,
     variables: int,
     constraints: int,
+    integer_variables: int,
+    mip_gap: float | None,
     shared: bool,
 ) -> dict[str, Any]:
     scenarios = prepared.scenario_set.scenarios
@@ -555,7 +743,13 @@ def _response(
         "engine": "highspy",
         "backend": "highs",
         "status": "optimal",
-        "formulation": "convex" if shared else "multistage-lp",
+        "formulation": (
+            "milp"
+            if shared and integer_variables
+            else "convex"
+            if shared
+            else "multistage-lp"
+        ),
         "objective_ore": objective,
         "service_slack": best_service,
         "solve_ms": solve_ms,
@@ -564,7 +758,7 @@ def _response(
         "solver_ms": solver_ms,
         "cache_hit": False,
         "dpp": False,
-        "mip_gap": None,
+        "mip_gap": mip_gap,
         "scenario_count": len(scenarios),
         "scenario_policy": "shared" if shared else "multistage",
         "policy_version": "shared-v1" if shared else "storage-multistage-v1",
@@ -669,6 +863,49 @@ def _response(
 
 def _add(coefficients: dict[int, float], index: int, value: float) -> None:
     coefficients[index] = coefficients.get(index, 0.0) + value
+
+
+def _remaining_time_s(deadline: float) -> float:
+    remaining = deadline - time.perf_counter()
+    if remaining <= 0.0:
+        raise DirectHighsError("direct HiGHS time budget exhausted")
+    return remaining
+
+
+def _validate_shared_baseline_solution(
+    prepared: "PreparedMultistage",
+    scenario_vars: list[DirectScenarioVars],
+    solution: np.ndarray,
+) -> None:
+    if prepared.mode not in {
+        "self_consumption",
+        "cheap_charge",
+        "passive_arbitrage",
+    }:
+        return
+    tolerance = 1e-4
+    for scenario, variables in zip(
+        prepared.scenario_set.scenarios, scenario_vars
+    ):
+        pv_generation = np.maximum(0.0, -scenario.pv)
+        for t in range(prepared.n):
+            curtailed = float(solution[variables.curtail[t]])
+            baseline = float(
+                scenario.load[t] - pv_generation[t] + curtailed
+            )
+            baseline_import = max(baseline, 0.0)
+            baseline_export = max(-baseline, 0.0)
+            grid_import = float(solution[variables.grid_import[t]])
+            grid_export = float(solution[variables.grid_export[t]])
+            if prepared.mode == "self_consumption":
+                valid = (
+                    grid_import <= baseline_import + 50.0 + tolerance
+                    and grid_export <= baseline_export + 50.0 + tolerance
+                )
+            else:
+                valid = grid_export <= baseline_export + 1e-6 + tolerance
+            if not valid:
+                raise DirectHighsError(SHARED_BASELINE_REPLAY_ERROR)
 
 
 def _accumulate(target: np.ndarray, terms: dict[int, float], weight: float) -> None:
