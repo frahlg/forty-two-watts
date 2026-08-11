@@ -113,6 +113,8 @@ def solve_progressive_hedging(
 
     iterations = 0
     for iteration in range(1, max_iterations + 1):
+        if residual_w <= tolerance_w:
+            break
         iterations = iteration
         for si, subproblem in enumerate(subproblems):
             subproblem.consensus_kw.value = consensus[si]
@@ -129,8 +131,6 @@ def solve_progressive_hedging(
         residual_w = _nonanticipativity_residual_w(prepared, decisions, consensus)
         for si, subproblem in enumerate(subproblems):
             dual[si] += subproblem.consensus_mask * (decisions[si] - consensus[si])
-        if residual_w <= tolerance_w:
-            break
     solver_ms = (time.perf_counter() - solver_started) * 1000.0
     if residual_w > tolerance_w:
         raise ProgressiveHedgingNotConverged(

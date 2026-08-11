@@ -1957,6 +1957,54 @@ def test_multistage_uses_progressive_hedging_only_for_eligible_large_convex_case
     assert response["solver"]["ph_residual_w"] <= 10
 
 
+def test_progressive_hedging_skips_iteration_for_converged_initial_solution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from ftw_optimizer import progressive
+
+    request = base_request()
+    request["request_id"] = "ph-initial-consensus"
+    request["slots"] = request["slots"][:1]
+    request["settings"].update(
+        {
+            "scenario_policy": "multistage",
+            "formulation": "relaxed",
+            "decomposition_method": "progressive_hedging",
+            "ph_max_iterations": 4,
+            "ph_tolerance_w": 5,
+        }
+    )
+    request["scenarios"] = [
+        {
+            "id": "base",
+            "probability": 1,
+            "load_w": [500],
+            "pv_w": [0],
+        }
+    ]
+
+    original_solve = progressive._solve_problem
+    solve_calls = 0
+
+    def solve_once(*args, **kwargs) -> None:
+        nonlocal solve_calls
+        solve_calls += 1
+        if solve_calls > 1:
+            raise AssertionError("converged initial PH solution ran another solve")
+        original_solve(*args, **kwargs)
+
+    monkeypatch.setattr(progressive, "_solve_problem", solve_once)
+
+    response = handle(request)
+
+    assert response["ok"], response
+    assert solve_calls == 1
+    assert response["solver"]["status"] == "optimal-ph"
+    assert response["solver"]["ph_iterations"] == 0
+    assert response["solver"]["ph_residual_w"] == pytest.approx(0)
+    assert_storage_replays(request, response)
+
+
 def test_progressive_hedging_refuses_discrete_mode() -> None:
     request = base_request()
     request["settings"].update(
