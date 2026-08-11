@@ -47,6 +47,8 @@ def ph_eligible(prepared: "PreparedMultistage") -> tuple[bool, str]:
     settings = prepared.settings
     if str(settings.get("formulation", "auto")) != "relaxed":
         return False, "formulation is not relaxed"
+    if prepared.discrete:
+        return False, "physical direction guards require a mixed-integer formulation"
     if prepared.mode != "arbitrage":
         return False, "mode is not unconstrained arbitrage"
     if prepared.economic_cvar_weight > 0:

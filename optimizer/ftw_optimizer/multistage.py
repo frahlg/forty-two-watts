@@ -20,8 +20,10 @@ from .model import (
     _canonicalize_storage_payload,
     _export_price,
     _mode,
+    _requires_direction_binary,
     _solver_options,
     _normalize_storage_specs,
+    _storage_relaxation_is_unsafe,
     _validate_storage_replay,
 )
 from .protocol import ProtocolError, finite_number, positive_number, require_dict, require_list
@@ -418,7 +420,6 @@ def _prepare(payload: dict[str, Any]) -> PreparedMultistage:
     formulation = str(settings.get("formulation", "auto"))
     if formulation not in {"auto", "milp", "relaxed"}:
         raise ProtocolError("settings.formulation must be auto, milp, or relaxed")
-    force_milp = formulation == "milp"
     pv_charge_bonus = max(
         0.0,
         finite_number(
@@ -426,13 +427,7 @@ def _prepare(payload: dict[str, Any]) -> PreparedMultistage:
             "settings.pv_charge_bonus_ore_kwh",
         ),
     )
-    unsafe_cycle = bool(np.any(effective_import < -1e-9)) or pv_charge_bonus > 0
-    unsafe_meter_split = bool(
-        np.any(effective_import < effective_export - 1e-9)
-    )
-    meter_discrete = force_milp or (
-        formulation == "auto" and unsafe_meter_split
-    )
+    unsafe_meter_split = bool(np.any(effective_import < effective_export - 1e-9))
     base_load = np.asarray(
         [finite_number(slot.get("load_w", 0), f"slots[{i}].load_w") for i, slot in enumerate(slots)]
     )
@@ -485,11 +480,17 @@ def _prepare(payload: dict[str, Any]) -> PreparedMultistage:
     _validate_storages(storage_specs, n)
     if not storage_specs:
         raise ProtocolError("multistage shadow requires at least one storage")
+    unsafe_cycle = _storage_relaxation_is_unsafe(
+        effective_import,
+        effective_export,
+        pv_charge_bonus,
+        storage_specs,
+    )
+    meter_discrete = _requires_direction_binary(formulation, unsafe_meter_split)
     storage_above_max = any(storage_above_maximum)
     storage_discrete = (
-        force_milp
-        or storage_above_max
-        or (formulation == "auto" and unsafe_cycle)
+        storage_above_max
+        or _requires_direction_binary(formulation, unsafe_cycle)
     )
 
     max_site_power = max(

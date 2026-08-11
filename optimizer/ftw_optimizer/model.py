@@ -232,6 +232,38 @@ def _arbitrage_spread_ore_kwh(settings: dict[str, Any], mode: str) -> float:
     return spread
 
 
+def _requires_direction_binary(formulation: str, relaxation_unsafe: bool) -> bool:
+    """Keep mutually exclusive physical flows when a relaxation can profit."""
+
+    return formulation == "milp" or relaxation_unsafe
+
+
+def _storage_relaxation_is_unsafe(
+    effective_import: np.ndarray,
+    effective_export: np.ndarray,
+    pv_charge_bonus_ore: float,
+    storages: list[dict[str, Any]] | tuple[dict[str, Any], ...],
+) -> bool:
+    """Return whether charge and discharge must stay mutually exclusive."""
+
+    if not storages:
+        return False
+    negative_terminal_value = any(
+        finite_number(
+            spec.get("terminal_price_ore_kwh", 0),
+            f"storages[{i}].terminal_price_ore_kwh",
+        )
+        < -1e-9
+        for i, spec in enumerate(storages)
+    )
+    return bool(
+        np.any(effective_import < -1e-9)
+        or np.any(effective_export < -1e-9)
+        or pv_charge_bonus_ore > 0
+        or negative_terminal_value
+    )
+
+
 def _export_price(slot: dict[str, Any], settings: dict[str, Any]) -> float:
     flat = finite_number(settings.get("export_ore_per_kwh", 0), "settings.export_ore_per_kwh")
     if flat > 0:
@@ -275,8 +307,11 @@ def _solver_options(
 def solve(
     payload: dict[str, Any],
     deadline: SolveDeadline | None = None,
+    *,
+    _force_storage_direction: bool = False,
+    _started: float | None = None,
 ) -> dict[str, Any]:
-    started = time.perf_counter()
+    started = time.perf_counter() if _started is None else _started
     payload = _canonicalize_storage_payload(payload)
     settings = require_dict(payload.get("settings", {}), "settings")
     if deadline is None:
@@ -309,11 +344,12 @@ def solve(
     if scenario_policy != "shared":
         raise ProtocolError("settings.scenario_policy must be shared, recourse, or multistage")
 
-    shared_backend = str(settings.get("shared_backend", "auto"))
-    if shared_backend not in {"auto", "highs", "cvxpy"}:
+    configured_shared_backend = str(settings.get("shared_backend", "auto"))
+    if configured_shared_backend not in {"auto", "highs", "cvxpy"}:
         raise ProtocolError("settings.shared_backend must be auto, highs, or cvxpy")
+    shared_backend = "cvxpy" if _force_storage_direction else configured_shared_backend
     direct_fallback_reason = ""
-    direct_storage_guard = False
+    direct_storage_guard = _force_storage_direction
     if shared_backend in {"auto", "highs"}:
         from .direct_highs import (
             DirectHighsError,
@@ -473,7 +509,6 @@ def solve(
     formulation = settings.get("formulation", "auto")
     if formulation not in {"auto", "milp", "relaxed"}:
         raise ProtocolError("settings.formulation must be auto, milp, or relaxed")
-    force_milp = formulation == "milp"
     pv_charge_bonus_ore = max(
         0.0,
         finite_number(
@@ -487,6 +522,13 @@ def solve(
     storage_specs, storage_above_maximum = _normalize_storage_specs(
         require_list(payload.get("storages", []), "storages")
     )
+    unsafe_cycle = _storage_relaxation_is_unsafe(
+        eff_import,
+        eff_export,
+        pv_charge_bonus_ore,
+        storage_specs,
+    )
+    unsafe_meter_split = bool(np.any(eff_import < eff_export - 1e-9))
     storages: list[StorageVars] = []
     asset_ids: set[str] = set()
     total_charge: cp.Expression = cp.Constant(np.zeros(n))
@@ -536,13 +578,11 @@ def solve(
         # it may never worsen, and once cleared it can never return. In-bound
         # starts have zero recovery allowance, preserving hard min/max bounds.
         service_slack += cp.sum(lower_recovery[1:] + upper_recovery[1:]) / (capacity * n)
-        unsafe_cycle = bool(np.any(eff_import < 0)) or pv_charge_bonus_ore > 0
         initial_above_max = storage_above_maximum[i]
         if (
-            force_milp
-            or direct_storage_guard
+            direct_storage_guard
             or initial_above_max
-            or (formulation == "auto" and unsafe_cycle)
+            or _requires_direction_binary(formulation, unsafe_cycle)
         ):
             direction = cp.Variable(n, boolean=True, name=f"storage_{i}_charge_mode")
             constraints += [charge <= max_charge * direction, discharge <= max_discharge * (1 - direction)]
@@ -789,8 +829,7 @@ def solve(
             grid_import <= np.where(import_limit > 0, import_limit, max_site_power),
             grid_export <= np.where(export_limit > 0, export_limit, max_site_power),
         ]
-        unsafe_meter_split = bool(np.any(eff_import < eff_export - 1e-9))
-        if force_milp or (formulation == "auto" and unsafe_meter_split):
+        if _requires_direction_binary(formulation, unsafe_meter_split):
             direction = cp.Variable(n, boolean=True, name=f"scenario_{si}_import_mode")
             constraints += [grid_import <= max_site_power * direction, grid_export <= max_site_power * (1 - direction)]
             discrete = True
@@ -1053,7 +1092,21 @@ def solve(
                 mip_gap = float(value)
                 break
     solve_ms = (time.perf_counter() - started) * 1000.0
-    _validate_storage_replay(actions, slots, [storage.spec for storage in storages])
+    try:
+        _validate_storage_replay(actions, slots, [storage.spec for storage in storages])
+    except ReplayConsistencyError as exc:
+        if direct_storage_guard:
+            raise
+        deadline.check("storage replay fallback")
+        response = solve(
+            payload,
+            deadline,
+            _force_storage_direction=True,
+            _started=started,
+        )
+        response["solver"]["fallback"] = True
+        response["solver"]["fallback_reason"] = str(exc)
+        return response
     response = {
         "schema_version": SCHEMA_VERSION,
         "request_id": str(payload["request_id"]),

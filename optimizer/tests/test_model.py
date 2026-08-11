@@ -17,6 +17,8 @@ from ftw_optimizer.model import (
     OPTIMAL_STATUSES,
     _arbitrage_spread_ore_kwh,
     _canonicalize_storage_payload,
+    _requires_direction_binary,
+    _storage_relaxation_is_unsafe,
 )
 from ftw_optimizer.protocol import ProtocolError
 from ftw_optimizer.scenario_tree import (
@@ -1598,6 +1600,286 @@ def test_multistage_auto_keeps_binary_guards_for_unsafe_incentives() -> None:
     assert response["ok"], response
     assert response["solver"]["engine"] == "cvxpy"
     assert response["solver"]["formulation"] == "multistage-milp"
+
+
+_RELAXED_POLICY_FORMULATIONS = {
+    "shared": ("convex", "milp"),
+    "recourse": ("stochastic-recourse-convex", "stochastic-recourse-milp"),
+    "multistage": ("multistage-lp", "multistage-milp"),
+}
+
+
+@pytest.mark.parametrize(
+    ("formulation", "relaxation_unsafe", "expected"),
+    [
+        ("auto", False, False),
+        ("auto", True, True),
+        ("relaxed", False, False),
+        ("relaxed", True, True),
+        ("milp", False, True),
+        ("milp", True, True),
+    ],
+)
+def test_direction_binary_requirement(
+    formulation: str, relaxation_unsafe: bool, expected: bool
+) -> None:
+    assert _requires_direction_binary(formulation, relaxation_unsafe) is expected
+
+
+@pytest.mark.parametrize(
+    ("import_price", "export_price", "bonus", "terminal_price", "expected"),
+    [
+        (10, 0, 0, 0, False),
+        (-1, -2, 0, 0, True),
+        (10, -1, 0, 0, True),
+        (10, 0, 1, 0, True),
+        (10, 0, 0, -1, True),
+        (-0.5e-9, -0.5e-9, 0, -0.5e-9, False),
+    ],
+)
+def test_storage_relaxation_risk_sources(
+    import_price: float,
+    export_price: float,
+    bonus: float,
+    terminal_price: float,
+    expected: bool,
+) -> None:
+    storage = {"terminal_price_ore_kwh": terminal_price}
+    assert (
+        _storage_relaxation_is_unsafe(
+            np.asarray([import_price]),
+            np.asarray([export_price]),
+            bonus,
+            [storage],
+        )
+        is expected
+    )
+    assert not _storage_relaxation_is_unsafe(
+        np.asarray([import_price]),
+        np.asarray([export_price]),
+        bonus,
+        [],
+    )
+
+
+def _relaxed_flow_guard_request(scenario_policy: str) -> dict:
+    request = base_request()
+    request["request_id"] = f"relaxed-flow-guard-{scenario_policy}"
+    request["settings"].update(
+        {
+            "mode": "arbitrage",
+            "solver": "HIGHS",
+            "formulation": "relaxed",
+            "shared_backend": "cvxpy",
+        }
+    )
+    if scenario_policy != "shared":
+        request["settings"]["scenario_policy"] = scenario_policy
+    if scenario_policy == "multistage":
+        request["settings"]["multistage_backend"] = "cvxpy"
+        clear_multistage_cache()
+    request["slots"] = [
+        {
+            "start_ms": 1,
+            "len_min": 60,
+            "price_ore": 20,
+            "spot_ore": 10,
+            "confidence": 1,
+            "pv_w": 0,
+            "load_w": 0,
+            "max_import_w": 8000,
+            "max_export_w": 8000,
+        }
+    ]
+    request["storages"][0].update(
+        {
+            "capacity_wh": 10_000,
+            "initial_energy_wh": 10_000,
+            "min_energy_wh": 0,
+            "max_energy_wh": 10_000,
+            "max_charge_w": 5000,
+            "max_discharge_w": 5000,
+            "charge_efficiency": 1,
+            "discharge_efficiency": 1,
+            "terminal_price_ore_kwh": 0,
+            "cycle_cost_ore_kwh": 0,
+            "throughput_cost_ore_kwh": 0,
+        }
+    )
+    return request
+
+
+@pytest.mark.parametrize("scenario_policy", _RELAXED_POLICY_FORMULATIONS)
+def test_safe_relaxed_formulation_remains_continuous(
+    scenario_policy: str,
+) -> None:
+    request = _relaxed_flow_guard_request(scenario_policy)
+
+    response = handle(request)
+
+    assert response["ok"], response
+    expected, _ = _RELAXED_POLICY_FORMULATIONS[scenario_policy]
+    assert response["solver"]["formulation"] == expected
+    assert_storage_replays(request, response)
+
+
+@pytest.mark.parametrize("scenario_policy", _RELAXED_POLICY_FORMULATIONS)
+def test_relaxed_formulation_guards_negative_price_storage_cycles(
+    scenario_policy: str,
+) -> None:
+    request = _relaxed_flow_guard_request(scenario_policy)
+    request["slots"][0].update({"price_ore": -100, "spot_ore": -200})
+    request["storages"][0].update(
+        {"charge_efficiency": 0.95, "discharge_efficiency": 0.95}
+    )
+
+    response = handle(request)
+
+    assert response["ok"], response
+    _, expected = _RELAXED_POLICY_FORMULATIONS[scenario_policy]
+    assert response["solver"]["formulation"] == expected
+    assert response["solver"].get("fallback", False) is False
+    assert_storage_replays(request, response)
+
+
+@pytest.mark.parametrize("scenario_policy", _RELAXED_POLICY_FORMULATIONS)
+def test_relaxed_formulation_guards_pv_bonus_storage_cycles(
+    scenario_policy: str,
+) -> None:
+    request = _relaxed_flow_guard_request(scenario_policy)
+    request["slots"][0].update({"price_ore": 0, "spot_ore": 0, "pv_w": -5000})
+    request["settings"]["pv_charge_bonus_ore_kwh"] = 100
+
+    response = handle(request)
+
+    assert response["ok"], response
+    _, expected = _RELAXED_POLICY_FORMULATIONS[scenario_policy]
+    assert response["solver"]["formulation"] == expected
+    assert math.isclose(
+        response["solver"]["objective_ore"],
+        response["plan"]["total_cost_ore"],
+        abs_tol=1e-5,
+    )
+    assert_storage_replays(request, response)
+
+
+@pytest.mark.parametrize("scenario_policy", _RELAXED_POLICY_FORMULATIONS)
+def test_relaxed_formulation_guards_profitable_meter_splits(
+    scenario_policy: str,
+) -> None:
+    request = _relaxed_flow_guard_request(scenario_policy)
+    request["slots"][0].update({"price_ore": 10, "spot_ore": 100})
+    request["storages"][0].update(
+        {
+            "initial_energy_wh": 5000,
+            "max_charge_w": 0,
+            "max_discharge_w": 0,
+        }
+    )
+
+    response = handle(request)
+
+    assert response["ok"], response
+    _, expected = _RELAXED_POLICY_FORMULATIONS[scenario_policy]
+    assert response["solver"]["formulation"] == expected
+    assert math.isclose(response["plan"]["actions"][0]["grid_w"], 0, abs_tol=1e-5)
+    assert math.isclose(
+        response["solver"]["objective_ore"],
+        response["plan"]["total_cost_ore"],
+        abs_tol=1e-5,
+    )
+    assert_storage_replays(request, response)
+
+
+def test_relaxed_formulation_guards_negative_export_storage_cycles() -> None:
+    request = _relaxed_flow_guard_request("shared")
+    request["slots"][0].update(
+        {"price_ore": 100, "spot_ore": -100, "pv_w": -5000}
+    )
+    request["storages"][0].update(
+        {"charge_efficiency": 0.95, "discharge_efficiency": 0.95}
+    )
+    request["commercial_constraints"] = {
+        "version": "srcful-commercial-v1",
+        "allow_pv_curtailment": False,
+    }
+
+    response = handle(request)
+
+    assert response["ok"], response
+    assert response["solver"]["formulation"] == "milp"
+    assert_storage_replays(request, response)
+
+
+@pytest.mark.parametrize("scenario_policy", _RELAXED_POLICY_FORMULATIONS)
+def test_relaxed_formulation_guards_negative_terminal_value(
+    scenario_policy: str,
+) -> None:
+    request = _relaxed_flow_guard_request(scenario_policy)
+    request["settings"]["mode"] = "self_consumption"
+    request["storages"][0].update(
+        {
+            "charge_efficiency": 0.95,
+            "discharge_efficiency": 0.95,
+            "terminal_price_ore_kwh": -100,
+        }
+    )
+
+    response = handle(request)
+
+    assert response["ok"], response
+    _, expected = _RELAXED_POLICY_FORMULATIONS[scenario_policy]
+    assert response["solver"]["formulation"] == expected
+    assert_storage_replays(request, response)
+
+
+@pytest.mark.parametrize("scenario_policy", _RELAXED_POLICY_FORMULATIONS)
+def test_neutral_relaxed_storage_cycle_retries_with_direction_guard(
+    scenario_policy: str,
+) -> None:
+    request = _relaxed_flow_guard_request(scenario_policy)
+    request["settings"]["solver"] = "CLARABEL"
+    request["slots"][0].update({"price_ore": 0, "spot_ore": 0})
+    request["storages"][0].update(
+        {
+            "initial_energy_wh": 5000,
+            "charge_efficiency": 0.95,
+            "discharge_efficiency": 0.95,
+        }
+    )
+
+    response = handle(request)
+
+    assert response["ok"], response
+    _, expected = _RELAXED_POLICY_FORMULATIONS[scenario_policy]
+    assert response["solver"]["formulation"] == expected
+    assert response["solver"]["fallback"] is True
+    assert "inconsistent with replay" in response["solver"]["fallback_reason"]
+    assert_storage_replays(request, response)
+
+
+def test_progressive_hedging_rejects_required_physical_direction_guards() -> None:
+    request = _relaxed_flow_guard_request("multistage")
+    request["settings"].update(
+        {
+            "decomposition_method": "progressive_hedging",
+            "multistage_backend": "auto",
+        }
+    )
+    request["slots"][0]["spot_ore"] = -2000
+    request["storages"][0].update(
+        {
+            "charge_efficiency": 0.95,
+            "discharge_efficiency": 0.95,
+            "terminal_price_ore_kwh": -1000,
+        }
+    )
+
+    response = handle(request)
+
+    assert not response["ok"]
+    assert response["error"]["code"] == "invalid_request"
+    assert "physical direction guards" in response["error"]["message"]
 
 
 def test_multistage_curtailment_cannot_create_room_for_passive_export() -> None:
