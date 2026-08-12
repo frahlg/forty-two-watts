@@ -212,6 +212,18 @@ jobs:
             and (.[0].url | contains("/releases/download/rpi-installer/"))
             and (.[0].extract_sha256 | test("^[0-9a-f]{64}$"))
           ' installer/os_list.json >/dev/null
+          # Imager 2.x needs a device chooser (imager.devices) and device tags
+          # on the entry itself, or the wizard dead-ends before reaching FTW.
+          # Warn rather than fail: the installer image is independent of
+          # application releases, so an image published before this metadata
+          # landed must not block an unrelated version release. Rebuilding via
+          # rpi-image-build.yml clears it.
+          if ! jq -e '
+            (.imager.devices | length) > 0
+            and (.os_list[0].devices | length) > 0
+          ' installer/os_list.json >/dev/null; then
+            echo "::warning::Published os_list.json has no imager.devices/os_list[].devices; Raspberry Pi Imager 2.x will dead-end on an empty device step. Rerun rpi-image-build.yml to republish the installer metadata."
+          fi
           gh release upload "${TAG}" installer/os_list.json \
             --repo "${GITHUB_REPOSITORY}" --clobber
 

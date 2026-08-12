@@ -82,6 +82,17 @@ jobs:
             and (.[0].extract_sha256 | contains("__EXTRACT_SHA256__"))
           ' deploy/imager/os_list.json >/dev/null
 
+          # Imager 2.x builds its device chooser from imager.devices and drops
+          # os_list entries that claim no device tags. Without both halves the
+          # wizard dead-ends on an empty device step, so assert they agree.
+          jq -e '
+            (.imager.devices | length) > 0
+            and all(.imager.devices[]; has("name") and has("description") and has("tags"))
+            and (.os_list[0].devices | length) > 0
+            and ([.imager.devices[].tags[]] as $offered
+                 | .os_list[0].devices | all(. as $t | $offered | index($t)))
+          ' deploy/imager/os_list.json >/dev/null
+
       - name: Validate embedded Compose file
         run: docker compose -f docker-compose.yml config --quiet
 

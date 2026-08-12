@@ -8,18 +8,24 @@ credentials and Wi-Fi before writing the card.
 
 1. Install [Raspberry Pi Imager](https://www.raspberrypi.com/software/) 2.0 or
    newer.
-2. Open **App Options → Content Repository → Edit → Use custom file**.
-3. Enter:
+2. Open **App Options → Content Repository → Edit → Use custom URL**.
+3. Paste:
 
    ```text
    https://github.com/srcfl/ftw/releases/download/rpi-installer/os_list.json
    ```
 
-4. Apply and restart Imager.
-5. Choose **FTW**, choose the SD card, and set hostname, SSH user/password and
+4. Click **Apply & Restart**.
+5. Choose **Raspberry Pi 5** or **Raspberry Pi 4** on the device step.
+6. Choose **FTW**, choose the SD card, and set hostname, SSH user/password and
    Wi-Fi in OS customisation.
-6. Write the card, insert it and power on the Pi.
-7. After first-boot provisioning, open `http://ftw.local/` on the same network.
+7. Write the card, insert it and power on the Pi.
+8. After first-boot provisioning, open `http://ftw.local/` on the same network.
+
+Pick **Use custom URL**, not **Use custom file**. They are separate options in
+the same dialog: **Use custom file** opens a file picker for a manifest already
+on your computer and offers no field to paste a web address into. The FTW
+manifest is hosted, so it belongs in **Use custom URL**.
 
 `rpi-installer` is the permanent repository URL and is the recommended value
 to save in Imager. Stable application releases also mirror this small file, so
@@ -122,6 +128,19 @@ The output path and exact base image are defined by those scripts and the image
 workflow. CI runs structural checks on changes; full images are built on the
 installer schedule or explicit dispatch.
 
-The Imager repository entry intentionally has no `devices` filter. Custom
-repositories do not receive Raspberry Pi Imager's stock hardware list, so a
-filter would hide FTW from the chooser even though the image supports Pi 4/5.
+A custom repository replaces Imager's stock manifest rather than extending it,
+so [`deploy/imager/os_list.json`](../deploy/imager/os_list.json) has to carry
+both halves of the hardware contract itself:
+
+- `imager.devices` supplies the device chooser. Imager 2.x builds the first
+  wizard step from this list alone, and leaves **Next** disabled until a device
+  is selected. A manifest without it dead-ends the wizard on an empty list.
+- `os_list[].devices` marks FTW as compatible with those devices. Imager drops
+  an entry with no `devices` tags whenever the selected device filters
+  exclusively, and the field is required by
+  [Imager's schema](https://github.com/raspberrypi/rpi-imager/blob/main/doc/json-schema/os-list-schema.json).
+
+The tags are Imager's own (`pi5-64bit`, `pi4-64bit`); FTW ships arm64 only, so
+it claims the 64-bit tags for Pi 4 and Pi 5. Keep the two lists consistent when
+either changes — an entry tagged for a device the chooser never offers is
+unreachable.
