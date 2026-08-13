@@ -93,6 +93,12 @@
     return h > 0 ? `${h} h ${m} min` : `${m} min`;
   }
 
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+
   const BOOST_STOP_LABELS = {
     cancelled: 'Cancelled by operator',
     expired: 'Time limit reached',
@@ -118,11 +124,11 @@
       return '<div class="lp-boost lp-boost-active">' +
         '<div class="lp-boost-title">Battery boost ' + badge('ACTIVE', true) + '</div>' +
         `<div class="lp-boost-copy">${fmtRemaining(boost.expires_at_ms)} left · home reserve ${boost.min_battery_soc_pct.toFixed(0)}%${target}</div>` +
-        `<button class="lp-boost-cancel" type="button" data-lp="${lp.id}">Stop boost</button>` +
+        `<button class="lp-boost-cancel" type="button" data-lp="${escapeHtml(lp.id)}">Stop boost</button>` +
         '</div>';
     }
     const stopped = boost.stop_reason
-      ? `<div class="lp-boost-reason">Last stop: ${BOOST_STOP_LABELS[boost.stop_reason] || boost.stop_reason}</div>`
+      ? `<div class="lp-boost-reason">Last stop: ${BOOST_STOP_LABELS[boost.stop_reason] || escapeHtml(boost.stop_reason)}</div>`
       : '';
     const blocked = !lp.plugged_in || lp.manual_active || lp.surplus_only;
     let why = '';
@@ -138,7 +144,7 @@
         '<label>EV target %<input class="lp-boost-target" type="number" min="1" max="100" step="1" placeholder="optional"></label>' +
         '<label>Departure<input class="lp-boost-departure" type="datetime-local"></label>' +
       '</div>' +
-      `<button class="lp-boost-enable" type="button" data-lp="${lp.id}" ${blocked ? 'disabled' : ''}>Enable boost</button>` +
+      `<button class="lp-boost-enable" type="button" data-lp="${escapeHtml(lp.id)}" ${blocked ? 'disabled' : ''}>Enable boost</button>` +
       (why ? `<span class="lp-boost-blocked">${why}</span>` : '') + stopped +
       '<div class="lp-boost-msg" aria-live="polite"></div>' +
       '</div>';
@@ -159,7 +165,7 @@
       ? `${lp.target_soc_pct.toFixed(0)}%${d ? ' by ' + d : ''}`
       : 'opportunistic';
     const vehicle = (lp.vehicle_driver)
-      ? `${lp.vehicle_driver}${lp.vehicle_charging_state ? ' · ' + lp.vehicle_charging_state : ''}${lp.vehicle_stale ? ' · stale' : ''}`
+      ? `${escapeHtml(lp.vehicle_driver)}${lp.vehicle_charging_state ? ' · ' + escapeHtml(lp.vehicle_charging_state) : ''}${lp.vehicle_stale ? ' · stale' : ''}`
       : '—';
     // When soc_source is "vehicle", the BMS reading (vehicle_soc_pct)
     // is ground truth and what the operator expects to see — render
@@ -176,7 +182,7 @@
         soc += ` · inferred ${lp.current_soc_pct.toFixed(1)}%`;
       }
     } else if (lp.current_soc_pct != null) {
-      soc = `${lp.current_soc_pct.toFixed(1)}%${lp.soc_source ? ' (' + lp.soc_source + ')' : ''}`;
+      soc = `${lp.current_soc_pct.toFixed(1)}%${lp.soc_source ? ' (' + escapeHtml(lp.soc_source) + ')' : ''}`;
     }
     // Inline manual SoC correction. The backend (POST /api/loadpoints/{id}/soc)
     // re-anchors the inferred SoC, so it only works during an active session —
@@ -184,11 +190,11 @@
     let socCell = soc;
     if (lp.plugged_in) {
       const cur = (lp.current_soc_pct != null) ? lp.current_soc_pct.toFixed(1) : '';
-      socCell = `${soc} <button class="lp-soc-edit" type="button" data-lp="${lp.id}" data-cur="${cur}" title="Set SoC manually" ` +
+      socCell = `${soc} <button class="lp-soc-edit" type="button" data-lp="${escapeHtml(lp.id)}" data-cur="${cur}" title="Set SoC manually" ` +
         `style="background:none;border:none;cursor:pointer;color:var(--accent-e);font-size:0.9em;padding:0 4px">✎</button>`;
     }
     const rows = [
-      ['Driver',       lp.driver_name || '—'],
+      ['Driver',       lp.driver_name ? escapeHtml(lp.driver_name) : '—'],
       ['Plugged in',   badge(lp.plugged_in ? 'YES' : 'NO', lp.plugged_in)],
       ['Surplus only', badge(lp.surplus_only ? 'ON' : 'OFF', lp.surplus_only)],
       ['Live power',   fmtW(lp.current_power_w)],
@@ -216,7 +222,7 @@
     const planLpId = plan.plan.loadpoint_id || null;
     const isOurs = !planLpId || planLpId === lp.id;
     if (!isOurs) {
-      return `<div class="lp-empty">Plan is scheduling <code>${planLpId}</code>, not this loadpoint.</div>`;
+      return `<div class="lp-empty">Plan is scheduling <code>${escapeHtml(planLpId)}</code>, not this loadpoint.</div>`;
     }
     const slots = plan.plan.actions
       .filter(a => a.loadpoint_w != null || a.loadpoint_soc_pct != null)
@@ -234,7 +240,7 @@
         `<td>${fmtW(a.loadpoint_w || 0)}</td>` +
         `<td>${fmtPct(a.loadpoint_soc_pct)}</td>` +
         `<td>${fmtW(a.battery_w)}</td>` +
-        `<td>${a.reason || ''}</td>` +
+        `<td>${escapeHtml(a.reason || '')}</td>` +
         '</tr>';
     }).join('');
     return '<div class="lp-schedule-wrap">' +
@@ -252,8 +258,8 @@
   }
 
   function loadpointCard(lp, plan) {
-    return `<div class="lp-card" data-lp-id="${lp.id}">` +
-      `<div class="lp-card-header"><h3>${lp.id}</h3></div>` +
+    return `<div class="lp-card" data-lp-id="${escapeHtml(lp.id)}">` +
+      `<div class="lp-card-header"><h3>${escapeHtml(lp.id)}</h3></div>` +
       '<div class="lp-card-body">' +
       '<div>' + configBlock(lp) + batteryBoostBlock(lp) + '</div>' +
       scheduleTable(lp, plan) +
@@ -326,7 +332,7 @@
     cell.innerHTML =
       `<input type="number" class="lp-soc-input" min="0" max="100" step="0.1" value="${cur}" ` +
       `style="width:64px;font-family:var(--mono)"> ` +
-      `<button class="lp-soc-save" type="button" data-lp="${socEditingId}" title="Save">✓</button> ` +
+      `<button class="lp-soc-save" type="button" data-lp="${escapeHtml(socEditingId)}" title="Save">✓</button> ` +
       `<button class="lp-soc-cancel" type="button" title="Cancel">✗</button> ` +
       `<span class="lp-soc-msg" style="color:var(--red-e,#c23b3b);font-size:0.8em;margin-left:6px"></span>`;
     const inp = cell.querySelector('.lp-soc-input');

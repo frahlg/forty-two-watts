@@ -12,15 +12,11 @@
     leafletLoading = new Promise(function (resolve, reject) {
       var css = document.createElement("link");
       css.rel = "stylesheet";
-      css.href = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.css";
-      css.integrity = "sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=";
-      css.crossOrigin = "";
+      css.href = "/vendor/leaflet/leaflet.css";
       document.head.appendChild(css);
 
       var script = document.createElement("script");
-      script.src = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js";
-      script.integrity = "sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=";
-      script.crossOrigin = "";
+      script.src = "/vendor/leaflet/leaflet.js";
       script.async = true;
       script.onload = function () { resolve(); };
       script.onerror = function () {
