@@ -1,11 +1,10 @@
-// Package fleetping tells Sourceful how many boxes exist and what shape they
-// are, without telling it which box is which.
+// Package fleetping adds anonymous reports to FTW's daily fleet totals without
+// telling the relay which box sent which report.
 //
 // It answers one question, and it is the owner's: how many households run FTW,
 // on which version, with which drivers, so engineering effort lands where the
-// fleet actually is. It runs against the constraint in docs/architecture.md —
-// the relay was built so Sourceful cannot follow a household over time, and a
-// ping that quietly undoes that is worse than having no numbers at all.
+// fleet actually is. It runs against the constraint in docs/architecture.md:
+// the daily totals must not give the relay a stable household record.
 //
 // So one ping is a picture of one box's shape and carries nothing that joins
 // two pings together:
@@ -280,15 +279,13 @@ func knownZone(zone string) string {
 // socket, and so the transport can be replaced without touching the schedule.
 type Provider interface {
 	// Send delivers the payload. A non-nil error is an ordinary outcome, not
-	// a fault: the endpoint may not exist yet.
+	// a fault: the endpoint may be unavailable.
 	Send(ctx context.Context, p Payload) error
 }
 
-// HTTPProvider posts the ping straight to Sourceful over HTTPS.
-//
-// Straight, and not through the relay: the relay's whole claim is that it
-// carries opaque bytes and holds nothing, and routing a readable message
-// through it would make that claim false for the sake of one HTTP request.
+// HTTPProvider posts the report to the relay's separate HTTPS endpoint. It
+// never enters the encrypted WebSocket path: the endpoint validates the six
+// fields, adds them to daily totals and keeps neither the request nor an id.
 type HTTPProvider struct {
 	Endpoint string
 	Client   *http.Client
@@ -308,9 +305,24 @@ func NewHTTPProvider(endpoint string, client *http.Client) (*HTTPProvider, error
 	}
 	if client == nil {
 		client = &http.Client{Timeout: sendTimeout}
+	} else {
+		// Do not alter a client the caller may use elsewhere.
+		copy := *client
+		client = &copy
+	}
+	// A 307 or 308 resends this body. Refuse every redirect so an HTTPS
+	// collector cannot move the household-shaped report to plain HTTP or an
+	// address the box owner never chose.
+	client.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
 	}
 	return &HTTPProvider{Endpoint: endpoint, Client: client}, nil
 }
+
+// EndpointURL is the address this provider actually uses. The Settings API
+// reads it from the running pinger because a saved endpoint change needs a
+// restart before it replaces this provider.
+func (h *HTTPProvider) EndpointURL() string { return h.Endpoint }
 
 func (h *HTTPProvider) Send(ctx context.Context, p Payload) error {
 	body, err := json.Marshal(p)
@@ -410,6 +422,17 @@ func (p *Pinger) Payload() Payload {
 	return Build(p.facts(), p.now())
 }
 
+// Endpoint is the address used by the running provider, when it has one.
+func (p *Pinger) Endpoint() string {
+	type endpointProvider interface {
+		EndpointURL() string
+	}
+	if provider, ok := p.provider.(endpointProvider); ok {
+		return provider.EndpointURL()
+	}
+	return ""
+}
+
 // Run pings once a day until ctx ends.
 func (p *Pinger) Run(ctx context.Context) {
 	for {
@@ -446,7 +469,7 @@ func (p *Pinger) delay() time.Duration {
 // sendOnce makes one attempt and forgets about it.
 //
 // There is no retry, here or anywhere: one household's ping is a rounding
-// error in an aggregate, the endpoint does not exist yet, and a fleet that
+// error in an aggregate, the endpoint may be unavailable, and a fleet that
 // retries against a dead endpoint is an outage the fleet inflicted on itself.
 // The next attempt is tomorrow, and the failure is a debug line rather than a
 // warning because nothing about the house is wrong.

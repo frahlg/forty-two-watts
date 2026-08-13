@@ -67,7 +67,6 @@ func startFleetPing(
 	cfgMu.RLock()
 	endpoint := cfg.FleetPing.Resolved()
 	cfgMu.RUnlock()
-	catalogue := fleetCatalogue(st, managedDriverDir)
 
 	provider, err := fleetping.NewHTTPProvider(endpoint, nil)
 	if err != nil {
@@ -79,6 +78,10 @@ func startFleetPing(
 	pinger, err := fleetping.New(fleetping.Options{
 		Enabled: fleetPingEnabled(cfg, cfgMu),
 		Facts: func() fleetping.Facts {
+			// Drivers can be installed without restarting FTW. Read the signed
+			// catalogue at the same time as the config so tomorrow's report and
+			// the Settings preview both see the install.
+			catalogue := fleetCatalogue(st, managedDriverDir)
 			cfgMu.RLock()
 			defer cfgMu.RUnlock()
 			return fleetping.FactsFromConfig(cfg, version, catalogue, installedAt)

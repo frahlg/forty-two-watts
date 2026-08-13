@@ -71,10 +71,10 @@ type FleetPing struct {
 	Endpoint string `yaml:"endpoint,omitempty" json:"endpoint,omitempty"`
 }
 
-// DefaultFleetPingEndpoint is Sourceful's collector. Nothing answers there
-// yet, which is the normal case the box is built for: a failed ping is
+// DefaultFleetPingEndpoint is the fleet-report door on FTW's relay. The relay
+// adds the report to daily totals and discards the request; a failed ping is
 // forgotten, never retried.
-const DefaultFleetPingEndpoint = "https://telemetry.sourceful.energy/v1/fleet"
+const DefaultFleetPingEndpoint = "https://relay.ftw.energy/fleet"
 
 // On reports whether the ping is switched on, and is the only place that
 // answers it.
@@ -95,7 +95,7 @@ func (f *FleetPing) On() bool {
 //
 // The fallback lives here rather than in applyDefaults, so the address is never
 // written into a household's config.yaml. A baked-in copy would keep posting to
-// this address after Sourceful moved the collector, and the aggregate would
+// this address after FTW moved the collector, and the aggregate would
 // quietly lose every box that had ever saved its settings.
 func (f *FleetPing) Resolved() string {
 	if f == nil || f.Endpoint == "" {
@@ -116,7 +116,7 @@ func (f *FleetPing) Validate() error {
 // ValidateFleetPingEndpoint refuses anything that is not a plain HTTPS URL.
 //
 // Plain HTTP would put the site's shape in the clear for every network between
-// the house and Sourceful — a worse leak than the ones the payload is designed
+// the house and the relay — a worse leak than the ones the payload is designed
 // around. Credentials, a query and a fragment are refused because none of them
 // addresses a collector: a URL carrying one is far more likely a mistake than a
 // choice, and credentials in a config field are a mistake whatever they are for.

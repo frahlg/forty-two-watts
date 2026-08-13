@@ -98,11 +98,11 @@ func TestFleetPingEndpointMustBePlainHTTPS(t *testing.T) {
 		{DefaultFleetPingEndpoint, true},
 		{"https://telemetry.example.test/v1/fleet", true},
 		{"", true}, // filled in by applyDefaults
-		{"http://telemetry.sourceful.energy/v1/fleet", false},
-		{"https://telemetry.sourceful.energy/v1/fleet?box=abc123", false},
-		{"https://box:secret@telemetry.sourceful.energy/v1/fleet", false},
-		{"https://telemetry.sourceful.energy/v1/fleet#abc123", false},
-		{"telemetry.sourceful.energy", false},
+		{"http://relay.ftw.energy/fleet", false},
+		{"https://relay.ftw.energy/fleet?box=abc123", false},
+		{"https://box:secret@relay.ftw.energy/fleet", false},
+		{"https://relay.ftw.energy/fleet#abc123", false},
+		{"relay.ftw.energy", false},
 	} {
 		err := (&FleetPing{Endpoint: tc.endpoint}).Validate()
 		if tc.ok && err != nil {

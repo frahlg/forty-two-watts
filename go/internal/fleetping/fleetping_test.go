@@ -308,7 +308,7 @@ func TestScheduleDrawsFreshEachTime(t *testing.T) {
 }
 
 func TestFailedSendIsSilentAndNotRetried(t *testing.T) {
-	// The endpoint does not exist yet. One household's ping is a rounding
+	// The endpoint may be unavailable. One household's ping is a rounding
 	// error in an aggregate, and a fleet retrying against a dead endpoint is
 	// an outage the fleet inflicted on itself.
 	rec := &recorder{err: errors.New("no such host")}
@@ -444,7 +444,10 @@ func TestHTTPProviderPostsTheJSONAndReadsNothingBack(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	provider := &HTTPProvider{Endpoint: srv.URL, Client: srv.Client()}
+	provider, err := NewHTTPProvider(srv.URL, srv.Client())
+	if err != nil {
+		t.Fatalf("NewHTTPProvider: %v", err)
+	}
 	if err := provider.Send(context.Background(), Build(facts(), time.Now())); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
@@ -462,19 +465,46 @@ func TestHTTPProviderReportsNon2xx(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	provider := &HTTPProvider{Endpoint: srv.URL, Client: srv.Client()}
+	provider, err := NewHTTPProvider(srv.URL, srv.Client())
+	if err != nil {
+		t.Fatalf("NewHTTPProvider: %v", err)
+	}
 	if err := provider.Send(context.Background(), Payload{}); err == nil {
 		t.Fatal("a 500 must be reported to the caller, which then forgets it")
+	}
+}
+
+func TestHTTPProviderDoesNotFollowRedirects(t *testing.T) {
+	var redirected atomic.Int32
+	plain := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		redirected.Add(1)
+	}))
+	defer plain.Close()
+
+	tls := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, plain.URL, http.StatusTemporaryRedirect)
+	}))
+	defer tls.Close()
+
+	provider, err := NewHTTPProvider(tls.URL, tls.Client())
+	if err != nil {
+		t.Fatalf("NewHTTPProvider: %v", err)
+	}
+	if err := provider.Send(context.Background(), Payload{}); err == nil {
+		t.Fatal("a redirect must be refused")
+	}
+	if got := redirected.Load(); got != 0 {
+		t.Fatalf("the report was resent to the redirect target %d time(s)", got)
 	}
 }
 
 func TestPlainHTTPEndpointIsRefused(t *testing.T) {
 	// The site's shape in the clear would be a worse leak than any this
 	// package guards against.
-	if _, err := NewHTTPProvider("http://telemetry.sourceful.energy/v1/fleet", nil); err == nil {
+	if _, err := NewHTTPProvider("http://relay.ftw.energy/fleet", nil); err == nil {
 		t.Fatal("http:// endpoint accepted")
 	}
-	if _, err := NewHTTPProvider("https://telemetry.sourceful.energy/v1/fleet?box=abc", nil); err == nil {
+	if _, err := NewHTTPProvider("https://relay.ftw.energy/fleet?box=abc", nil); err == nil {
 		t.Fatal("a query string is a place to hide an identifier and must be refused")
 	}
 	if _, err := NewHTTPProvider(config.DefaultFleetPingEndpoint, nil); err != nil {

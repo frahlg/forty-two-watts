@@ -2161,8 +2161,8 @@ func main() {
 	}
 
 	// The anonymous fleet ping: how many boxes, which versions, which drivers.
-	// Straight to Sourceful over HTTPS and never through the relay, which
-	// carries opaque bytes and holds nothing.
+	// Its separate relay HTTP door keeps daily totals; the encrypted app path
+	// stays opaque and stores no routed traffic.
 	// The bundled drivers dir is deliberately not passed: which drivers this
 	// build ships with is compiled in, not discovered on disk. See
 	// fleetCatalogue for what that buys.

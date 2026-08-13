@@ -105,6 +105,36 @@ func TestSavingAnExplicitOptOutStillTurnsThePingOff(t *testing.T) {
 	}
 }
 
+func TestRunningFleetPingSeesADriverInstalledLater(t *testing.T) {
+	store := openStore(t)
+	active := t.TempDir()
+	cfg := &config.Config{FleetPing: &config.FleetPing{Enabled: true}}
+	cfgMu := &sync.RWMutex{}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	pinger, err := startFleetPing(ctx, cfg, cfgMu, store, "v1.4.0", active)
+	if err != nil {
+		t.Fatalf("startFleetPing: %v", err)
+	}
+	if slicesContain(pinger.Payload().Drivers, "easee_cloud") {
+		t.Fatal("the driver was reported before it was installed")
+	}
+
+	writeDriver(t, active, "easee_cloud.lua")
+	recordInstall(t, store, config.DefaultDriverRepositoryID, "drivers/easee_cloud.lua", true)
+	cfgMu.Lock()
+	cfg.Drivers = append(cfg.Drivers, config.Driver{
+		Name: "Laddbox",
+		Lua:  filepath.Join(active, "easee_cloud.lua"),
+	})
+	cfgMu.Unlock()
+
+	if got := pinger.Payload().Drivers; !slicesContain(got, "easee_cloud") {
+		t.Fatalf("drivers after live install = %v, want easee_cloud", got)
+	}
+}
+
 func writeDriver(t *testing.T, dir, name string) {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(dir, name), []byte("DRIVER = {}\n"), 0o600); err != nil {

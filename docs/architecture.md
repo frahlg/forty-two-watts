@@ -375,15 +375,16 @@ The honest limits, which belong here rather than in a comment nobody reads:
 
 ## Fleet ping
 
-The box's other outbound path to Sourceful, and the only one that carries
-readable content: once a day it posts its FTW version and channel, the driver
-types in use, a battery-capacity bucket, its price zone and an install-age
-bucket. It answers how many boxes exist and what they run, which is what sizes
-engineering bets.
+The box's other outbound path, and the only one that carries readable content:
+once a day it posts its FTW version and channel, the driver types in use, a
+battery-capacity bucket, its price zone and an install-age bucket. It answers
+how many reports arrive and what they describe, which helps size engineering
+bets.
 
-It goes straight to the endpoint over HTTPS and never through the relay,
-because the relay's claim is that it holds nothing and routing a readable
-message through it would make that false.
+It goes over HTTPS to a separate `/fleet` door on `relay.ftw.energy`. It never
+enters the encrypted WebSocket path: that stays blind and stores no routed
+traffic. The HTTP door validates the fixed payload, adds it to the UTC day's
+counters and drops it. It keeps 90 days of totals, not raw reports.
 
 The constraint is the one above: Sourceful must not be able to follow a
 household. So the message carries no gateway ID, no key, no serial, no site
@@ -432,17 +433,19 @@ about code: it stops nobody from running the drivers they like, and the one way
 left through it is writing an FTW-signed row into the box's own `state.db` by
 hand, which this design does not claim to stop.
 
-Two things this does not fix, and both are said on the Settings screen rather
-than only here. The fields still describe a household, so the payload remains a
-quasi-identifier: a beta box in a small price zone with a big battery may be
-the only one like it, and coarse buckets with a small field set are what keep
-that population large rather than a proof that it is. And the endpoint sees the
-source IP. The design makes the payload useless as an identifier, not the
-connection anonymous.
+Three things this does not fix, and each is said on the Settings screen or the
+relay's local stats response. The fields still describe a household, so the
+payload remains a quasi-identifier: a beta box in a small price zone with a big
+battery may be the only one like it, and coarse buckets with a small field set
+are what keep that population large rather than a proof that it is. The endpoint
+also sees the source IP while the request is open, though neither the relay nor
+Caddy writes it. And with no id there is no way to dedupe, so the totals count
+reports, not unique boxes.
 
 A failed send is forgotten, never retried. Settings → Fleet ping renders the
 exact payload from the same call the sender uses, so the claim is checkable
-rather than promised. See [`go/internal/fleetping`](../go/internal/fleetping).
+rather than promised. It is on by default; saving `enabled: false` opts out
+without a restart. See [`go/internal/fleetping`](../go/internal/fleetping).
 
 ## Releases
 

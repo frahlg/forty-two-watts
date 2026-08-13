@@ -16,6 +16,7 @@ import (
 type silentProvider struct{}
 
 func (silentProvider) Send(context.Context, fleetping.Payload) error { return nil }
+func (silentProvider) EndpointURL() string                           { return config.DefaultFleetPingEndpoint }
 
 func fleetPingServer(t *testing.T, cfg *config.Config) *Server {
 	t.Helper()
@@ -97,6 +98,23 @@ func TestFleetPingStillShowsThePayloadWhenSwitchedOff(t *testing.T) {
 	}
 	if got.Payload["schema"] != fleetping.Schema {
 		t.Errorf("payload = %v, want the message it would send", got.Payload)
+	}
+}
+
+func TestFleetPingShowsTheRunningEndpointUntilRestart(t *testing.T) {
+	cfg := &config.Config{
+		FleetPing: &config.FleetPing{Enabled: true, Endpoint: "https://saved.example.test/fleet"},
+	}
+
+	w := httptest.NewRecorder()
+	fleetPingServer(t, cfg).Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/fleet-ping", nil))
+
+	var got fleetPingView
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Endpoint != config.DefaultFleetPingEndpoint {
+		t.Errorf("endpoint = %q, want the running provider %q", got.Endpoint, config.DefaultFleetPingEndpoint)
 	}
 }
 

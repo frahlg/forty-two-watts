@@ -1,4 +1,4 @@
-// Settings → Fleet ping: the message this box sends Sourceful once a day.
+// Settings → Fleet ping: the message this box adds to FTW's fleet totals.
 //
 // This tab is not a privacy policy. A policy is a promise; this screen shows
 // the actual payload, built by the same call the sender uses, so somebody
@@ -140,7 +140,7 @@
           slot.textContent = "";
           var err = document.createElement("p");
           err.className = "hint";
-          err.textContent = "The fleet ping is not running on this box, so there is nothing to show.";
+          err.textContent = "Fleet statistics are not running on this box, so there is nothing to show.";
           slot.appendChild(err);
           return;
         }
@@ -173,21 +173,22 @@
       setTimeout(refresh, 0);
 
       return (
-        "<fieldset><legend>Fleet ping</legend>" +
-        '<p class="hint">Once a day this box tells Sourceful six things: its ' +
+        "<fieldset><legend>Fleet statistics</legend>" +
+        '<p class="hint">Once a day this box tells the FTW relay six things: its ' +
         "FTW version, its release channel, the kinds of device it talks to, " +
         "roughly how much battery, its price zone, and roughly how old the " +
         "install is. Nothing else — no id, no key, no serial, no site name, no " +
         "counter, no timestamp — so nothing in the message says which box sent " +
-        "it.</p>" +
+        "it. The relay adds it to that day's totals and does not keep the report. " +
+        "The totals count reports, not unique boxes.</p>" +
         '<p class="hint fleet-ping-limits">Two limits, plainly. Those six things still describe ' +
         "you: a beta box in a small price zone with a big battery may be the " +
-        "only one of its kind. And Sourceful sees the address you send from, " +
-        "the way any website does. Below is the whole message, as this box " +
-        "would send it right now.</p>" +
+        "only one of its kind. And the relay sees the address during the request, " +
+        "the way any website does, though it does not save it. Below is the whole " +
+        "message, as this box would send it right now.</p>" +
         '<label><input type="checkbox" id="fleet-ping-enabled" ' +
         'data-checkbox-path="fleet_ping.enabled"' + (enabled ? " checked" : "") +
-        "> Send the daily fleet ping</label>" +
+        "> Share daily fleet statistics</label>" +
         '<p class="hint">Takes effect as soon as you save. No restart.</p>' +
         '<div id="fleet-ping-payload"></div>' +
         "</fieldset>"
