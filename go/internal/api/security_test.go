@@ -345,6 +345,28 @@ func TestServerHandlerAppliesMutationSecurity(t *testing.T) {
 	}
 }
 
+func TestServerHandlerSetsSecurityHeaders(t *testing.T) {
+	srv := New(&Deps{})
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	assertSecurityHeaders(t, rr)
+	if got := rr.Header().Get("Access-Control-Allow-Origin"); got != "" {
+		t.Fatalf("Access-Control-Allow-Origin = %q, want empty", got)
+	}
+}
+
+func TestWithSecurityHeadersAppliesOnEveryStatus(t *testing.T) {
+	h := WithSecurityHeaders(statusHandler(http.StatusNotFound))
+	req := httptest.NewRequest(http.MethodGet, "/missing", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rr.Code)
+	}
+	assertSecurityHeaders(t, rr)
+}
+
 func TestJSONResponsesDoNotAdvertiseWildcardCORS(t *testing.T) {
 	rr := httptest.NewRecorder()
 	writeJSON(rr, http.StatusOK, map[string]string{"status": "ok"})
@@ -370,4 +392,19 @@ func mutationRequest(endpoint sensitiveMutation, baseURL string) *http.Request {
 
 func statusHandler(status int) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(status) })
+}
+
+func assertSecurityHeaders(t *testing.T, rr *httptest.ResponseRecorder) {
+	t.Helper()
+	want := map[string]string{
+		"Content-Security-Policy": "frame-ancestors 'none'",
+		"X-Frame-Options":         "DENY",
+		"X-Content-Type-Options":  "nosniff",
+		"Referrer-Policy":         "no-referrer",
+	}
+	for name, value := range want {
+		if got := rr.Header().Get(name); got != value {
+			t.Errorf("%s = %q, want %q", name, got, value)
+		}
+	}
 }

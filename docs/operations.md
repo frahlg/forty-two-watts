@@ -88,6 +88,8 @@ an unqualified hostname, `.local`, `.localhost`, or `.home.arpa`. The setup
 wizard follows the same rule, and the actual client address must also be local.
 Browser writes must also be same-origin; FTW checks `Origin`, `Host`, and
 `Sec-Fetch-Site` and does not advertise CORS.
+The box refuses to be framed: every response includes
+`Content-Security-Policy: frame-ancestors 'none'` and `X-Frame-Options: DENY`.
 Local non-browser clients such as `curl` and Home Assistant may omit browser
 fetch headers, but JSON bodies must use `Content-Type: application/json`.
 Active reads that start discovery, begin an authorization flow, or force an

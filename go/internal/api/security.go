@@ -19,6 +19,18 @@ type MutationPolicy struct {
 	Token                 string
 }
 
+// WithSecurityHeaders sets clickjacking and baseline browser headers on
+// every response, including 4xx/5xx, before the next handler runs.
+func WithSecurityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		next.ServeHTTP(w, r)
+	})
+}
+
 // Authenticate names the caller and guards state-changing requests.
 //
 // Naming the caller is the new half. This is the one place in the box that

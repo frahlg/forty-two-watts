@@ -296,7 +296,7 @@ func New(deps *Deps) *Server {
 
 // Handler returns the http.Handler suitable for http.ListenAndServe.
 func (s *Server) Handler() http.Handler {
-	return Authenticate(s.mux, s.deps.MutationPolicy)
+	return WithSecurityHeaders(Authenticate(s.mux, s.deps.MutationPolicy))
 }
 
 // ServeHTTP runs one request through the same handler the listener serves,
