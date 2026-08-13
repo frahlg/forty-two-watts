@@ -62,6 +62,9 @@ func Authenticate(next http.Handler, policy MutationPolicy) http.Handler {
 			return
 		}
 
+		// Set before 401/403 so caches cannot store the denial either.
+		w.Header().Set("Cache-Control", "no-store")
+
 		reqAuthority, err := parseAuthority(r.Host)
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid Host header"})
@@ -119,14 +122,10 @@ func requiresMutationProtection(r *http.Request) bool {
 	case http.MethodOptions:
 		return false
 	case http.MethodGet, http.MethodHead:
-		if r.URL.Path == "/api/caldav/credentials" ||
-			r.URL.Path == "/api/backups" ||
-			strings.HasPrefix(r.URL.Path, "/api/backups/") {
+		if protectedReadPath(r.URL.Path) {
 			return true
 		}
 		switch r.URL.Path {
-		case "/api/scan", "/api/oauth/myuplink/start":
-			return true
 		case "/api/version/check":
 			return r.URL.Query().Get("force") == "1"
 		case "/api/oauth/myuplink/callback":
@@ -139,6 +138,32 @@ func requiresMutationProtection(r *http.Request) bool {
 		}
 	}
 	return true
+}
+
+// protectedReadPath names GET/HEAD routes that must not leak off a public
+// host. Live dashboard reads are not listed here.
+func protectedReadPath(path string) bool {
+	switch path {
+	case "/api/config",
+		"/api/support/dump",
+		"/api/support/report",
+		"/api/logs",
+		"/api/system/info",
+		"/api/research/load/dump",
+		"/api/app-link/devices",
+		"/api/caldav/credentials",
+		"/api/scan",
+		"/api/oauth/myuplink/start":
+		return true
+	}
+	if path == "/api/backups" || strings.HasPrefix(path, "/api/backups/") {
+		return true
+	}
+	if strings.HasPrefix(path, "/api/drivers/") &&
+		(strings.HasSuffix(path, "/source") || strings.HasSuffix(path, "/logs")) {
+		return true
+	}
+	return false
 }
 
 func requestHasBody(r *http.Request) bool {

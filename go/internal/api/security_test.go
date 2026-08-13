@@ -101,6 +101,24 @@ func TestAuthenticateGuardsProtectedReads(t *testing.T) {
 		{name: "backup download via HEAD", method: http.MethodHead, path: "/api/backups/ftw-full-backup-20260731T120000Z.ftwbak"},
 		{name: "CalDAV credentials", method: http.MethodGet, path: "/api/caldav/credentials"},
 		{name: "CalDAV credentials via HEAD", method: http.MethodHead, path: "/api/caldav/credentials"},
+		{name: "config", method: http.MethodGet, path: "/api/config"},
+		{name: "config via HEAD", method: http.MethodHead, path: "/api/config"},
+		{name: "support dump", method: http.MethodGet, path: "/api/support/dump"},
+		{name: "support dump via HEAD", method: http.MethodHead, path: "/api/support/dump"},
+		{name: "support report", method: http.MethodGet, path: "/api/support/report"},
+		{name: "support report via HEAD", method: http.MethodHead, path: "/api/support/report"},
+		{name: "logs", method: http.MethodGet, path: "/api/logs"},
+		{name: "logs via HEAD", method: http.MethodHead, path: "/api/logs"},
+		{name: "system info", method: http.MethodGet, path: "/api/system/info"},
+		{name: "system info via HEAD", method: http.MethodHead, path: "/api/system/info"},
+		{name: "research dump", method: http.MethodGet, path: "/api/research/load/dump"},
+		{name: "research dump via HEAD", method: http.MethodHead, path: "/api/research/load/dump"},
+		{name: "app-link devices", method: http.MethodGet, path: "/api/app-link/devices"},
+		{name: "app-link devices via HEAD", method: http.MethodHead, path: "/api/app-link/devices"},
+		{name: "driver source", method: http.MethodGet, path: "/api/drivers/sonnen/source"},
+		{name: "driver source via HEAD", method: http.MethodHead, path: "/api/drivers/sonnen/source"},
+		{name: "driver logs", method: http.MethodGet, path: "/api/drivers/sonnen/logs"},
+		{name: "driver logs via HEAD", method: http.MethodHead, path: "/api/drivers/sonnen/logs"},
 	}
 
 	for _, tc := range guarded {
@@ -126,6 +144,9 @@ func TestAuthenticateGuardsProtectedReads(t *testing.T) {
 			if rr.Code != http.StatusNoContent {
 				t.Fatalf("status = %d, want 204 (body=%s)", rr.Code, rr.Body.String())
 			}
+			if got := rr.Header().Get("Cache-Control"); got != "no-store" {
+				t.Fatalf("Cache-Control = %q, want no-store", got)
+			}
 		})
 	}
 }
@@ -140,6 +161,8 @@ func TestAuthenticateLeavesOrdinaryReadsAndOAuthCallbackCompatible(t *testing.T)
 		{method: http.MethodOptions, path: "/api/status"},
 		{method: http.MethodGet, path: "/api/version/check"},
 		{method: http.MethodGet, path: "/api/oauth/myuplink/callback?code=code&state=state"},
+		{method: http.MethodGet, path: "/api/drivers/catalog"},
+		{method: http.MethodGet, path: "/api/drivers/sonnen"},
 	} {
 		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
 			req := httptest.NewRequest(tc.method, "http://ftw.local:8080"+tc.path, nil)
@@ -162,6 +185,15 @@ func TestAuthenticateRequiresRemoteTokenForProtectedReads(t *testing.T) {
 		"/api/backups",
 		"/api/backups/ftw-full-backup-20260731T120000Z.ftwbak",
 		"/api/caldav/credentials",
+		"/api/config",
+		"/api/support/dump",
+		"/api/support/report",
+		"/api/logs",
+		"/api/system/info",
+		"/api/research/load/dump",
+		"/api/app-link/devices",
+		"/api/drivers/sonnen/source",
+		"/api/drivers/sonnen/logs",
 	} {
 		t.Run(path, func(t *testing.T) {
 			request := func(auth string) *httptest.ResponseRecorder {
@@ -179,6 +211,8 @@ func TestAuthenticateRequiresRemoteTokenForProtectedReads(t *testing.T) {
 
 			if rr := request(""); rr.Code != http.StatusUnauthorized {
 				t.Fatalf("missing token status = %d, want 401", rr.Code)
+			} else if got := rr.Header().Get("Cache-Control"); got != "no-store" {
+				t.Fatalf("missing token Cache-Control = %q, want no-store", got)
 			}
 			if rr := request("Bearer " + testMutationToken); rr.Code != http.StatusNoContent {
 				t.Fatalf("valid token status = %d, want 204 (body=%s)", rr.Code, rr.Body.String())
