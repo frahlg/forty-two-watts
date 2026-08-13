@@ -1,6 +1,10 @@
 package api
 
-import "net/http"
+import (
+	"net/http"
+
+	"github.com/srcfl/ftw/go/internal/config"
+)
 
 // What this box would add to FTW's daily fleet totals.
 //
@@ -12,6 +16,9 @@ import "net/http"
 type fleetPingView struct {
 	Enabled  bool   `json:"enabled"`
 	Endpoint string `json:"endpoint"`
+	// FTWRelay lets Settings state FTW's retention rules only when the running
+	// process is using the endpoint those rules govern.
+	FTWRelay bool `json:"ftw_relay"`
 	// Payload is the whole message, exactly as it would be posted.
 	Payload any `json:"payload"`
 }
@@ -31,9 +38,11 @@ func (s *Server) handleFleetPing(w http.ResponseWriter, r *http.Request) {
 	enabled := s.deps.Cfg.FleetPing.On()
 	s.deps.CfgMu.RUnlock()
 
+	endpoint := s.deps.FleetPing.Endpoint()
 	writeJSON(w, http.StatusOK, fleetPingView{
 		Enabled:  enabled,
-		Endpoint: s.deps.FleetPing.Endpoint(),
+		Endpoint: endpoint,
+		FTWRelay: endpoint == config.DefaultFleetPingEndpoint,
 		Payload:  s.deps.FleetPing.Payload(),
 	})
 }

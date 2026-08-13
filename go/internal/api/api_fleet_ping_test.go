@@ -13,15 +13,19 @@ import (
 	"github.com/srcfl/ftw/go/internal/fleetping"
 )
 
-type silentProvider struct{}
+type silentProvider string
 
 func (silentProvider) Send(context.Context, fleetping.Payload) error { return nil }
-func (silentProvider) EndpointURL() string                           { return config.DefaultFleetPingEndpoint }
+func (p silentProvider) EndpointURL() string                         { return string(p) }
 
 func fleetPingServer(t *testing.T, cfg *config.Config) *Server {
+	return fleetPingServerAt(t, cfg, config.DefaultFleetPingEndpoint)
+}
+
+func fleetPingServerAt(t *testing.T, cfg *config.Config, endpoint string) *Server {
 	t.Helper()
 	pinger, err := fleetping.New(fleetping.Options{
-		Provider: silentProvider{},
+		Provider: silentProvider(endpoint),
 		Facts: func() fleetping.Facts {
 			return fleetping.FactsFromConfig(cfg, "v1.4.0",
 				[]string{"sungrow", "easee_cloud"},
@@ -55,13 +59,14 @@ func TestFleetPingShowsTheRealPayload(t *testing.T) {
 	var got struct {
 		Enabled  bool           `json:"enabled"`
 		Endpoint string         `json:"endpoint"`
+		FTWRelay bool           `json:"ftw_relay"`
 		Payload  map[string]any `json:"payload"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if !got.Enabled || got.Endpoint != config.DefaultFleetPingEndpoint {
-		t.Errorf("enabled=%v endpoint=%q", got.Enabled, got.Endpoint)
+	if !got.Enabled || got.Endpoint != config.DefaultFleetPingEndpoint || !got.FTWRelay {
+		t.Errorf("enabled=%v endpoint=%q ftw_relay=%v", got.Enabled, got.Endpoint, got.FTWRelay)
 	}
 	if got.Payload["price_zone"] != "SE3" || got.Payload["battery_kwh"] != "5-15" {
 		t.Errorf("payload = %v, want this box's own values", got.Payload)
@@ -115,6 +120,24 @@ func TestFleetPingShowsTheRunningEndpointUntilRestart(t *testing.T) {
 	}
 	if got.Endpoint != config.DefaultFleetPingEndpoint {
 		t.Errorf("endpoint = %q, want the running provider %q", got.Endpoint, config.DefaultFleetPingEndpoint)
+	}
+	if !got.FTWRelay {
+		t.Error("the active FTW relay endpoint was not marked as such")
+	}
+}
+
+func TestFleetPingDoesNotApplyRelayPromisesToACustomCollector(t *testing.T) {
+	cfg := &config.Config{FleetPing: &config.FleetPing{Enabled: true}}
+	w := httptest.NewRecorder()
+	fleetPingServerAt(t, cfg, "https://collector.example.test/fleet").Handler().ServeHTTP(
+		w, httptest.NewRequest(http.MethodGet, "/api/fleet-ping", nil))
+
+	var got fleetPingView
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Endpoint != "https://collector.example.test/fleet" || got.FTWRelay {
+		t.Errorf("endpoint=%q ftw_relay=%v", got.Endpoint, got.FTWRelay)
 	}
 }
 

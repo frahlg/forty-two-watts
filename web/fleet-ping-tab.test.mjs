@@ -139,10 +139,18 @@ describe("the fleet ping tab", () => {
   });
 
   it("says the relay keeps totals rather than reports or unique-box counts", () => {
-    const html = render({});
-    assert.match(html, /adds it to that day.s totals/i);
-    assert.match(html, /does not keep the report/i);
-    assert.match(html, /reports, not unique boxes/i);
+    const line = whereLine({ enabled: true, endpoint: "https://relay.ftw.energy/fleet", ftw_relay: true, payload });
+    assert.match(line, /adds the report to that day.s totals/i);
+    assert.match(line, /then drops it/i);
+    assert.match(line, /does not save the source address/i);
+    assert.match(line, /reports, not unique boxes/i);
+  });
+
+  it("does not promise FTW relay handling for a custom collector", () => {
+    const line = whereLine({ enabled: true, endpoint: "https://collector.example.test/fleet", ftw_relay: false, payload });
+    assert.match(line, /custom collector/i);
+    assert.match(line, /cannot say what that service stores/i);
+    assert.doesNotMatch(line, /drops it|does not save the source address/i);
   });
 
   it("leaves a slot for the payload rather than writing values into the markup", () => {
@@ -158,7 +166,7 @@ describe("the line under the payload", () => {
   const endpoint = "https://relay.ftw.energy/fleet";
 
   it("says where the message goes while the ping is on", () => {
-    const line = whereLine({ enabled: true, endpoint, payload });
+    const line = whereLine({ enabled: true, endpoint, ftw_relay: true, payload });
     assert.match(line, /Sent to https:\/\/relay\.ftw\.energy/);
     assert.match(line, /once a day/);
   });
@@ -168,7 +176,7 @@ describe("the line under the payload", () => {
     // days to work its way round the clock. Until then one box's arrival times
     // are still loosely related, and a line saying otherwise is a promise the
     // schedule does not keep.
-    const line = whereLine({ enabled: true, endpoint, payload });
+    const line = whereLine({ enabled: true, endpoint, ftw_relay: true, payload });
     assert.doesNotMatch(line, /cannot be recognised/i);
     assert.match(line, /a few days/i);
   });
@@ -177,7 +185,7 @@ describe("the line under the payload", () => {
     // This is the one screen whose entire justification is that it makes no
     // claim it cannot keep. "Sent to https://… once a day" under a switched
     // off ping is a false one.
-    const line = whereLine({ enabled: false, endpoint, payload });
+    const line = whereLine({ enabled: false, endpoint, ftw_relay: true, payload });
     assert.doesNotMatch(line, /^Sent to/);
     assert.match(line, /Nothing is sent/);
     // The address still shows: somebody deciding whether to switch it on
