@@ -93,8 +93,10 @@ The box refuses to be framed: every response includes
 Local non-browser clients such as `curl` and Home Assistant may omit browser
 fetch headers, but JSON bodies must use `Content-Type: application/json`.
 Active reads that start discovery, begin an authorization flow, or force an
-external update check pass through the same boundary. Cached and ordinary
-read-only requests remain compatible.
+external update check pass through the same boundary. So do reads of config,
+logs, support dump and report, driver source, system info, research dump, and
+the app-link device list. Live dashboard reads such as status, energy, prices
+and plan stay compatible.
 
 Mutation requests addressed through any other hostname or a public IP fail
 closed. To expose that API intentionally, generate a random token of at least
@@ -118,8 +120,11 @@ curl -X POST -H "Authorization: Bearer <same-random-secret>" \
 The built-in browser UI does not store API tokens. For a public/FQDN browser
 deployment, put FTW behind an operator-managed HTTPS reverse proxy with login
 or session authentication and have that trusted proxy inject the Bearer header
-upstream. This token protects mutations, not read-only dashboard data, so FTW
-must not be published directly to the internet.
+upstream. The token, and the same-origin / local-address checks, now also
+cover config, logs, support dump and report, driver source, system info,
+research dump, and the app-link device list. Live dashboard reads (status,
+energy, prices, plan) stay open if someone publishes the port. Still do not
+publish the box directly to the internet.
 
 Recovery cannot be disabled by a bad token: connect through `localhost`, the
 host's private IP, or its `.local` name, correct/remove `FTW_API_TOKEN`, and
