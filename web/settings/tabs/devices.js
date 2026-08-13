@@ -959,6 +959,9 @@
           html += '<fieldset><legend>HTTP</legend>' +
             '<label>Host / IP ' + help('Hostname (e.g. zap.local) or IP address of the device. mDNS names work when your OS resolver supports them; otherwise use the LAN IP.') + '</label>' +
             '<input type="text" data-path="drivers.' + idx + '.config.host" value="' + escHtml(lcfg.host || '') + '" placeholder="zap.local">' +
+            ((d.lua || '').indexOf('zap.lua') >= 0
+              ? '<p class="zap-p1-note" style="margin:8px 0 0;font-size:0.82rem;color:var(--text-dim);line-height:1.45">This driver is the P1/HAN site meter. If the Zap also lists an inverter, battery or charger, add that device here with its own driver. Do not use Zap as a proxy for those.</p>'
+              : '') +
             '<div class="drv-local-creds" data-drv-lua="' + escHtml(d.lua || '') + '"' + (localCreds ? '' : ' hidden') + '>' +
               '<label style="margin-top:8px">Username ' + help('Username for the device\'s local API (HTTP Basic auth). For NIBE this is the local-API account you set up in the myUplink app.') + '</label>' +
               '<input type="text" autocomplete="off" data-path="drivers.' + idx + '.config.username" value="' + escHtml(lcfg.username || '') + '" placeholder="local-api-user">' +

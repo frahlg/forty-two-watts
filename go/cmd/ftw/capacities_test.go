@@ -19,7 +19,7 @@ func evCatalog() []drivers.CatalogEntry {
 		{Path: "drivers/easee_cloud.lua", Filename: "easee_cloud.lua", Capabilities: []string{"ev"}},
 		{Path: "drivers/ctek_hybrid.lua", Filename: "ctek_hybrid.lua", Capabilities: []string{"ev"}},
 		{Path: "drivers/tesla_vehicle.lua", Filename: "tesla_vehicle.lua", Capabilities: []string{"vehicle"}},
-		{Path: "drivers/zap.lua", Filename: "zap.lua", Capabilities: []string{"meter", "pv", "battery", "v2x_charger"}, ReadOnly: true},
+		{Path: "drivers/zap.lua", Filename: "zap.lua", Capabilities: []string{"meter"}, ReadOnly: true},
 		{Path: "drivers/p1meter.lua", Filename: "p1meter.lua", Capabilities: []string{"meter"}},
 		{Path: "drivers/huawei_battery.lua", Filename: "huawei_battery.lua", Capabilities: []string{"battery"}},
 		{Path: "drivers/sim_ev.lua", Filename: "sim_ev.lua", Capabilities: []string{"meter"}},
@@ -209,7 +209,7 @@ func TestIsEVOrVehicleDriverByCapabilities(t *testing.T) {
 		{"drivers/sungrow.lua", false},
 		{"drivers/p1meter.lua", false},
 		{"drivers/huawei_battery.lua", false},
-		{"drivers/zap.lua", false}, // read-only battery gateway, not ev
+		{"drivers/zap.lua", false}, // read-only P1/HAN meter, not ev
 		// A filename that LOOKS EV-ish but the driver self-declares
 		// otherwise — the previous filename-prefix heuristic would
 		// have over-matched anything starting with "sim_ev", and the

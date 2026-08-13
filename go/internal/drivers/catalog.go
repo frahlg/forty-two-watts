@@ -43,8 +43,7 @@ type CatalogEntry struct {
 	// and that POST is not actuation. Only meaningful with ReadOnly.
 	AuthPostPath string `json:"auth_post_path,omitempty"`
 	// ReadOnly means the driver never accepts dispatch commands. The catalog
-	// UI uses it to avoid presenting battery capacity as a control opt-in and
-	// to enable battery_telemetry_only for gateway-style drivers.
+	// UI uses it to avoid presenting battery capacity as a control opt-in.
 	ReadOnly bool `json:"read_only,omitempty"`
 	// ReadOnlyDeclared distinguishes an explicit false value from old metadata
 	// that did not state whether the driver can control hardware.
@@ -246,7 +245,7 @@ func IsEVOrVehicleDriver(catalog []CatalogEntry, luaPath string) bool {
 
 // IsReadOnlyDriver reports whether the matched Lua catalog entry explicitly
 // declares read_only=true. Control-pool construction uses this as a safety
-// boundary for telemetry gateways such as Sourceful Zap.
+// boundary for read-only telemetry drivers such as Sourceful Zap.
 func IsReadOnlyDriver(catalog []CatalogEntry, luaPath string) bool {
 	if luaPath == "" {
 		return false

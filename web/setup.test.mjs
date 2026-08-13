@@ -132,6 +132,13 @@ describe("setup wizard — read-only battery gateways", () => {
     assert.match(DEVICES_JS, /caps\.indexOf\("meter"\) >= 0 && caps\.indexOf\("battery"\) >= 0/);
     assert.match(DEVICES_JS, /prevents Combined from counting its power twice/);
   });
+
+  it("tells the operator that Zap is the P1/HAN meter only", () => {
+    assert.match(JS, /P1\/HAN site meter/,
+      "setup must say Zap is the meter, not a proxy for other devices");
+    assert.match(DEVICES_JS, /class="zap-p1-note"/);
+    assert.match(DEVICES_JS, /Do not use Zap as a proxy/);
+  });
 });
 
 describe("price provider defaults", () => {

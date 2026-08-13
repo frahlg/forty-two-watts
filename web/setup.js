@@ -266,6 +266,9 @@
     btn.disabled = false;
 
     var lines = [];
+    if (selectedCatalog.filename === 'zap.lua' || selectedCatalog.id === 'sourceful-zap') {
+      lines.push('This driver is the P1/HAN site meter. Add inverters, batteries and chargers as their own devices in FTW. Do not attach them to Zap.');
+    }
     if (selectedCatalog.description) lines.push(selectedCatalog.description);
 
     var version = selectedCatalog.installed_version || selectedCatalog.version;
