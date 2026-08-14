@@ -18,6 +18,13 @@ import (
 
 const testHousePassword = "house-pass-ok"
 
+func resetLANSessions() {
+	lanSessionMu.Lock()
+	lanSessions = map[string]lanSession{}
+	lanSessionNow = time.Now
+	lanSessionMu.Unlock()
+}
+
 func resetLANGuesses(t *testing.T) {
 	t.Helper()
 	lanGuessMu.Lock()
@@ -25,13 +32,59 @@ func resetLANGuesses(t *testing.T) {
 	lanGuessLockedUntil = time.Time{}
 	lanGuessNow = time.Now
 	lanGuessMu.Unlock()
+	resetLANSessions()
 	t.Cleanup(func() {
 		lanGuessMu.Lock()
 		lanGuessFailures = 0
 		lanGuessLockedUntil = time.Time{}
 		lanGuessNow = time.Now
 		lanGuessMu.Unlock()
+		resetLANSessions()
 	})
+}
+
+func mustIssueLANSession(t *testing.T) string {
+	t.Helper()
+	token, err := issueLANSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return token
+}
+
+func lanSessionFromRecorder(t *testing.T, rr *httptest.ResponseRecorder) string {
+	t.Helper()
+	for _, c := range rr.Result().Cookies() {
+		if c.Name == lanSessionCookieName && c.Value != "" {
+			return c.Value
+		}
+	}
+	t.Fatalf("missing %s cookie: %q", lanSessionCookieName, rr.Header().Get("Set-Cookie"))
+	return ""
+}
+
+func enableStoredLANAuth(t *testing.T, srv *Server) {
+	t.Helper()
+	body := `{"password":"` + testHousePassword + `","enabled":true}`
+	post := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/api/auth/password", strings.NewReader(body))
+	post.RemoteAddr = "127.0.0.1:43210"
+	post.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, post)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("enable status = %d, body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func postLANAuthJSON(srv *Server, method, url, remote, body string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(method, url, strings.NewReader(body))
+	req.RemoteAddr = remote
+	if body != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	return rr
 }
 
 func lanAuthPolicy(secret string) MutationPolicy {
@@ -477,5 +530,167 @@ func TestLANPasswordHashRoundTrip(t *testing.T) {
 	}
 	if verifyLANPassword(encoded, "wrong-password") {
 		t.Fatal("wrong password accepted")
+	}
+}
+
+func TestLANAuthProtectedConfigAcceptsSessionCookie(t *testing.T) {
+	resetLANGuesses(t)
+	token := mustIssueLANSession(t)
+	var caller apiauth.Caller
+	req := lanAuthRequest(http.MethodGet, "http://ftw.local:8080/api/config", "192.168.1.10:43210", "")
+	req.AddCookie(&http.Cookie{Name: lanSessionCookieName, Value: token})
+	rr := serveLANAuth(lanAuthPolicy(testHousePassword), req, func(r *http.Request) {
+		caller, _ = apiauth.FromRequest(r)
+	})
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204 (body=%s)", rr.Code, rr.Body.String())
+	}
+	if caller.Kind != apiauth.KindLAN || caller.Role != apiauth.RoleOwner {
+		t.Fatalf("caller = %+v, want LAN owner", caller)
+	}
+}
+
+func TestLANAuthProtectedConfigRejectsUnknownCookie(t *testing.T) {
+	resetLANGuesses(t)
+	req := lanAuthRequest(http.MethodGet, "http://ftw.local:8080/api/config", "192.168.1.10:43210", "")
+	req.AddCookie(&http.Cookie{Name: lanSessionCookieName, Value: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"})
+	rr := serveLANAuth(lanAuthPolicy(testHousePassword), req, nil)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 (body=%s)", rr.Code, rr.Body.String())
+	}
+}
+
+func TestLANAuthBearerWinsOverSessionCookie(t *testing.T) {
+	resetLANGuesses(t)
+	token := mustIssueLANSession(t)
+	req := lanAuthRequest(http.MethodGet, "http://ftw.local:8080/api/config", "192.168.1.10:43210", "Bearer wrong-password")
+	req.AddCookie(&http.Cookie{Name: lanSessionCookieName, Value: token})
+	rr := serveLANAuth(lanAuthPolicy(testHousePassword), req, nil)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 when Bearer is present and wrong (body=%s)", rr.Code, rr.Body.String())
+	}
+}
+
+func TestAuthLoginSetsCookieAndConfigSucceeds(t *testing.T) {
+	resetLANGuesses(t)
+	srv := newLANAuthServer(t)
+	enableStoredLANAuth(t, srv)
+
+	rr := postLANAuthJSON(srv, http.MethodPost, "http://ftw.local:8080/api/auth/login", "192.168.1.10:43210",
+		`{"password":"`+testHousePassword+`"}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("login status = %d, want 200 (body=%s)", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), `"status":"ok"`) {
+		t.Fatalf("login body = %s", rr.Body.String())
+	}
+	var cookie *http.Cookie
+	for _, c := range rr.Result().Cookies() {
+		if c.Name == lanSessionCookieName {
+			cookie = c
+			break
+		}
+	}
+	if cookie == nil || cookie.Value == "" {
+		t.Fatalf("missing session cookie: %q", rr.Header().Get("Set-Cookie"))
+	}
+	if !cookie.HttpOnly {
+		t.Fatal("session cookie is not HttpOnly")
+	}
+	if cookie.Path != "/" {
+		t.Fatalf("cookie Path = %q, want /", cookie.Path)
+	}
+	if cookie.SameSite != http.SameSiteStrictMode {
+		t.Fatalf("cookie SameSite = %v, want Strict", cookie.SameSite)
+	}
+	if cookie.Secure {
+		t.Fatal("session cookie must not set Secure (LAN is http)")
+	}
+	if cookie.MaxAge != int(lanSessionTTL/time.Second) {
+		t.Fatalf("cookie MaxAge = %d, want %d", cookie.MaxAge, int(lanSessionTTL/time.Second))
+	}
+	raw := rr.Header().Get("Set-Cookie")
+	if strings.Contains(strings.ToLower(raw), "secure") {
+		t.Fatalf("Set-Cookie advertised Secure: %q", raw)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "http://ftw.local:8080/api/config", nil)
+	req.RemoteAddr = "192.168.1.10:43210"
+	req.AddCookie(&http.Cookie{Name: lanSessionCookieName, Value: cookie.Value})
+	got := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(got, req)
+	if got.Code != http.StatusOK {
+		t.Fatalf("config with session cookie status = %d, want 200 (body=%s)", got.Code, got.Body.String())
+	}
+	if !strings.Contains(got.Body.String(), `"lan_auth":true`) {
+		t.Fatalf("config body = %s", got.Body.String())
+	}
+}
+
+func TestAuthLoginWrongPasswordNoCookie(t *testing.T) {
+	resetLANGuesses(t)
+	srv := newLANAuthServer(t)
+	enableStoredLANAuth(t, srv)
+
+	rr := postLANAuthJSON(srv, http.MethodPost, "http://ftw.local:8080/api/auth/login", "192.168.1.10:43210",
+		`{"password":"wrong-password"}`)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("login status = %d, want 401 (body=%s)", rr.Code, rr.Body.String())
+	}
+	for _, c := range rr.Result().Cookies() {
+		if c.Name == lanSessionCookieName && c.Value != "" {
+			t.Fatalf("wrong password set a session cookie: %+v", c)
+		}
+	}
+}
+
+func TestAuthLoginRejectedWhenDisabled(t *testing.T) {
+	resetLANGuesses(t)
+	srv := newLANAuthServer(t)
+	rr := postLANAuthJSON(srv, http.MethodPost, "http://ftw.local:8080/api/auth/login", "192.168.1.10:43210",
+		`{"password":"`+testHousePassword+`"}`)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("login while off status = %d, want 400 (body=%s)", rr.Code, rr.Body.String())
+	}
+}
+
+func TestAuthLogoutThenConfigUnauthorized(t *testing.T) {
+	resetLANGuesses(t)
+	srv := newLANAuthServer(t)
+	enableStoredLANAuth(t, srv)
+
+	login := postLANAuthJSON(srv, http.MethodPost, "http://ftw.local:8080/api/auth/login", "192.168.1.10:43210",
+		`{"password":"`+testHousePassword+`"}`)
+	if login.Code != http.StatusOK {
+		t.Fatalf("login status = %d, body=%s", login.Code, login.Body.String())
+	}
+	token := lanSessionFromRecorder(t, login)
+
+	logout := httptest.NewRequest(http.MethodPost, "http://ftw.local:8080/api/auth/logout", strings.NewReader(`{}`))
+	logout.RemoteAddr = "192.168.1.10:43210"
+	logout.Header.Set("Content-Type", "application/json")
+	logout.AddCookie(&http.Cookie{Name: lanSessionCookieName, Value: token})
+	out := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(out, logout)
+	if out.Code != http.StatusOK {
+		t.Fatalf("logout status = %d, want 200 (body=%s)", out.Code, out.Body.String())
+	}
+	cleared := false
+	for _, c := range out.Result().Cookies() {
+		if c.Name == lanSessionCookieName && c.MaxAge < 0 {
+			cleared = true
+		}
+	}
+	if !cleared && !strings.Contains(out.Header().Get("Set-Cookie"), "Max-Age=0") {
+		t.Fatalf("logout did not clear cookie: %q", out.Header().Get("Set-Cookie"))
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "http://ftw.local:8080/api/config", nil)
+	req.RemoteAddr = "192.168.1.10:43210"
+	req.AddCookie(&http.Cookie{Name: lanSessionCookieName, Value: token})
+	got := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(got, req)
+	if got.Code != http.StatusUnauthorized {
+		t.Fatalf("config after logout status = %d, want 401 (body=%s)", got.Code, got.Body.String())
 	}
 }
