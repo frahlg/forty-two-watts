@@ -2130,6 +2130,8 @@ body.advanced #ui-mode-toggle { color: #fbbf24; }
   font-size: 0.78rem;
   margin: 0;
   color: var(--fg-label, var(--text, #e8e8e8));
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .lp-card-body {
   display: grid;

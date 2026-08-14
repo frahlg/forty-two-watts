@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 const source = readFileSync(new URL('./loadpoints.js', import.meta.url), 'utf8');
+const styles = readFileSync(new URL('./style.css', import.meta.url), 'utf8');
 
 function sliceFn(name, next) {
   const start = source.indexOf('function ' + name);
@@ -11,6 +12,11 @@ function sliceFn(name, next) {
   assert.ok(end > start, name + ' must be followed by ' + next);
   return source.slice(start, end);
 }
+
+test('escaped loadpoint IDs wrap instead of widening the page', () => {
+  const rule = styles.match(/\.lp-card-header h3\s*\{[^}]*\}/s)?.[0] || '';
+  assert.match(rule, /overflow-wrap:\s*anywhere/);
+});
 
 test('escapeHtml exists and matches the heating.js mapping', () => {
   assert.match(source, /function escapeHtml/);
