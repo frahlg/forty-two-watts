@@ -13,10 +13,18 @@ import (
 
 // MutationPolicy is the trust boundary for protected HTTP requests.
 // Local LAN clients remain compatible without a token; public/FQDN access is
-// opt-in and must prove possession of Token.
+// opt-in and must prove possession of Token. LANAuthEnabled / VerifyLANSecret
+// are an extra, optional house-password check on the LAN and do not replace
+// the remote token.
 type MutationPolicy struct {
 	RequireTokenForRemote bool
 	Token                 string
+	// LANAuthEnabled reports whether the house opted into a LAN password.
+	// Nil means off (today's behavior).
+	LANAuthEnabled func() bool
+	// VerifyLANSecret reports whether the presented secret matches the stored
+	// house password. Nil or false means it does not.
+	VerifyLANSecret func(secret string) bool
 }
 
 // WithSecurityHeaders sets clickjacking and baseline browser headers on
@@ -39,22 +47,25 @@ func WithSecurityHeaders(next http.Handler) http.Handler {
 //   - a Caller already on the context was put there by whoever authenticated
 //     the request — today the app session, which proved possession of an
 //     enrolled device's Noise static key before a byte of this request
-//     existed. It is kept as it is.
-//   - anything else arrived on the LAN listener and is minted as a local
-//     owner. That is not a weakening. It writes down what the LAN already is:
-//     124 endpoints served with no authentication whatsoever. Every handler
-//     from here on is written against apiauth.From, so the whole future job
-//     of authenticating the LAN API is changing this one branch.
+//     existed. It is kept as it is. KindApp is never replaced and never
+//     asked for the house password.
+//   - anything else arrived on the LAN listener. With api.lan_auth off
+//     (the default), or from loopback, or with a matching house Bearer,
+//     it is minted as a local owner — today's behaviour. With lan_auth
+//     on, a LAN peer without that proof is a viewer.
 //
 // The guarding half rejects browser cross-site writes, non-JSON request
 // bodies, malformed Host/Origin metadata and unauthenticated protected
 // requests addressed through non-local hostnames. Semantically active and
 // secret-bearing GET/HEAD requests are protected too; ordinary reads remain
-// unaffected.
+// unaffected. When lan_auth is on, protected LAN routes also need the
+// house password. Public-host checks stay independent and still use Token.
 func Authenticate(next http.Handler, policy MutationPolicy) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		houseOK, r := resolveLANSecret(r, policy)
+
 		if _, ok := apiauth.From(r.Context()); !ok {
-			r = r.WithContext(apiauth.WithCaller(r.Context(), localCaller(r)))
+			r = r.WithContext(apiauth.WithCaller(r.Context(), decideLANCaller(r, policy, houseOK)))
 		}
 
 		if !requiresMutationProtection(r) {
@@ -74,7 +85,8 @@ func Authenticate(next http.Handler, policy MutationPolicy) http.Handler {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
 			return
 		}
-		if policy.RequireTokenForRemote && (!isLocalAuthority(reqAuthority) || !isLocalClient(r.RemoteAddr)) {
+		remoteRequired := policy.RequireTokenForRemote && (!isLocalAuthority(reqAuthority) || !isLocalClient(r.RemoteAddr))
+		if remoteRequired {
 			if strings.TrimSpace(policy.Token) == "" {
 				writeJSON(w, http.StatusForbidden, map[string]string{
 					"error": "remote access to protected API routes is disabled; configure FTW_API_TOKEN or use a local address",
@@ -87,6 +99,13 @@ func Authenticate(next http.Handler, policy MutationPolicy) http.Handler {
 				return
 			}
 		}
+		caller, _ := apiauth.From(r.Context())
+		if !remoteRequired && lanAuthOn(policy) && !isLoopbackClient(r.RemoteAddr) &&
+			caller.Kind == apiauth.KindLAN && !lanAuthExempt(r.URL.Path) && !houseOK {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="ftw-lan"`)
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "valid LAN password required"})
+			return
+		}
 		if requestHasBody(r) && !hasJSONContentType(r.Header.Get("Content-Type")) {
 			writeJSON(w, http.StatusUnsupportedMediaType, map[string]string{
 				"error": "request body must use Content-Type application/json",
@@ -98,6 +117,44 @@ func Authenticate(next http.Handler, policy MutationPolicy) http.Handler {
 	})
 }
 
+func lanAuthOn(policy MutationPolicy) bool {
+	return policy.LANAuthEnabled != nil && policy.LANAuthEnabled()
+}
+
+func lanAuthExempt(path string) bool {
+	switch path {
+	case "/api/auth/login", "/api/auth/logout", "/api/auth/status":
+		return true
+	default:
+		return false
+	}
+}
+
+func decideLANCaller(r *http.Request, policy MutationPolicy, houseOK bool) apiauth.Caller {
+	if !lanAuthOn(policy) || isLoopbackClient(r.RemoteAddr) || houseOK {
+		return localCaller(r)
+	}
+	return lanViewerCaller(r)
+}
+
+// resolveLANSecret verifies a presented house Bearer at most once per
+// request. The outer listener and Server.Handler both wrap Authenticate;
+// a context flag stops the inner wrap from hashing or counting twice.
+func resolveLANSecret(r *http.Request, policy MutationPolicy) (bool, *http.Request) {
+	if ok, checked := lanSecretFrom(r.Context()); checked {
+		return ok, r
+	}
+	if !lanAuthOn(policy) || isLoopbackClient(r.RemoteAddr) || !isLocalClient(r.RemoteAddr) {
+		return false, r
+	}
+	secret, ok := parseBearer(r.Header.Get("Authorization"))
+	if !ok {
+		return false, r
+	}
+	houseOK := admitLANSecret(policy.VerifyLANSecret, secret)
+	return houseOK, r.WithContext(withLANSecret(r.Context(), houseOK))
+}
+
 // localCaller is what a request off the LAN listener carries.
 //
 // Full authority, because that is the truth of the deployment as it stands
@@ -105,16 +162,29 @@ func Authenticate(next http.Handler, policy MutationPolicy) http.Handler {
 // curl. The Subject records the address so an audit line can say where a
 // change came from, which is more than the box could say before.
 func localCaller(r *http.Request) apiauth.Caller {
-	host := r.RemoteAddr
-	if h, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
-		host = h
-	}
 	return apiauth.Caller{
-		Subject: apiauth.KindLAN + ":" + host,
+		Subject: apiauth.KindLAN + ":" + remoteHost(r),
 		Kind:    apiauth.KindLAN,
 		Role:    apiauth.RoleOwner,
 		Scopes:  apiauth.EveryScope(),
 	}
+}
+
+func lanViewerCaller(r *http.Request) apiauth.Caller {
+	return apiauth.Caller{
+		Subject: apiauth.KindLAN + ":" + remoteHost(r),
+		Kind:    apiauth.KindLAN,
+		Role:    apiauth.RoleViewer,
+		Scopes:  apiauth.NewScopeSet(apiauth.RoleScopes[apiauth.RoleViewer]...),
+	}
+}
+
+func remoteHost(r *http.Request) string {
+	host := r.RemoteAddr
+	if h, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		host = h
+	}
+	return host
 }
 
 func requiresMutationProtection(r *http.Request) bool {
@@ -181,11 +251,19 @@ func hasJSONContentType(value string) bool {
 }
 
 func validBearerToken(header, want string) bool {
-	parts := strings.Fields(header)
-	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
+	got, ok := parseBearer(header)
+	if !ok {
 		return false
 	}
-	return subtle.ConstantTimeCompare([]byte(parts[1]), []byte(want)) == 1
+	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
+}
+
+func parseBearer(header string) (string, bool) {
+	parts := strings.Fields(header)
+	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
+		return "", false
+	}
+	return parts[1], true
 }
 
 type authority struct {
@@ -285,6 +363,18 @@ func isLocalAuthority(a authority) bool {
 }
 
 func isLocalClient(remoteAddr string) bool {
+	ip := remoteIP(remoteAddr)
+	return ip != nil && (ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast())
+}
+
+// isLoopbackClient is true only for 127.0.0.0/8 and ::1. A private LAN
+// address is not loopback; with lan_auth on it still needs the house password.
+func isLoopbackClient(remoteAddr string) bool {
+	ip := remoteIP(remoteAddr)
+	return ip != nil && ip.IsLoopback()
+}
+
+func remoteIP(remoteAddr string) net.IP {
 	host, _, err := net.SplitHostPort(remoteAddr)
 	if err != nil {
 		host = remoteAddr
@@ -292,6 +382,5 @@ func isLocalClient(remoteAddr string) bool {
 	if zoneAt := strings.LastIndexByte(host, '%'); zoneAt >= 0 {
 		host = host[:zoneAt]
 	}
-	ip := net.ParseIP(host)
-	return ip != nil && (ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast())
+	return net.ParseIP(host)
 }

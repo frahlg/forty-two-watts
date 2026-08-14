@@ -36,6 +36,7 @@ func TestRestartRequiredFor_HotReloadable(t *testing.T) {
 	old.HomeAssistant = &HomeAssistant{
 		Enabled: true, Broker: "192.168.1.1", Port: 1883, PublishIntervalS: 5,
 	}
+	newC.API.LANAuth = true
 
 	if r := RestartRequiredFor(old, newC); len(r) != 0 {
 		t.Fatalf("expected no reasons (all hot-reloadable), got %v", r)

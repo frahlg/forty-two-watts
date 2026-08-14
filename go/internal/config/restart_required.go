@@ -49,7 +49,7 @@ func RestartRequiredFor(oldCfg, newCfg *Config) []string {
 		reasons = append(reasons, "site.name — used by HA discovery + logging at boot")
 	}
 
-	if !reflect.DeepEqual(oldCfg.API, newCfg.API) {
+	if oldCfg.API.Port != newCfg.API.Port {
 		reasons = append(reasons, "api.port — HTTP server binds the port at startup")
 	}
 	// homeassistant.* is hot-reloadable via (*ha.Bridge).Reload; see the

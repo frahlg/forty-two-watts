@@ -106,4 +106,7 @@ func TestAPIMutationPolicyRejectsShortConfiguredToken(t *testing.T) {
 	if !policy.RequireTokenForRemote {
 		t.Fatal("remote protection disabled")
 	}
+	if policy.LANAuthEnabled != nil || policy.VerifyLANSecret != nil {
+		t.Fatal("apiMutationPolicy must leave LAN auth off")
+	}
 }
