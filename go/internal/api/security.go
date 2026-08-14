@@ -149,9 +149,20 @@ func protectedReadPath(path string) bool {
 		"/api/support/report",
 		"/api/logs",
 		"/api/system/info",
+		"/api/storage/inventory",
 		"/api/research/load/dump",
 		"/api/app-link/devices",
+		"/api/devices",
+		"/api/drivers/catalog",
+		"/api/device_repository/status",
+		"/api/components",
+		"/api/components/history",
+		"/api/ha/status",
+		"/api/caldav/status",
 		"/api/caldav/credentials",
+		"/api/notifications/status",
+		"/api/notifications/history",
+		"/api/version/snapshots",
 		"/api/scan",
 		"/api/oauth/myuplink/start":
 		return true
@@ -159,9 +170,11 @@ func protectedReadPath(path string) bool {
 	if path == "/api/backups" || strings.HasPrefix(path, "/api/backups/") {
 		return true
 	}
-	if strings.HasPrefix(path, "/api/drivers/") &&
-		(strings.HasSuffix(path, "/source") || strings.HasSuffix(path, "/logs")) {
-		return true
+	if rest, ok := strings.CutPrefix(path, "/api/drivers/"); ok {
+		// The detail route includes serial number, MAC address and endpoint.
+		// Nested source and log routes can hold credentials or arbitrary text.
+		return (rest != "" && !strings.Contains(rest, "/")) ||
+			strings.HasSuffix(rest, "/source") || strings.HasSuffix(rest, "/logs")
 	}
 	return false
 }

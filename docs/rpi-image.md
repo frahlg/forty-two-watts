@@ -29,10 +29,11 @@ valid when copied from a version release. Both forms point at the same current
 installer image; the image pulls the current stable containers on first boot.
 
 Use a unique SSH password or key. FTW blocks unauthenticated mutations
-through public hostnames. Config, logs and dumps need the same local-or-token
-check. Live dashboard reads (status, energy, prices, plan) stay
-unauthenticated. Keep the box on a trusted LAN or behind an operator-managed,
-authenticated private/HTTPS proxy. See [operations.md](operations.md#lan-and-api-access).
+through public hostnames. Config, logs, dumps, device identity, integration
+status and local paths need the same local-or-token check. Live dashboard
+reads (status, energy, prices, plan) stay unauthenticated. Keep the box on a
+trusted LAN or behind an operator-managed, authenticated private/HTTPS proxy.
+See [operations.md](operations.md#lan-and-api-access).
 
 ## Direct image fallback
 

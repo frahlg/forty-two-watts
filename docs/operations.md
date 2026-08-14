@@ -121,10 +121,11 @@ The built-in browser UI does not store API tokens. For a public/FQDN browser
 deployment, put FTW behind an operator-managed HTTPS reverse proxy with login
 or session authentication and have that trusted proxy inject the Bearer header
 upstream. The token, and the same-origin / local-address checks, now also
-cover config, logs, support dump and report, driver source, system info,
-research dump, and the app-link device list. Live dashboard reads (status,
-energy, prices, plan) stay open if someone publishes the port. Still do not
-publish the box directly to the internet.
+cover config, logs, support dump and report, driver source and identity,
+integration status, notification history, system and storage info, local
+repository and snapshot paths, research dump, and the app-link device list.
+Live dashboard reads (status, energy, prices, plan) stay open if someone
+publishes the port. Still do not publish the box directly to the internet.
 
 Recovery cannot be disabled by a bad token: connect through `localhost`, the
 host's private IP, or its `.local` name, correct/remove `FTW_API_TOKEN`, and
