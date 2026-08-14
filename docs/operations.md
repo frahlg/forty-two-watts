@@ -135,10 +135,17 @@ mutations remain locked.
 tunnel credential for future remote access. That expansion point is described in
 [architecture.md](architecture.md#future-remote-access-boundary).
 
-`api.lan_auth` is off by default. When on, protected LAN routes need
-`Authorization: Bearer <house-password>`. Loopback (`127.0.0.1` / `::1`) never
-does. Live status stays readable without the password; a viewer caller is
-minted for those reads. The browser login page is not part of this change.
+`api.lan_auth` is off by default. Turn it on from Settings → System (LAN
+password). When on, protected LAN routes need the house password. `curl`
+sends `Authorization: Bearer <house-password>`. The browser login form
+sets a session cookie (`ftw_lan`, 12 hours). Loopback (`127.0.0.1` / `::1`)
+never asks. Live status stays readable without the password; a viewer
+caller is minted for those reads.
+
+The FTW app and Home Assistant MQTT are unchanged.
+
+Recovery: `curl` to `127.0.0.1`, or set `api.lan_auth: false` in
+`config.yaml` and restart Core.
 
 ## Logs and health
 

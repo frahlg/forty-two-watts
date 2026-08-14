@@ -372,6 +372,8 @@ func (s *Server) routes() {
 	s.handle("GET  /api/health", Read, s.handleHealth)
 	s.handle("GET  /api/status", Read, s.handleStatus)
 	s.handle("GET  /api/auth/status", Read, s.handleAuthStatus)
+	s.handle("POST /api/auth/login", Configure, s.handleAuthLogin)
+	s.handle("POST /api/auth/logout", Configure, s.handleAuthLogout)
 	s.handle("POST /api/auth/password", Configure, s.handleAuthPassword)
 	s.handle("GET  /api/system/info", Read, s.handleSysInfo)
 	s.handle("GET  /api/storage/inventory", Read, s.handleStorageInventory)
