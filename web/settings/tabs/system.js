@@ -97,6 +97,20 @@
 		'  .sys-help-secondary { margin:10px 0 0; color:var(--text-dim); font-size:0.8rem; }' +
         '</style>' +
         '<fieldset>' +
+        '<legend>LAN password</legend>' +
+        '<p class="sys-meta" id="sys-lan-auth-status">…</p>' +
+        '<label for="sys-lan-auth-password">Password</label>' +
+        '<input type="password" id="sys-lan-auth-password" autocomplete="new-password">' +
+        '<label for="sys-lan-auth-confirm">Confirm</label>' +
+        '<input type="password" id="sys-lan-auth-confirm" autocomplete="new-password">' +
+        '<div class="sys-help-actions" style="margin-top:10px">' +
+        '  <button class="btn-add" type="button" id="sys-lan-auth-enable">Enable</button>' +
+        '  <button class="btn-add" type="button" id="sys-lan-auth-disable">Disable</button>' +
+        '</div>' +
+        '<p class="sys-help-secondary" id="sys-lan-auth-msg"></p>' +
+        '<p class="sys-help-secondary">Asks for this password on the LAN before settings and writes. Live status stays visible. curl still uses Bearer.</p>' +
+        '</fieldset>' +
+        '<fieldset>' +
         '<legend>Host</legend>' +
         '<div class="sys-grid">' +
         '  <div class="sys-row">' +
@@ -307,8 +321,89 @@
         });
       }
 
+      function setLanMsg(txt) {
+        var el = document.getElementById("sys-lan-auth-msg");
+        if (el) el.textContent = txt || "";
+      }
+
+      function lanStatusText(d) {
+        if (!d || typeof d !== "object") return "Status unavailable";
+        if (d.lan_auth && d.configured) return "On — password is set";
+        if (d.lan_auth && !d.configured) return "On — no password stored";
+        if (!d.lan_auth && d.configured) return "Off — password is stored";
+        return "Off";
+      }
+
+      function refreshLanAuth() {
+        apiFetch("/api/auth/status").then(function (r) { return r.json(); }).then(function (d) {
+          var statusEl = document.getElementById("sys-lan-auth-status");
+          if (statusEl) statusEl.textContent = lanStatusText(d);
+          var disableBtn = document.getElementById("sys-lan-auth-disable");
+          if (disableBtn) disableBtn.disabled = !d.lan_auth;
+        }).catch(function () {
+          var statusEl = document.getElementById("sys-lan-auth-status");
+          if (statusEl) statusEl.textContent = "Status unavailable";
+        });
+      }
+
+      var enableBtn = document.getElementById("sys-lan-auth-enable");
+      if (enableBtn) enableBtn.onclick = function () {
+        var pwEl = document.getElementById("sys-lan-auth-password");
+        var cfEl = document.getElementById("sys-lan-auth-confirm");
+        var pw = pwEl ? pwEl.value : "";
+        var cf = cfEl ? cfEl.value : "";
+        if (pw.length < 10) {
+          setLanMsg("Password must be at least 10 characters");
+          return;
+        }
+        if (pw !== cf) {
+          setLanMsg("Password and confirm do not match");
+          return;
+        }
+        enableBtn.disabled = true;
+        setLanMsg("");
+        apiFetch("/api/auth/password", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ password: pw, enabled: true }),
+        }).then(function (r) {
+          return r.json().then(function (body) {
+            if (!r.ok) throw new Error(body.error || "enable failed");
+            if (pwEl) pwEl.value = "";
+            if (cfEl) cfEl.value = "";
+            setLanMsg("LAN password is on");
+            refreshLanAuth();
+          });
+        }).catch(function (err) {
+          setLanMsg(err.message || "enable failed");
+        }).then(function () {
+          enableBtn.disabled = false;
+        });
+      };
+
+      var disableBtn = document.getElementById("sys-lan-auth-disable");
+      if (disableBtn) disableBtn.onclick = function () {
+        disableBtn.disabled = true;
+        setLanMsg("");
+        apiFetch("/api/auth/password", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ enabled: false }),
+        }).then(function (r) {
+          return r.json().then(function (body) {
+            if (!r.ok) throw new Error(body.error || "disable failed");
+            setLanMsg("LAN password is off");
+            refreshLanAuth();
+          });
+        }).catch(function (err) {
+          setLanMsg(err.message || "disable failed");
+          disableBtn.disabled = false;
+        });
+      };
+
       refresh();
       refreshComponents();
+      refreshLanAuth();
       if (window._systemStatusTimer) clearInterval(window._systemStatusTimer);
       window._systemStatusTimer = setInterval(refresh, 5000);
     },

@@ -50,9 +50,10 @@ func WithSecurityHeaders(next http.Handler) http.Handler {
 //     existed. It is kept as it is. KindApp is never replaced and never
 //     asked for the house password.
 //   - anything else arrived on the LAN listener. With api.lan_auth off
-//     (the default), or from loopback, or with a matching house Bearer,
-//     it is minted as a local owner — today's behaviour. With lan_auth
-//     on, a LAN peer without that proof is a viewer.
+//     (the default), or from loopback, or with a matching house Bearer
+//     or session cookie, it is minted as a local owner — today's
+//     behaviour. With lan_auth on, a LAN peer without that proof is a
+//     viewer.
 //
 // The guarding half rejects browser cross-site writes, non-JSON request
 // bodies, malformed Host/Origin metadata and unauthenticated protected
@@ -137,9 +138,10 @@ func decideLANCaller(r *http.Request, policy MutationPolicy, houseOK bool) apiau
 	return lanViewerCaller(r)
 }
 
-// resolveLANSecret verifies a presented house Bearer at most once per
-// request. The outer listener and Server.Handler both wrap Authenticate;
-// a context flag stops the inner wrap from hashing or counting twice.
+// resolveLANSecret verifies a presented house Bearer or session cookie at
+// most once per request. Bearer wins when both are present. The outer
+// listener and Server.Handler both wrap Authenticate; a context flag
+// stops the inner wrap from hashing or counting twice.
 func resolveLANSecret(r *http.Request, policy MutationPolicy) (bool, *http.Request) {
 	if ok, checked := lanSecretFrom(r.Context()); checked {
 		return ok, r
@@ -147,12 +149,14 @@ func resolveLANSecret(r *http.Request, policy MutationPolicy) (bool, *http.Reque
 	if !lanAuthOn(policy) || isLoopbackClient(r.RemoteAddr) || !isLocalClient(r.RemoteAddr) {
 		return false, r
 	}
-	secret, ok := parseBearer(r.Header.Get("Authorization"))
-	if !ok {
-		return false, r
+	if secret, ok := parseBearer(r.Header.Get("Authorization")); ok {
+		houseOK := admitLANSecret(policy.VerifyLANSecret, secret)
+		return houseOK, r.WithContext(withLANSecret(r.Context(), houseOK))
 	}
-	houseOK := admitLANSecret(policy.VerifyLANSecret, secret)
-	return houseOK, r.WithContext(withLANSecret(r.Context(), houseOK))
+	if token, ok := lanSessionCookieValue(r); ok && lanSessionValid(token) {
+		return true, r.WithContext(withLANSecret(r.Context(), true))
+	}
+	return false, r
 }
 
 // localCaller is what a request off the LAN listener carries.

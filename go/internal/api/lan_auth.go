@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -23,6 +24,10 @@ const (
 
 	lanGuessLimit    = 5
 	lanGuessCooldown = 30 * time.Second
+
+	lanSessionCookieName = "ftw_lan"
+	lanSessionBytes      = 32
+	lanSessionTTL        = 12 * time.Hour
 
 	// Encoded in the stored hash so a later bump still verifies old rows.
 	lanArgonTime    uint32 = 3
@@ -52,7 +57,78 @@ var (
 	lanGuessFailures    int
 	lanGuessLockedUntil time.Time
 	lanGuessNow         = time.Now
+
+	lanSessionMu  sync.Mutex
+	lanSessions   = map[string]lanSession{}
+	lanSessionNow = time.Now
 )
+
+type lanSession struct {
+	expires time.Time
+}
+
+func lanSessionCookieValue(r *http.Request) (string, bool) {
+	c, err := r.Cookie(lanSessionCookieName)
+	if err != nil || c.Value == "" {
+		return "", false
+	}
+	return c.Value, true
+}
+
+func lanSessionValid(token string) bool {
+	if token == "" {
+		return false
+	}
+	lanSessionMu.Lock()
+	defer lanSessionMu.Unlock()
+	sess, ok := lanSessions[token]
+	if !ok {
+		return false
+	}
+	if !sess.expires.After(lanSessionNow()) {
+		delete(lanSessions, token)
+		return false
+	}
+	return true
+}
+
+func issueLANSession() (string, error) {
+	raw := make([]byte, lanSessionBytes)
+	if _, err := rand.Read(raw); err != nil {
+		return "", err
+	}
+	token := hex.EncodeToString(raw)
+	lanSessionMu.Lock()
+	lanSessions[token] = lanSession{expires: lanSessionNow().Add(lanSessionTTL)}
+	lanSessionMu.Unlock()
+	return token, nil
+}
+
+func dropLANSession(token string) {
+	if token == "" {
+		return
+	}
+	lanSessionMu.Lock()
+	delete(lanSessions, token)
+	lanSessionMu.Unlock()
+}
+
+func dropAllLANSessions() {
+	lanSessionMu.Lock()
+	lanSessions = map[string]lanSession{}
+	lanSessionMu.Unlock()
+}
+
+func setLANSessionCookie(w http.ResponseWriter, token string, maxAge int) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     lanSessionCookieName,
+		Value:    token,
+		Path:     "/",
+		MaxAge:   maxAge,
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+	})
+}
 
 // admitLANSecret is the process-global guess limiter for the house password.
 // Five failed VerifyLANSecret calls lock every further attempt, including
@@ -183,6 +259,56 @@ func (s *Server) handleAuthStatus(w http.ResponseWriter, _ *http.Request) {
 	})
 }
 
+type lanAuthLoginRequest struct {
+	Password string `json:"password"`
+}
+
+func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
+	if s.deps.State == nil || s.deps.Cfg == nil || s.deps.CfgMu == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "config store unavailable"})
+		return
+	}
+	s.deps.CfgMu.RLock()
+	lanAuth := s.deps.Cfg.API.LANAuth
+	s.deps.CfgMu.RUnlock()
+	if !lanAuth {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "LAN auth is not enabled"})
+		return
+	}
+	if !lanPasswordConfigured(s.deps.State) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "LAN password is not configured"})
+		return
+	}
+	var req lanAuthLoginRequest
+	if err := readJSON(r, &req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body: " + err.Error()})
+		return
+	}
+	st := s.deps.State
+	if !admitLANSecret(func(secret string) bool {
+		return VerifyStoredLANSecret(st, secret)
+	}, req.Password) {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid password"})
+		return
+	}
+	token, err := issueLANSession()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not create session"})
+		return
+	}
+	setLANSessionCookie(w, token, int(lanSessionTTL/time.Second))
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (s *Server) handleAuthLogout(w http.ResponseWriter, r *http.Request) {
+	if token, ok := lanSessionCookieValue(r); ok {
+		dropLANSession(token)
+	}
+	// MaxAge < 0 emits Max-Age=0 so the browser drops ftw_lan.
+	setLANSessionCookie(w, "", -1)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
 type lanAuthPasswordRequest struct {
 	Password string `json:"password"`
 	Enabled  *bool  `json:"enabled"`
@@ -227,6 +353,7 @@ func (s *Server) handleAuthPassword(w http.ResponseWriter, r *http.Request) {
 				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "save failed: " + err.Error()})
 				return
 			}
+			dropAllLANSessions()
 		}
 	}
 
@@ -239,6 +366,7 @@ func (s *Server) handleAuthPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !enabled {
+		dropAllLANSessions()
 		if err := s.deps.State.SaveConfig(lanAuthPasswordKey, ""); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "save failed: " + err.Error()})
 			return

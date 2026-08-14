@@ -369,11 +369,11 @@ The honest limits, which belong here rather than in a comment nobody reads:
   `appenroll` on every privileged request so a socket cannot outlive a revoke,
   and the next handshake fails. Nothing can un-send bytes already in a phone's
   cache;
-- **the LAN is still unauthenticated.** `api.Authenticate` mints a local owner
-  for anything that arrives without a caller. That writes down what the LAN
-  already is rather than changing it, and it is the one branch that has to
-  change to authenticate the LAN later — every handler downstream reads its
-  caller from `apiauth.From`.
+- **the LAN is unauthenticated unless `api.lan_auth` is on.** With the flag
+  off, `api.Authenticate` mints a local owner for anything that arrives
+  without a caller. With it on, a LAN peer must present the house password
+  (Bearer or session cookie) to act as owner; live reads stay open as a
+  viewer. Every handler downstream reads its caller from `apiauth.From`.
 
 ## Fleet ping
 
