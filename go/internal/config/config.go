@@ -975,7 +975,8 @@ func (d Driver) EffectiveModbus() *ModbusConfig {
 
 // API is the HTTP server config.
 type API struct {
-	Port int `yaml:"port" json:"port"`
+	Port    int  `yaml:"port" json:"port"`
+	LANAuth bool `yaml:"lan_auth,omitempty" json:"lan_auth,omitempty"`
 }
 
 // HomeAssistant is the MQTT bridge config.

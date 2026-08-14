@@ -124,6 +124,7 @@ drivers:
 
 api:
   port: 8080
+  # lan_auth: false  # when true, protected LAN routes need Authorization: Bearer <house-password>
 
 # Home Assistant MQTT bridge (optional)
 homeassistant:

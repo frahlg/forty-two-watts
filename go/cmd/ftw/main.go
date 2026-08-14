@@ -346,10 +346,16 @@ func main() {
 	// observed 2026-07-16 as an auto-rollback in the middle of a VACUUM.
 	// Until the real mux is wired, /api/health answers 200 "starting" and
 	// everything else 503.
+	// Closures start unbound (lan_auth off) so the boot-phase health
+	// listener does not lock the box before state.db is open.
+	lanAuth := &lanAuthLookups{}
+	bootPolicy := apiMutationPolicy()
+	bootPolicy.LANAuthEnabled = lanAuth.Enabled
+	bootPolicy.VerifyLANSecret = lanAuth.Verify
 	apiHandler := newSwappableHandler(bootPhaseHandler())
 	httpSrv := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.API.Port),
-		Handler:           api.WithSecurityHeaders(api.Authenticate(apiHandler, apiMutationPolicy())),
+		Handler:           api.WithSecurityHeaders(api.Authenticate(apiHandler, bootPolicy)),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	go func() {
@@ -2173,8 +2179,20 @@ func main() {
 		slog.Warn("fleet ping unavailable", "err", fleetPingErr)
 	}
 
+	mutationPolicy := apiMutationPolicy()
+	mutationPolicy.LANAuthEnabled = func() bool {
+		cfgMu.RLock()
+		defer cfgMu.RUnlock()
+		return cfg.API.LANAuth
+	}
+	mutationPolicy.VerifyLANSecret = func(secret string) bool {
+		return api.VerifyStoredLANSecret(st, secret)
+	}
+	lanAuth.Bind(mutationPolicy.LANAuthEnabled, mutationPolicy.VerifyLANSecret)
+
 	deps = &api.Deps{
-		Tel: tel, LogRing: logRing, Ctrl: ctrl, CtrlMu: ctrlMu,
+		MutationPolicy: mutationPolicy,
+		Tel:            tel, LogRing: logRing, Ctrl: ctrl, CtrlMu: ctrlMu,
 		State: st,
 		CapMu: capMu, Capacities: capacities, TelemetryCapacities: telemetryCapacities,
 		BatteryIdentity: batteryIdentity,
