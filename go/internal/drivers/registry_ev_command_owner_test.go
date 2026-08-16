@@ -96,6 +96,7 @@ func newEVCommandOwnerRegistry(t *testing.T, blocked bool) (*Registry, *runningD
 		lifecycleCtx:    lifecycleCtx,
 		lifecycleCancel: lifecycleCancel,
 		cmdCh:           make(chan driverCmd, 8),
+		defaultCh:       make(chan driverCmd, 1),
 		stop:            make(chan bool, 1),
 		done:            make(chan struct{}),
 	}
@@ -128,26 +129,29 @@ func TestDefaultBoundaryInvalidatesEarlierEVPause(t *testing.T) {
 	defaultDone := make(chan error, 1)
 	go func() { defaultDone <- r.SendDefault(ctx, "charger") }()
 	deadline := time.Now().Add(2 * time.Second)
-	for len(rd.cmdCh) == 0 && time.Now().Before(deadline) {
+	for len(rd.defaultCh) == 0 && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
-	if len(rd.cmdCh) == 0 {
+	if len(rd.defaultCh) == 0 {
 		close(runtime.pauseRelease)
 		t.Fatal("default was not queued behind the parked pause")
 	}
 	close(runtime.pauseRelease)
-	for name, done := range map[string]<-chan error{
-		"pause":   pauseDone,
-		"default": defaultDone,
-	} {
-		select {
-		case err := <-done:
-			if err != nil {
-				t.Fatalf("%s: %v", name, err)
-			}
-		case <-time.After(2 * time.Second):
-			t.Fatalf("%s did not finish", name)
+	select {
+	case err := <-pauseDone:
+		if !errors.Is(err, ErrCommandMayHaveRun) || !errors.Is(err, context.Canceled) {
+			t.Fatalf("pause = %v, want command-may-have-run plus canceled", err)
 		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("pause did not finish")
+	}
+	select {
+	case err := <-defaultDone:
+		if err != nil {
+			t.Fatalf("default: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("default did not finish")
 	}
 	// Prove the actor's default revision, not the outer health check, owns
 	// the rejection: telemetry may recover before this stale continuation.

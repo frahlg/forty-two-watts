@@ -609,6 +609,13 @@ func luaReturnError(name string, ret lua.LValue) error {
 
 // ---- host.* API exposed to Lua ----
 
+func luaCallContext(L *lua.LState) context.Context {
+	if ctx := L.Context(); ctx != nil {
+		return ctx
+	}
+	return context.Background()
+}
+
 func registerHost(L *lua.LState, env *HostEnv) {
 	host := L.NewTable()
 
@@ -720,7 +727,12 @@ func registerHost(L *lua.LState, env *HostEnv) {
 			return 1
 		}
 		if ms > 0 {
-			time.Sleep(time.Duration(ms) * time.Millisecond)
+			timer := time.NewTimer(time.Duration(ms) * time.Millisecond)
+			defer timer.Stop()
+			select {
+			case <-timer.C:
+			case <-luaCallContext(L).Done():
+			}
 		}
 		return 0
 	}))
@@ -1280,7 +1292,7 @@ func registerHost(L *lua.LState, env *HostEnv) {
 			L.Push(lua.LString("http: " + reason))
 			return 2
 		}
-		req, err := net_http.NewRequest("GET", url, nil)
+		req, err := net_http.NewRequestWithContext(luaCallContext(L), "GET", url, nil)
 		if err != nil {
 			L.Push(lua.LNil)
 			L.Push(lua.LString(err.Error()))
@@ -1332,6 +1344,10 @@ func registerHost(L *lua.LState, env *HostEnv) {
 			return 2
 		}
 		payload := L.CheckString(2)
+		// Do not cancel a mutating request when the Lua command context ends.
+		// Once the device may have received the write, a following default must
+		// stay behind this request in the registry actor. The host client's
+		// 15-second timeout still bounds transport failure.
 		req, err := net_http.NewRequest("POST", url, strings.NewReader(payload))
 		if err != nil {
 			L.Push(lua.LNil)
@@ -1393,6 +1409,8 @@ func registerHost(L *lua.LState, env *HostEnv) {
 			return 2
 		}
 		payload := L.CheckString(2)
+		// Keep the same ordering rule as POST: the registry actor must not send
+		// a default while this older mutating request can still finish normally.
 		req, err := net_http.NewRequest("PATCH", url, strings.NewReader(payload))
 		if err != nil {
 			L.Push(lua.LNil)

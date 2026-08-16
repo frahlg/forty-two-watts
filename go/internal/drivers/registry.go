@@ -263,9 +263,10 @@ type runningDriver struct {
 	evPauseCycleID  uint64
 	evPausePending  bool
 	// Poll loop coordination
-	cmdCh chan driverCmd
-	stop  chan bool
-	done  chan struct{}
+	cmdCh     chan driverCmd
+	defaultCh chan driverCmd
+	stop      chan bool
+	done      chan struct{}
 }
 
 func (rd *runningDriver) controlStatus() DriverControlStatus {
@@ -657,6 +658,7 @@ func (r *Registry) add(ctx context.Context, cfg config.Driver, startupDefault bo
 		lifecycleCtx:    lifecycleCtx,
 		lifecycleCancel: lifecycleCancel,
 		cmdCh:           make(chan driverCmd, 8),
+		defaultCh:       make(chan driverCmd, 1),
 		stop:            make(chan bool, 1),
 		done:            make(chan struct{}),
 	}
@@ -820,7 +822,45 @@ func (r *Registry) runLoop(rd *runningDriver) {
 		}
 		return commandOutcome
 	}
+	handleDefault := func(cmd driverCmd) {
+		invalidateCommandSequence()
+		cmdCtx := cmd.ctx
+		if cmdCtx == nil {
+			cmdCtx = ctx
+		}
+		// Once accepted, a safety default must survive its caller timing out
+		// behind an older command. A fresh bounded attempt keeps that request
+		// durable without letting the actor block forever.
+		var cancel context.CancelFunc
+		if cmdCtx.Err() != nil {
+			cmdCtx, cancel = context.WithTimeout(context.Background(), defaultRecoveryTimeout)
+		}
+		err := r.defaultDriver(cmdCtx, rd, "host_request")
+		if cancel != nil {
+			cancel()
+		}
+		if err == nil {
+			clearLease()
+			rd.markDefaultConfirmed()
+			clearRecoveryTimer()
+			r.clearRecoveryRequired(rd.cfg.Name, rd)
+		} else {
+			scheduleRecovery()
+		}
+		if cmd.result != nil {
+			cmd.result <- err
+		}
+	}
 	for {
+		// Service an accepted autonomous default before normal control. The
+		// blocked status still rejects a normal command if both queues become
+		// ready between this check and the main select.
+		select {
+		case cmd := <-rd.defaultCh:
+			handleDefault(cmd)
+			continue
+		default:
+		}
 		select {
 		case skipDefault := <-rd.stop:
 			if !skipDefault {
@@ -856,6 +896,8 @@ func (r *Registry) runLoop(rd *runningDriver) {
 				_ = rd.env.TCP.Close()
 			}
 			return
+		case cmd := <-rd.defaultCh:
+			handleDefault(cmd)
 		case cmd := <-rd.cmdCh:
 			var err error
 			reportOutcome := cmd.outcome != nil
@@ -925,6 +967,15 @@ func (r *Registry) runLoop(rd *runningDriver) {
 					invalidateCommandSequence()
 				}
 				commandCtx, finishCommand := rd.beginCommand(cmdCtx)
+				// SendDefault may close the control window after the earlier queue
+				// check but before this actor installs activeCancel. Recheck once the
+				// cancel hook exists; after this point a racing default cancels the
+				// context passed to the runtime.
+				if rd.controlIsBlocked() {
+					finishCommand()
+					err = ErrControlBlocked
+					break
+				}
 				if rd.policy != nil && rd.policy.IsControlV2() {
 					var result DriverCommandResultV1
 					var leaseExpiresAt time.Time
@@ -960,17 +1011,6 @@ func (r *Registry) runLoop(rd *runningDriver) {
 					rd.evPausePending = true
 					rd.evPauseRevision = rd.commandRevision
 					rd.evPauseCycleID = cmd.cycleID
-				}
-			case "default":
-				invalidateCommandSequence()
-				err = r.defaultDriver(cmdCtx, rd, "host_request")
-				if err == nil {
-					clearLease()
-					rd.markDefaultConfirmed()
-					clearRecoveryTimer()
-					r.clearRecoveryRequired(rd.cfg.Name, rd)
-				} else {
-					scheduleRecovery()
 				}
 			}
 			if reportOutcome {
@@ -1279,12 +1319,10 @@ func (r *Registry) sendWithGeneration(ctx context.Context, name string, payload 
 	}
 }
 
-// SendDefault sends the default/watchdog command to a driver. Symmetric
-// with Send: both the channel-push and the result-wait honour ctx. A
-// driver whose cmdCh is full (because its goroutine is slow / stuck mid
-// I/O) would otherwise block the caller forever; the watchdog-fallback
-// path runs on every dispatch tick, so an unblocked send into a wedged
-// driver deadlocks the entire control loop.
+// SendDefault sends the default/watchdog command to a driver. Defaults use a
+// dedicated one-slot queue so stale normal commands cannot prevent the
+// autonomous path from being accepted. Once accepted, the generation stays
+// blocked until the default succeeds or the recovery timer retries it.
 func (r *Registry) SendDefault(ctx context.Context, name string) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -1295,11 +1333,26 @@ func (r *Registry) SendDefault(ctx context.Context, name string) error {
 	if !ok {
 		return fmt.Errorf("driver %q not found", name)
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	// Close the control window before enqueueing. Canceling the active Lua call
+	// lets a context-aware host operation return to this same actor before the
+	// queued default runs; the registry never calls one driver in parallel.
+	rd.markDefaultRecoveryPending()
+	rd.cancelActiveCommand()
 	resCh := make(chan error, 1)
+	cmd := driverCmd{kind: "default", ctx: ctx, result: resCh}
 	select {
-	case rd.cmdCh <- driverCmd{kind: "default", ctx: ctx, result: resCh}:
-	case <-ctx.Done():
-		return ctx.Err()
+	case rd.defaultCh <- cmd:
+	default:
+		// Another accepted default already supplies the durable safety request.
+		// Wait only for room or this caller's deadline.
+		select {
+		case rd.defaultCh <- cmd:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
 	select {
 	case err := <-resCh:
