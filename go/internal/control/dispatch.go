@@ -4303,7 +4303,7 @@ func fleetAtLivePower(
 // The sort makes the selected commands independent of map iteration. For
 // different cap deltas, prefer the smallest cap change that clears the
 // remaining relief; otherwise take the largest available change first.
-func fuseSafeBaselineForRelief(raw, safe []DispatchTarget, requiredRelief float64) []DispatchTarget {
+func fuseSafeBaselineForRelief(raw, safe []DispatchTarget, requiredRelief, maxRelief float64) []DispatchTarget {
 	rawByDriver := make(map[string]DispatchTarget, len(raw))
 	for _, t := range raw {
 		rawByDriver[t.Driver] = t
@@ -4338,25 +4338,34 @@ func fuseSafeBaselineForRelief(raw, safe []DispatchTarget, requiredRelief float6
 		return candidates[i].relief < candidates[j].relief
 	})
 
-	for remaining := requiredRelief; remaining > 0 && len(candidates) > 0; {
+	for remaining, budget := requiredRelief, maxRelief; remaining > 0 && budget > 0 && len(candidates) > 0; {
 		pick := -1
 		// A single safe cap that covers the remaining relief avoids taking
 		// control of another externally moving battery. The candidates are
 		// sorted by cap delta, so the first one is the least over-correction.
 		for i, c := range candidates {
-			if c.relief >= remaining {
+			if c.relief >= remaining && c.relief <= budget {
 				pick = i
 				break
 			}
 		}
 		if pick == -1 {
-			// No one cap clears the remainder. Use the largest first to keep
-			// the command set as small as possible, with the sort's driver
-			// order breaking equal deltas deterministically.
-			pick = len(candidates) - 1
+			// No one safe cap clears the remainder. Use the largest step that
+			// still fits inside the export budget. A larger discrete clamp
+			// would trade an import-side fuse event for an export-side one.
+			for i := len(candidates) - 1; i >= 0; i-- {
+				if candidates[i].relief <= budget {
+					pick = i
+					break
+				}
+			}
+			if pick == -1 {
+				break
+			}
 		}
 		baseline = append(baseline, candidates[pick].target)
 		remaining -= candidates[pick].relief
+		budget -= candidates[pick].relief
 		candidates = append(candidates[:pick], candidates[pick+1:]...)
 	}
 
@@ -4439,7 +4448,9 @@ func fuseSaverFromLivePower(
 	if requiredRelief <= 0 {
 		return nil
 	}
-	safeBaseline = fuseSafeBaselineForRelief(rawLive, safeBaseline, requiredRelief)
+	_, _, predictedRaw := predictedGridFromSnapshot(rawLive, batteryReadings, meter)
+	maxRelief := predictedRaw + state.effectiveExportCeilingW(fuseMaxW)
+	safeBaseline = fuseSafeBaselineForRelief(rawLive, safeBaseline, requiredRelief, maxRelief)
 	if len(safeBaseline) == 0 {
 		return nil
 	}
@@ -4474,29 +4485,11 @@ func fuseReliefFromSnapshot(
 		return 0
 	}
 
-	// Sum currentBat only across the batteries we're about to control.
-	// Uncontrolled or offline batteries already contribute to the live grid.
-	seenBat := make(map[string]struct{}, len(targets))
-	var currentBat float64
-	for _, t := range targets {
-		if _, seen := seenBat[t.Driver]; seen {
-			continue
-		}
-		seenBat[t.Driver] = struct{}{}
-		if r := batteryReadings[t.Driver]; r != nil {
-			currentBat += r.SmoothedW
-		}
-	}
-
-	var currentGrid float64
+	currentBat, sumTarget, predicted := predictedGridFromSnapshot(targets, batteryReadings, meter)
+	currentGrid := 0.0
 	if meter != nil {
 		currentGrid = meter.SmoothedW
 	}
-	var sumTarget float64
-	for _, t := range targets {
-		sumTarget += t.TargetW
-	}
-	predicted := currentGrid - currentBat + sumTarget
 
 	// The effective import ceiling includes both the fuse margin and an
 	// optional tariff peak. Per-phase relief remains fuse-only and may act only
@@ -4518,6 +4511,31 @@ func fuseReliefFromSnapshot(
 		}
 	}
 	return overage
+}
+
+// predictedGridFromSnapshot holds non-targeted site power constant and replaces
+// only the captured batteries with their proposed targets.
+func predictedGridFromSnapshot(
+	targets []DispatchTarget,
+	batteryReadings map[string]*telemetry.DerReading,
+	meter *telemetry.DerReading,
+) (currentBat, sumTarget, predicted float64) {
+	seenBat := make(map[string]struct{}, len(targets))
+	for _, t := range targets {
+		sumTarget += t.TargetW
+		if _, seen := seenBat[t.Driver]; seen {
+			continue
+		}
+		seenBat[t.Driver] = struct{}{}
+		if r := batteryReadings[t.Driver]; r != nil {
+			currentBat += r.SmoothedW
+		}
+	}
+	currentGrid := 0.0
+	if meter != nil {
+		currentGrid = meter.SmoothedW
+	}
+	return currentBat, sumTarget, currentGrid - currentBat + sumTarget
 }
 
 // forceFuseDischarge is the reactive fuse-saver primary. It runs AFTER
@@ -4601,6 +4619,14 @@ func forceFuseDischargeWithSnapshot(
 	overage := fuseReliefFromSnapshot(targets, batteryReadings, meter, state, fuseMaxW, accountPhaseTargetDelta)
 	if overage <= 0 {
 		return targets
+	}
+	_, _, predicted := predictedGridFromSnapshot(targets, batteryReadings, meter)
+	exportRoom := predicted + state.effectiveExportCeilingW(fuseMaxW)
+	if exportRoom <= 0 {
+		return targets
+	}
+	if overage > exportRoom {
+		overage = exportRoom
 	}
 
 	type slot struct {

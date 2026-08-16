@@ -1069,6 +1069,89 @@ func TestDeadbandExitSelectsOnlyNeededOutOfCapChargeClamp(t *testing.T) {
 	}
 }
 
+func TestDeadbandExitSkipsCapStepThatWouldBreakExportCeiling(t *testing.T) {
+	const (
+		fuseMaxW      = 11040.0
+		gridW         = fuseMaxW + 1000
+		liveChargeW   = 20000.0
+		maxChargeW    = 3000.0
+		maxExportW    = 1000.0
+		capReliefW    = liveChargeW - maxChargeW
+		maxSafeRelief = gridW + maxExportW
+	)
+	if capReliefW <= maxSafeRelief {
+		t.Fatalf("test setup needs cap relief %.0f W above export budget %.0f W", capReliefW, maxSafeRelief)
+	}
+
+	store := telemetry.NewStore()
+	store.Update("meter", telemetry.DerMeter, gridW, nil, nil)
+	store.DriverHealthMut("meter").RecordSuccess()
+	setBatteryLiveW(store, "oversized", liveChargeW, 0.6)
+	setBatteryLiveW(store, "safe", 0, 0.6)
+	state := NewState(0, 50, "meter")
+	state.MaxExportW = maxExportW
+	state.DriverLimits = map[string]PowerLimits{
+		"oversized": {MaxChargeW: maxChargeW, MaxDischargeW: 10000},
+		"safe":      {MaxChargeW: 10000, MaxDischargeW: 10000},
+	}
+	state.SetGridTarget(gridW)
+	state.MinDispatchIntervalS = 0
+	caps := map[string]float64{"oversized": 20000, "safe": 10000}
+
+	out := ComputeDispatch(store, state, caps, fuseMaxW)
+	if len(out) != 1 || out[0].Driver != "safe" {
+		t.Fatalf("got %+v, want relief only from the in-range battery", out)
+	}
+	if math.Abs(out[0].TargetW-(-1000)) > 1 {
+		t.Fatalf("safe target = %.0f W, want -1000 W", out[0].TargetW)
+	}
+	if postGridW := gridW + out[0].TargetW; math.Abs(postGridW-fuseMaxW) > 1 {
+		t.Fatalf("post-dispatch grid = %.0f W, want %.0f W", postGridW, fuseMaxW)
+	}
+}
+
+func TestDeadbandExitReturnsNoTargetWhenOnlyCapStepBreaksExportCeiling(t *testing.T) {
+	const (
+		fuseMaxW    = 11040.0
+		gridW       = fuseMaxW + 1000
+		liveChargeW = 20000.0
+		maxChargeW  = 3000.0
+	)
+	store, state, caps := setupFuseSaver(gridW, 0, 0.6, 20000)
+	setBatteryLiveW(store, "bat", liveChargeW, 0.6)
+	state.MaxExportW = 1000
+	state.DriverLimits["bat"] = PowerLimits{MaxChargeW: maxChargeW, MaxDischargeW: 10000}
+	state.SetGridTarget(gridW)
+	state.MinDispatchIntervalS = 0
+
+	if out := ComputeDispatch(store, state, caps, fuseMaxW); out != nil {
+		t.Fatalf("unsafe discrete cap step must fail closed, got %+v", out)
+	}
+}
+
+func TestDeadbandExitCapsPerPhaseReliefAtExportCeiling(t *testing.T) {
+	const (
+		gridW      = 1000.0
+		maxExportW = 1000.0
+		fuseMaxW   = 11040.0
+	)
+	store, state, caps := setupPerPhase(gridW, 20, 4, 4, 0.6, 10000)
+	state.MaxExportW = maxExportW
+	state.SetGridTarget(gridW)
+	state.MinDispatchIntervalS = 0
+
+	out := ComputeDispatch(store, state, caps, fuseMaxW)
+	if len(out) != 1 {
+		t.Fatalf("got %+v, want one bounded phase-relief target", out)
+	}
+	if math.Abs(out[0].TargetW-(-2000)) > 1 {
+		t.Fatalf("target = %.0f W, want -2000 W at the export ceiling", out[0].TargetW)
+	}
+	if postGridW := gridW + out[0].TargetW; math.Abs(postGridW-(-maxExportW)) > 1 {
+		t.Fatalf("post-dispatch grid = %.0f W, want export ceiling %.0f W", postGridW, -maxExportW)
+	}
+}
+
 func TestDeadbandExitEmitsCapClampWhenItAloneClearsFuseOverload(t *testing.T) {
 	const (
 		gridW        = 17040.0
