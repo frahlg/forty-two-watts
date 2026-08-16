@@ -5629,11 +5629,13 @@ func TestControlSlotIdentityTracksSameSlotReplan(t *testing.T) {
 		Strategy:        "arbitrage",
 	}
 	available := true
+	calls := 0
 	store := seedStore(0, []struct {
 		name          string
 		currentW, soc float64
 	}{{"ferroamp", 0, 0.5}})
 	st := makeSlotMetricsState("ferroamp", func(time.Time) (SlotDirective, bool) {
+		calls++
 		return current, available
 	})
 	st.clock = func() time.Time { return now }
@@ -5642,11 +5644,17 @@ func TestControlSlotIdentityTracksSameSlotReplan(t *testing.T) {
 	if got := st.SlotEnergy().DecisionID; got != current.DecisionID {
 		t.Fatalf("first control tick decision ID = %q, want %q", got, current.DecisionID)
 	}
+	if calls != 1 {
+		t.Fatalf("first control tick read %d plan generations, want 1", calls)
+	}
 
 	current.DecisionID = "00000000-0000-4000-8000-000000000302"
 	_ = ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
 	if got := st.SlotEnergy().DecisionID; got != current.DecisionID {
 		t.Fatalf("same-slot replan decision ID = %q, want %q", got, current.DecisionID)
+	}
+	if calls != 2 {
+		t.Fatalf("second control tick read %d total plan generations, want 2", calls)
 	}
 
 	available = false
@@ -5654,12 +5662,16 @@ func TestControlSlotIdentityTracksSameSlotReplan(t *testing.T) {
 	if got := st.SlotEnergy().DecisionID; got != "" {
 		t.Fatalf("tick without a plan slot retained decision ID %q", got)
 	}
+	if calls != 3 {
+		t.Fatalf("stale-plan tick read %d total plan generations, want 3", calls)
+	}
 }
 
 func TestControlSlotIdentityTracksLegacyPlan(t *testing.T) {
 	now := time.Date(2026, 8, 16, 12, 5, 0, 0, time.UTC)
 	decisionID := "00000000-0000-4000-8000-000000000303"
 	available := true
+	calls := 0
 	store := seedStore(0, []struct {
 		name          string
 		currentW, soc float64
@@ -5669,6 +5681,7 @@ func TestControlSlotIdentityTracksLegacyPlan(t *testing.T) {
 	st.SlewRateW = 100000
 	st.clock = func() time.Time { return now }
 	st.PlanTarget = func(time.Time) (string, float64, string, bool) {
+		calls++
 		return "self_consumption", 0, decisionID, available
 	}
 
@@ -5676,11 +5689,17 @@ func TestControlSlotIdentityTracksLegacyPlan(t *testing.T) {
 	if got := st.SlotEnergy().DecisionID; got != decisionID {
 		t.Fatalf("legacy control tick decision ID = %q, want %q", got, decisionID)
 	}
+	if calls != 1 {
+		t.Fatalf("legacy control tick read %d plan generations, want 1", calls)
+	}
 
 	available = false
 	_ = ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
 	if got := st.SlotEnergy().DecisionID; got != "" {
 		t.Fatalf("legacy tick without a plan slot retained decision ID %q", got)
+	}
+	if calls != 2 {
+		t.Fatalf("stale legacy tick read %d total plan generations, want 2", calls)
 	}
 }
 
