@@ -6824,17 +6824,17 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": 558.2886517728132,
+          "target_w": 504.49717972717156,
           "clamped": true
         },
         {
           "driver": "pixii",
-          "target_w": -641,
+          "target_w": -560.3799976687259,
           "clamped": true
         },
         {
           "driver": "sungrow",
-          "target_w": 317.7113482271869,
+          "target_w": 290.8828179415545,
           "clamped": true
         }
       ],
@@ -6861,7 +6861,7 @@
       },
       "site_totals": {
         "battery_current_w": 2929,
-        "battery_target_sum_w": 235,
+        "battery_target_sum_w": 235.00000000000017,
         "raw_grid_w": 13734,
         "projected_grid_w": 11040
       }

@@ -3984,10 +3984,16 @@ func perPhaseOverageW(store *telemetry.Store, state *State) float64 {
 	if state == nil || state.SiteFuseAmps <= 0 || state.SiteMeterDriver == "" {
 		return 0
 	}
-	if state.SiteFuseVoltage <= 0 || state.SiteFusePhases <= 0 {
+	r := store.Get(state.SiteMeterDriver, telemetry.DerMeter)
+	return perPhaseOverageReadingW(r, state)
+}
+
+// perPhaseOverageReadingW is the snapshot form used when one control decision
+// must keep the aggregate reading and its phase data from the same meter sample.
+func perPhaseOverageReadingW(r *telemetry.DerReading, state *State) float64 {
+	if state == nil || state.SiteFuseAmps <= 0 || state.SiteFuseVoltage <= 0 || state.SiteFusePhases <= 0 {
 		return 0
 	}
-	r := store.Get(state.SiteMeterDriver, telemetry.DerMeter)
 	if r == nil || len(r.Data) == 0 {
 		return 0
 	}
@@ -4172,7 +4178,7 @@ func fuseSaverEarlyExit(
 	driverCapacities map[string]float64,
 	fuseMaxW float64,
 ) []DispatchTarget {
-	out := fuseSaverFromZero(store, state, driverCapacities, fuseMaxW)
+	out := fuseSaverFromLivePower(store, state, driverCapacities, fuseMaxW)
 	if out == nil || state == nil {
 		return out
 	}
@@ -4195,9 +4201,7 @@ func fuseSaverEarlyExit(
 // command on a string inverter outright, and a rejection core asked for is a
 // rejection core counts.
 //
-// Used by ModeIdle to hold the fleet, and by fuseSaverFromZero as the baseline
-// the fuse-saver flips to discharge. One function so the two can never come to
-// disagree about which batteries are under our control.
+// Used by ModeIdle to hold the fleet at zero.
 func holdFleetAtZero(store *telemetry.Store, capacities map[string]float64) []DispatchTarget {
 	if store == nil {
 		return nil
@@ -4216,34 +4220,229 @@ func holdFleetAtZero(store *telemetry.Store, capacities map[string]float64) []Di
 	return out
 }
 
-// fuseSaverFromZero is the early-return entry point for the fuse-saver.
+// fuseTargetBounds returns the safe command interval for one battery reading.
+// A battery that is empty or reports a blocked direction may still be moving
+// in that direction, but core must not send a command that asks it to continue.
+func fuseTargetBounds(r *telemetry.DerReading, lim PowerLimits) (lower, upper float64) {
+	maxChargeW := float64(MaxCommandW)
+	maxDischargeW := float64(MaxCommandW)
+	if lim.MaxChargeW > 0 {
+		maxChargeW = lim.MaxChargeW
+	}
+	if lim.MaxDischargeW > 0 {
+		maxDischargeW = lim.MaxDischargeW
+	}
+
+	lower = -maxDischargeW
+	upper = maxChargeW
+	soc := 0.1
+	if r.SoC != nil {
+		soc = *r.SoC
+	}
+	dischargeBlocked, chargeBlocked := batteryDirectionBlocks(r.Data)
+	if soc < 0.05 || dischargeBlocked {
+		lower = 0
+	}
+	if chargeBlocked {
+		upper = 0
+	}
+	return lower, upper
+}
+
+// fleetAtLivePower uses the same eligibility as holdFleetAtZero but captures
+// each reading in the same pass. It returns both the raw snapshot and a
+// separate command-safe baseline. A live target below its safe lower bound is
+// omitted from the command baseline: raising it would increase import during
+// the fuse event. Its current effect remains in the site meter and is therefore
+// treated as uncontrolled. A config reload can remove telemetry between calls,
+// so callers must not prove presence and then dereference a second Get.
+func fleetAtLivePower(
+	store *telemetry.Store,
+	capacities map[string]float64,
+	limits map[string]PowerLimits,
+) (raw, safe []DispatchTarget, readings map[string]*telemetry.DerReading) {
+	if store == nil {
+		return nil, nil, nil
+	}
+	raw = make([]DispatchTarget, 0, len(capacities))
+	safe = make([]DispatchTarget, 0, len(capacities))
+	readings = make(map[string]*telemetry.DerReading, len(capacities))
+	for name := range capacities {
+		h := store.DriverHealth(name)
+		if h == nil || !h.IsOnline() {
+			continue
+		}
+		r := store.Get(name, telemetry.DerBattery)
+		if r == nil {
+			continue
+		}
+		rawTarget := DispatchTarget{Driver: name, TargetW: r.SmoothedW}
+		readings[name] = r
+		lower, upper := fuseTargetBounds(r, limits[name])
+		raw = append(raw, rawTarget)
+		if rawTarget.TargetW < lower {
+			continue
+		}
+		safeTarget := rawTarget
+		if safeTarget.TargetW > upper {
+			safeTarget.TargetW = upper
+			safeTarget.Clamped = true
+		}
+		safe = append(safe, safeTarget)
+	}
+	return raw, safe, readings
+}
+
+// fuseSnapshotStillCurrent is the final fail-closed gate before an early fuse
+// command leaves control. The calculation may call Store.Get more than once;
+// if any captured meter or battery sample changed in between, retry on the next
+// control tick instead of mixing old targets with new limits or capability data.
+func fuseSnapshotStillCurrent(
+	store *telemetry.Store,
+	state *State,
+	meterUpdatedAt time.Time,
+	batteryReadings map[string]*telemetry.DerReading,
+	targets []DispatchTarget,
+) bool {
+	if store == nil || state == nil || meterUpdatedAt.IsZero() {
+		return false
+	}
+	meter := store.Get(state.SiteMeterDriver, telemetry.DerMeter)
+	if meter == nil || !meter.UpdatedAt.Equal(meterUpdatedAt) {
+		return false
+	}
+
+	fresh := make(map[string]*telemetry.DerReading, len(batteryReadings))
+	for driver, captured := range batteryReadings {
+		r := store.Get(driver, telemetry.DerBattery)
+		h := store.DriverHealth(driver)
+		if captured == nil || r == nil || h == nil || !h.IsOnline() || !r.UpdatedAt.Equal(captured.UpdatedAt) {
+			return false
+		}
+		fresh[driver] = r
+	}
+	for _, target := range targets {
+		r := fresh[target.Driver]
+		if r == nil {
+			return false
+		}
+		lower, upper := fuseTargetBounds(r, state.DriverLimits[target.Driver])
+		if target.TargetW < lower || target.TargetW > upper {
+			return false
+		}
+	}
+	return true
+}
+
+// fuseSaverFromLivePower is the early-return entry point for the fuse-saver.
 // Called via fuseSaverEarlyExit from the ComputeDispatch branches that
 // would otherwise return nil (holdoff window, reactive deadband) so the
 // safety primary still gets a chance to fire before we walk away from the
-// cycle. Takes holdFleetAtZero's command set — every battery that is BOTH
-// online (per DriverHealth) AND has a current DerBattery reading — and runs
-// it through forceFuseDischarge; if no overflow is predicted, the result is
-// nil and the caller sees the same empty dispatch it saw before.
-func fuseSaverFromZero(
+// cycle. It starts from every controllable battery's live power and runs that
+// baseline through forceFuseDischarge. If no target changes, the result is nil
+// and the caller sees the same empty dispatch it saw before.
+func fuseSaverFromLivePower(
 	store *telemetry.Store,
 	state *State,
 	driverCapacities map[string]float64,
 	fuseMaxW float64,
 ) []DispatchTarget {
-	if fuseMaxW <= 0 || len(driverCapacities) == 0 || store == nil {
+	if fuseMaxW <= 0 || len(driverCapacities) == 0 || store == nil || state == nil {
 		return nil
 	}
-	zeros := holdFleetAtZero(store, driverCapacities)
-	if len(zeros) == 0 {
+	meter := store.Get(state.SiteMeterDriver, telemetry.DerMeter)
+	if meter == nil {
 		return nil
 	}
-	out := forceFuseDischarge(zeros, store, state, driverCapacities, fuseMaxW)
+	rawLive, safeBaseline, batteryReadings := fleetAtLivePower(store, driverCapacities, state.DriverLimits)
+	if len(rawLive) == 0 {
+		return nil
+	}
+	// A command-safe baseline may differ from the live snapshot even when the
+	// site is safe. Preserve the deadband in that case: this early-return path
+	// exists to answer a fuse condition, not to take control of an externally
+	// moved battery merely because its reading sits outside a command cap.
+	if fuseReliefFromSnapshot(rawLive, batteryReadings, meter, state, fuseMaxW, false) <= 0 {
+		return nil
+	}
+	if len(safeBaseline) == 0 {
+		return nil
+	}
+	out := forceFuseDischargeWithSnapshot(safeBaseline, batteryReadings, meter, state, driverCapacities, fuseMaxW, true)
+	rawByDriver := make(map[string]DispatchTarget, len(rawLive))
+	for _, t := range rawLive {
+		rawByDriver[t.Driver] = t
+	}
 	for _, t := range out {
-		if t.TargetW != 0 || t.Clamped {
+		rawTarget, ok := rawByDriver[t.Driver]
+		if !ok || t.TargetW != rawTarget.TargetW || t.Clamped != rawTarget.Clamped {
+			if !fuseSnapshotStillCurrent(store, state, meter.UpdatedAt, batteryReadings, out) {
+				return nil
+			}
 			return out
 		}
 	}
 	return nil
+}
+
+// fuseReliefFromSnapshot returns the import-side relief required for one
+// target set without reading a second telemetry version during the decision.
+func fuseReliefFromSnapshot(
+	targets []DispatchTarget,
+	batteryReadings map[string]*telemetry.DerReading,
+	meter *telemetry.DerReading,
+	state *State,
+	fuseMaxW float64,
+	accountPhaseTargetDelta bool,
+) float64 {
+	if fuseMaxW <= 0 || len(targets) == 0 || state == nil {
+		return 0
+	}
+
+	// Sum currentBat only across the batteries we're about to control.
+	// Uncontrolled or offline batteries already contribute to the live grid.
+	seenBat := make(map[string]struct{}, len(targets))
+	var currentBat float64
+	for _, t := range targets {
+		if _, seen := seenBat[t.Driver]; seen {
+			continue
+		}
+		seenBat[t.Driver] = struct{}{}
+		if r := batteryReadings[t.Driver]; r != nil {
+			currentBat += r.SmoothedW
+		}
+	}
+
+	var currentGrid float64
+	if meter != nil {
+		currentGrid = meter.SmoothedW
+	}
+	var sumTarget float64
+	for _, t := range targets {
+		sumTarget += t.TargetW
+	}
+	predicted := currentGrid - currentBat + sumTarget
+
+	// The effective import ceiling includes both the fuse margin and an
+	// optional tariff peak. Per-phase relief remains fuse-only and may act only
+	// while the matching aggregate meter sample is on the import side.
+	overage := predicted - state.effectiveImportCeilingW(fuseMaxW)
+	if currentGrid >= 0 {
+		relief := perPhaseOverageReadingW(meter, state) * float64(state.SiteFusePhases)
+		if relief > 0 && accountPhaseTargetDelta {
+			// The early fuse baseline can only hold or reduce each included
+			// target. Count that import reduction against the raw phase relief so
+			// a command-cap clamp is not followed by the same correction twice.
+			relief += sumTarget - currentBat
+			if relief < 0 {
+				relief = 0
+			}
+		}
+		if relief > overage {
+			overage = relief
+		}
+	}
+	return overage
 }
 
 // forceFuseDischarge is the reactive fuse-saver primary. It runs AFTER
@@ -4278,9 +4477,10 @@ func fuseSaverFromZero(
 //     EV draw / manual_hold / unplanned spikes.
 //  2. If predicted ≤ fuseMaxW: nothing to do.
 //  3. Otherwise allocate `overage = predicted − fuseMaxW` of
-//     additional discharge, distributed proportionally to each
-//     online battery's remaining discharge headroom (per-battery
-//     MaxDischargeW − current target magnitude, gated on SoC ≥ 5 %).
+//     additional relief, distributed proportionally to each online
+//     battery's safe travel toward its lower command bound. Empty packs and
+//     drivers that block discharge may cancel live charge down to 0 W but are
+//     never asked to discharge.
 //  4. Mark every modified target Clamped so the dispatch trace
 //     shows the fuse-saver fired.
 //
@@ -4294,64 +4494,36 @@ func forceFuseDischarge(
 	driverCapacities map[string]float64,
 	fuseMaxW float64,
 ) []DispatchTarget {
+	if store == nil || state == nil {
+		return targets
+	}
+	readings := make(map[string]*telemetry.DerReading, len(targets))
+	for _, target := range targets {
+		if _, ok := readings[target.Driver]; ok {
+			continue
+		}
+		readings[target.Driver] = store.Get(target.Driver, telemetry.DerBattery)
+	}
+	meter := store.Get(state.SiteMeterDriver, telemetry.DerMeter)
+	return forceFuseDischargeWithSnapshot(targets, readings, meter, state, driverCapacities, fuseMaxW, false)
+}
+
+// forceFuseDischargeWithSnapshot keeps all math for one decision on the same
+// battery and meter readings. The early fuse path validates that the captured
+// readings remain current before it returns the command.
+func forceFuseDischargeWithSnapshot(
+	targets []DispatchTarget,
+	batteryReadings map[string]*telemetry.DerReading,
+	meter *telemetry.DerReading,
+	state *State,
+	driverCapacities map[string]float64,
+	fuseMaxW float64,
+	accountPhaseTargetDelta bool,
+) []DispatchTarget {
 	if fuseMaxW <= 0 || len(targets) == 0 || state == nil {
 		return targets
 	}
-	// Sum currentBat only across the batteries we're about to control
-	// — uncontrolled or offline batteries' current draw is captured in
-	// the live grid reading already; counting them again would
-	// double-subtract their contribution and mispredict.
-	seenBat := make(map[string]struct{}, len(targets))
-	var currentBat float64
-	for _, t := range targets {
-		if _, seen := seenBat[t.Driver]; seen {
-			continue
-		}
-		seenBat[t.Driver] = struct{}{}
-		if r := store.Get(t.Driver, telemetry.DerBattery); r != nil {
-			currentBat += r.SmoothedW
-		}
-	}
-	var currentGrid float64
-	if state.SiteMeterDriver != "" {
-		if r := store.Get(state.SiteMeterDriver, telemetry.DerMeter); r != nil {
-			currentGrid = r.SmoothedW
-		}
-	}
-	var sumTarget float64
-	for _, t := range targets {
-		sumTarget += t.TargetW
-	}
-	predicted := currentGrid - currentBat + sumTarget
-
-	// Effective import ceiling: fuse minus safety margin, capped further
-	// by PeakImportCeilingW when the operator has set a tariff peak.
-	// This is what makes the reactive fuse-saver also defend the peak —
-	// the battery briefly bridges while the loadpoint controller ramps
-	// the EV down in response to the joint allocator's FuseEVMaxW.
-	// Per-phase overage stays on the fuse-only path below; tariff is
-	// aggregate, not per-phase.
-	effImportW := state.effectiveImportCeilingW(fuseMaxW)
-	overage := predicted - effImportW
-	// Per-phase relief trumps aggregate when bigger — but ONLY on the
-	// import side. This function's single lever is MORE discharge, and
-	// perPhaseReliefW is direction-agnostic (its overage uses |amps|),
-	// so honouring it during export would push the over-current phase
-	// further over the breaker. applyFuseGuard's exportOverage branch
-	// already shrinks discharge for that case before we run. The
-	// direction limit is stated here, at the one call that needs it,
-	// rather than baked into a second copy of the conversion.
-	//
-	// Gate on `currentGrid` (live aggregate at the meter) rather than
-	// `predicted`. Per-phase amps and currentGrid come from the same
-	// DerMeter sample; predicted mixes in sumTarget which can swing
-	// across 0 and silently flip the gate.
-	importSide := currentGrid >= 0
-	if importSide {
-		if relief := perPhaseReliefW(store, state); relief > overage {
-			overage = relief
-		}
-	}
+	overage := fuseReliefFromSnapshot(targets, batteryReadings, meter, state, fuseMaxW, accountPhaseTargetDelta)
 	if overage <= 0 {
 		return targets
 	}
@@ -4367,27 +4539,16 @@ func forceFuseDischarge(
 		if !ok || cap <= 0 {
 			continue
 		}
-		r := store.Get(t.Driver, telemetry.DerBattery)
+		r := batteryReadings[t.Driver]
 		if r == nil {
 			continue
 		}
-		soc := 0.1
-		if r.SoC != nil {
-			soc = *r.SoC
-		}
-		if soc < 0.05 {
-			continue // empty pack — can't draw on it
-		}
-		lim := state.DriverLimits[t.Driver]
-		dCap := lim.MaxDischargeW
-		if dCap <= 0 {
-			dCap = MaxCommandW
-		}
-		var alreadyDischarging float64
-		if t.TargetW < 0 {
-			alreadyDischarging = -t.TargetW
-		}
-		room := dCap - alreadyDischarging
+		lower, _ := fuseTargetBounds(r, state.DriverLimits[t.Driver])
+		// Relief subtracts from the current target. Its full safe travel is
+		// the distance to the current lower command bound. A live positive
+		// target contributes charge cancellation even when SoC or the driver
+		// blocks discharge, but the target cannot cross below 0 W in that case.
+		room := t.TargetW - lower
 		if room <= 0 {
 			continue
 		}
