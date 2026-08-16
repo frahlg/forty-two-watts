@@ -561,6 +561,167 @@ services:
 	}
 }
 
+func TestPrepareUpdateImagePin_AddsTagEnvironmentToVariableImage(t *testing.T) {
+	s, _ := newTestServer(t)
+	original := `services:
+  ftw:
+    image: ghcr.io/srcfl/ftw:${FTW_IMAGE_TAG:-latest}
+    volumes:
+      - ./data:/app/data
+`
+	writeCompose(t, s.composeFile, original)
+
+	cleanup, err := s.prepareUpdateImagePin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	if s.updateOverrideFile == "" {
+		t.Fatal("variable image without a container environment mapping should create an override")
+	}
+	overrideData, err := os.ReadFile(s.updateOverrideFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var override struct {
+		Services map[string]struct {
+			Image       string            `yaml:"image"`
+			Environment map[string]string `yaml:"environment"`
+		} `yaml:"services"`
+	}
+	if err := yaml.Unmarshal(overrideData, &override); err != nil {
+		t.Fatal(err)
+	}
+	svc := override.Services[canonicalMainServiceName]
+	if svc.Image != "" {
+		t.Fatalf("identity-only override changed image to %q", svc.Image)
+	}
+	if got := svc.Environment[mainTagEnv]; got != "${FTW_IMAGE_TAG:-latest}" {
+		t.Fatalf("compatibility override %s = %q", mainTagEnv, got)
+	}
+	got, err := os.ReadFile(s.composeFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != original {
+		t.Fatal("compatibility migration modified the host Compose file")
+	}
+}
+
+func TestPrepareUpdateImagePin_OverridesStaleContainerTag(t *testing.T) {
+	s, _ := newTestServer(t)
+	writeCompose(t, s.composeFile, `services:
+  ftw:
+    image: ghcr.io/srcfl/ftw:${FTW_IMAGE_TAG:-latest}
+    environment:
+      FTW_IMAGE_TAG: stale-fixed-tag
+`)
+
+	cleanup, err := s.prepareUpdateImagePin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	if s.updateOverrideFile == "" {
+		t.Fatal("variable image with a stale container tag should create an override")
+	}
+	overrideData, err := os.ReadFile(s.updateOverrideFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var override struct {
+		Services map[string]struct {
+			Environment map[string]string `yaml:"environment"`
+		} `yaml:"services"`
+	}
+	if err := yaml.Unmarshal(overrideData, &override); err != nil {
+		t.Fatal(err)
+	}
+	if got := override.Services[canonicalMainServiceName].Environment[mainTagEnv]; got != "${FTW_IMAGE_TAG:-latest}" {
+		t.Fatalf("compatibility override %s = %q", mainTagEnv, got)
+	}
+}
+
+func TestPrepareUpdateImagePin_ReplacesUnsupportedTagExpressions(t *testing.T) {
+	for _, image := range []string{
+		"ghcr.io/srcfl/ftw:${MY_FTW_IMAGE_TAG:-latest}",
+		"ghcr.io/srcfl/ftw:$FTW_IMAGE_TAG",
+		"ghcr.io/srcfl/ftw:${FTW_IMAGE_TAGGED:-latest}",
+		"ghcr.io/srcfl/ftw:${FTW_IMAGE_TAG:-latest}-${ARCH}",
+		"${FTW_REGISTRY:-ghcr.io/srcfl}/ftw:${FTW_IMAGE_TAG:-latest}",
+	} {
+		t.Run(image, func(t *testing.T) {
+			s, _ := newTestServer(t)
+			writeCompose(t, s.composeFile, "services:\n  ftw:\n    image: "+image+"\n")
+
+			cleanup, err := s.prepareUpdateImagePin()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer cleanup()
+			effective, ok, err := serviceImageFromComposeFiles(s.composeFiles(), canonicalMainServiceName)
+			if err != nil || !ok {
+				t.Fatalf("effective image = %q, %v, %v", effective, ok, err)
+			}
+			want := canonicalMainImage + ":${FTW_IMAGE_TAG:-latest}"
+			if effective != want {
+				t.Fatalf("effective image = %q, want %q", effective, want)
+			}
+			if got, ok := composeImageRepositoryForTag(effective, mainTagEnv); !ok || got != canonicalMainImage {
+				t.Fatalf("rollback repository = %q, supported=%v", got, ok)
+			}
+		})
+	}
+}
+
+func TestValidateComponentImagePinRequiresExactVariable(t *testing.T) {
+	for _, image := range []string{
+		"ghcr.io/srcfl/ftw:${MY_FTW_IMAGE_TAG:-latest}",
+		"ghcr.io/srcfl/ftw:$FTW_IMAGE_TAG",
+		"ghcr.io/srcfl/ftw:${FTW_IMAGE_TAGGED:-latest}",
+		"ghcr.io/srcfl/ftw:${FTW_IMAGE_TAG:-latest}-${ARCH}",
+		"${FTW_REGISTRY:-ghcr.io/srcfl}/ftw:${FTW_IMAGE_TAG:-latest}",
+	} {
+		t.Run(image, func(t *testing.T) {
+			s, _ := newTestServer(t)
+			writeCompose(t, s.composeFile, "services:\n  ftw:\n    image: "+image+"\n")
+			spec, err := s.componentSpec("core")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := s.validateComponentImagePin(spec); err == nil {
+				t.Fatalf("validate accepted unsupported image %q", image)
+			}
+		})
+	}
+}
+
+func TestComponentRollbackPinsUnsupportedOptimizerImages(t *testing.T) {
+	for _, image := range []string{
+		"ghcr.io/srcfl/ftw-optimizer:latest",
+		"ghcr.io/srcfl/ftw-optimizer:${MY_TAG:-latest}",
+	} {
+		t.Run(image, func(t *testing.T) {
+			s, runner := newTestServer(t)
+			writeCompose(t, s.composeFile, "services:\n  ftw:\n    image: ghcr.io/srcfl/ftw:${FTW_IMAGE_TAG:-latest}\n  ftw-optimizer:\n    image: "+image+"\n")
+			s.writeState(State{State: "done", Component: "optimizer", PreviousImageID: "sha256:optimizer-old"})
+
+			s.runComponentRollback("optimizer", time.Now())
+			state := s.readState()
+			if state.State != "done" || state.Action != "component_rollback" {
+				t.Fatalf("rollback state = %+v", state)
+			}
+			calls, envs := runner.snapshot(), runner.envSnapshot()
+			if len(calls) != 2 || !strings.Contains(strings.Join(calls[0], " "), "image tag sha256:optimizer-old "+canonicalOptimizerImage+":ftw-rollback-") {
+				t.Fatalf("rollback calls = %v", calls)
+			}
+			if len(envs) != 2 || len(envs[1]) != 1 || !strings.HasPrefix(envs[1][0], "FTW_OPTIMIZER_IMAGE_TAG=ftw-rollback-") {
+				t.Fatalf("rollback env = %v", envs)
+			}
+		})
+	}
+}
+
 func TestPrepareUpdateImagePin_WinsOverHardcodedUserOverride(t *testing.T) {
 	s, _ := newTestServer(t)
 	userOverride := filepath.Join(filepath.Dir(s.composeFile), "docker-compose.override.yml")

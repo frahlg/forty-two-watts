@@ -676,6 +676,16 @@ func (s *server) runComponentRollback(component string, startedAt time.Time) {
 		s.writeState(State{State: "failed", Action: "component_rollback", Component: component, StartedAt: now, UpdatedAt: time.Now(), Message: err.Error(), PreviousImageID: previous})
 		return
 	}
+	cleanup, err := s.prepareComponentImagePin(spec)
+	if err != nil {
+		s.writeState(State{State: "failed", Action: "component_rollback", Component: component, StartedAt: now, UpdatedAt: time.Now(), Message: "compose preflight failed: " + err.Error(), PreviousImageID: previous})
+		return
+	}
+	defer cleanup()
+	if err := s.validateComponentImagePin(spec); err != nil {
+		s.writeState(State{State: "failed", Action: "component_rollback", Component: component, StartedAt: now, UpdatedAt: time.Now(), Message: "compose preflight failed: " + err.Error(), PreviousImageID: previous})
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	current, currentErr := s.imageID(ctx, spec.service)
 	cancel()
@@ -731,9 +741,9 @@ func (s *server) restorePreviousComponentImageWithTag(imageID, previousTag strin
 	if !ok {
 		return fmt.Errorf("service %q has no image", spec.service)
 	}
-	repository, err := composeImageRepository(image)
-	if err != nil {
-		return err
+	repository, ok := composeImageRepositoryForTag(image, spec.tagVariable)
+	if !ok {
+		return fmt.Errorf("service %q image %q does not reference %s", spec.service, image, spec.tagVariable)
 	}
 	rollbackTag := previousTag
 	if rollbackTag == "" {
@@ -762,8 +772,8 @@ func (s *server) restorePreviousComponentImageWithTag(imageID, previousTag strin
 }
 
 // prepareUpdateImagePin makes old Compose layouts safe for immutable updates.
-// Older and developer installations often hard-code an image tag, so merely
-// exporting FTW_IMAGE_TAG would leave the running service on the old digest.
+// Older and developer installations may hard-code an image tag or omit the
+// container-side FTW_IMAGE_TAG mapping needed to report the selected release.
 // The project directory is deliberately mounted read-only in the updater;
 // instead of rewriting user configuration, add a generated override last in
 // the Compose file chain for this update only. Compose keeps the original
@@ -784,24 +794,25 @@ func (s *server) prepareComponentImagePin(spec componentSpec) (func(), error) {
 	if !ok {
 		return func() {}, fmt.Errorf("service %q is missing an image entry in compose files", spec.service)
 	}
-	if strings.Contains(image, spec.tagVariable) {
-		return func() {}, nil
-	}
+	_, imageUsesTag := composeImageRepositoryForTag(image, spec.tagVariable)
 
 	type imageService struct {
-		Image       string            `yaml:"image"`
+		Image       string            `yaml:"image,omitempty"`
 		Environment map[string]string `yaml:"environment"`
+	}
+	override := imageService{
+		Environment: map[string]string{
+			spec.tagEnv: "${" + spec.tagVariable + ":-latest}",
+		},
+	}
+	if !imageUsesTag {
+		override.Image = spec.image + ":${" + spec.tagVariable + ":-latest}"
 	}
 	doc := struct {
 		Services map[string]imageService `yaml:"services"`
 	}{
 		Services: map[string]imageService{
-			spec.service: {
-				Image: spec.image + ":${" + spec.tagVariable + ":-latest}",
-				Environment: map[string]string{
-					spec.tagEnv: "${" + spec.tagVariable + ":-latest}",
-				},
-			},
+			spec.service: override,
 		},
 	}
 	data, err := yaml.Marshal(doc)
@@ -835,7 +846,7 @@ func (s *server) prepareComponentImagePin(spec componentSpec) (func(), error) {
 		return func() {}, fmt.Errorf("close compatibility override: %w", err)
 	}
 	s.updateOverrideFile = path
-	slog.Warn("using transient canonical image override for legacy compose", "service", spec.service, "previous_image", image)
+	slog.Warn("using transient release image override for legacy compose", "service", spec.service, "previous_image", image)
 
 	cleanup := func() {
 		s.updateOverrideFile = ""
@@ -846,11 +857,58 @@ func (s *server) prepareComponentImagePin(spec componentSpec) (func(), error) {
 	return cleanup, nil
 }
 
-func composeImageRepository(image string) (string, error) {
-	if i := strings.Index(image, ":${"); i > 0 {
-		return image[:i], nil
+func composeImageRepositoryForTag(image, variable string) (string, bool) {
+	marker := ":${" + variable
+	i := strings.LastIndex(image, marker)
+	if i <= 0 {
+		return "", false
 	}
-	return "", fmt.Errorf("image %q does not use a supported repository:${*_IMAGE_TAG} form", image)
+	repository := image[:i]
+	if !staticImageRepository(repository) {
+		return "", false
+	}
+	suffix := image[i+len(marker):]
+	if suffix == "}" || (strings.HasPrefix(suffix, ":-") && strings.IndexByte(suffix, '}') == len(suffix)-1) {
+		return repository, true
+	}
+	return "", false
+}
+
+func staticImageRepository(repository string) bool {
+	parts := strings.Split(repository, "/")
+	if len(parts) == 0 {
+		return false
+	}
+	for i, part := range parts {
+		if part == "" {
+			return false
+		}
+		if colon := strings.IndexByte(part, ':'); colon >= 0 {
+			if i != 0 || len(parts) == 1 || colon == 0 || colon == len(part)-1 || strings.IndexByte(part[colon+1:], ':') >= 0 {
+				return false
+			}
+			for _, c := range part[colon+1:] {
+				if c < '0' || c > '9' {
+					return false
+				}
+			}
+			part = part[:colon]
+		}
+		if !((part[0] >= 'a' && part[0] <= 'z') || (part[0] >= '0' && part[0] <= '9')) {
+			return false
+		}
+		last := part[len(part)-1]
+		if !((last >= 'a' && last <= 'z') || (last >= '0' && last <= '9')) {
+			return false
+		}
+		for _, c := range part {
+			if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-' {
+				continue
+			}
+			return false
+		}
+	}
+	return true
 }
 
 // validateComposeImagePin catches old host-side compose files that hard-code
@@ -873,7 +931,7 @@ func (s *server) validateComponentImagePin(spec componentSpec) error {
 	if !ok {
 		return fmt.Errorf("service %q is missing an image entry in compose files", spec.service)
 	}
-	if !strings.Contains(image, spec.tagVariable) {
+	if _, ok := composeImageRepositoryForTag(image, spec.tagVariable); !ok {
 		return fmt.Errorf("service %q image %q does not reference %s", spec.service, image, spec.tagVariable)
 	}
 	return nil

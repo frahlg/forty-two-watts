@@ -235,8 +235,10 @@ describe("release metadata", () => {
     assert.match(releaseWorkflow, /\.publishedAt/);
     assert.match(
       releaseWorkflow,
-      /python3 - "\$\{metadata\}" "\$\{GITHUB_SHA\}" "\$\{BETA_TAG\}"/,
+      /python3 - "\$\{metadata\}" "\$\{GITHUB_SHA\}" "\$\{VERSION\}"/,
     );
+    assert.match(releaseWorkflow, /current_digest.+expected_digest/s);
+    assert.match(releaseWorkflow, /image_ref.+expected_digest/s);
     assert.match(releaseWorkflow, /required_platforms = \("linux\/amd64", "linux\/arm64"\)/);
     assert.match(releaseWorkflow, /org\.opencontainers\.image\.revision/);
     assert.match(releaseWorkflow, /org\.opencontainers\.image\.version/);
