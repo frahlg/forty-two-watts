@@ -25,7 +25,7 @@ jobs:
       state_schema: ${{ steps.version.outputs.state_schema }}
     steps:
       - name: Checkout selected commit
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -84,7 +84,7 @@ jobs:
             image_suffix: "-updater"
     steps:
       - name: Checkout beta tag
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
           ref: ${{ needs.tag.outputs.version }}
 
