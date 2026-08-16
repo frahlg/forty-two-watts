@@ -115,6 +115,9 @@ type PlanTargetFunc func(now time.Time) (string, float64, bool)
 // control package import-cycle free. Populated by main.go's injected
 // SlotDirectiveFunc adapter.
 type SlotDirective struct {
+	// DecisionID identifies the accepted plan that produced this directive.
+	// It is report metadata only; dispatch math never reads it.
+	DecisionID      string
 	SlotStart       time.Time
 	SlotEnd         time.Time
 	BatteryEnergyWh float64 // site-signed: + = charge, − = discharge
@@ -484,6 +487,9 @@ type State struct {
 	currentDirective SlotDirective
 	slotDelivered    float64   // Wh delivered to batteries since slot start
 	lastTickTs       time.Time // for ∫ battery_w dt
+	// controlSlotDecisionID is the accepted plan used to choose the last
+	// battery control tick's slot. It is cleared when a tick uses no slot.
+	controlSlotDecisionID string
 
 	// slotActualWh + slotActualLastTs + slotActualSlotStart are the
 	// path-agnostic per-slot delivery accumulator. Updated on EVERY
@@ -680,6 +686,9 @@ func (s *State) GetBatteryManualHold(now time.Time) (BatteryManualHold, bool) {
 // distinguish from "the plan asked for nothing".
 type SlotEnergySnapshot struct {
 	HasSlot bool
+	// DecisionID is the accepted plan used to choose the last battery
+	// control tick's slot. Empty means that tick used no slot identity.
+	DecisionID string
 	// PlannedWh is the plan's BatteryEnergyWh for the slot in flight.
 	// Site-signed: positive charges.
 	PlannedWh float64
@@ -697,6 +706,7 @@ type SlotEnergySnapshot struct {
 // hold the outer ctrlMu.
 func (s *State) SlotEnergy() SlotEnergySnapshot {
 	out := SlotEnergySnapshot{
+		DecisionID:   s.controlSlotDecisionID,
 		PlannedWh:    s.slotActualPlannedWh,
 		ActualWh:     s.slotActualWh,
 		EnergyPathWh: s.slotDelivered,
@@ -920,6 +930,7 @@ func preparePlannerSelf(state *State, now time.Time) plannerSelfDecision {
 		state.PlanStale = true
 		return plannerSelfDecision{noChargeOnStalePlan: true}
 	}
+	state.controlSlotDecisionID = dir.DecisionID
 
 	state.PlanStale = false
 	return plannerSelfDecision{
@@ -1184,6 +1195,9 @@ func ComputeDispatch(
 	driverCapacities map[string]float64,
 	fuseMaxW float64,
 ) []DispatchTarget {
+	// Each tick reports only the plan identity it actually consulted for its
+	// main battery decision. Legacy grid-target ticks have no such identity.
+	state.controlSlotDecisionID = ""
 	// ---- Per-slot Wh delivery observability (path-agnostic) ----
 	// Runs on EVERY tick before any mode/short-circuit decision so the
 	// idle / charge / holdoff / reactive-fallback paths all contribute
@@ -1318,6 +1332,7 @@ func ComputeDispatch(
 		// planner_cheap / planner_arbitrage.
 		if state.UseEnergyDispatch && state.SlotDirective != nil {
 			if dir, ok := state.SlotDirective(state.now()); ok {
+				state.controlSlotDecisionID = dir.DecisionID
 				currentDirective = dir
 				// planner_arbitrage and planner_passive_arbitrage idle slots: skip the energy path and
 				// fall through to reactive PI (same as planner_self does always).

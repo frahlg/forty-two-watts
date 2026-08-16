@@ -83,6 +83,54 @@ func TestSupportReportWithNoDependencies(t *testing.T) {
 	}
 }
 
+func TestPlanControlDecisionRendersMatchMismatchAndUnavailable(t *testing.T) {
+	planID := "00000000-0000-4000-8000-000000000201"
+	oldID := "00000000-0000-4000-8000-000000000200"
+	plan := &mpc.Plan{DecisionID: planID}
+
+	for _, tc := range []struct {
+		name string
+		slot control.SlotEnergySnapshot
+		want string
+	}{
+		{name: "match", slot: control.SlotEnergySnapshot{DecisionID: planID}, want: "**match**"},
+		{name: "same-slot replan not used yet", slot: control.SlotEnergySnapshot{DecisionID: oldID}, want: "**mismatch**"},
+		{name: "no control tick identity", slot: control.SlotEnergySnapshot{}, want: "**unavailable**"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var b strings.Builder
+			writePlanControlDecision(&b, plan, tc.slot)
+			out := b.String()
+			if !strings.Contains(out, "`"+planID+"`") || !strings.Contains(out, tc.want) {
+				t.Fatalf("plan identity table = %q", out)
+			}
+			if tc.slot.DecisionID != "" && !strings.Contains(out, "`"+tc.slot.DecisionID+"`") {
+				t.Fatalf("control ID missing from table: %q", out)
+			}
+		})
+	}
+}
+
+func TestPlanControlDecisionMismatchBecomesFinding(t *testing.T) {
+	srv, ctrl, _ := reportTestServer(t)
+	ctrl.Mode = control.ModePlannerPassiveArbitrage
+	plan := &mpc.Plan{DecisionID: "00000000-0000-4000-8000-000000000202"}
+	slot := control.SlotEnergySnapshot{DecisionID: "00000000-0000-4000-8000-000000000201"}
+	findings := srv.collectFindings(*ctrl,
+		liveSnapshot{HaveGrid: true, LoadW: 1000, PredictedLd: 1000},
+		plan, nil, nil, nil, slot, time.Now())
+
+	for _, got := range findings {
+		if strings.Contains(got.Title, "different plan IDs") {
+			if got.Severity != sevProblem || !strings.Contains(got.Detail, plan.DecisionID) || !strings.Contains(got.Detail, slot.DecisionID) {
+				t.Fatalf("mismatch finding = %+v", got)
+			}
+			return
+		}
+	}
+	t.Fatalf("plan/control mismatch produced no finding: %+v", findings)
+}
+
 // The load-forecast check is the reason this report exists: a plan built
 // against 383 W while the house draws 7.9 kW must be called out in
 // Findings, not left for someone to spot in a table.

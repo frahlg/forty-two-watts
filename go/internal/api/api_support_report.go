@@ -99,6 +99,37 @@ type finding struct {
 	Detail   string
 }
 
+type planControlDecision struct {
+	LatestPlanID string
+	ControlID    string
+	Status       string
+	Reason       string
+}
+
+func comparePlanControlDecision(plan *mpc.Plan, slot control.SlotEnergySnapshot) planControlDecision {
+	out := planControlDecision{Status: "unavailable"}
+	if plan == nil {
+		out.Reason = "no accepted plan is available"
+		return out
+	}
+	out.LatestPlanID = plan.DecisionID
+	if out.LatestPlanID == "" {
+		out.Reason = "the latest accepted plan has no decision ID"
+		return out
+	}
+	out.ControlID = slot.DecisionID
+	if out.ControlID == "" {
+		out.Reason = "the last battery control tick did not use a plan slot ID"
+		return out
+	}
+	if out.LatestPlanID != out.ControlID {
+		out.Status = "mismatch"
+		return out
+	}
+	out.Status = "match"
+	return out
+}
+
 func (s *Server) handleSupportReport(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	body := s.buildSupportReport(r.Context(), now)
@@ -200,6 +231,7 @@ func (s *Server) buildSupportReport(ctx context.Context, now time.Time) string {
 	writeReportHeader(&b, s.deps.Version, now)
 	writeFindings(&b, findings)
 	writeRightNow(&b, ctrl, snap, activeSlot, targets, slotEnergy, now)
+	writePlanControlDecision(&b, plan, slotEnergy)
 	writePlanSection(&b, plan, lastReplanAt, lastReplanReason, now)
 	writeForecastSection(&b, s, snap, activeSlot, now)
 	writeDeviceSection(&b, health, now)
@@ -207,6 +239,28 @@ func (s *Server) buildSupportReport(ctx context.Context, now time.Time) string {
 	s.writeLogSection(&b)
 	writeReportFooter(&b)
 	return b.String()
+}
+
+func writePlanControlDecision(b *strings.Builder, plan *mpc.Plan, slot control.SlotEnergySnapshot) {
+	decision := comparePlanControlDecision(plan, slot)
+	latest := "unavailable"
+	if decision.LatestPlanID != "" {
+		latest = "`" + decision.LatestPlanID + "`"
+	}
+	controlID := "unavailable"
+	if decision.ControlID != "" {
+		controlID = "`" + decision.ControlID + "`"
+	}
+
+	b.WriteString("Plan identity on the last battery control tick:\n\n")
+	b.WriteString("| Check | Value |\n|---|---|\n")
+	fmt.Fprintf(b, "| Latest accepted plan ID | %s |\n", latest)
+	fmt.Fprintf(b, "| Control tick slot ID | %s |\n", controlID)
+	fmt.Fprintf(b, "| Same plan | **%s**", decision.Status)
+	if decision.Reason != "" {
+		fmt.Fprintf(b, " — %s", decision.Reason)
+	}
+	b.WriteString(" |\n\n")
 }
 
 func writeReportHeader(b *strings.Builder, version string, now time.Time) {
@@ -639,6 +693,13 @@ func (s *Server) collectFindings(
 	now time.Time,
 ) []finding {
 	var out []finding
+	decision := comparePlanControlDecision(plan, slotEnergy)
+	if decision.Status == "mismatch" {
+		out = append(out, finding{sevProblem, "The shown plan and control tick use different plan IDs",
+			fmt.Sprintf("The latest accepted plan is `%s`, but the last battery control tick used `%s`. "+
+				"A new plan may have arrived after that tick; if the IDs still differ after the next tick, control is using an older plan.",
+				decision.LatestPlanID, decision.ControlID)})
+	}
 
 	if !snap.HaveGrid {
 		out = append(out, finding{sevProblem, "No site meter reading",

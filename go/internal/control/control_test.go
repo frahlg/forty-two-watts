@@ -5619,6 +5619,43 @@ func makeSlotMetricsState(siteMeter string, dirFn SlotDirectiveFunc) *State {
 	return st
 }
 
+func TestControlSlotIdentityTracksSameSlotReplan(t *testing.T) {
+	now := time.Date(2026, 8, 16, 12, 5, 0, 0, time.UTC)
+	current := SlotDirective{
+		DecisionID:      "00000000-0000-4000-8000-000000000301",
+		SlotStart:       now.Add(-5 * time.Minute),
+		SlotEnd:         now.Add(10 * time.Minute),
+		BatteryEnergyWh: 250,
+		Strategy:        "arbitrage",
+	}
+	available := true
+	store := seedStore(0, []struct {
+		name          string
+		currentW, soc float64
+	}{{"ferroamp", 0, 0.5}})
+	st := makeSlotMetricsState("ferroamp", func(time.Time) (SlotDirective, bool) {
+		return current, available
+	})
+	st.clock = func() time.Time { return now }
+
+	_ = ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if got := st.SlotEnergy().DecisionID; got != current.DecisionID {
+		t.Fatalf("first control tick decision ID = %q, want %q", got, current.DecisionID)
+	}
+
+	current.DecisionID = "00000000-0000-4000-8000-000000000302"
+	_ = ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if got := st.SlotEnergy().DecisionID; got != current.DecisionID {
+		t.Fatalf("same-slot replan decision ID = %q, want %q", got, current.DecisionID)
+	}
+
+	available = false
+	_ = ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if got := st.SlotEnergy().DecisionID; got != "" {
+		t.Fatalf("tick without a plan slot retained decision ID %q", got)
+	}
+}
+
 //  1. The accumulator integrates current battery total × dt across
 //     multiple ticks within the same slot.
 func TestSlotMetricsAccumulatesActualWhAcrossTicks(t *testing.T) {

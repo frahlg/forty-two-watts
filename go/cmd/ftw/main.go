@@ -134,6 +134,24 @@ func decimalDigits(s string) bool {
 	return s != ""
 }
 
+// controlSlotDirectiveFromMPC keeps the import-cycle bridge explicit. The
+// decision ID is report metadata; control does not use it for dispatch math.
+func controlSlotDirectiveFromMPC(d mpc.SlotDirective) control.SlotDirective {
+	return control.SlotDirective{
+		DecisionID:             d.DecisionID,
+		SlotStart:              d.SlotStart,
+		SlotEnd:                d.SlotEnd,
+		BatteryEnergyWh:        d.BatteryEnergyWh,
+		SoCTargetPct:           d.SoCTargetPct,
+		Strategy:               string(d.Strategy),
+		PVLimitW:               d.PVLimitW,
+		PlannedGridW:           d.GridW,
+		HasPlannedGridW:        true,
+		LivePVSurplusSoCCapPct: d.LivePVSurplusSoCCapPct,
+		LoadpointEnergyWh:      d.LoadpointEnergyWh,
+	}
+}
+
 // siteIdentityLoad is the machine's own identity, not a user's.
 //
 // Bound is set when nova.key has been adopted into a hardware-protected
@@ -1509,18 +1527,7 @@ func main() {
 			if !ok {
 				return control.SlotDirective{}, false
 			}
-			return control.SlotDirective{
-				SlotStart:              d.SlotStart,
-				SlotEnd:                d.SlotEnd,
-				BatteryEnergyWh:        d.BatteryEnergyWh,
-				SoCTargetPct:           d.SoCTargetPct,
-				Strategy:               string(d.Strategy),
-				PVLimitW:               d.PVLimitW,
-				PlannedGridW:           d.GridW,
-				HasPlannedGridW:        true,
-				LivePVSurplusSoCCapPct: d.LivePVSurplusSoCCapPct,
-				LoadpointEnergyWh:      d.LoadpointEnergyWh,
-			}, true
+			return controlSlotDirectiveFromMPC(d), true
 		}
 		// Default to the energy-allocation path. The plan is a
 		// scheduler (decides WHEN each strategy applies); the EMS is
