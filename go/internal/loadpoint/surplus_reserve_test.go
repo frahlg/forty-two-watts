@@ -74,6 +74,19 @@ func TestSurplusReserveW(t *testing.T) {
 	}
 }
 
+func TestSurplusChargingWCountsOnlyProtectedLoadpoints(t *testing.T) {
+	states := []State{
+		{ID: "surplus", SurplusOnly: true, PluggedIn: true, CurrentPowerW: 3000},
+		{ID: "regular", SurplusOnly: false, PluggedIn: true, CurrentPowerW: 4000},
+		{ID: "unplugged", SurplusOnly: true, PluggedIn: false, CurrentPowerW: 2500},
+		{ID: "manual", SurplusOnly: true, PluggedIn: true, ManualActive: true, CurrentPowerW: 2000},
+		{ID: "v2x", SurplusOnly: true, PluggedIn: true, CurrentPowerW: -1000},
+	}
+	if got := SurplusChargingW(states); got != 3000 {
+		t.Errorf("SurplusChargingW = %.0f, want 3000 from the protected EV only", got)
+	}
+}
+
 // Concrete regression: user's reported bug. EV at 2.5 kW on an Easee
 // with 11 kW max, plan says charge battery, 3 kW of PV exporting.
 // Pre-fix the reserve was 11 kW so ceiling = pvSurplus − (reserve −

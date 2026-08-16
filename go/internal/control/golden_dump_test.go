@@ -109,6 +109,7 @@ type goldenStateInputs struct {
 	BatteryBoostEVChargingW   float64            `json:"battery_boost_ev_charging_w"`
 	BatteryBoostReserveSoC    float64            `json:"battery_boost_reserve_soc"`
 	EVSurplusOnlyReserveW     float64            `json:"ev_surplus_only_reserve_w"`
+	EVSurplusOnlyChargingW    float64            `json:"ev_surplus_only_charging_w,omitempty"`
 	PeakLimitW                float64            `json:"peak_limit_w"`
 	PeakImportCeilingW        float64            `json:"peak_import_ceiling_w"`
 	MaxExportW                float64            `json:"max_export_w"`
@@ -283,6 +284,7 @@ func runGoldenScenarioAt(sc goldenScenario, scenarioNow time.Time, slotDirective
 	st.BatteryBoostEVChargingW = si.BatteryBoostEVChargingW
 	st.BatteryBoostReserveSoC = si.BatteryBoostReserveSoC
 	st.EVSurplusOnlyReserveW = si.EVSurplusOnlyReserveW
+	st.EVSurplusOnlyChargingW = si.EVSurplusOnlyChargingW
 	st.PeakLimitW = si.PeakLimitW
 	st.PeakImportCeilingW = si.PeakImportCeilingW
 	st.MaxExportW = si.MaxExportW
@@ -2040,6 +2042,7 @@ func seededEVBoost() []goldenScenario {
 		}
 		if rng.Float64() < 0.30 {
 			in.State.EVSurplusOnlyReserveW = roundW(1500 + rng.Float64()*2500)
+			in.State.EVSurplusOnlyChargingW = evW
 			in.GridW = -roundW(1000 + rng.Float64()*5000)
 			in.PV = []goldenPV{{Driver: "pv-0", PowerW: -roundW(3000 + rng.Float64()*5000)}}
 		}

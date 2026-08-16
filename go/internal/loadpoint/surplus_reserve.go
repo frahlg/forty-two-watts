@@ -48,9 +48,6 @@ const EVRampHeadroomW = 2000
 func SurplusReserveW(states []State, wakeKickActiveIDs map[string]bool) float64 {
 	var sum float64
 	for _, st := range states {
-		if !st.SurplusOnly || !st.PluggedIn {
-			continue
-		}
 		// Manual / schedule override: when the operator is force-charging
 		// (manual hold, or an active schedule forcing the setpoint), the EV
 		// is NOT surplus-gated — it charges at the forced power and the home
@@ -62,7 +59,7 @@ func SurplusReserveW(states []State, wakeKickActiveIDs map[string]bool) float64 
 		// the EV (grid→0) and flaps the battery support 0↔full (observed on
 		// Stefan's CTEK 2026-06-11 during a manual charge). surplus_only stays
 		// on so automatic surplus charging resumes when the force-charge ends.
-		if st.ManualActive {
+		if !surplusOnlyProtected(st) {
 			continue
 		}
 		// Tie the reserve to the EV's ACTUAL draw, not just "plugged in
@@ -156,6 +153,25 @@ func SurplusReserveW(states []State, wakeKickActiveIDs map[string]bool) float64 
 		sum += ceiling
 	}
 	return sum
+}
+
+// SurplusChargingW returns the actual positive charging power that belongs to
+// loadpoints protected by SurplusReserveW. Dispatch keeps this separate from
+// aggregate EV power so a regular loadpoint can still be covered by the home
+// battery when another loadpoint is surplus-only.
+func SurplusChargingW(states []State) float64 {
+	var sum float64
+	for _, st := range states {
+		if !surplusOnlyProtected(st) || st.CurrentPowerW <= 0 {
+			continue
+		}
+		sum += st.CurrentPowerW
+	}
+	return sum
+}
+
+func surplusOnlyProtected(st State) bool {
+	return st.SurplusOnly && st.PluggedIn && !st.ManualActive
 }
 
 // SurplusPotentialW is the parallel reserve sized for the PV-curtail

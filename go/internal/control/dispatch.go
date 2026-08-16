@@ -354,10 +354,11 @@ type State struct {
 	// rating — the recurring Ferroamp EnergyHub 0x8030 fault after ~8 kW
 	// sustained midday export. Sourced from site.max_export_w.
 	MaxExportW float64
-	// EVChargingW is the effective aggregate vehicle charging load the
-	// control loop excludes when BatteryCoversEV=false. It is recomputed
-	// from ManualEVChargingW plus live EV/V2X charger telemetry each dispatch
-	// tick, so manual uninstrumented EV load can coexist with live V2X.
+	// EVChargingW is the effective aggregate vehicle charging load. Self
+	// (manual) keeps it in the raw meter signal; other modes exclude the
+	// uncovered share when BatteryCoversEV=false. It is recomputed from
+	// ManualEVChargingW plus live EV/V2X charger telemetry each dispatch tick,
+	// so manual uninstrumented EV load can coexist with live V2X.
 	EVChargingW       float64
 	ManualEVChargingW float64
 	liveEVChargingW   float64
@@ -368,13 +369,19 @@ type State struct {
 	//     it doesn't consume PV that the EV could be claiming
 	//   - the legacy PI / self-consumption path biases the grid setpoint
 	//     so it leaves `reserveRemaining` of export untouched
-	// Where reserveRemaining = max(0, EVSurplusOnlyReserveW - EVChargingW)
-	// — once the EV has ramped up to the reserve, no further headroom is
-	// withheld from the battery. Populated each tick by main.go from
-	// loadpoint.Manager.States(): sum of MaxChargeW across LPs that are
-	// SurplusOnly && PluggedIn. Set to 0 when no such LP is connected,
-	// in which case all behaviour reverts to the pre-existing path.
+	// Where reserveRemaining = max(0, EVSurplusOnlyReserveW -
+	// EVSurplusOnlyChargingW) — once the protected EVs have ramped up to
+	// the reserve, no further headroom is withheld from the battery.
+	// Populated each tick by main.go from loadpoint.Manager.States(). Set
+	// to 0 when no such LP is connected, in which case all behaviour
+	// reverts to the pre-existing path.
 	EVSurplusOnlyReserveW float64
+	// EVSurplusOnlyChargingW is the actual positive charging draw from the
+	// loadpoints counted by EVSurplusOnlyReserveW. It stays separate from
+	// aggregate EVChargingW so a regular EV can still be covered by the home
+	// battery when another loadpoint is surplus-only. Populated by main.go on
+	// every dispatch tick.
+	EVSurplusOnlyChargingW float64
 
 	// EVCurtailHeadroomW is the parallel quantity sized for the
 	// PV-curtail decision. EVSurplusOnlyReserveW above is intentionally
@@ -2107,13 +2114,12 @@ func ComputeDispatch(
 					totalCorrection = ceiling - currentTotal
 				}
 			} else if targetTotal2 < 0 && state.Mode == ModeSelfConsumption {
-				// Self sees the raw meter, but surplus-only must not turn EV
-				// import into home-battery discharge. Allow only the discharge
-				// needed by the house-side signal. If PV already covers the
-				// house, stop at idle rather than charging while the raw meter
-				// imports for the EV.
-				houseGridW := gridW - state.EVChargingW
-				maxDischargeTargetW := currentTotal - houseGridW
+				// Self sees the raw meter, but surplus-only must not turn its EV
+				// import into home-battery discharge. Exclude only the protected
+				// EV draw: house load and regular EVs remain coverable. If PV
+				// already covers those loads, stop at idle.
+				coverableGridW := gridW - state.EVSurplusOnlyChargingW
+				maxDischargeTargetW := currentTotal - coverableGridW
 				if maxDischargeTargetW > 0 {
 					maxDischargeTargetW = 0
 				}
@@ -3217,7 +3223,7 @@ func newSurplusAccounting(rawGridW, effectiveGridW, currentBatteryW float64, sta
 		effectiveGridW:      effectiveGridW,
 		currentBatteryW:     currentBatteryW,
 		evReserveRemainingW: evReserveRemainingW(state),
-		evActive:            state != nil && state.EVChargingW > evActiveThresholdW,
+		evActive:            state != nil && state.EVSurplusOnlyChargingW > evActiveThresholdW,
 	}
 }
 
@@ -3225,7 +3231,7 @@ func evReserveRemainingW(state *State) float64 {
 	if state == nil || state.EVSurplusOnlyReserveW <= 0 {
 		return 0
 	}
-	remaining := state.EVSurplusOnlyReserveW - state.EVChargingW
+	remaining := state.EVSurplusOnlyReserveW - state.EVSurplusOnlyChargingW
 	if remaining < 0 {
 		return 0
 	}

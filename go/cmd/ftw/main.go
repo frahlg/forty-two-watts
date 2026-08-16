@@ -2721,6 +2721,10 @@ func main() {
 				}
 			}
 			evReserveW := loadpoint.SurplusReserveW(lpStatesSnapshot, wakeKickActiveIDs)
+			// Keep the protected EVs' actual draw separate from aggregate EV
+			// power. A regular loadpoint must stay coverable when another LP is
+			// surplus-only.
+			evSurplusOnlyChargingW := loadpoint.SurplusChargingW(lpStatesSnapshot)
 			// Parallel curtail-side reserve — more permissive than the
 			// dispatch reserve above; counts plugged-but-stopped EVs
 			// with SoC headroom so PV isn't cut when a vehicle could
@@ -2730,6 +2734,7 @@ func main() {
 
 			ctrlMu.Lock()
 			ctrl.EVSurplusOnlyReserveW = evReserveW
+			ctrl.EVSurplusOnlyChargingW = evSurplusOnlyChargingW
 			ctrl.EVCurtailHeadroomW = evCurtailHeadroomW
 			ctrl.BatteryBoostEVChargingW = boostEVW
 			ctrl.BatteryBoostReserveSoC = boostReserveSoC

@@ -1132,6 +1132,7 @@ func TestSelfConsumptionSurplusOnlyEVStillBlocksBatteryDischarge(t *testing.T) {
 	st.Mode = ModeSelfConsumption
 	st.EVChargingW = 9000
 	st.EVSurplusOnlyReserveW = 11000
+	st.EVSurplusOnlyChargingW = 9000
 	st.BatteryCoversEV = true
 	st.SlewRateW = 100000
 	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
@@ -1156,6 +1157,7 @@ func TestSelfConsumptionSurplusOnlyEVStillCoversHouseLoad(t *testing.T) {
 	st.Mode = ModeSelfConsumption
 	st.EVChargingW = 3000
 	st.EVSurplusOnlyReserveW = 5000
+	st.EVSurplusOnlyChargingW = 3000
 	st.BatteryCoversEV = true
 	st.SlewRateW = 100000
 	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
@@ -1164,6 +1166,40 @@ func TestSelfConsumptionSurplusOnlyEVStillCoversHouseLoad(t *testing.T) {
 	}
 	if math.Abs(targets[0].TargetW-(-1000)) > 1 {
 		t.Errorf("surplus-only house coverage target=%f W, want -1000 W", targets[0].TargetW)
+	}
+}
+
+func TestSelfConsumptionSurplusOnlyEVDoesNotBlockCoveringRegularEV(t *testing.T) {
+	// Raw import is 8 kW: 3 kW surplus-only EV, 4 kW regular EV and
+	// 1 kW house. Protect only the surplus-only EV; the battery may cover
+	// the regular EV and house load.
+	store := seedStore(8000, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	st := NewState(0, 50, "ferroamp")
+	st.Mode = ModeSelfConsumption
+	st.EVChargingW = 7000
+	st.EVSurplusOnlyReserveW = 5000
+	st.EVSurplusOnlyChargingW = 3000
+	st.BatteryCoversEV = true
+	st.SlewRateW = 100000
+	st.MinDispatchIntervalS = 0
+	var lastTarget float64
+	for i := 0; i < 12; i++ {
+		targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+		if len(targets) != 1 {
+			t.Fatalf("cycle %d: expected 1 target, got %d", i, len(targets))
+		}
+		lastTarget = targets[0].TargetW
+		store.Update("ferroamp", telemetry.DerBattery, lastTarget, ptrF64(0.5), nil)
+		store.Update("ferroamp", telemetry.DerMeter, 8000+lastTarget, nil, nil)
+		store.DriverHealthMut("ferroamp").RecordSuccess()
+	}
+	if math.Abs(lastTarget-(-5000)) > 50 {
+		t.Errorf("mixed-EV target converged to %f W, want -5000 W for house plus regular EV", lastTarget)
 	}
 }
 
@@ -1190,6 +1226,7 @@ func TestSurplusOnlyEVDoesNotAutoEnableBatteryCoversEV(t *testing.T) {
 	st.UseEnergyDispatch = true
 	st.EVChargingW = 9000
 	st.EVSurplusOnlyReserveW = 11000
+	st.EVSurplusOnlyChargingW = 9000
 	st.BatteryCoversEV = false
 	st.SlewRateW = 100000
 	st.MinDispatchIntervalS = 0
@@ -3916,6 +3953,7 @@ func TestPlannerSelfIdleGateLeavesSurplusOnlyEVReserve(t *testing.T) {
 	st.UseEnergyDispatch = true
 	st.EVChargingW = 1000
 	st.EVSurplusOnlyReserveW = 3000
+	st.EVSurplusOnlyChargingW = 1000
 	st.SlewRateW = 10000
 	st.MinDispatchIntervalS = 0
 	st.SlotDirective = func(time.Time) (SlotDirective, bool) { return dir, true }
@@ -5363,6 +5401,7 @@ func TestEnergyDispatchAbsorbsSurplusBeyondEVReserveActualDraw(t *testing.T) {
 	st := newStateWithEnergyDispatch(dir, "ferroamp")
 	st.EVChargingW = 2500
 	st.EVSurplusOnlyReserveW = 2500 + 2000 // = SurplusReserveW for one LP at 2.5 kW
+	st.EVSurplusOnlyChargingW = 2500
 
 	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
 	if len(targets) != 1 {
@@ -5432,6 +5471,7 @@ func TestEnergyDispatchPreFixReserveStarvesBattery(t *testing.T) {
 	st := newStateWithEnergyDispatch(dir, "ferroamp")
 	st.EVChargingW = 2500
 	st.EVSurplusOnlyReserveW = 11000 // simulate the old "reserve = MaxChargeW" formula
+	st.EVSurplusOnlyChargingW = 2500
 
 	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
 	got := targets[0].TargetW

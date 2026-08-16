@@ -71,6 +71,7 @@ func TestWorkingStateLeavesTheRevisionAlone(t *testing.T) {
 	before := rev.Observe(s)
 
 	s.EVChargingW = 4200
+	s.EVSurplusOnlyChargingW = 1800
 	s.PlanStale = true
 	s.LastTargets = []DispatchTarget{{Driver: "battery", TargetW: -1000}}
 	s.PrevTargets = map[string]float64{"battery": -1000}
