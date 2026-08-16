@@ -15,6 +15,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 // fakeRunner records the compose commands the server attempted to run so
@@ -527,6 +529,21 @@ services:
 	if image != canonicalMainImage+":${FTW_IMAGE_TAG:-latest}" {
 		t.Fatalf("effective image = %q", image)
 	}
+	overrideData, err := os.ReadFile(s.updateOverrideFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var override struct {
+		Services map[string]struct {
+			Environment map[string]string `yaml:"environment"`
+		} `yaml:"services"`
+	}
+	if err := yaml.Unmarshal(overrideData, &override); err != nil {
+		t.Fatal(err)
+	}
+	if got := override.Services[legacyMainServiceName].Environment[mainTagEnv]; got != "${FTW_IMAGE_TAG:-latest}" {
+		t.Fatalf("compatibility override %s = %q", mainTagEnv, got)
+	}
 	got, err := os.ReadFile(s.composeFile)
 	if err != nil {
 		t.Fatal(err)
@@ -867,6 +884,9 @@ func TestUpdateHealthFailureRestoresPreviousImage(t *testing.T) {
 `)
 	s.mainServiceName = legacyMainServiceName
 	s.imageID = func(context.Context, string) (string, error) { return "sha256:previous", nil }
+	s.imageRef = func(context.Context, string) (string, error) {
+		return "ghcr.io/srcfl/ftw:v1.2.2-beta.4", nil
+	}
 	checks := 0
 	s.healthCheck = func(_ context.Context, service string) error {
 		if service == optimizerServiceName {
@@ -893,11 +913,33 @@ func TestUpdateHealthFailureRestoresPreviousImage(t *testing.T) {
 	if got := strings.Join(calls[2], " "); !strings.Contains(got, "image tag sha256:previous") {
 		t.Fatalf("third call should tag previous image, got %q", got)
 	}
-	if got := strings.Join(calls[2], " "); !strings.Contains(got, canonicalMainImage+":ftw-rollback-") {
-		t.Fatalf("previous legacy image should be retagged into canonical repository, got %q", got)
+	if got := strings.Join(calls[2], " "); !strings.Contains(got, canonicalMainImage+":v1.2.2-beta.4") {
+		t.Fatalf("previous legacy beta should keep its exact tag, got %q", got)
 	}
 	if got := strings.Join(calls[3], " "); !strings.Contains(got, "ftw-compose-update-") || calls[3][len(calls[3])-1] != legacyMainServiceName {
 		t.Fatalf("rollback must reuse transient pin and legacy service identity, got %q", got)
+	}
+	if got := runner.envSnapshot()[3]; len(got) != 1 || got[0] != "FTW_IMAGE_TAG=v1.2.2-beta.4" {
+		t.Fatalf("rollback env = %v", got)
+	}
+}
+
+func TestImageTagFromReferenceAcceptsOnlyImmutableReleaseTags(t *testing.T) {
+	for _, tc := range []struct {
+		ref  string
+		want string
+		ok   bool
+	}{
+		{ref: "ghcr.io/srcfl/ftw:v2.0.0-beta.7", want: "v2.0.0-beta.7", ok: true},
+		{ref: "ghcr.io/srcfl/ftw:v2.0.0", want: "v2.0.0", ok: true},
+		{ref: "ghcr.io/srcfl/ftw:latest"},
+		{ref: "ghcr.io/srcfl/ftw@sha256:deadbeef"},
+		{ref: "ghcr.io/srcfl/ftw"},
+	} {
+		got, ok := imageTagFromReference(tc.ref)
+		if got != tc.want || ok != tc.ok {
+			t.Errorf("imageTagFromReference(%q) = %q, %v; want %q, %v", tc.ref, got, ok, tc.want, tc.ok)
+		}
 	}
 }
 
