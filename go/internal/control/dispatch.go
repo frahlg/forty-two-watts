@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"sort"
 	"time"
 
 	"github.com/srcfl/ftw/go/internal/mpc"
@@ -4293,6 +4294,78 @@ func fleetAtLivePower(
 	return raw, safe, readings
 }
 
+// fuseSafeBaselineForRelief keeps an out-of-range live charge uncontrolled
+// until the fuse actually needs its command-safe cap. A cap is a discrete
+// change: we can only ask a +10 kW battery with a +3 kW limit for +3 kW, not
+// for an unsafe intermediate target. Select the smallest safe set that covers
+// the required relief, and leave all other out-of-range readings alone.
+//
+// The sort makes the selected commands independent of map iteration. For
+// different cap deltas, prefer the smallest cap change that clears the
+// remaining relief; otherwise take the largest available change first.
+func fuseSafeBaselineForRelief(raw, safe []DispatchTarget, requiredRelief float64) []DispatchTarget {
+	rawByDriver := make(map[string]DispatchTarget, len(raw))
+	for _, t := range raw {
+		rawByDriver[t.Driver] = t
+	}
+
+	type candidate struct {
+		target DispatchTarget
+		relief float64
+	}
+	baseline := make([]DispatchTarget, 0, len(safe))
+	candidates := make([]candidate, 0, len(safe))
+	for _, target := range safe {
+		rawTarget, ok := rawByDriver[target.Driver]
+		if !ok {
+			continue
+		}
+		relief := rawTarget.TargetW - target.TargetW
+		if relief <= 0 {
+			baseline = append(baseline, target)
+			continue
+		}
+		candidates = append(candidates, candidate{target: target, relief: relief})
+	}
+
+	sort.Slice(baseline, func(i, j int) bool {
+		return baseline[i].Driver < baseline[j].Driver
+	})
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].relief == candidates[j].relief {
+			return candidates[i].target.Driver < candidates[j].target.Driver
+		}
+		return candidates[i].relief < candidates[j].relief
+	})
+
+	for remaining := requiredRelief; remaining > 0 && len(candidates) > 0; {
+		pick := -1
+		// A single safe cap that covers the remaining relief avoids taking
+		// control of another externally moving battery. The candidates are
+		// sorted by cap delta, so the first one is the least over-correction.
+		for i, c := range candidates {
+			if c.relief >= remaining {
+				pick = i
+				break
+			}
+		}
+		if pick == -1 {
+			// No one cap clears the remainder. Use the largest first to keep
+			// the command set as small as possible, with the sort's driver
+			// order breaking equal deltas deterministically.
+			pick = len(candidates) - 1
+		}
+		baseline = append(baseline, candidates[pick].target)
+		remaining -= candidates[pick].relief
+		candidates = append(candidates[:pick], candidates[pick+1:]...)
+	}
+
+	sort.Slice(baseline, func(i, j int) bool {
+		return baseline[i].Driver < baseline[j].Driver
+	})
+	return baseline
+}
+
 // fuseSnapshotStillCurrent is the final fail-closed gate before an early fuse
 // command leaves control. The calculation may call Store.Get more than once;
 // if any captured meter or battery sample changed in between, retry on the next
@@ -4362,9 +4435,11 @@ func fuseSaverFromLivePower(
 	// site is safe. Preserve the deadband in that case: this early-return path
 	// exists to answer a fuse condition, not to take control of an externally
 	// moved battery merely because its reading sits outside a command cap.
-	if fuseReliefFromSnapshot(rawLive, batteryReadings, meter, state, fuseMaxW, false) <= 0 {
+	requiredRelief := fuseReliefFromSnapshot(rawLive, batteryReadings, meter, state, fuseMaxW, false)
+	if requiredRelief <= 0 {
 		return nil
 	}
+	safeBaseline = fuseSafeBaselineForRelief(rawLive, safeBaseline, requiredRelief)
 	if len(safeBaseline) == 0 {
 		return nil
 	}

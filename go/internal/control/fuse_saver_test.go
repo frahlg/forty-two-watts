@@ -1028,6 +1028,47 @@ func TestDeadbandExitClampsLiveChargeBeforeFuseRelief(t *testing.T) {
 	}
 }
 
+func TestDeadbandExitSelectsOnlyNeededOutOfCapChargeClamp(t *testing.T) {
+	const (
+		fuseMaxW   = 11040.0
+		gridW      = fuseMaxW + 1000
+		liveCharge = 10000.0
+		maxCharge  = 3000.0
+	)
+	store := telemetry.NewStore()
+	store.Update("meter", telemetry.DerMeter, gridW, nil, nil)
+	store.DriverHealthMut("meter").RecordSuccess()
+	setBatteryLiveW(store, "a", liveCharge, 0.6)
+	setBatteryLiveW(store, "b", liveCharge, 0.6)
+	state := NewState(0, 50, "meter")
+	state.DriverLimits = map[string]PowerLimits{
+		"a": {MaxChargeW: maxCharge, MaxDischargeW: 10000},
+		"b": {MaxChargeW: maxCharge, MaxDischargeW: 10000},
+	}
+	state.SetGridTarget(gridW)
+	state.MinDispatchIntervalS = 0
+	caps := map[string]float64{"b": 10000, "a": 10000}
+
+	// Map iteration is deliberately unstable. Repeat the exact two-battery
+	// case to prove that only one command-safe cap is selected each time.
+	for i := 0; i < 100; i++ {
+		out := ComputeDispatch(store, state, caps, fuseMaxW)
+		if len(out) != 1 {
+			t.Fatalf("run %d: got %+v, want one capped battery", i, out)
+		}
+		if out[0].Driver != "a" || math.Abs(out[0].TargetW-maxCharge) > 1 || !out[0].Clamped {
+			t.Fatalf("run %d: got %+v, want deterministic a at safe cap %.0f W", i, out, maxCharge)
+		}
+		if out[0].TargetW > state.DriverLimits[out[0].Driver].MaxChargeW {
+			t.Fatalf("run %d: target %.0f W exceeds max charge %.0f W", i, out[0].TargetW, maxCharge)
+		}
+		postGridW := gridW - liveCharge + out[0].TargetW
+		if postGridW > fuseMaxW+1 || postGridW < -1 {
+			t.Fatalf("run %d: post-dispatch grid %.0f W, want import within [0, %.0f] W", i, postGridW, fuseMaxW)
+		}
+	}
+}
+
 func TestDeadbandExitEmitsCapClampWhenItAloneClearsFuseOverload(t *testing.T) {
 	const (
 		gridW        = 17040.0
