@@ -78,10 +78,10 @@ jobs:
           # which changesets have already been consumed by past
           # Version PRs (it walks .changeset/ vs CHANGELOG.md).
           fetch-depth: 0
-          # Keep the default credential for fetches and stable tag pushes.
-          # The CI_TOKEN only replaces this header for the short
-          # changesets/action step below, after npm ci has completed.
-          persist-credentials: true
+          # Checkout may use github.token for its own fetch, but must not leave
+          # an includeIf credential behind. Each later git phase installs one
+          # explicit header below.
+          persist-credentials: false
 
       - name: Setup Node
         uses: actions/setup-node@v7
@@ -105,6 +105,11 @@ jobs:
           git config --local --unset-all http.https://github.com/.extraheader || true
           git config --local http.https://github.com/.extraheader \
             "AUTHORIZATION: basic $(printf 'x-access-token:%s' "${CI_TOKEN}" | base64 | tr -d '\n')"
+          AUTH_HEADER_COUNT="$(git config --get-all http.https://github.com/.extraheader | wc -l | tr -d '[:space:]')"
+          if [ "${AUTH_HEADER_COUNT}" != "1" ]; then
+            echo "Expected one GitHub auth header for the Version Packages push; found ${AUTH_HEADER_COUNT}." >&2
+            exit 1
+          fi
 
       - name: Create or update Version Packages PR
         id: changesets
@@ -121,8 +126,8 @@ jobs:
           commit: "chore(release): version packages"
         env:
           # changesets/action uses this token for its GitHub API calls. Its
-          # git push uses checkout's persisted credential, which the prior
-          # step replaced with this same token.
+          # git push uses the single local auth header installed by the prior
+          # step; checkout does not persist a second credential.
           #
           # CI_TOKEN should be a fine-grained PAT scoped to THIS repo with
           # `contents: write` + `pull-requests: write` only — nothing here
@@ -138,6 +143,11 @@ jobs:
           git config --local --unset-all http.https://github.com/.extraheader || true
           git config --local http.https://github.com/.extraheader \
             "AUTHORIZATION: basic $(printf 'x-access-token:%s' "${GITHUB_TOKEN}" | base64 | tr -d '\n')"
+          AUTH_HEADER_COUNT="$(git config --get-all http.https://github.com/.extraheader | wc -l | tr -d '[:space:]')"
+          if [ "${AUTH_HEADER_COUNT}" != "1" ]; then
+            echo "Expected one GitHub auth header after restoring the release credential; found ${AUTH_HEADER_COUNT}." >&2
+            exit 1
+          fi
 
       - name: Set up Docker Buildx for stable promotion validation
         if: github.event_name == 'workflow_dispatch' && steps.changesets.outputs.hasChangesets == 'false'
@@ -299,9 +309,9 @@ jobs:
 
           if [ "${TAG_EXISTS}" = "false" ]; then
             git tag -a "${TAG}" -m "Release ${TAG}"
-            # Push with the persisted GITHUB_TOKEN credentials. The explicit
+            # Push with the restored GITHUB_TOKEN credential. The explicit
             # dispatch below binds the chosen beta before assets can publish.
-            # Checkout must not persist the CI_TOKEN PAT; see the Checkout step.
+            # Checkout does not persist its own credential; see the Checkout step.
             git push origin "${TAG}"
           fi
 

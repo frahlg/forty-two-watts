@@ -51,6 +51,17 @@ grep -Fq '"${source}@${SOURCE_DIGEST}"' "${assets}"
 grep -Fq 'FTW_IMAGE_TAG: ${FTW_IMAGE_TAG:-}' "${compose}"
 grep -Fq 'FTW_IMAGE_TAG: ${FTW_IMAGE_TAG:-}' "${compose_macos}"
 
+release_checkout="$(grep -n '      - name: Checkout$' "${release}" | cut -d: -f1)"
+release_setup_node="$(grep -n '      - name: Setup Node$' "${release}" | cut -d: -f1)"
+if ! sed -n "${release_checkout},$((release_setup_node - 1))p" "${release}" | grep -Fq 'persist-credentials: false'; then
+  echo "release checkout must not persist a second GitHub auth header" >&2
+  exit 1
+fi
+if [ "$(grep -Fc 'AUTH_HEADER_COUNT="' "${release}")" -ne 2 ]; then
+  echo "both release git credential phases must enforce exactly one auth header" >&2
+  exit 1
+fi
+
 stable_guard="$(grep -n 'STABLE_COMMIT="$(git rev-list -n 1 "${TAG}")"' "${release}" | cut -d: -f1)"
 already_done="$(grep -n '# Already-done case:' "${release}" | cut -d: -f1)"
 if [ "${stable_guard}" -ge "${already_done}" ]; then
