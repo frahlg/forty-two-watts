@@ -646,6 +646,49 @@ func TestWeightedDistribution(t *testing.T) {
 	}
 }
 
+func TestWeightedDistributionReallocatesBlockedDirection(t *testing.T) {
+	tests := []struct {
+		name       string
+		correction float64
+		bats       []batteryInfo
+		wantB      float64
+	}{
+		{
+			name:       "charge",
+			correction: 1000,
+			bats: []batteryInfo{
+				{driver: "blocked", capacityWh: 10000, soc: 0.5, online: true, chargeBlocked: true},
+				{driver: "capable", capacityWh: 10000, soc: 0.5, online: true},
+			},
+			wantB: 1000,
+		},
+		{
+			name:       "discharge",
+			correction: -1000,
+			bats: []batteryInfo{
+				{driver: "blocked", capacityWh: 10000, soc: 0.5, online: true, dischargeBlocked: true},
+				{driver: "capable", capacityWh: 10000, soc: 0.5, online: true},
+			},
+			wantB: -1000,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			targets := distributeWeighted(tt.bats, tt.correction, map[string]float64{
+				"blocked": 1,
+				"capable": 1,
+			})
+			got := targetsByDriver(targets)
+			if got["blocked"].TargetW != 0 || !got["blocked"].Clamped {
+				t.Errorf("blocked target = %+v, want 0 W clamped", got["blocked"])
+			}
+			if got["capable"].TargetW != tt.wantB {
+				t.Errorf("capable TargetW = %.1f W, want %.1f W", got["capable"].TargetW, tt.wantB)
+			}
+		})
+	}
+}
+
 // ---- Clamps ----
 
 func TestClampWithSoCBlocksDischargeWhenEmpty(t *testing.T) {
@@ -689,6 +732,96 @@ func TestClampWithSoCUsesPerBatteryLimits(t *testing.T) {
 	if v, was := clampWithSoC(-9000, b); v != -8000 || !was {
 		t.Errorf("-9000 vs 8 kW discharge cap: got %f clamped=%v, want -8000 true", v, was)
 	}
+}
+
+func TestClampWithSoCPreservesExplicitZeroDirectionLimits(t *testing.T) {
+	b := batteryInfo{
+		soc:              0.5,
+		maxChargeWSet:    true,
+		maxDischargeW:    8000,
+		maxDischargeWSet: true,
+	}
+	if v, was := clampWithSoC(1000, b); v != 0 || !was {
+		t.Errorf("explicit zero charge limit: got %f clamped=%v, want 0 true", v, was)
+	}
+	if v, was := clampWithSoC(-1000, b); v != -1000 || was {
+		t.Errorf("enabled discharge direction changed: got %f clamped=%v, want -1000 false", v, was)
+	}
+
+	b = batteryInfo{
+		soc:              0.5,
+		maxChargeW:       8000,
+		maxChargeWSet:    true,
+		maxDischargeWSet: true,
+	}
+	if v, was := clampWithSoC(-1000, b); v != 0 || !was {
+		t.Errorf("explicit zero discharge limit: got %f clamped=%v, want 0 true", v, was)
+	}
+	if v, was := clampWithSoC(1000, b); v != 1000 || was {
+		t.Errorf("enabled charge direction changed: got %f clamped=%v, want 1000 false", v, was)
+	}
+}
+
+func TestPowerLimitsPositiveValuesRemainEffectiveWithoutSetFlags(t *testing.T) {
+	limits := map[string]PowerLimits{
+		"battery": {MaxChargeW: 7000, MaxDischargeW: 6000},
+	}
+	targets := clampTargetsToPowerLimits([]DispatchTarget{
+		{Driver: "battery", TargetW: 9000},
+		{Driver: "battery", TargetW: -9000},
+	}, limits)
+	if targets[0].TargetW != 7000 || !targets[0].Clamped {
+		t.Errorf("legacy positive charge limit: got %+v, want +7000 clamped", targets[0])
+	}
+	if targets[1].TargetW != -6000 || !targets[1].Clamped {
+		t.Errorf("legacy positive discharge limit: got %+v, want -6000 clamped", targets[1])
+	}
+}
+
+func TestComputeDispatchPreservesExplicitZeroDirectionLimits(t *testing.T) {
+	t.Run("charge", func(t *testing.T) {
+		store := seedStore(-6000, []struct {
+			name          string
+			currentW, soc float64
+		}{{"battery", 0, 0.5}})
+		st := NewState(0, 0, "ferroamp")
+		st.Mode = ModeCharge
+		st.DriverLimits = map[string]PowerLimits{
+			"battery": {
+				MaxChargeWSet:    true,
+				MaxDischargeW:    6000,
+				MaxDischargeWSet: true,
+			},
+		}
+
+		targets := ComputeDispatch(store, st, caps(map[string]float64{"battery": 10000}), 50000)
+		if len(targets) != 1 || targets[0].TargetW != 0 {
+			t.Fatalf("explicit zero charge limit produced targets %+v, want one 0 W target", targets)
+		}
+	})
+
+	t.Run("discharge", func(t *testing.T) {
+		store := seedStore(12000, []struct {
+			name          string
+			currentW, soc float64
+		}{{"battery", 0, 0.5}})
+		st := NewState(0, 0, "ferroamp")
+		st.Mode = ModeSelfConsumption
+		st.SlewRateW = 100000
+		st.MinDispatchIntervalS = 0
+		st.DriverLimits = map[string]PowerLimits{
+			"battery": {
+				MaxChargeW:       6000,
+				MaxChargeWSet:    true,
+				MaxDischargeWSet: true,
+			},
+		}
+
+		targets := ComputeDispatch(store, st, caps(map[string]float64{"battery": 10000}), 50000)
+		if len(targets) != 1 || targets[0].TargetW != 0 {
+			t.Fatalf("explicit zero discharge limit produced targets %+v, want one 0 W target", targets)
+		}
+	})
 }
 
 // ---- Fuse guard ----

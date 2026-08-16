@@ -255,17 +255,37 @@ func (s *State) SetManualEVCharging(w float64, active bool) {
 	s.EVChargingW = s.ManualEVChargingW + s.liveEVChargingW
 }
 
-// PowerLimits holds the per-driver charge/discharge ceiling. Zero on
-// either field means "use the global MaxCommandW default" — the value
-// an unset config key carries through the YAML → Driver struct →
-// dispatch map pipeline. A non-zero value overrides the default at
-// every clamp point (clampWithSoC and the post-slew re-clamp).
+// PowerLimits holds the per-driver charge/discharge ceiling. The Set fields
+// preserve the difference between an omitted limit and an explicit zero: an
+// omitted limit uses MaxCommandW, while an explicit zero closes that direction.
+// A positive value remains effective without its Set field so existing callers
+// that construct PowerLimits directly keep their old behavior.
 //
 // A per-driver cap higher than the site fuse doesn't buy extra throughput:
 // the fuse-guard still scales at the site boundary (#145 safety invariant).
 type PowerLimits struct {
-	MaxChargeW    float64
-	MaxDischargeW float64
+	MaxChargeW       float64
+	MaxDischargeW    float64
+	MaxChargeWSet    bool
+	MaxDischargeWSet bool
+}
+
+func effectivePowerLimit(value float64, set bool) float64 {
+	if set && value >= 0 {
+		return value
+	}
+	if value > 0 {
+		return value
+	}
+	return MaxCommandW
+}
+
+func (l PowerLimits) chargeCap() float64 {
+	return effectivePowerLimit(l.MaxChargeW, l.MaxChargeWSet)
+}
+
+func (l PowerLimits) dischargeCap() float64 {
+	return effectivePowerLimit(l.MaxDischargeW, l.MaxDischargeWSet)
 }
 
 // DispatchTarget is one command to issue to a single battery driver.
@@ -614,8 +634,9 @@ type State struct {
 	FuseSaturated bool
 
 	// DriverLimits maps driver name → per-battery charge/discharge cap.
-	// Missing entries (or zero fields) fall through to the global
-	// MaxCommandW default. Consulted in every clamp step — per-battery
+	// Missing entries and unset fields fall through to the global
+	// MaxCommandW default; a set zero blocks that direction. Consulted in every
+	// clamp step — per-battery
 	// clampWithSoC, post-slew re-clamp, and fuse-guard's reference to
 	// total headroom. Hot-swappable via the config-reload watcher.
 	// Issue #145.
@@ -1211,14 +1232,16 @@ func (s *State) siteFuseMaxW() float64 {
 
 // batteryInfo is internal state read from telemetry per dispatch cycle.
 type batteryInfo struct {
-	driver        string
-	capacityWh    float64
-	currentW      float64
-	soc           float64
-	online        bool
-	group         string  // inverter-affinity tag; empty = untagged (#143)
-	maxChargeW    float64 // per-driver cap; 0 = use MaxCommandW default (#145)
-	maxDischargeW float64 // per-driver cap; 0 = use MaxCommandW default (#145)
+	driver           string
+	capacityWh       float64
+	currentW         float64
+	soc              float64
+	online           bool
+	group            string  // inverter-affinity tag; empty = untagged (#143)
+	maxChargeW       float64 // per-driver cap; see maxChargeWSet (#145)
+	maxDischargeW    float64 // per-driver cap; see maxDischargeWSet (#145)
+	maxChargeWSet    bool    // true preserves an explicit zero (charge disabled)
+	maxDischargeWSet bool    // true preserves an explicit zero (discharge disabled)
 
 	// Per-direction blocks the driver reports this cycle. A battery that
 	// can't move in the demanded direction (e.g. a Ferroamp ESO floored at
@@ -1236,20 +1259,14 @@ type batteryInfo struct {
 // back to MaxCommandW when the driver didn't set an explicit limit.
 // Kept a method so every clamp point queries the same fallback rule.
 func (b batteryInfo) chargeCap() float64 {
-	if b.maxChargeW > 0 {
-		return b.maxChargeW
-	}
-	return MaxCommandW
+	return effectivePowerLimit(b.maxChargeW, b.maxChargeWSet)
 }
 
 // dischargeCap is the symmetric version of chargeCap for discharge
 // targets. Returned as a positive magnitude; callers apply the minus
 // sign at the comparison site.
 func (b batteryInfo) dischargeCap() float64 {
-	if b.maxDischargeW > 0 {
-		return b.maxDischargeW
-	}
-	return MaxCommandW
+	return effectivePowerLimit(b.maxDischargeW, b.maxDischargeWSet)
 }
 
 // batteryDirectionBlocks reads the optional discharge_capable / charge_capable
@@ -1645,6 +1662,11 @@ func ComputeDispatch(
 		}
 		lim := state.DriverLimits[name]
 		dischargeBlocked, chargeBlocked := batteryDirectionBlocks(r.Data)
+		// A configured zero is a hard direction block, not the legacy
+		// "use MaxCommandW" sentinel. Feed it into the allocator as well as
+		// the clamps so capable siblings receive the blocked battery's share.
+		dischargeBlocked = dischargeBlocked || lim.dischargeCap() == 0
+		chargeBlocked = chargeBlocked || lim.chargeCap() == 0
 		batteries = append(batteries, batteryInfo{
 			driver:           name,
 			capacityWh:       cap,
@@ -1654,6 +1676,8 @@ func ComputeDispatch(
 			group:            state.InverterGroups[name],
 			maxChargeW:       lim.MaxChargeW,
 			maxDischargeW:    lim.MaxDischargeW,
+			maxChargeWSet:    lim.MaxChargeWSet,
+			maxDischargeWSet: lim.MaxDischargeWSet,
 			dischargeBlocked: dischargeBlocked,
 			chargeBlocked:    chargeBlocked,
 		})
@@ -2085,6 +2109,7 @@ func ComputeDispatch(
 		surplusActive := state.EVSurplusOnlyReserveW > 0 && effectiveMode == ModeSelfConsumption
 		if !surplusActive && math.Abs(errW) < state.GridToleranceW &&
 			!(noSelfDischarge && anyBatteryDischarging(onlineBats)) &&
+			!anyExplicitZeroDischargeViolation(onlineBats) &&
 			!anyBlockedBatteryCharging(onlineBats, noSelfCharge) {
 			// A small grid error is not a statement that the site is
 			// safe. errW compares one aggregate number against one
@@ -2464,25 +2489,7 @@ func ComputeDispatch(
 	// reading), the slewed target inherits the overshoot. Re-apply the
 	// per-driver cap (DriverLimits, falling back to MaxCommandW) so we
 	// never issue a command outside safe bounds.
-	for i := range raw {
-		maxC := float64(MaxCommandW)
-		maxD := float64(MaxCommandW)
-		if lim, ok := state.DriverLimits[raw[i].Driver]; ok {
-			if lim.MaxChargeW > 0 {
-				maxC = lim.MaxChargeW
-			}
-			if lim.MaxDischargeW > 0 {
-				maxD = lim.MaxDischargeW
-			}
-		}
-		if raw[i].TargetW > maxC {
-			raw[i].TargetW = maxC
-			raw[i].Clamped = true
-		} else if raw[i].TargetW < -maxD {
-			raw[i].TargetW = -maxD
-			raw[i].Clamped = true
-		}
-	}
+	raw = clampTargetsToPowerLimits(raw, state.DriverLimits)
 
 	// ---- Fuse guard (bidirectional, #145) ----
 	return applyDispatchSafetyPipeline(raw, store, state, driverCapacities, fuseMaxW, dispatchSafetyOptions{
@@ -2561,10 +2568,16 @@ func applyDispatchSafetyPipeline(
 	// emergency remains superior and may still discharge to prevent a trip.
 	targets = applyBatteryBoostReserve(targets, store, state, driverCapacities)
 
-	// forceFuseDischarge runs LAST. A fuse overflow can demand a battery
-	// target far beyond what slew would allow in one tick; slew-limiting that
-	// response would leave the fuse violated for multiple ticks.
+	// forceFuseDischarge runs after the normal policy rails. A fuse overflow can
+	// demand a battery target far beyond what slew would allow in one tick;
+	// slew-limiting that response would leave the fuse violated for multiple ticks.
 	targets = forceFuseDischarge(targets, store, state, driverCapacities, fuseMaxW)
+	// Keep the hardware direction contract last. forceFuseDischarge already
+	// allocates within the discharge cap, but this final check also covers any
+	// future safety stage and callers that enter the pipeline directly.
+	if state != nil {
+		targets = clampTargetsToPowerLimits(targets, state.DriverLimits)
+	}
 	republishFuseEVCapAfterFuseDischarge(targets, store, state, fuseMaxW)
 	recordDispatchTargets(targets, state, opts.updatePrevTargets, opts.recordDispatch)
 	return targets
@@ -3032,9 +3045,9 @@ const curtailMinPerDriverW = 1.0
 // is treated as having no curtail-absorption headroom. Below it, the
 // battery's MaxChargeW (or MaxCommandW default) is added to the live
 // curtail limit so PV stays uncapped while the battery can still take
-// the energy. Hard-coded conservatively — the goal is to err on the
-// side of preserving PV generation when there's anywhere meaningful
-// to put it.
+// the energy. An explicit zero adds no headroom. Hard-coded conservatively:
+// the goal is to err on the side of preserving PV generation when there's
+// anywhere meaningful to put it.
 const pvCurtailBatterySoCMax = 0.99
 
 // liveCurtailLimitW computes the cap PV may produce *right now* given
@@ -3130,11 +3143,7 @@ func liveCurtailLimitW(state *State, store *telemetry.Store) (float64, bool) {
 		if r.SoC == nil || *r.SoC >= pvCurtailBatterySoCMax {
 			continue
 		}
-		capW := float64(MaxCommandW)
-		if lim, ok := state.DriverLimits[r.Driver]; ok && lim.MaxChargeW > 0 {
-			capW = lim.MaxChargeW
-		}
-		batHeadroomW += capW
+		batHeadroomW += state.DriverLimits[r.Driver].chargeCap()
 	}
 
 	// EV reserve: prefer the curtail-specific value (counts plugged-
@@ -3287,6 +3296,20 @@ func distributeByCapacity(bats []batteryInfo, desiredTotal, totalCap float64) []
 func anyBatteryDischarging(bats []batteryInfo) bool {
 	for _, b := range bats {
 		if b.currentW < -1 {
+			return true
+		}
+	}
+	return false
+}
+
+// anyExplicitZeroDischargeViolation reports a live discharge that conflicts
+// with a configured hard zero. This is narrower than dischargeBlocked: a
+// driver's transient discharge_capable=false report does not bypass the
+// reactive deadband. The config limit does, because returning no target would
+// leave the driver's previous negative setpoint active on every quiet tick.
+func anyExplicitZeroDischargeViolation(bats []batteryInfo) bool {
+	for _, b := range bats {
+		if b.maxDischargeWSet && b.maxDischargeW == 0 && b.currentW < -1 {
 			return true
 		}
 	}
@@ -3710,25 +3733,42 @@ func distributePriority(bats []batteryInfo, totalCorrection float64, order []str
 
 // distributeWeighted splits by custom weights. Missing batteries default to weight=1.
 func distributeWeighted(bats []batteryInfo, totalCorrection float64, weights map[string]float64) []DispatchTarget {
+	var currentTotal float64
+	for _, b := range bats {
+		currentTotal += b.currentW
+	}
+	desiredTotal := currentTotal + totalCorrection
+	blockedForDirection := func(b batteryInfo) bool {
+		if desiredTotal > 0 {
+			return b.chargeBlocked
+		}
+		if desiredTotal < 0 {
+			return b.dischargeBlocked
+		}
+		return false
+	}
+
 	var totalW float64
 	for _, b := range bats {
+		if blockedForDirection(b) {
+			continue
+		}
 		w, ok := weights[b.driver]
 		if !ok {
 			w = 1.0
 		}
 		totalW += w
 	}
-	if totalW <= 0 {
-		return nil
-	}
-	var currentTotal float64
-	for _, b := range bats {
-		currentTotal += b.currentW
-	}
-	desiredTotal := currentTotal + totalCorrection
 
 	out := make([]DispatchTarget, 0, len(bats))
 	for _, b := range bats {
+		if blockedForDirection(b) {
+			out = append(out, DispatchTarget{Driver: b.driver, TargetW: 0, Clamped: true})
+			continue
+		}
+		if totalW <= 0 {
+			continue
+		}
 		w, ok := weights[b.driver]
 		if !ok {
 			w = 1.0
@@ -3751,14 +3791,30 @@ func chargeAll(store *telemetry.Store, capacities map[string]float64, limits map
 		if h == nil || !h.IsOnline() {
 			continue
 		}
-		target := float64(MaxCommandW)
-		if lim, ok := limits[name]; ok && lim.MaxChargeW > 0 {
-			target = lim.MaxChargeW
-		}
+		target := limits[name].chargeCap()
 		// Site convention: + = charge.
 		out = append(out, DispatchTarget{Driver: name, TargetW: target})
 	}
 	return out
+}
+
+// clampTargetsToPowerLimits is the common last-mile clamp for command slices.
+// It treats a missing limit as MaxCommandW and an explicit zero as a closed
+// direction. Mutating in place matches the other safety floors in this file.
+func clampTargetsToPowerLimits(targets []DispatchTarget, limits map[string]PowerLimits) []DispatchTarget {
+	for i := range targets {
+		lim := limits[targets[i].Driver]
+		maxC := lim.chargeCap()
+		maxD := lim.dischargeCap()
+		if targets[i].TargetW > maxC {
+			targets[i].TargetW = maxC
+			targets[i].Clamped = true
+		} else if targets[i].TargetW < -maxD {
+			targets[i].TargetW = -maxD
+			targets[i].Clamped = true
+		}
+	}
+	return targets
 }
 
 // clampWithSoC applies the hard safety clamps for one battery command:
@@ -4339,17 +4395,8 @@ func holdFleetAtZero(store *telemetry.Store, capacities map[string]float64) []Di
 // A battery that is empty or reports a blocked direction may still be moving
 // in that direction, but core must not send a command that asks it to continue.
 func fuseTargetBounds(r *telemetry.DerReading, lim PowerLimits) (lower, upper float64) {
-	maxChargeW := float64(MaxCommandW)
-	maxDischargeW := float64(MaxCommandW)
-	if lim.MaxChargeW > 0 {
-		maxChargeW = lim.MaxChargeW
-	}
-	if lim.MaxDischargeW > 0 {
-		maxDischargeW = lim.MaxDischargeW
-	}
-
-	lower = -maxDischargeW
-	upper = maxChargeW
+	lower = -lim.dischargeCap()
+	upper = lim.chargeCap()
 	soc := 0.1
 	if r.SoC != nil {
 		soc = *r.SoC

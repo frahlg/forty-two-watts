@@ -339,6 +339,28 @@ func TestComputePVCurtail_BatteryHeadroomLiftsCap(t *testing.T) {
 	}
 }
 
+func TestComputePVCurtail_ExplicitZeroChargeLimitAddsNoBatteryHeadroom(t *testing.T) {
+	st := NewState(0, 100, "meter")
+	st.SlotDirective = stubSlotDirective(SlotDirective{PVLimitW: 500})
+	st.SupportsPVCurtail = map[string]bool{"solaredge": true}
+	st.DriverLimits = map[string]PowerLimits{
+		"pixii": {
+			MaxChargeWSet:    true,
+			MaxDischargeW:    5000,
+			MaxDischargeWSet: true,
+		},
+	}
+	store := telemetry.NewStore()
+	emitPV(t, store, "solaredge", -3000)
+	emitBattery(t, store, "pixii", 0, 0.60)
+	emitMeter(t, store, "meter", -2500)
+
+	got := findCurtail(ComputePVCurtail(st, store))
+	if abs(got["solaredge"]-500) > 1e-3 {
+		t.Errorf("zero charge limit invented battery headroom: want 500 W PV limit, got %.2f", got["solaredge"])
+	}
+}
+
 // Battery essentially full (SoC >= ceiling) and no EV reserve →
 // planner-warranted curtail goes through, capped at live load only.
 func TestComputePVCurtail_FullBatteryNoHeadroomCurtails(t *testing.T) {

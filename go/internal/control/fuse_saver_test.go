@@ -135,6 +135,42 @@ func TestFuseSaverRespectsMaxDischarge(t *testing.T) {
 	}
 }
 
+func TestFuseSaverRespectsExplicitZeroDischargeLimit(t *testing.T) {
+	store, state, caps := setupFuseSaver(20000, 0, 0.6, 10000)
+	state.DriverLimits["bat"] = PowerLimits{
+		MaxChargeW:       10000,
+		MaxDischargeWSet: true,
+	}
+	targets := []DispatchTarget{{Driver: "bat", TargetW: 0}}
+	out := forceFuseDischarge(targets, store, state, caps, 11040)
+	if out[0].TargetW != 0 || out[0].Clamped {
+		t.Errorf("explicit zero discharge limit must close fuse-saver headroom: got %+v", out[0])
+	}
+}
+
+func TestDeadbandFuseSaverRespectsExplicitZeroDischargeLimit(t *testing.T) {
+	store, state, caps := setupFuseSaver(14000, 0, 0.6, 10000)
+	state.DriverLimits["bat"] = PowerLimits{
+		MaxChargeW:       10000,
+		MaxDischargeWSet: true,
+	}
+	state.SetGridTarget(14000)
+	state.MinDispatchIntervalS = 0
+
+	if out := ComputeDispatch(store, state, caps, 11040); out != nil {
+		t.Fatalf("deadband fuse saver crossed explicit zero discharge limit: %+v", out)
+	}
+}
+
+func TestFuseSaverLegacyZeroWithoutSetFlagStillUsesDefault(t *testing.T) {
+	store, state, caps := setupFuseSaver(20000, 0, 0.6, 0)
+	targets := []DispatchTarget{{Driver: "bat", TargetW: 0}}
+	out := forceFuseDischarge(targets, store, state, caps, 11040)
+	if out[0].TargetW != -MaxCommandW || !out[0].Clamped {
+		t.Errorf("legacy zero without validity flag: got %+v, want -%d W clamped", out[0], MaxCommandW)
+	}
+}
+
 // Within fuse → no-op. The fuse-saver doesn't touch dispatch when
 // predicted gridW is already safe.
 func TestFuseSaverNoOpWhenWithinFuse(t *testing.T) {

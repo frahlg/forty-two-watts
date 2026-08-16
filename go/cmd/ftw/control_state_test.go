@@ -6,7 +6,9 @@ import (
 	"time"
 
 	"github.com/srcfl/ftw/go/internal/config"
+	"github.com/srcfl/ftw/go/internal/control"
 	"github.com/srcfl/ftw/go/internal/mpc"
+	"github.com/srcfl/ftw/go/internal/telemetry"
 )
 
 func TestControlStateFromConfigAppliesSiteGain(t *testing.T) {
@@ -44,5 +46,103 @@ func TestControlSlotDirectiveFromMPCPreservesDecisionIdentity(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got.LoadpointEnergyWh, loadpoints) {
 		t.Fatalf("loadpoint allocation changed across adapter: %+v", got.LoadpointEnergyWh)
+	}
+}
+
+func parseBatteryLimitConfig(t *testing.T, driverLimits, batteryLimits string) *config.Config {
+	t.Helper()
+	yaml := `
+site:
+  name: Limit test
+fuse:
+  max_amps: 63
+  phases: 3
+  voltage: 230
+api:
+  port: 8080
+drivers:
+  - name: battery
+    lua: battery.lua
+    is_site_meter: true
+    battery_capacity_wh: 10000
+    capabilities:
+      standalone: true
+` + driverLimits + `
+batteries:
+  battery:
+` + batteryLimits
+	cfg, err := config.Parse([]byte(yaml), t.TempDir())
+	if err != nil {
+		t.Fatalf("parse battery limit config: %v", err)
+	}
+	return cfg
+}
+
+func batteryLimitStore(gridW float64) *telemetry.Store {
+	store := telemetry.NewStore()
+	store.Update("battery", telemetry.DerMeter, gridW, nil, nil)
+	soc := 0.5
+	store.Update("battery", telemetry.DerBattery, 0, &soc, nil)
+	store.DriverHealthMut("battery").RecordSuccess()
+	return store
+}
+
+func TestBatteryLimitConfigExplicitZeroChargeReachesControl(t *testing.T) {
+	cfg := parseBatteryLimitConfig(t,
+		"    max_charge_w: 7000\n    max_discharge_w: 6000\n",
+		"    max_charge_w: 0\n    max_discharge_w: 4000\n")
+	ctrl := newControlStateFromConfig(cfg)
+	lim := ctrl.DriverLimits["battery"]
+	if !lim.MaxChargeWSet || lim.MaxChargeW != 0 {
+		t.Fatalf("charge limit lost config presence: %+v", lim)
+	}
+	ctrl.Mode = control.ModeCharge
+	targets := control.ComputeDispatch(batteryLimitStore(-6000), ctrl, map[string]float64{"battery": 10000}, 40000)
+	if len(targets) != 1 || targets[0].TargetW != 0 {
+		t.Fatalf("batteries.battery.max_charge_w=0 produced %+v, want one 0 W target", targets)
+	}
+}
+
+func TestBatteryLimitConfigExplicitZeroDischargeReachesControl(t *testing.T) {
+	cfg := parseBatteryLimitConfig(t,
+		"    max_charge_w: 7000\n    max_discharge_w: 6000\n",
+		"    max_charge_w: 4000\n    max_discharge_w: 0\n")
+	ctrl := newControlStateFromConfig(cfg)
+	lim := ctrl.DriverLimits["battery"]
+	if !lim.MaxDischargeWSet || lim.MaxDischargeW != 0 {
+		t.Fatalf("discharge limit lost config presence: %+v", lim)
+	}
+	ctrl.Mode = control.ModeSelfConsumption
+	ctrl.SlewRateW = 100000
+	ctrl.MinDispatchIntervalS = 0
+	targets := control.ComputeDispatch(batteryLimitStore(12000), ctrl, map[string]float64{"battery": 10000}, 40000)
+	if len(targets) != 1 || targets[0].TargetW != 0 {
+		t.Fatalf("batteries.battery.max_discharge_w=0 produced %+v, want one 0 W target", targets)
+	}
+}
+
+func TestBatteryLimitConfigUnsetUsesDriverValue(t *testing.T) {
+	cfg := parseBatteryLimitConfig(t,
+		"    max_charge_w: 7000\n    max_discharge_w: 6000\n",
+		"    weight: 1\n")
+	ctrl := newControlStateFromConfig(cfg)
+	ctrl.Mode = control.ModeCharge
+	targets := control.ComputeDispatch(batteryLimitStore(0), ctrl, map[string]float64{"battery": 10000}, 40000)
+	if len(targets) != 1 || targets[0].TargetW != 7000 {
+		t.Fatalf("unset battery charge limit produced %+v, want configured driver limit 7000 W", targets)
+	}
+}
+
+func TestBatteryLimitConfigBothZeroRetainsControlDefault(t *testing.T) {
+	cfg := parseBatteryLimitConfig(t, "",
+		"    max_charge_w: 0\n    max_discharge_w: 0\n")
+	ctrl := newControlStateFromConfig(cfg)
+	if _, ok := ctrl.DriverLimits["battery"]; ok {
+		t.Fatalf("both-zero config error became hard-disabled limits: %+v", ctrl.DriverLimits["battery"])
+	}
+	ctrl.Mode = control.ModeCharge
+	targets := control.ComputeDispatch(batteryLimitStore(0), ctrl, map[string]float64{"battery": 10000}, 40000)
+	if len(targets) != 1 || targets[0].TargetW != control.MaxCommandW {
+		t.Fatalf("both-zero config error produced %+v, want control default %d W", targets, control.MaxCommandW)
 	}
 }

@@ -142,6 +142,76 @@ func TestDeadbandExitMayNotStrandChargeBlockedDriver(t *testing.T) {
 	}
 }
 
+func TestDeadbandExitEnforcesExplicitZeroDirection(t *testing.T) {
+	tests := []struct {
+		name     string
+		liveW    float64
+		limits   PowerLimits
+		wantText string
+	}{
+		{
+			name:     "discharge",
+			liveW:    -2000,
+			limits:   PowerLimits{MaxDischargeWSet: true},
+			wantText: "max_discharge_w: 0",
+		},
+		{
+			name:     "charge",
+			liveW:    2000,
+			limits:   PowerLimits{MaxChargeWSet: true},
+			wantText: "max_charge_w: 0",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := seedDeadbandSite(0, []deadbandBattery{{"blocked", tt.liveW, 0.55, ""}})
+			st := NewState(0, 60, "meter")
+			st.Mode = ModeSelfConsumption
+			st.SlewRateW = 500
+			st.MinDispatchIntervalS = 0
+			st.DriverLimits = map[string]PowerLimits{"blocked": tt.limits}
+
+			targets := ComputeDispatch(store, st, caps(map[string]float64{"blocked": 10000}), 11040)
+			if len(targets) == 0 {
+				t.Fatalf("no target issued — %s left the battery at %.0f W", tt.wantText, tt.liveW)
+			}
+			got := targetsByDriver(targets)
+			if math.Abs(got["blocked"].TargetW) > 0.01 {
+				t.Errorf("blocked TargetW = %.1f W, want 0 W for %s", got["blocked"].TargetW, tt.wantText)
+			}
+		})
+	}
+}
+
+func TestDeadbandExitReallocatesExplicitZeroDischarge(t *testing.T) {
+	store := seedDeadbandSite(0, []deadbandBattery{
+		{"blocked", -2000, 0.55, ""},
+		{"capable", 0, 0.55, ""},
+	})
+	st := NewState(0, 60, "meter")
+	st.Mode = ModeSelfConsumption
+	st.SlewRateW = 100000
+	st.MinDispatchIntervalS = 0
+	st.DriverLimits = map[string]PowerLimits{
+		"blocked": {MaxDischargeWSet: true},
+	}
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{
+		"blocked": 10000,
+		"capable": 10000,
+	}), 11040)
+	if len(targets) == 0 {
+		t.Fatal("no target issued — the blocked battery kept the fleet inside deadband")
+	}
+	got := targetsByDriver(targets)
+	if math.Abs(got["blocked"].TargetW) > 0.01 {
+		t.Errorf("blocked TargetW = %.1f W, want 0 W", got["blocked"].TargetW)
+	}
+	if math.Abs(got["capable"].TargetW+2000) > 0.01 {
+		t.Errorf("capable TargetW = %.1f W, want -2000 W reallocated discharge", got["capable"].TargetW)
+	}
+}
+
 // ---- The quiet ticks the fix must leave quiet ----
 
 // The guard that bounds the whole change: a deadband tick with nothing
@@ -159,6 +229,20 @@ func TestDeadbandExitStaysQuietWhenNothingIsBlocked(t *testing.T) {
 	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
 	if len(targets) != 0 {
 		t.Errorf("deadband tick issued %d target(s) %v — no gate closed charge here, the tick must stay quiet",
+			len(targets), targets)
+	}
+}
+
+func TestDeadbandExitStaysQuietWithOmittedPowerLimits(t *testing.T) {
+	store := seedDeadbandSite(0, []deadbandBattery{{"ferroamp", -2000, 0.50, ""}})
+	st := NewState(0, 60, "meter")
+	st.Mode = ModeSelfConsumption
+	st.SlewRateW = 500
+	st.MinDispatchIntervalS = 0
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 0 {
+		t.Errorf("deadband tick issued %d target(s) %v — omitted limits must keep the default quiet behavior",
 			len(targets), targets)
 	}
 }

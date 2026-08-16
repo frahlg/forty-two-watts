@@ -3282,11 +3282,14 @@ func driverCapacitiesFrom(drvList []config.Driver, loadpoints []config.Loadpoint
 
 // driverLimitsFrom builds the driver-name → per-battery PowerLimits map
 // used by control.State for per-battery charge/discharge caps (#145).
-// Reads the drivers section first, then falls back to the batteries
-// section for the same key — operators commonly set per-battery limits
+// Reads the drivers section first, then applies any batteries-section
+// override for the same key — operators commonly set per-battery limits
 // only under `batteries:` (the MPC reads them from there), and without
-// this fallback the dispatcher silently uses the 5 kW MaxCommandW
+// this path the dispatcher silently uses the 5 kW MaxCommandW
 // default while the planner schedules against the configured 9 kW.
+// Battery limit pointers preserve omitted versus explicit zero. As in the
+// MPC builder below, exact both-zero battery overrides are a config error and
+// retain defaults rather than disabling the battery in both directions.
 // Drivers without limits in either place are omitted from the map.
 func driverLimitsFrom(drivers []config.Driver, batteries map[string]config.Battery) map[string]control.PowerLimits {
 	out := map[string]control.PowerLimits{}
@@ -3295,20 +3298,29 @@ func driverLimitsFrom(drivers []config.Driver, batteries map[string]config.Batte
 			continue
 		}
 		chg, dis := d.MaxChargeW, d.MaxDischargeW
+		chgSet, disSet := chg > 0, dis > 0
 		if b, ok := batteries[d.Name]; ok {
-			if chg == 0 && b.MaxChargeW != nil && *b.MaxChargeW > 0 {
-				chg = *b.MaxChargeW
-			}
-			if dis == 0 && b.MaxDischargeW != nil && *b.MaxDischargeW > 0 {
-				dis = *b.MaxDischargeW
+			bothZero := b.MaxChargeW != nil && *b.MaxChargeW == 0 &&
+				b.MaxDischargeW != nil && *b.MaxDischargeW == 0
+			if !bothZero {
+				if b.MaxChargeW != nil && *b.MaxChargeW >= 0 {
+					chg = *b.MaxChargeW
+					chgSet = true
+				}
+				if b.MaxDischargeW != nil && *b.MaxDischargeW >= 0 {
+					dis = *b.MaxDischargeW
+					disSet = true
+				}
 			}
 		}
-		if chg == 0 && dis == 0 {
+		if chg == 0 && dis == 0 && !chgSet && !disSet {
 			continue
 		}
 		out[d.Name] = control.PowerLimits{
-			MaxChargeW:    chg,
-			MaxDischargeW: dis,
+			MaxChargeW:       chg,
+			MaxDischargeW:    dis,
+			MaxChargeWSet:    chgSet,
+			MaxDischargeWSet: disSet,
 		}
 	}
 	return out
