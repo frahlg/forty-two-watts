@@ -254,6 +254,73 @@ func TestWallboxCycleChecksHealthBeforeEachSend(t *testing.T) {
 	}
 }
 
+// A slow charger must consume only its own deadline. Tick walks loadpoints
+// in order, so an unbounded first send otherwise prevents every charger after
+// it from receiving this tick's setpoint.
+func TestBlockedChargerDoesNotStallAnotherLoadpoint(t *testing.T) {
+	now := time.Date(2026, 8, 16, 13, 0, 0, 0, time.UTC)
+	configs := []Config{
+		{ID: "slow", DriverName: "slow", MinChargeW: 1400, MaxChargeW: 7400},
+		{ID: "fast", DriverName: "fast", MinChargeW: 1400, MaxChargeW: 7400},
+	}
+	m := NewManager()
+	m.Load(configs)
+	directive := Directive{
+		SlotStart: now.Add(-time.Second),
+		SlotEnd:   now.Add(15 * time.Minute),
+		LoadpointEnergyWh: map[string]float64{
+			"slow": 1850,
+			"fast": 1850,
+		},
+	}
+	plan := PlanFunc(func(time.Time) (Directive, bool) { return directive, true })
+	tel := TelemetryFunc(func(string) (EVSample, bool) {
+		return EVSample{Connected: true, RequestActive: true}, true
+	})
+	slowEntered := make(chan struct{})
+	fastSent := make(chan struct{})
+	releaseSlow := make(chan struct{})
+	var slowOnce, fastOnce sync.Once
+	send := SenderFunc(func(ctx context.Context, driver string, _ []byte) error {
+		if driver == "fast" {
+			fastOnce.Do(func() { close(fastSent) })
+			return nil
+		}
+		slowOnce.Do(func() { close(slowEntered) })
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-releaseSlow:
+			return nil
+		}
+	})
+	c := NewController(m, plan, tel, send)
+	c.SetCommandTimeout(20 * time.Millisecond)
+	done := make(chan struct{})
+	go func() {
+		c.Tick(context.Background(), now)
+		close(done)
+	}()
+	select {
+	case <-slowEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("slow charger never received its command")
+	}
+	select {
+	case <-fastSent:
+	case <-time.After(50 * time.Millisecond):
+		close(releaseSlow)
+		<-done
+		t.Fatal("slow charger blocked the next loadpoint past its command deadline")
+	}
+	close(releaseSlow)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("tick did not finish")
+	}
+}
+
 // The 0 W standdown is core withdrawing under a stale site meter, not core
 // actuating. The staleness tracker owns that transition, and a charger that
 // refuses the standdown must not be excluded for a fault belonging to the

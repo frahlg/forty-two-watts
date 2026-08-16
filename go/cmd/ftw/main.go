@@ -1568,6 +1568,8 @@ func main() {
 		// current and the plan keeps counting the load. Only the periodic
 		// ev_set_current is reported — see loadpoint.DispatchOutcomeFunc
 		// for the sends that are deliberately not.
+		lpController.SetOutcomeSender(reg.SendWithOutcome)
+		lpController.SetCycleSender(reg.SendEVContinuation)
 		lpController.SetDispatchOutcome(actuation.recordCommandOutcome)
 		lpController.SetDriverOnline(func(name string) bool {
 			health := tel.DriverHealth(name)
@@ -2458,6 +2460,9 @@ func main() {
 	// Every dispatch command carries its own deadline — see
 	// driverCommandTimeout for the stall it bounds.
 	driverCmdTimeout := driverCommandTimeout(controlInterval)
+	if lpController != nil {
+		lpController.SetCommandTimeout(driverCmdTimeout)
+	}
 
 	// Graceful shutdown
 	sigc := make(chan os.Signal, 1)

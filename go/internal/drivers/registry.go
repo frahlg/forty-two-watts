@@ -29,6 +29,15 @@ var (
 	// ErrObserveOnly is returned when a configured telemetry-only driver is
 	// reached through a generic command path instead of the API guard.
 	ErrObserveOnly = errors.New("driver is observe_only and cannot be controlled")
+	// ErrCommandSuperseded is returned when an EV command no longer belongs
+	// to the current per-driver control sequence. In particular, ev_resume is
+	// valid only immediately after the ev_pause that opened its cycle; any
+	// intervening command, default, exclusion, or lifecycle stop cancels it.
+	ErrCommandSuperseded = errors.New("driver command was superseded by a newer control boundary")
+	// ErrCommandIneligible is returned when Core health has already excluded
+	// an EV driver by the time its command reaches the per-driver command
+	// owner. The device is not called.
+	ErrCommandIneligible = errors.New("driver is not eligible for EV control")
 )
 
 type commandMayHaveRunError struct {
@@ -244,6 +253,15 @@ type runningDriver struct {
 	lifecycleCancel    context.CancelFunc
 	shutdownMu         sync.Mutex
 	shutdownDefaultErr error
+	// commandRevision and evPauseRevision belong only to runLoop. Defaults,
+	// exclusion, and lifecycle cancellation advance the revision. A successful
+	// ev_pause records it; ev_resume is admitted only while it is still current.
+	// Ordinary successful setpoints may run during the 3 s pause dwell without
+	// canceling the intended resume.
+	commandRevision uint64
+	evPauseRevision uint64
+	evPauseCycleID  uint64
+	evPausePending  bool
 	// Poll loop coordination
 	cmdCh chan driverCmd
 	stop  chan bool
@@ -382,11 +400,35 @@ func commandContextError(requestCtx, executionCtx context.Context) error {
 }
 
 type driverCmd struct {
-	kind    string
-	ctx     context.Context
-	payload []byte
-	result  chan error
-	state   *commandState
+	kind          string
+	ctx           context.Context
+	payload       []byte
+	result        chan error
+	state         *commandState
+	cycleID       uint64
+	checkEVHealth bool
+	// outcome runs on the per-driver actor after command/default recovery and
+	// before the next queue item. It must stay bounded and perform no I/O.
+	outcome func(error)
+}
+
+type driverCommandMetadata struct {
+	Action string `json:"action"`
+}
+
+func commandMetadata(payload []byte) driverCommandMetadata {
+	var command driverCommandMetadata
+	_ = json.Unmarshal(payload, &command)
+	return command
+}
+
+func isPhysicalEVCommand(action string) bool {
+	switch action {
+	case "ev_start", "ev_set_current", "ev_pause", "ev_resume":
+		return true
+	default:
+		return false
+	}
 }
 
 // Add spawns an operational driver. Before a legacy driver becomes
@@ -682,6 +724,10 @@ func (r *Registry) runLoop(rd *runningDriver) {
 		<-leaseTimer.C
 	}
 	defer leaseTimer.Stop()
+	invalidateCommandSequence := func() {
+		rd.commandRevision++
+		rd.evPausePending = false
+	}
 	var leaseC <-chan time.Time
 	var recoveryTimer *time.Timer
 	var recoveryC <-chan time.Time
@@ -748,6 +794,10 @@ func (r *Registry) runLoop(rd *runningDriver) {
 		scheduleRecovery()
 	}
 	attemptDefault := func(reason string) error {
+		// The actor owns this transition. Invalidate any pause→resume
+		// continuation before the default call starts, regardless of whether
+		// the device later confirms it.
+		invalidateCommandSequence()
 		defaultCtx, cancel := context.WithTimeout(context.Background(), defaultRecoveryTimeout)
 		defaultErr := r.defaultDriver(defaultCtx, rd, reason)
 		cancel()
@@ -774,6 +824,7 @@ func (r *Registry) runLoop(rd *runningDriver) {
 		select {
 		case skipDefault := <-rd.stop:
 			if !skipDefault {
+				invalidateCommandSequence()
 				shutdownCtx, cancel := context.WithTimeout(context.Background(), defaultRecoveryTimeout)
 				defaultErr := r.defaultDriver(shutdownCtx, rd, "host_shutdown")
 				rd.setShutdownDefaultError(defaultErr)
@@ -807,22 +858,71 @@ func (r *Registry) runLoop(rd *runningDriver) {
 			return
 		case cmd := <-rd.cmdCh:
 			var err error
+			reportOutcome := cmd.outcome != nil
 			cmdCtx := cmd.ctx
 			if cmdCtx == nil {
 				cmdCtx = ctx
 			}
+			if lifecycleErr := ctx.Err(); lifecycleErr != nil {
+				invalidateCommandSequence()
+				err = lifecycleErr
+				if reportOutcome {
+					cmd.outcome(err)
+				}
+				if cmd.state != nil {
+					cmd.state.finish(err)
+				}
+				if cmd.result != nil {
+					cmd.result <- err
+				}
+				continue
+			}
 			switch cmd.kind {
 			case "command":
+				metadata := commandMetadata(cmd.payload)
+				action := metadata.Action
+				cyclePause := action == "ev_pause" && cmd.cycleID != 0
+				cycleResume := action == "ev_resume" && cmd.cycleID != 0
 				if rd.controlIsBlocked() {
 					err = ErrControlBlocked
 					break
 				}
 				if cancelErr := cmdCtx.Err(); cancelErr != nil {
+					if cycleResume && rd.evPausePending && rd.evPauseCycleID == cmd.cycleID {
+						rd.evPausePending = false
+					}
 					err = cancelErr
+					break
+				}
+				if cmd.checkEVHealth && isPhysicalEVCommand(action) && r.tel != nil {
+					health := r.tel.DriverHealth(rd.cfg.Name)
+					if health == nil || !health.IsOnline() {
+						invalidateCommandSequence()
+						err = ErrCommandIneligible
+						reportOutcome = false
+						break
+					}
+				}
+				if cycleResume && (!rd.evPausePending || rd.evPauseCycleID != cmd.cycleID || rd.evPauseRevision != rd.commandRevision) {
+					err = ErrCommandSuperseded
+					reportOutcome = false
+					break
+				}
+				if cyclePause && rd.evPausePending {
+					err = ErrCommandSuperseded
+					reportOutcome = false
 					break
 				}
 				if cmd.state != nil {
 					cmd.state.markStarted()
+				}
+				if cyclePause || cycleResume {
+					rd.evPausePending = false
+				} else if action == "ev_start" || action == "ev_pause" || action == "ev_resume" {
+					// An operator command starts a new intent and must cancel an
+					// older automatic pause continuation, but remains valid on its
+					// own (manual ev_resume does not require a cycle id).
+					invalidateCommandSequence()
 				}
 				commandCtx, finishCommand := rd.beginCommand(cmdCtx)
 				if rd.policy != nil && rd.policy.IsControlV2() {
@@ -837,6 +937,7 @@ func (r *Registry) runLoop(rd *runningDriver) {
 						armLease(leaseExpiresAt)
 						rd.markCommandApplied()
 					} else if err == nil && result.Status == "applied" && result.DeviceState == "default" {
+						invalidateCommandSequence()
 						clearLease()
 						rd.markDefaultConfirmed()
 						clearRecoveryTimer()
@@ -855,7 +956,13 @@ func (r *Registry) runLoop(rd *runningDriver) {
 					}
 				}
 				finishCommand()
+				if err == nil && cyclePause {
+					rd.evPausePending = true
+					rd.evPauseRevision = rd.commandRevision
+					rd.evPauseCycleID = cmd.cycleID
+				}
 			case "default":
+				invalidateCommandSequence()
 				err = r.defaultDriver(cmdCtx, rd, "host_request")
 				if err == nil {
 					clearLease()
@@ -865,6 +972,9 @@ func (r *Registry) runLoop(rd *runningDriver) {
 				} else {
 					scheduleRecovery()
 				}
+			}
+			if reportOutcome {
+				cmd.outcome(err)
 			}
 			if cmd.state != nil {
 				cmd.state.finish(err)
@@ -1097,12 +1207,34 @@ func (r *Registry) Send(ctx context.Context, name string, payload []byte) error 
 	return err
 }
 
+// SendWithOutcome is Send with one actor-owned completion step. outcome runs
+// after any command-failure default recovery and before the next command for
+// this driver, which lets Core publish exclusion without opening a queue gap.
+// The callback must not perform I/O or wait on the registry.
+func (r *Registry) SendWithOutcome(ctx context.Context, name string, payload []byte, outcome func(error)) error {
+	_, err := r.sendWithGeneration(ctx, name, payload, 0, true, outcome)
+	return err
+}
+
+// SendEVContinuation sends one internal pause/resume cycle step. cycleID is
+// actor metadata, not part of the driver payload, so public/manual ev_resume
+// remains a standalone command while Core's async continuation is ordered
+// against defaults, exclusion, and driver lifecycle.
+func (r *Registry) SendEVContinuation(ctx context.Context, name string, payload []byte, cycleID uint64) error {
+	_, err := r.sendWithGeneration(ctx, name, payload, cycleID, true, nil)
+	return err
+}
+
 // SendWithGeneration dispatches a command to the concrete running driver that
 // was selected for this call and returns that instance's generation. Selecting
 // the instance and recording its generation under the registry lock prevents a
 // caller from pairing a command sent to a replacement with an older status
 // snapshot.
 func (r *Registry) SendWithGeneration(ctx context.Context, name string, payload []byte) (uint64, error) {
+	return r.sendWithGeneration(ctx, name, payload, 0, false, nil)
+}
+
+func (r *Registry) sendWithGeneration(ctx context.Context, name string, payload []byte, cycleID uint64, checkEVHealth bool, outcome func(error)) (uint64, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -1122,16 +1254,13 @@ func (r *Registry) SendWithGeneration(ctx context.Context, name string, payload 
 	if rd.cfg.ObserveOnly {
 		return generation, ErrObserveOnly
 	}
-	if rd.controlIsBlocked() {
-		return generation, ErrControlBlocked
-	}
 	if err := ctx.Err(); err != nil {
 		return generation, err
 	}
 	resCh := make(chan error, 1)
 	state := &commandState{}
 	select {
-	case rd.cmdCh <- driverCmd{kind: "command", ctx: ctx, payload: payload, result: resCh, state: state}:
+	case rd.cmdCh <- driverCmd{kind: "command", ctx: ctx, payload: payload, result: resCh, state: state, cycleID: cycleID, checkEVHealth: checkEVHealth, outcome: outcome}:
 	case <-ctx.Done():
 		return generation, ctx.Err()
 	}

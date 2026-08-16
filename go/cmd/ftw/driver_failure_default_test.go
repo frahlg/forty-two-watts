@@ -237,6 +237,8 @@ func TestNonRefusalErrorsDoNotExcludeADriver(t *testing.T) {
 		err  error
 	}{
 		{"observe only", drivers.ErrObserveOnly},
+		{"EV health gate", drivers.ErrCommandIneligible},
+		{"stale EV continuation", drivers.ErrCommandSuperseded},
 		{"command deadline", context.DeadlineExceeded},
 		{"tick cancelled", context.Canceled},
 		{"wrapped deadline", &wrappedErr{cause: context.DeadlineExceeded}},

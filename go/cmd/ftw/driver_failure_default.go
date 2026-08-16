@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/srcfl/ftw/go/internal/drivers"
@@ -77,10 +78,11 @@ const (
 // staleSiteDefaultTracker, which does this per site-meter transition; this
 // one is per driver.
 //
-// Not safe for concurrent use: both methods run on the control-loop
-// goroutine, recordCommandOutcome during dispatch and update at the top of
-// the following tick.
+// The loadpoint outcome runs inside the registry's per-driver actor so it can
+// close health before the next queued EV command. mu keeps that short callback
+// safe against a control-loop timeout moving on to update or another driver.
 type driverActuationTracker struct {
+	mu        sync.Mutex
 	tel       *telemetry.Store
 	refusals  map[string]refusalState
 	defaulted map[string]struct{}
@@ -156,6 +158,8 @@ func (t *driverActuationTracker) recordCommandOutcomeFor(name, action string, er
 	if t == nil || t.tel == nil {
 		return
 	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	if action == "" {
 		action = "dispatch"
 	}
@@ -247,6 +251,8 @@ func (t *driverActuationTracker) update(now time.Time, observeOnly map[string]bo
 	if t == nil || t.tel == nil {
 		return nil
 	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	health := t.tel.AllHealth()
 
 	for name, st := range t.refusals {
@@ -344,6 +350,8 @@ func isCommandRefusal(err error) bool {
 	case errors.Is(err, drivers.ErrObserveOnly):
 		return false
 	case errors.Is(err, drivers.ErrControlBlocked):
+		return false
+	case errors.Is(err, drivers.ErrCommandIneligible), errors.Is(err, drivers.ErrCommandSuperseded):
 		return false
 	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
 		return false
