@@ -84,19 +84,13 @@ func (s *server) replaceUpdater(ctx context.Context, target string) error {
 
 	steps := []string{fmt.Sprintf("sleep %d", int(selfReplaceDelay.Seconds()))}
 	// Record the tags this update installed so a later plain `docker compose
-	// up -d` on the host does not resolve :latest and undo it. Skipped, with
-	// the update left intact, if the current .env cannot be read — overwriting
-	// a file we could not see would be worse than the rollback risk.
-	if existing, err := readEnvFile(projectDir); err != nil {
-		slog.Warn("image tags not persisted; a later `docker compose up` may roll this update back",
-			"env", filepath.Join(projectDir, ".env"), "err", err)
+	// up -d` on the host does not undo it or lose Core's matching runtime
+	// identity. Legacy layouts receive a small standard override when safe.
+	if pinStep, err := s.releaseIdentityPinStep(projectDir, target); err != nil {
+		slog.Warn("release identity not persisted; a later `docker compose up` may change or misreport this update",
+			"project", projectDir, "err", err)
 	} else {
-		// Core and the sidecar are the same release, and this only ever runs
-		// after a Core update, so one target pins both.
-		steps = append(steps, envPinScript(projectDir, mergeEnvFile(existing, map[string]string{
-			mainTagEnv:    target,
-			updaterTagEnv: target,
-		})))
+		steps = append(steps, pinStep)
 	}
 	steps = append(steps, "exec docker "+strings.Join(upArgs, " "))
 	script := strings.Join(steps, "; ")

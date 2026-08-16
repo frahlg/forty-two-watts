@@ -13,6 +13,8 @@ import (
 const composeWithUpdater = `services:
   ftw:
     image: ghcr.io/srcfl/ftw:${FTW_IMAGE_TAG:-latest}
+    environment:
+      FTW_IMAGE_TAG: ${FTW_IMAGE_TAG:-}
     volumes:
       - ./data:/app/data
   ftw-optimizer:
