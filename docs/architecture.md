@@ -188,7 +188,9 @@ The properties that matter:
   and later ones by the app's pinned static key;
 - the relay forwards encrypted frames and holds no keys. The handle the box
   joins under is derived per epoch from the rendezvous secret, so it rotates
-  hourly and gives the relay operator nothing stable to key a household on;
+  hourly and leaves no stable household ID in the protocol. The relay still
+  sees source IP, timing and connection continuity, which can correlate a
+  household across handle rotations;
 - the machine identity in [`go/internal/gatewayidentity`](../go/internal/gatewayidentity)
   is separate and does not authenticate this connection. It resolves to a
   hardware-protected P-256 key where the hardware exists and a bound software

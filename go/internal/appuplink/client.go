@@ -1,5 +1,5 @@
-// Package appuplink keeps the box's outbound connection to the blind relay,
-// and runs the app sessions that arrive over it.
+// Package appuplink keeps the box's outbound connection to the content-blind
+// relay, and runs the app sessions that arrive over it.
 //
 // The relay is the only remote path between a box and a phone, and it cannot
 // read a watt: it joins one box uplink to a handful of browser streams under a
@@ -38,7 +38,8 @@ import (
 
 // Endpoint is the production relay. Not configurable: a box that can be
 // pointed at another relay is a box a support call can point at an attacker's,
-// and the relay is blind anyway, so there is nothing to gain by choosing one.
+// and the relay is fixed by the protocol, so there is nothing to gain by
+// choosing one.
 const Endpoint = "wss://relay.ftw.energy"
 
 // The relay's close codes and control words. Held here rather than shared with
@@ -73,13 +74,11 @@ const (
 	// rotateJitter is how long a box waits before rejoining after an epoch
 	// turned over.
 	//
-	// Not zero, and this is the point of it. The relay closes the old handle
-	// and the new one appears when the peer comes back; returning instantly
-	// lets a relay watching the clock line the two epochs up by timing alone,
-	// which is the correlation rotation exists to prevent. The relay already
-	// spreads the closes across five minutes, so a few seconds here is enough
-	// to put other households' rotations in between — and short enough that
-	// the phone in someone's hand does not notice.
+	// Not zero. The relay closes the old handle and the new one appears when
+	// the peer comes back; returning instantly gives it a stronger timing link
+	// between the two protocol handles. The relay already spreads the closes
+	// across five minutes, so a few seconds here weakens that signal without
+	// making the phone wait. It cannot hide IP or connection continuity.
 	rotateJitter = 5 * time.Second
 
 	// correctionLimit is how many epoch corrections we take at full speed

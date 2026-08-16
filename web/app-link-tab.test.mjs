@@ -51,21 +51,28 @@ describe("the app tab", () => {
   });
 
   it("creates the config section when it is missing entirely", () => {
-    // A box that has never had app_link in its YAML — the state Fredrik's
-    // box was in. Without this the checkbox writes into nothing and Save
-    // posts a config with no app_link key at all.
+    // Load normally supplies the default. Keep the tab safe for partial config
+    // fixtures and old API responses too, or the checkbox writes into nothing.
     const config = {};
     render(config);
     // Compared field by field: the object is built inside the vm sandbox, so
     // its prototype comes from another realm and deepStrictEqual refuses it.
     assert.ok(config.app_link, "app_link was not created");
-    assert.equal(config.app_link.enabled, false);
+    assert.equal(config.app_link.enabled, true);
   });
 
   it("says a restart is needed", () => {
     // Not buried in a tooltip: this is the one thing about this setting that
     // does not behave like the rest of the page.
     assert.match(render({}), /[Rr]estart/);
+  });
+
+  it("states both the encrypted content and visible connection metadata", () => {
+    const html = render({});
+    assert.match(html, /end-to-end encrypted/);
+    assert.match(html, /IP/);
+    assert.match(html, /when the box is connected/);
+    assert.match(html, /cannot read/);
   });
 
   it("starts with the pairing button disabled", () => {

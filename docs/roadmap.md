@@ -76,8 +76,9 @@ planning, and does not.
 
 The box holds one outbound WSS connection to `wss://relay.ftw.energy`, joining
 under a handle derived per epoch from the rendezvous secret with HKDF-SHA256.
-The handle rotates hourly, so the relay operator cannot follow a household from
-one hour to the next, and there is no DNS alias or other stable per-box name.
+The handle rotates hourly, so the protocol exposes no stable per-box name or
+DNS alias. The relay still sees source IP, timing and connection continuity,
+which can correlate a household across the hour boundary.
 An epoch correction from the relay is read as a clock correction and clamped;
 it is never an order.
 

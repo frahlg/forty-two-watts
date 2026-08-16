@@ -438,7 +438,8 @@ func (a *appPlans) CeilingW() *int64 {
 	return &ceiling
 }
 
-// startAppLink connects the box to the app relay, if the site asked for it.
+// startAppLink connects the box to the app relay when its loaded config leaves
+// the link enabled. Config defaults an omitted app_link section on.
 //
 // It returns the enrollment identity whether or not the uplink runs, because
 // the QR code on the lid is minted from it and a box with the link switched
@@ -462,7 +463,7 @@ func startAppLink(
 	gateway *lateAPI,
 	webPush *notifications.WebPush,
 ) (*appenroll.Identity, *appuplink.Uplink, bool, error) {
-	enabled := cfg != nil && cfg.AppLink != nil && cfg.AppLink.Enabled
+	enabled := cfg != nil && cfg.AppLink.On()
 
 	enroll, err := appenroll.LoadOrCreate(identityKeyPath)
 	if err != nil {

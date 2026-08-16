@@ -315,8 +315,8 @@ func TestAWrongPairingCodeIsRefused(t *testing.T) {
 }
 
 // The box joins under the handle its own secret derives, not under anything
-// the relay chose. If this ever became a constant the relay could correlate a
-// household across years.
+// the relay chose. If this ever became a constant the protocol would hand the
+// relay a household identifier that lasts for years.
 func TestTheBoxJoinsUnderTheDerivedHandle(t *testing.T) {
 	r := newRig(t, 481234)
 
@@ -367,9 +367,9 @@ func TestAnImplausibleEpochCorrectionIsIgnored(t *testing.T) {
 	}
 }
 
-// A box closed at a rotation must not come straight back. The relay would
-// otherwise watch one handle go quiet and another appear in the same
-// millisecond, and link the two epochs by timing alone.
+// A box closed at a rotation must not come straight back. That would give the
+// relay the strongest possible timing link between the old and new protocol
+// handles, even though IP and connection metadata can still correlate them.
 func TestRotationIsNotFollowedInstantly(t *testing.T) {
 	relay := newFakeRelay(481234)
 	defer relay.close()

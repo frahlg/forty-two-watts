@@ -376,7 +376,7 @@
 
   S.tabs.app = {
     render: function (ctx) {
-      if (!ctx.config.app_link) ctx.config.app_link = { enabled: false };
+      if (!ctx.config.app_link) ctx.config.app_link = { enabled: true };
       var enabled = !!ctx.config.app_link.enabled;
       pairingCtx = ctx;
 
@@ -407,9 +407,10 @@
 
       return (
         "<fieldset><legend>The FTW app</legend>" +
-        '<p class="hint">The FTW app talks to this box directly. Turning this on ' +
-        "lets it reach you when you are away from home; nothing readable passes " +
-        "through Sourceful either way.</p>" +
+        '<p class="hint">The FTW app talks to this box directly. Keeping this on ' +
+        "lets it reach you when you are away from home. Readings and commands are " +
+        "end-to-end encrypted. Sourceful can see your IP and when the box is " +
+        "connected, but cannot read them.</p>" +
         '<label><input type="checkbox" id="app-link-enabled" ' +
         'data-checkbox-path="app_link.enabled"' + (enabled ? " checked" : "") +
         "> Let the FTW app connect to this box</label>" +

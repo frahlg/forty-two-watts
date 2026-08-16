@@ -56,15 +56,17 @@ two pairing stories and two things to get right at 1 Hz, for one product.
    commands, not reading.
 
 3. **The relay is `wss://relay.ftw.energy` and holds no keys.** It forwards
-   encrypted frames and cannot read or attribute them. Up to four sessions
-   share one uplink; the relay broadcasts, and the box lets the AEAD decide
-   which session a frame came from, because asking the relay would mean the
-   relay had to know.
+   encrypted frames and cannot read their contents or attribute them from a
+   protocol identity. It still sees source IPs, timing and connection
+   continuity. Up to four sessions share one uplink; the relay broadcasts, and
+   the box lets the AEAD decide which session a frame came from, because asking
+   the relay would mean the relay had to know.
 
 4. **The box's name on the relay rotates hourly.** The join handle is derived
-   per epoch from the rendezvous secret with HKDF-SHA256, so the relay operator
-   cannot follow one household from hour to hour. There is no DNS alias, no
-   three-word host, and nothing stable for the relay to key a household on.
+   per epoch from the rendezvous secret with HKDF-SHA256. This removes the
+   stable protocol handle and DNS alias. It does not stop the relay operator
+   from correlating a continuous or promptly reconnected socket through its IP
+   and timing metadata.
 
 5. **Authority is unchanged, which is the point.** A command carries an expiry
    and preconditions; core revalidates against fresh state before acting. Site
@@ -86,12 +88,11 @@ Home Link working:
 - **`GET /api/home-link/status`, `POST /api/home-link/pairing` and
   `POST /api/home-link/passkeys/revoke` are gone**, along with the LAN UI's
   Remote tab.
-- **There is no pairing surface on the box's own UI yet.** The QR payload is
-  minted at boot but nothing renders it. Until that lands, a site that turns on
-  `app_link` cannot pair a phone from the local UI.
-- **Revocation is coarser.** Home Link could revoke one passkey and leave the
-  others. Today the box can rotate the rendezvous secret, which moves every
-  paired phone at once. Per-device revocation is owed.
+- **Pairing moves to the app tab.** The local UI mints a short-lived owner code
+  for the first phone and viewer codes for sharing. It lists paired phones and
+  can remove one without moving the others.
+- **The last owner cannot remove or demote itself.** A second owner must exist
+  first, so a remote role change cannot leave the home without an owner.
 - **WebAuthn as an on-box capability is gone**, including the signature-counter
   clone check and the emergency fail-closed markers beside `state.db`. If a
   future feature needs a local relying party, it starts from nothing.
@@ -122,8 +123,9 @@ Home Link working:
   this. A box with `app_link.enabled: false` behaves exactly as before.
 - One remote path means one thing to threat-model, one pairing story and one
   place freshness can be got wrong.
-- The relay is now a dumb frame forwarder. It can deny service and it can count
-  connections per handle for an hour. It cannot identify a household, read a
-  reading, or name a device.
-- Per-device revocation and an on-box pairing surface are open work, and the
-  app uplink is not finished until they land.
+- The relay is now a frame forwarder. It can deny service, count connections
+  per handle for an hour and observe IP, timing and connection metadata. It
+  cannot read a reading, name a device from the protocol or decrypt a frame.
+- The app link defaults on when an existing config omits the section. An
+  explicit `app_link.enabled: false` keeps the outbound connection off. An
+  empty `app_link: {}` section also reads as off.

@@ -19,9 +19,10 @@ so no server ever sees it, and afterwards the phone reconnects on its own key â€
 a photographed code cannot pair a second phone. You can remove one paired phone
 at a time from the same tab; removal drops its live session at once. The relay
 holds no keys and cannot read a frame, and the name the box joins under changes
-every hour, so the relay operator cannot tell which household is online or
-follow one across the day. Nothing about local control, setup, history or
-fallback planning changes.
+every hour, so the protocol carries no stable household ID. The relay still
+sees source IP, timing and connection continuity, which can correlate a
+household across those rotations. Nothing about local control, setup, history
+or fallback planning changes.
 
 An existing `home_link:` block in your `config.yaml` is ignored â€” the box boots
 without you editing anything. Home Link's rows in `state.db` are left where

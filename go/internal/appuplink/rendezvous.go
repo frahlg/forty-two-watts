@@ -9,28 +9,30 @@ import (
 
 // The rendezvous handle: what the box and the app call each other on the relay.
 //
-// It is the one piece of metadata the relay unavoidably sees, so what it is
-// made of decides how much the relay learns. A stable handle — a hash of the
-// box's static key, say — would work perfectly and hand the operator a
-// household identifier good for years: every connection, every outage, every
-// holiday, joined up under one string.
+// It is the one piece of protocol metadata the relay unavoidably sees, so what
+// it is made of decides how much the protocol itself reveals. A stable handle
+// — a hash of the box's static key, say — would work perfectly and hand the
+// operator a household identifier good for years: every connection, every
+// outage, every holiday, joined up under one string.
 //
 // So it is derived per epoch from a secret the relay never sees:
 //
 //	handle = HKDF-SHA256(secret, info = "ftw/rendezvous/v1/<epoch>")[0..16]
 //
 // HKDF-Expand is a PRF, so without the secret two epochs' handles are two
-// unrelated strings and there is no function the relay can compute that links
-// them. The relay's only contribution is the epoch *number*, which it
-// announces to everyone equally because it is its own clock.
+// cryptographically unrelated strings and there is no function the relay can
+// compute from the handles alone that links them. This removes a stable
+// protocol identifier; it does not hide source IP, timing or connection
+// continuity. The relay's only contribution to the derivation is the epoch
+// *number*, which it announces to everyone equally because it is its own clock.
 //
 // This must agree byte for byte with srcfl/ftw-webapp
 // src/lib/carrier/rendezvous.ts. Disagreeing means the box and the app sit in
 // two different rooms and nobody's house appears on their phone.
 const (
-	// EpochMs is how long a handle lives. An hour is short enough that a
-	// handle is not a household identifier, and long enough that rotations
-	// are rare next to the reconnects a phone does anyway.
+	// EpochMs is how long a stable protocol handle lives. An hour limits that
+	// identifier's lifetime and keeps rotations rare next to the reconnects a
+	// phone does anyway. Network metadata may still correlate the sockets.
 	EpochMs = 3_600_000
 
 	// HandleBytes is 128 bits: long enough that handles never collide,

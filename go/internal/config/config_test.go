@@ -946,6 +946,46 @@ func TestSlewExplicitDisablePreserved(t *testing.T) {
 	}
 }
 
+func TestAppLinkDefaultsOnAndPreservesOptOut(t *testing.T) {
+	absent := &Config{}
+	applyDefaults(absent)
+	if absent.AppLink == nil || !absent.AppLink.Enabled {
+		t.Fatalf("omitted app_link must default on, got %+v", absent.AppLink)
+	}
+
+	disabled := &Config{AppLink: &AppLink{Enabled: false}}
+	applyDefaults(disabled)
+	if disabled.AppLink.Enabled {
+		t.Fatal("explicit app_link opt-out was overwritten")
+	}
+}
+
+func TestParseAppLinkPreservesExplicitNullOptOut(t *testing.T) {
+	tests := []struct {
+		name    string
+		suffix  string
+		enabled bool
+	}{
+		{name: "omitted", enabled: true},
+		{name: "bare null", suffix: "app_link:\n", enabled: false},
+		{name: "named null", suffix: "app_link: null\n", enabled: false},
+		{name: "empty mapping", suffix: "app_link: {}\n", enabled: false},
+		{name: "explicit false", suffix: "app_link:\n  enabled: false\n", enabled: false},
+		{name: "explicit true", suffix: "app_link:\n  enabled: true\n", enabled: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := Parse([]byte(minimalYAML+tt.suffix), t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := cfg.AppLink.On(); got != tt.enabled {
+				t.Fatalf("app link enabled = %v, want %v", got, tt.enabled)
+			}
+		})
+	}
+}
+
 func TestNotificationsDefaults(t *testing.T) {
 	c := &Config{Notifications: &Notifications{Enabled: false}}
 	applyDefaults(c)

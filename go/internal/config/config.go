@@ -45,12 +45,22 @@ type Config struct {
 	DeviceRepository *DeviceRepository  `yaml:"device_repository,omitempty" json:"device_repository,omitempty"`
 }
 
-// AppLink enables the outbound connection the FTW app reaches this box
-// through. One switch: the relay is blind and fixed by the protocol, so there
-// is no endpoint to choose and no transport to pick. A question the site owner
-// cannot answer is the wrong question.
+// AppLink controls the outbound connection the FTW app reaches this box
+// through. It defaults on when the section is absent; an explicit false is the
+// opt-out. One switch is enough because the relay is content-blind and fixed
+// by the protocol, so there is no endpoint or transport to choose.
 type AppLink struct {
 	Enabled bool `yaml:"enabled" json:"enabled"`
+}
+
+// On is the single reading of the app-link switch. A nil section means an old
+// config that has never made the choice, so it follows the default. An empty
+// section has Enabled's false zero value and remains an opt-out.
+func (a *AppLink) On() bool {
+	if a == nil {
+		return true
+	}
+	return a.Enabled
 }
 
 // FleetPing configures the once-a-day count of how many boxes run FTW, on
@@ -1265,9 +1275,19 @@ func Load(path string) (*Config, error) {
 
 // Parse parses config bytes and validates. baseDir resolves driver Lua paths.
 func Parse(data []byte, baseDir string) (*Config, error) {
-	var c Config
-	if err := yaml.Unmarshal(data, &c); err != nil {
+	var doc yaml.Node
+	if err := yaml.Unmarshal(data, &doc); err != nil {
 		return nil, fmt.Errorf("yaml: %w", err)
+	}
+	var c Config
+	if err := doc.Decode(&c); err != nil {
+		return nil, fmt.Errorf("yaml: %w", err)
+	}
+	// An omitted app_link section follows the new default. An explicit YAML
+	// null was a valid opt-out before that default changed, so retain it as an
+	// explicit disabled section instead of letting applyDefaults turn it on.
+	if topLevelYAMLNull(&doc, "app_link") {
+		c.AppLink = &AppLink{Enabled: false}
 	}
 	applyDefaults(&c)
 	if err := c.Validate(); err != nil {
@@ -1275,6 +1295,22 @@ func Parse(data []byte, baseDir string) (*Config, error) {
 	}
 	c.ResolveDriverPaths(baseDir)
 	return &c, nil
+}
+
+func topLevelYAMLNull(doc *yaml.Node, key string) bool {
+	if doc == nil || doc.Kind != yaml.DocumentNode || len(doc.Content) != 1 {
+		return false
+	}
+	root := doc.Content[0]
+	if root.Kind != yaml.MappingNode {
+		return false
+	}
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		if root.Content[i].Value == key {
+			return root.Content[i+1].Tag == "!!null"
+		}
+	}
+	return false
 }
 
 // DriversDirOverride redirects resolution of relative "drivers/<name>.lua"
@@ -1428,6 +1464,13 @@ func applyDefaults(c *Config) {
 				},
 			}}
 		}
+	}
+	if c.AppLink == nil {
+		// The app relay carries only end-to-end encrypted frames under a handle
+		// that changes every hour. It still sees connection metadata. Existing
+		// sites with no app_link section join the supported remote path after
+		// upgrading; an explicit enabled:false block remains the operator opt-out.
+		c.AppLink = &AppLink{Enabled: true}
 	}
 	if c.FleetPing == nil {
 		// Absent means never configured, which is the state every existing

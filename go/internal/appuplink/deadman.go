@@ -88,7 +88,8 @@ type DeadmanSource interface {
 // rendezvous secret over a versioned purpose tag and the subscription id,
 // truncated to 16 bytes — 32 lowercase hex chars, as the contract asks.
 // Deterministic so a reboot claims the same ids it posted; keyed and tagged
-// so the relay can link neither id to a rendezvous handle nor id to id.
+// so the values alone link neither id to a rendezvous handle nor id to id.
+// Source IP and request timing remain visible to the relay.
 func DeadmanID(secret []byte, subscriptionID string) string {
 	mac := hmac.New(sha256.New, secret)
 	mac.Write([]byte("ftw deadman v1\x00" + subscriptionID))
