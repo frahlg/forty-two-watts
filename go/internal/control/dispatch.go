@@ -103,13 +103,14 @@ func (m Mode) IsPlannerMode() bool {
 // stale/missing and the control loop falls back to self_consumption with
 // grid_target=0.
 //
-// Returns (mode_string, grid_target_w, ok). mode_string maps to a Mode
-// constant; the dispatch uses its existing mode logic for HOW batteries
-// respond. The plan is a scheduler, not a regulator.
+// Returns (mode_string, grid_target_w, decision_id, ok). mode_string maps to a
+// Mode constant; the dispatch uses its existing mode logic for HOW batteries
+// respond. decision_id is report metadata only. The plan is a scheduler, not a
+// regulator.
 //
 // Legacy — the new contract (energy-allocation per slot, EMS converts to
 // power) uses SlotDirectiveFunc.
-type PlanTargetFunc func(now time.Time) (string, float64, bool)
+type PlanTargetFunc func(now time.Time) (string, float64, string, bool)
 
 // SlotDirective mirrors mpc.SlotDirective — we redefine here to keep the
 // control package import-cycle free. Populated by main.go's injected
@@ -1196,7 +1197,7 @@ func ComputeDispatch(
 	fuseMaxW float64,
 ) []DispatchTarget {
 	// Each tick reports only the plan identity it actually consulted for its
-	// main battery decision. Legacy grid-target ticks have no such identity.
+	// main battery decision.
 	state.controlSlotDecisionID = ""
 	// ---- Per-slot Wh delivery observability (path-agnostic) ----
 	// Runs on EVERY tick before any mode/short-circuit decision so the
@@ -1419,13 +1420,14 @@ func ComputeDispatch(
 			}
 		}
 		if !useEnergyPath && !arbitrageFamilyIdleSlot && !coverLoadDischargeSlot {
-			var modeStr string
+			var modeStr, decisionID string
 			var gridW float64
 			ok := false
 			if state.PlanTarget != nil {
-				modeStr, gridW, ok = state.PlanTarget(state.now())
+				modeStr, gridW, decisionID, ok = state.PlanTarget(state.now())
 			}
 			if ok {
+				state.controlSlotDecisionID = decisionID
 				effectiveMode = Mode(modeStr)
 				state.SetGridTarget(gridW)
 				state.PlanStale = false
@@ -3557,7 +3559,7 @@ func planHasNonDischargeIntent(state *State) bool {
 		}
 	}
 	if state.PlanTarget != nil {
-		if modeStr, gridW, ok := state.PlanTarget(state.now()); ok {
+		if modeStr, gridW, _, ok := state.PlanTarget(state.now()); ok {
 			switch Mode(modeStr) {
 			case ModeCharge:
 				return true
@@ -4155,7 +4157,7 @@ func planSignIntent(state *State) int {
 		}
 	}
 	if state.PlanTarget != nil {
-		if modeStr, gridW, ok := state.PlanTarget(state.now()); ok {
+		if modeStr, gridW, _, ok := state.PlanTarget(state.now()); ok {
 			switch Mode(modeStr) {
 			case ModeCharge:
 				return +1

@@ -127,7 +127,7 @@ func TestSlewMayNotReopenStalePlanChargeBlock(t *testing.T) {
 	st.SlewRateW = 500
 	st.MinDispatchIntervalS = 0
 	st.SlotDirective = func(time.Time) (SlotDirective, bool) { return SlotDirective{}, false }
-	st.PlanTarget = func(time.Time) (string, float64, bool) { return "", 0, false }
+	st.PlanTarget = func(time.Time) (string, float64, string, bool) { return "", 0, "", false }
 
 	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
 	got := targetsByDriver(targets)

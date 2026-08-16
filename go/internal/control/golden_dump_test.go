@@ -332,8 +332,8 @@ func runGoldenScenarioAt(sc goldenScenario, scenarioNow time.Time, slotDirective
 	}
 	if sc.Inputs.LegacyPlan != nil {
 		lp := *sc.Inputs.LegacyPlan
-		st.PlanTarget = func(_ time.Time) (string, float64, bool) {
-			return lp.Mode, lp.GridW, true
+		st.PlanTarget = func(_ time.Time) (string, float64, string, bool) {
+			return lp.Mode, lp.GridW, "", true
 		}
 	}
 

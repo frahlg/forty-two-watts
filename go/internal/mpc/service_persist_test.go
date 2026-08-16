@@ -188,13 +188,18 @@ func TestReplanCallsSaveDiag(t *testing.T) {
 		got.WeatherRowAvailableAtMs != weatherFetchedAt {
 		t.Fatalf("persisted input provenance = %+v", got)
 	}
-	directive, ok := svc.SlotDirectiveAt(time.UnixMilli(plan.Actions[0].SlotStartMs).Add(time.Second))
+	slotNow := time.UnixMilli(plan.Actions[0].SlotStartMs).Add(time.Second)
+	directive, ok := svc.SlotDirectiveAt(slotNow)
 	if !ok {
 		t.Fatal("SlotDirectiveAt did not return the active plan slot")
 	}
 	if directive.DecisionID != plan.DecisionID || directive.SlotStart.UnixMilli() != plan.Actions[0].SlotStartMs {
 		t.Fatalf("directive identity = (%q, %d), want (%q, %d)",
 			directive.DecisionID, directive.SlotStart.UnixMilli(), plan.DecisionID, plan.Actions[0].SlotStartMs)
+	}
+	if _, _, decisionID, ok := svc.SlotAt(slotNow); !ok || decisionID != plan.DecisionID {
+		t.Fatalf("legacy slot identity = (%q, %t), want (%q, true)",
+			decisionID, ok, plan.DecisionID)
 	}
 }
 

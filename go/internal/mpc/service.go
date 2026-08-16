@@ -561,14 +561,15 @@ func livePVSurplusSoCCapPct(actions []Action, current int, p Params) float64 {
 }
 
 // SlotAt returns the plan's directive for the slot containing `now`.
-// Returns (mode, grid_target_w, ok). Dispatch uses `mode` to select
-// the EMS strategy and `grid_target_w` as the PI setpoint. The plan is
-// a scheduler (decides WHEN); the EMS is the regulator (decides HOW).
+// Returns (mode, grid_target_w, decision_id, ok). Dispatch uses `mode` to
+// select the EMS strategy and `grid_target_w` as the PI setpoint. decision_id
+// identifies the same accepted plan used for that target. The plan is a
+// scheduler (decides WHEN); the EMS is the regulator (decides HOW).
 //
 // Legacy — the new path uses SlotDirectiveAt.
-func (s *Service) SlotAt(now time.Time) (string, float64, bool) {
+func (s *Service) SlotAt(now time.Time) (string, float64, string, bool) {
 	if s == nil {
-		return "", 0, false
+		return "", 0, "", false
 	}
 	s.mu.RLock()
 	p := s.last
@@ -578,19 +579,20 @@ func (s *Service) SlotAt(now time.Time) (string, float64, bool) {
 	}
 	s.mu.RUnlock()
 	if p == nil {
-		return "", 0, false
+		return "", 0, "", false
 	}
 	if time.Since(time.UnixMilli(p.GeneratedAtMs)) > MaxPlanAge {
-		return "", 0, false
+		return "", 0, "", false
 	}
 	nowMs := now.UnixMilli()
 	for _, a := range p.Actions {
 		end := a.SlotStartMs + int64(a.SlotLenMin)*60*1000
 		if nowMs >= a.SlotStartMs && nowMs < end {
-			return actionToSlot(a, params.Mode)
+			mode, gridW, ok := actionToSlot(a, params.Mode)
+			return mode, gridW, p.DecisionID, ok
 		}
 	}
-	return "", 0, false
+	return "", 0, "", false
 }
 
 // actionToSlot translates an MPC action into (mode_string, grid_target_w, true).
