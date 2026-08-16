@@ -13,18 +13,15 @@ behind it no longer exist. The local UI's Remote tab and the
 browser away from home, that stops working on this release and the app is the
 only way back.
 
-**What you get.** One remote path instead of two. The app pairs by scanning the
-box's QR code, which carries the box's key optically so no server ever sees it,
-and afterwards reconnects on its own key — a photographed code cannot pair a
-second phone. The relay holds no keys and cannot read a frame, and the name the
-box joins under changes every hour, so the relay operator cannot tell which
-household is online or follow one across the day. Nothing about local control,
-setup, history or fallback planning changes.
-
-**What is not there yet.** The box mints its pairing code at boot but nothing
-renders it in the local UI, so pairing a phone still needs the terminal.
-Revoking one phone means rotating the rendezvous secret, which re-pairs the
-whole household; per-device revocation is owed.
+**What you get.** One remote path instead of two. In Settings → FTW app, the
+box makes a short-lived, single-use QR code. It carries the box's key optically
+so no server ever sees it, and afterwards the phone reconnects on its own key —
+a photographed code cannot pair a second phone. You can remove one paired phone
+at a time from the same tab; removal drops its live session at once. The relay
+holds no keys and cannot read a frame, and the name the box joins under changes
+every hour, so the relay operator cannot tell which household is online or
+follow one across the day. Nothing about local control, setup, history or
+fallback planning changes.
 
 An existing `home_link:` block in your `config.yaml` is ignored — the box boots
 without you editing anything. Home Link's rows in `state.db` are left where
