@@ -3,16 +3,15 @@ package drivers
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/srcfl/ftw/go/internal/telemetry"
 )
 
-// TestFerroampModbusLoads exercises every lifecycle hook in the new
-// drivers/ferroamp_modbus.lua driver. A no-op Modbus capability is attached
-// so the default-mode write path can be exercised now that driver_default_mode
-// failures are surfaced.
+// TestFerroampModbusLoads exercises telemetry and the read-only command
+// boundary in drivers/ferroamp_modbus.lua.
 func TestFerroampModbusLoads(t *testing.T) {
 	tel := telemetry.NewStore()
 	env := NewHostEnv("ferroamp_modbus", tel).WithModbus(&mockModbus{})
@@ -34,8 +33,8 @@ func TestFerroampModbusLoads(t *testing.T) {
 
 	for _, action := range []string{"battery", "curtail", "curtail_disable", "deinit"} {
 		cmd, _ := json.Marshal(map[string]any{"action": action, "power_w": 1000.0})
-		if err := d.Command(ctx, cmd); err != nil {
-			t.Fatalf("%s cmd: %v", action, err)
+		if err := d.Command(ctx, cmd); err == nil || !strings.Contains(err.Error(), "returned false") {
+			t.Fatalf("%s cmd: got %v, want read-only refusal", action, err)
 		}
 	}
 
@@ -65,6 +64,9 @@ func TestFerroampModbusCatalogEntry(t *testing.T) {
 	}
 	if found.Manufacturer != "Ferroamp" {
 		t.Errorf("manufacturer: got %q want Ferroamp", found.Manufacturer)
+	}
+	if !found.ReadOnly || !found.ReadOnlyDeclared {
+		t.Error("ferroamp-modbus must declare its telemetry-only boundary")
 	}
 	wantProtocols := map[string]bool{"modbus": true}
 	for _, p := range found.Protocols {
