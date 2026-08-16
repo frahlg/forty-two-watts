@@ -72,16 +72,9 @@ jobs:
           # which changesets have already been consumed by past
           # Version PRs (it walks .changeset/ vs CHANGELOG.md).
           fetch-depth: 0
-          # Default GITHUB_TOKEN credentials, persisted for the publish
-          # step's own git ops (ls-remote + tag push). We deliberately do
-          # NOT persist the CI_TOKEN PAT here. The cascade that unblocks the
-          # Version PR's required checks is driven entirely by the changesets
-          # step's GITHUB_TOKEN env (it pushes the branch + opens the PR as
-          # the PAT — see there); persisting a job-wide PAT would only widen
-          # blast radius (readable by npm ci and every later step) and, worse,
-          # its http.extraheader would silently re-auth the publish step's
-          # GITHUB_TOKEN tag push back as the PAT — double-firing
-          # release-assets.yml (which listens on `push: tags`).
+          # Keep the default credential for fetches and stable tag pushes.
+          # The CI_TOKEN only replaces this header for the short
+          # changesets/action step below, after npm ci has completed.
           persist-credentials: true
 
       - name: Setup Node
@@ -93,6 +86,19 @@ jobs:
 
       - name: Install dependencies
         run: npm ci --prefer-offline --no-audit --no-fund
+
+      - name: Use CI token for Version Packages branch
+        env:
+          CI_TOKEN: ${{ secrets.CI_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CI_TOKEN}" ]; then
+            echo "CI_TOKEN is required to update the Version Packages branch." >&2
+            exit 1
+          fi
+          git config --local --unset-all http.https://github.com/.extraheader || true
+          git config --local http.https://github.com/.extraheader \
+            "AUTHORIZATION: basic $(printf 'x-access-token:%s' "${CI_TOKEN}" | base64 | tr -d '\n')"
 
       - name: Create or update Version Packages PR
         id: changesets
@@ -108,20 +114,24 @@ jobs:
           title:  "chore(release): version packages"
           commit: "chore(release): version packages"
         env:
-          # THE load-bearing line. changesets/action uses this token to both
-          # open the Version PR (Octokit) and push its branch, using its own
-          # auth derived from this env var — independent of the checkout
-          # credentials. Using the CI_TOKEN PAT (not the default GITHUB_TOKEN)
-          # means the PR `opened` + `synchronize` events come from a real
-          # account, which GitHub cascades into `pull_request` workflow runs —
-          # so `test.yml` / `changeset-check.yml` fire on the auto-generated
-          # Version PR and its required-checks merge button unblocks on its
-          # own (GITHUB_TOKEN-authored events never cascade — that was the bug).
+          # changesets/action uses this token for its GitHub API calls. Its
+          # git push uses checkout's persisted credential, which the prior
+          # step replaced with this same token.
           #
           # CI_TOKEN should be a fine-grained PAT scoped to THIS repo with
           # `contents: write` + `pull-requests: write` only — nothing here
           # needs broader scope, and a narrow token bounds the blast radius.
           GITHUB_TOKEN: ${{ secrets.CI_TOKEN }}
+
+      - name: Restore default release credential
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git config --local --unset-all http.https://github.com/.extraheader || true
+          git config --local http.https://github.com/.extraheader \
+            "AUTHORIZATION: basic $(printf 'x-access-token:%s' "${GITHUB_TOKEN}" | base64 | tr -d '\n')"
 
       - name: Set up Docker Buildx for stable promotion validation
         if: github.event_name == 'workflow_dispatch' && steps.changesets.outputs.hasChangesets == 'false'
