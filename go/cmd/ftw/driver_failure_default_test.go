@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/srcfl/ftw/go/internal/control"
 	"github.com/srcfl/ftw/go/internal/drivers"
 	"github.com/srcfl/ftw/go/internal/telemetry"
 )
@@ -131,6 +132,49 @@ func TestRefusedCommandsExcludeDriverAndReachTheDefaultOnce(t *testing.T) {
 	}
 }
 
+// The registry closes its own command gate when it cannot confirm the safe
+// default after a failed command. That is stronger evidence than the normal
+// three-refusal heuristic and must reach the shared DriverHealth gate even
+// when the returned error also carries the original command failure.
+func TestRegistryControlBlockImmediatelyExcludesDriver(t *testing.T) {
+	tel := pollingStore(t, "sungrow")
+	tracker := newDriverActuationTracker(tel)
+	now := time.Now()
+	err := errors.Join(
+		errors.New("modbus write refused"),
+		errors.Join(drivers.ErrControlBlocked, errors.New("default mode write refused")),
+	)
+
+	tracker.recordCommandOutcome("sungrow", err, now)
+
+	if tel.DriverHealth("sungrow").IsOnline() {
+		t.Fatal("registry-blocked driver remained eligible for Core control")
+	}
+	assertStringsEqual(t, tracker.update(now, nil), []string{"sungrow"})
+}
+
+// A hybrid inverter may accept its battery setpoint and reject its PV cap in
+// the same tick. The accepted action must not reset the other action's streak.
+func TestHybridActionSuccessDoesNotClearCurtailRefusals(t *testing.T) {
+	tel := pollingStore(t, "hybrid")
+	tracker := newDriverActuationTracker(tel)
+	battery := &stubSender{}
+	curtail := refusingSender("curtail register refused")
+	now := time.Now()
+	payload := []byte(`{"action":"battery","power_w":-2000}`)
+	targets := []control.CurtailTarget{{Driver: "hybrid", LimitW: 2500}}
+
+	for i := 0; i < driverRefusalLimit; i++ {
+		tracker.dispatchCommand(context.Background(), battery, "driver send", "hybrid", payload, time.Second, now)
+		dispatchPVCurtail(context.Background(), curtail, tracker, targets, time.Second, now)
+		now = now.Add(time.Second)
+	}
+
+	if tel.DriverHealth("hybrid").IsOnline() {
+		t.Fatal("accepted battery actions cleared the failed PV-curtail streak")
+	}
+}
+
 // The exclusion must not need an operator to end it: a device can reject
 // writes through a firmware restart and take them again afterwards.
 func TestExcludedDriverIsRetriedAndRecovers(t *testing.T) {
@@ -193,7 +237,6 @@ func TestNonRefusalErrorsDoNotExcludeADriver(t *testing.T) {
 		err  error
 	}{
 		{"observe only", drivers.ErrObserveOnly},
-		{"control blocked", drivers.ErrControlBlocked},
 		{"command deadline", context.DeadlineExceeded},
 		{"tick cancelled", context.Canceled},
 		{"wrapped deadline", &wrappedErr{cause: context.DeadlineExceeded}},

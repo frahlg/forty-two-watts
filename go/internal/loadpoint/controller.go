@@ -40,6 +40,11 @@ type Controller struct {
 	// only that command. See DispatchOutcomeFunc for what it deliberately
 	// does not see. nil disables the reporting entirely.
 	dispatchOutcome DispatchOutcomeFunc
+	// driverOnline is Core's shared DriverHealth.IsOnline gate. A charger
+	// excluded after refused commands must not keep reaching send and clear
+	// its own refusal record before the retry window opens. nil keeps the
+	// controller usable without Core health wiring in narrow tests.
+	driverOnline func(driver string) bool
 
 	// fuseEVMax is the joint fuse-budget allocator's verdict for how much
 	// W this controller may command to the EV this tick. Set by the
@@ -471,6 +476,20 @@ func (c *Controller) SetDispatchOutcome(f DispatchOutcomeFunc) {
 		return
 	}
 	c.dispatchOutcome = f
+}
+
+// SetDriverOnline wires Core's per-driver control eligibility. Returning
+// false preserves observation and schedule state but emits no command or
+// wake side effect for that loadpoint.
+func (c *Controller) SetDriverOnline(f func(driver string) bool) {
+	if c == nil {
+		return
+	}
+	c.driverOnline = f
+}
+
+func (c *Controller) driverCanDispatch(driver string) bool {
+	return c.driverOnline == nil || c.driverOnline(driver)
 }
 
 // SetFuseEVMax wires the joint allocator's verdict from control.State.
@@ -1299,6 +1318,13 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config, d
 	if !wasPlugged {
 		c.resetSurplusSession(lpCfg.ID)
 	}
+	if !c.driverCanDispatch(lpCfg.DriverName) {
+		// Keep the observation above: the UI and session state should still
+		// show the connected car. Only actuation pauses while Core holds the
+		// driver out of control. In particular, do not report a synthetic
+		// outcome here; driverActuationTracker.update owns the timed retry.
+		return
+	}
 	if !dispatchAllowed {
 		// The observation above is deliberately retained: dashboards, SoC
 		// inference and plug/unplug state must stay live while the site-meter
@@ -1578,6 +1604,12 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config, d
 	if c.dispatchOutcome != nil {
 		c.dispatchOutcome(lpCfg.DriverName, sendErr, now)
 	}
+	if !c.driverCanDispatch(lpCfg.DriverName) {
+		// The outcome callback can close Core's health gate synchronously.
+		// Stop this tick here as well: charge_start and the wallbox cycle are
+		// wake side effects of a dispatch that Core has just rejected.
+		return
+	}
 
 	// Auto-wake: if the matched vehicle reports `Stopped` /
 	// `Disconnected` / `Complete` — i.e. it detached mid-session and
@@ -1736,16 +1768,23 @@ func (c *Controller) cycleWallbox(lpID, driverName string) {
 	if driverName == "" || c.send == nil {
 		return
 	}
+	gap := wallboxCycleGap
 	go func() {
 		pauseCmd, _ := json.Marshal(map[string]any{"action": "ev_pause"})
 		resumeCmd, _ := json.Marshal(map[string]any{"action": "ev_resume"})
+		if !c.driverCanDispatch(driverName) {
+			return
+		}
 		if err := c.send(context.Background(), driverName, pauseCmd); err != nil {
 			slog.Warn("loadpoint wallbox-cycle pause failed",
 				"lp", lpID, "driver", driverName, "err", err)
 			return
 		}
 		slog.Info("loadpoint wallbox-cycle: paused", "lp", lpID, "driver", driverName)
-		time.Sleep(wallboxCycleGap)
+		time.Sleep(gap)
+		if !c.driverCanDispatch(driverName) {
+			return
+		}
 		if err := c.send(context.Background(), driverName, resumeCmd); err != nil {
 			slog.Warn("loadpoint wallbox-cycle resume failed",
 				"lp", lpID, "driver", driverName, "err", err)

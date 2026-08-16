@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"sort"
@@ -86,8 +87,15 @@ type driverActuationTracker struct {
 }
 
 type refusalState struct {
-	consecutive int
+	// consecutive is kept per dispatch action. Hybrid inverters can accept
+	// their battery setpoint and reject their PV cap in the same tick; the
+	// accepted battery command must not erase the curtail refusal streak.
+	consecutive map[string]int
 	reason      string
+	// excludedAction is the action that crossed the refusal threshold. It is
+	// left one refusal short when the retry window opens, so that action gets
+	// exactly one trial without coupling its result to another action.
+	excludedAction string
 	// excludedAt is when the driver was last put out of dispatch, and
 	// zero while it is still in. It dates the retry window.
 	excludedAt time.Time
@@ -111,7 +119,7 @@ func (t *driverActuationTracker) dispatchCommand(
 	timeout time.Duration,
 	now time.Time,
 ) {
-	t.recordCommandOutcome(name, sendDriverCommand(ctx, reg, kind, name, payload, timeout), now)
+	t.recordCommandOutcomeFor(name, dispatchAction(payload), sendDriverCommand(ctx, reg, kind, name, payload, timeout), now)
 }
 
 // releaseCommand sends a command that hands a device back to its own control
@@ -136,17 +144,62 @@ func (t *driverActuationTracker) releaseCommand(
 	_ = sendDriverCommand(ctx, reg, kind, name, payload, timeout)
 }
 
-// recordCommandOutcome files the result of one dispatch command. Only a
-// refusal counts; see isCommandRefusal for what does not.
+// recordCommandOutcome is the loadpoint callback. The loadpoint controller
+// reports only ev_set_current, so its action class is known at this boundary.
 func (t *driverActuationTracker) recordCommandOutcome(name string, err error, now time.Time) {
+	t.recordCommandOutcomeFor(name, "ev_set_current", err, now)
+}
+
+// recordCommandOutcomeFor files one dispatch result under its action class.
+// Only a refusal counts; see isCommandRefusal for what does not.
+func (t *driverActuationTracker) recordCommandOutcomeFor(name, action string, err error, now time.Time) {
 	if t == nil || t.tel == nil {
 		return
 	}
+	if action == "" {
+		action = "dispatch"
+	}
 	if err == nil {
-		if _, tracked := t.refusals[name]; tracked {
-			delete(t.refusals, name)
-			t.tel.SetDriverCommandFault(name, false, "")
+		if st, tracked := t.refusals[name]; tracked {
+			// Once excluded, only update's timed retry may reopen the
+			// driver. A later success from the same tick must not bypass it.
+			if st.excludedAt.IsZero() || action != st.excludedAction {
+				delete(st.consecutive, action)
+			}
+			if len(st.consecutive) == 0 {
+				delete(t.refusals, name)
+			} else {
+				t.refusals[name] = st
+			}
+			// A different action may still own the driver-wide exclusion.
+			// Only the action that failed can clear its own record.
+			if st.excludedAt.IsZero() && len(st.consecutive) == 0 {
+				t.tel.SetDriverCommandFault(name, false, "")
+			}
 		}
+		return
+	}
+	if errors.Is(err, drivers.ErrControlBlocked) {
+		// The registry has already closed its command gate because it could
+		// not confirm the autonomous default. Reflect that authoritative
+		// state in DriverHealth immediately. In particular, an error joined
+		// from the original refusal and a failed default recovery must not be
+		// dismissed merely because it also contains ErrControlBlocked.
+		if t.refusals == nil {
+			t.refusals = map[string]refusalState{}
+		}
+		st := t.refusals[name]
+		if st.consecutive == nil {
+			st.consecutive = map[string]int{}
+		}
+		st.consecutive[action] = driverRefusalLimit
+		st.reason = err.Error()
+		st.excludedAction = action
+		if st.excludedAt.IsZero() {
+			st.excludedAt = now
+		}
+		t.refusals[name] = st
+		t.tel.SetDriverCommandFault(name, true, st.reason)
 		return
 	}
 	if !isCommandRefusal(err) {
@@ -156,13 +209,30 @@ func (t *driverActuationTracker) recordCommandOutcome(name string, err error, no
 		t.refusals = map[string]refusalState{}
 	}
 	st := t.refusals[name]
-	st.consecutive++
+	if st.consecutive == nil {
+		st.consecutive = map[string]int{}
+	}
+	st.consecutive[action]++
 	st.reason = err.Error()
-	if st.consecutive >= driverRefusalLimit && st.excludedAt.IsZero() {
+	if st.consecutive[action] >= driverRefusalLimit && st.excludedAt.IsZero() {
+		st.excludedAction = action
 		st.excludedAt = now
 		t.tel.SetDriverCommandFault(name, true, st.reason)
 	}
 	t.refusals[name] = st
+}
+
+func dispatchAction(payload []byte) string {
+	var command struct {
+		Action string `json:"action"`
+	}
+	if json.Unmarshal(payload, &command) != nil {
+		return "dispatch"
+	}
+	if command.Action == "" {
+		return "dispatch"
+	}
+	return command.Action
 }
 
 // update walks every driver that cannot actuate to its autonomous default,
@@ -193,7 +263,10 @@ func (t *driverActuationTracker) update(now time.Time, observeOnly map[string]bo
 		// Retry window is up. Let one command through: a single fresh
 		// refusal puts the driver straight back out, an accepted one
 		// clears the record entirely.
-		st.consecutive = driverRefusalLimit - 1
+		if st.consecutive == nil {
+			st.consecutive = map[string]int{}
+		}
+		st.consecutive[st.excludedAction] = driverRefusalLimit - 1
 		st.excludedAt = time.Time{}
 		t.refusals[name] = st
 		t.tel.SetDriverCommandFault(name, false, "")
@@ -254,8 +327,9 @@ func (t *driverActuationTracker) update(now time.Time, observeOnly map[string]bo
 //
 //   - observe_only: the registry refused on the driver's behalf and never
 //     touched the device. It says nothing about the hardware;
-//   - control blocked: the registry is already holding this driver in its
-//     default and retrying with backoff;
+//   - control blocked: handled before this classifier as an authoritative,
+//     immediate exclusion because the registry is already holding this driver
+//     in its default and retrying with backoff;
 //   - deadline/cancel: a driver wedged in device I/O stops emitting
 //     telemetry too, and the staleness watchdog walks it to its default.
 //     Same reasoning as sendDriverCommand's timeout handling — a slow cloud

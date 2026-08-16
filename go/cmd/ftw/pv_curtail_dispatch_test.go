@@ -123,8 +123,11 @@ func TestAcceptedCurtailClearsTheExclusion(t *testing.T) {
 		t.Fatal("inverter was not excluded")
 	}
 
+	// The health gate keeps normal dispatch out until the timed trial opens.
+	// Mirror the control loop's update-before-dispatch order here.
+	tracker.update(now.Add(driverRefusalRetryInterval), nil)
 	refusing = false
-	dispatchPVCurtail(context.Background(), sender, tracker, targets, time.Second, now)
+	dispatchPVCurtail(context.Background(), sender, tracker, targets, time.Second, now.Add(driverRefusalRetryInterval))
 	if !tel.DriverHealth("sungrow").IsOnline() {
 		t.Fatal("inverter accepted a cap and is still excluded")
 	}

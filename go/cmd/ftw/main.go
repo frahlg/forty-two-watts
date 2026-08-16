@@ -1569,6 +1569,10 @@ func main() {
 		// ev_set_current is reported — see loadpoint.DispatchOutcomeFunc
 		// for the sends that are deliberately not.
 		lpController.SetDispatchOutcome(actuation.recordCommandOutcome)
+		lpController.SetDriverOnline(func(name string) bool {
+			health := tel.DriverHealth(name)
+			return health != nil && health.IsOnline()
+		})
 		// Wire the site fuse so the per-phase EV clamp and the
 		// phase-split derivation can use the actual site voltage and
 		// breaker rating instead of hard-coding 230 V × 16 A.

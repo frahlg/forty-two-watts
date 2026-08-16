@@ -57,6 +57,10 @@ func evController(t *testing.T, tel *telemetry.Store, driver string, send loadpo
 	tracker := newDriverActuationTracker(tel)
 	c := loadpoint.NewController(mgr, plan, telFn, send)
 	c.SetDispatchOutcome(tracker.recordCommandOutcome)
+	c.SetDriverOnline(func(name string) bool {
+		health := tel.DriverHealth(name)
+		return health != nil && health.IsOnline()
+	})
 	return c, tracker
 }
 
@@ -105,7 +109,7 @@ func TestRecoveringLoadpointDriverIsCountedAgain(t *testing.T) {
 		}
 		return nil
 	})
-	c, _ := evController(t, tel, "easee", send, now)
+	c, tracker := evController(t, tel, "easee", send, now)
 
 	for i := 0; i < driverRefusalLimit; i++ {
 		c.Tick(context.Background(), now.Add(time.Duration(i)*5*time.Second))
@@ -116,6 +120,14 @@ func TestRecoveringLoadpointDriverIsCountedAgain(t *testing.T) {
 
 	refusing = false
 	c.Tick(context.Background(), now.Add(time.Minute))
+	if tel.DriverHealth("easee").IsOnline() {
+		t.Fatal("excluded charger bypassed its retry window")
+	}
+
+	excludedAt := now.Add(time.Duration(driverRefusalLimit-1) * 5 * time.Second)
+	retryAt := excludedAt.Add(driverRefusalRetryInterval)
+	tracker.update(retryAt, nil)
+	c.Tick(context.Background(), retryAt)
 	if !tel.DriverHealth("easee").IsOnline() {
 		t.Fatal("charger accepted a setpoint and is still excluded")
 	}

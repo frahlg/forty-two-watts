@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -131,6 +132,125 @@ func TestAcceptedEVSetCurrentIsReported(t *testing.T) {
 	_, errs := log.reported()
 	if len(errs) != 1 || errs[0] != nil {
 		t.Fatalf("accepted ev_set_current reported as %v", errs)
+	}
+}
+
+// Core's command-fault state is a dispatch gate, not just a planning hint.
+// Observation stays live while an excluded charger waits for its timed retry,
+// but no setpoint or success outcome may leak through and clear the fault.
+func TestOfflineDriverSkipsDispatchButKeepsObservation(t *testing.T) {
+	now := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
+	sender := &outcomeSender{}
+	c, cfg, log := outcomeFixture(t, now, sender)
+	c.SetDriverOnline(func(string) bool { return false })
+
+	c.Tick(context.Background(), now)
+
+	if calls := sender.sent(); len(calls) != 0 {
+		t.Fatalf("offline charger received dispatch: %+v", calls)
+	}
+	if drivers, _ := log.reported(); len(drivers) != 0 {
+		t.Fatalf("offline charger produced a synthetic success outcome: %v", drivers)
+	}
+	state, ok := c.manager.State(cfg.ID)
+	if !ok || !state.PluggedIn {
+		t.Fatalf("offline dispatch gate discarded the live plug observation: %+v, ok=%v", state, ok)
+	}
+}
+
+// ev_set_current can be the call that crosses Core's refusal threshold. The
+// outcome callback closes DriverHealth synchronously, so this same tick must
+// not continue into a vehicle wake or a charger contactor cycle.
+func TestDispatchFaultStopsWakeWorkInTheSameTick(t *testing.T) {
+	now := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
+	sender := &outcomeSender{}
+	c, cfg, _ := outcomeFixture(t, now, sender)
+	var online atomic.Bool
+	online.Store(true)
+	c.SetDriverOnline(func(string) bool { return online.Load() })
+	c.SetDispatchOutcome(func(string, error, time.Time) { online.Store(false) })
+	c.SetVehicleStatus(func(string) (string, string, bool) {
+		return "tesla", "Stopped", true
+	})
+	oldGap := wallboxCycleGap
+	wallboxCycleGap = 0
+	t.Cleanup(func() { wallboxCycleGap = oldGap })
+
+	c.Tick(context.Background(), now)
+	// Old behavior queued ev_pause/ev_resume after sending charge_start.
+	// Give that goroutine time to run so absence covers async work too.
+	time.Sleep(20 * time.Millisecond)
+
+	sent := sender.sent()
+	if len(sent) != 1 || sent[0].driver != cfg.DriverName || sent[0].action != "ev_set_current" {
+		t.Fatalf("wake work escaped after dispatch closed health: %+v", sent)
+	}
+	if sent[0].powerW <= 0 {
+		t.Fatalf("test did not create a real wake condition: %+v", sent[0])
+	}
+	state, ok := c.manager.State(cfg.ID)
+	if !ok || !state.PluggedIn {
+		t.Fatalf("post-dispatch health gate discarded observation: %+v, ok=%v", state, ok)
+	}
+}
+
+// A cycle runs off-thread. Health can close after ev_pause but before
+// ev_resume, so each physical send needs its own current check.
+func TestWallboxCycleChecksHealthBeforeEachSend(t *testing.T) {
+	var online atomic.Bool
+	online.Store(true)
+	var checks atomic.Int32
+	pauseSeen := make(chan struct{})
+	releasePause := make(chan struct{})
+	secondCheck := make(chan struct{})
+	var pauseOnce, checkOnce sync.Once
+	var callsMu sync.Mutex
+	var calls []string
+	send := SenderFunc(func(_ context.Context, _ string, payload []byte) error {
+		var command struct {
+			Action string `json:"action"`
+		}
+		if err := json.Unmarshal(payload, &command); err != nil {
+			return err
+		}
+		callsMu.Lock()
+		calls = append(calls, command.Action)
+		callsMu.Unlock()
+		if command.Action == "ev_pause" {
+			pauseOnce.Do(func() { close(pauseSeen) })
+			<-releasePause
+		}
+		return nil
+	})
+	c := NewController(NewManager(), nil, nil, send)
+	c.SetDriverOnline(func(string) bool {
+		if checks.Add(1) == 2 {
+			checkOnce.Do(func() { close(secondCheck) })
+		}
+		return online.Load()
+	})
+	oldGap := wallboxCycleGap
+	wallboxCycleGap = 0
+	t.Cleanup(func() { wallboxCycleGap = oldGap })
+
+	c.cycleWallbox("garage", "easee")
+	select {
+	case <-pauseSeen:
+	case <-time.After(2 * time.Second):
+		t.Fatal("wallbox cycle never reached ev_pause")
+	}
+	online.Store(false)
+	close(releasePause)
+	select {
+	case <-secondCheck:
+	case <-time.After(2 * time.Second):
+		t.Fatal("wallbox cycle never rechecked health before ev_resume")
+	}
+
+	callsMu.Lock()
+	defer callsMu.Unlock()
+	if len(calls) != 1 || calls[0] != "ev_pause" {
+		t.Fatalf("offline cycle sent after pause: %v", calls)
 	}
 }
 
