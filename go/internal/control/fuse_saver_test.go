@@ -1152,6 +1152,117 @@ func TestDeadbandExitCapsPerPhaseReliefAtExportCeiling(t *testing.T) {
 	}
 }
 
+func TestDeadbandExitFindsCapCombinationWithinExportBudget(t *testing.T) {
+	const (
+		gridW       = 9500.0
+		importLimit = 500.0
+		exportLimit = 500.0
+		fuseMaxW    = 11040.0
+		maxChargeW  = 1000.0
+	)
+	store := telemetry.NewStore()
+	store.Update("meter", telemetry.DerMeter, gridW, nil, nil)
+	store.DriverHealthMut("meter").RecordSuccess()
+	setBatteryLiveW(store, "a", 5000, 0.02) // 4 kW discrete cap relief.
+	setBatteryLiveW(store, "b", 7000, 0.02) // 6 kW discrete cap relief.
+	setBatteryLiveW(store, "c", 8000, 0.02) // 7 kW discrete cap relief.
+	state := NewState(0, 50, "meter")
+	state.PeakImportCeilingW = importLimit
+	state.MaxExportW = exportLimit
+	state.DriverLimits = map[string]PowerLimits{
+		"a": {MaxChargeW: maxChargeW, MaxDischargeW: 10000},
+		"b": {MaxChargeW: maxChargeW, MaxDischargeW: 10000},
+		"c": {MaxChargeW: maxChargeW, MaxDischargeW: 10000},
+	}
+	caps := map[string]float64{"a": 10000, "b": 10000, "c": 10000}
+
+	out := fuseSaverFromLivePower(store, state, caps, fuseMaxW)
+	if len(out) != 2 || out[0].Driver != "a" || out[1].Driver != "b" {
+		t.Fatalf("got %+v, want the 4+6 kW covering subset", out)
+	}
+	for _, target := range out {
+		if math.Abs(target.TargetW-maxChargeW) > 1 || !target.Clamped {
+			t.Fatalf("unsafe cap target: %+v", target)
+		}
+	}
+	if postGridW := gridW - 10000; math.Abs(postGridW-(-exportLimit)) > 1 {
+		t.Fatalf("post-dispatch grid = %.0f W, want export ceiling %.0f W", postGridW, -exportLimit)
+	}
+}
+
+func TestDeadbandExitChoosesCapWithEnoughContinuousHeadroom(t *testing.T) {
+	const (
+		gridW       = 5000.0
+		reliefW     = 10000.0
+		exportLimit = 5000.0
+		fuseMaxW    = 11040.0
+	)
+	phaseData, _ := json.Marshal(map[string]any{
+		"l1_a": 16 + reliefW/(3*230),
+		"l2_a": 4.0,
+		"l3_a": 4.0,
+	})
+	store := telemetry.NewStore()
+	store.Update("meter", telemetry.DerMeter, gridW, nil, phaseData)
+	store.DriverHealthMut("meter").RecordSuccess()
+	setBatteryLiveW(store, "large-step", 9500, 0.02)
+	setBatteryLiveW(store, "useful-room", 5000, 0.6)
+
+	state := NewState(0, 50, "meter")
+	state.SiteFuseAmps = 16
+	state.SiteFuseVoltage = 230
+	state.SiteFusePhases = 3
+	state.MaxExportW = exportLimit
+	state.DriverLimits = map[string]PowerLimits{
+		"large-step":  {MaxChargeW: 500, MaxDischargeW: 10000},
+		"useful-room": {MaxChargeW: 1000, MaxDischargeW: 10000},
+	}
+	caps := map[string]float64{"large-step": 10000, "useful-room": 10000}
+
+	out := fuseSaverFromLivePower(store, state, caps, fuseMaxW)
+	if len(out) != 1 || out[0].Driver != "useful-room" {
+		t.Fatalf("got %+v, want the smaller cap with enough continuous headroom", out)
+	}
+	if math.Abs(out[0].TargetW-(-5000)) > 1 {
+		t.Fatalf("target = %.0f W, want -5000 W at the export ceiling", out[0].TargetW)
+	}
+	if postGridW := gridW - 5000 + out[0].TargetW; math.Abs(postGridW-(-exportLimit)) > 1 {
+		t.Fatalf("post-dispatch grid = %.0f W, want export ceiling %.0f W", postGridW, -exportLimit)
+	}
+}
+
+func TestDeadbandExitCombinesCapsInLargeFleet(t *testing.T) {
+	const (
+		fuseMaxW = 11040.0
+		gridW    = fuseMaxW + 3000
+	)
+	store := telemetry.NewStore()
+	store.Update("meter", telemetry.DerMeter, gridW, nil, nil)
+	store.DriverHealthMut("meter").RecordSuccess()
+	state := NewState(0, 50, "meter")
+	state.DriverLimits = make(map[string]PowerLimits)
+	caps := make(map[string]float64)
+	for i := 0; i < 13; i++ {
+		name := fmt.Sprintf("bat-%02d", i)
+		setBatteryLiveW(store, name, 2000, 0.02)
+		state.DriverLimits[name] = PowerLimits{MaxChargeW: 1000, MaxDischargeW: 10000}
+		caps[name] = 10000
+	}
+
+	out := fuseSaverFromLivePower(store, state, caps, fuseMaxW)
+	if len(out) != 2 || out[0].Driver != "bat-00" || out[1].Driver != "bat-01" {
+		t.Fatalf("got %+v, want the first two deterministic cap candidates", out)
+	}
+	for _, target := range out {
+		if math.Abs(target.TargetW-500) > 1 || !target.Clamped {
+			t.Fatalf("target = %+v, want +500 W after cap and shared relief", target)
+		}
+	}
+	if postGridW := gridW - 4000 + 1000; math.Abs(postGridW-fuseMaxW) > 1 {
+		t.Fatalf("post-dispatch grid = %.0f W, want fuse ceiling %.0f W", postGridW, fuseMaxW)
+	}
+}
+
 func TestDeadbandExitEmitsCapClampWhenItAloneClearsFuseOverload(t *testing.T) {
 	const (
 		gridW        = 17040.0

@@ -4300,32 +4300,54 @@ func fleetAtLivePower(
 // for an unsafe intermediate target. Select the smallest safe set that covers
 // the required relief, and leave all other out-of-range readings alone.
 //
-// The sort makes the selected commands independent of map iteration. For
-// different cap deltas, prefer the smallest cap change that clears the
-// remaining relief; otherwise take the largest available change first.
-func fuseSafeBaselineForRelief(raw, safe []DispatchTarget, requiredRelief, maxRelief float64) []DispatchTarget {
+// The sort makes the selected commands independent of map iteration. Search
+// the small home-battery set for the least cap relief whose remaining safe
+// travel can cover the need without crossing the export budget. If no subset
+// covers it, keep the set that can deliver the most total relief. Large
+// malformed fleets fail closed instead of doing unbounded work in the control
+// tick.
+func fuseSafeBaselineForRelief(
+	raw, safe []DispatchTarget,
+	batteryReadings map[string]*telemetry.DerReading,
+	limits map[string]PowerLimits,
+	driverCapacities map[string]float64,
+	requiredRelief, maxRelief float64,
+) []DispatchTarget {
 	rawByDriver := make(map[string]DispatchTarget, len(raw))
 	for _, t := range raw {
 		rawByDriver[t.Driver] = t
 	}
 
 	type candidate struct {
-		target DispatchTarget
-		relief float64
+		target   DispatchTarget
+		relief   float64
+		headroom float64
 	}
 	baseline := make([]DispatchTarget, 0, len(safe))
 	candidates := make([]candidate, 0, len(safe))
+	var baselineHeadroom float64
 	for _, target := range safe {
 		rawTarget, ok := rawByDriver[target.Driver]
 		if !ok {
 			continue
 		}
+		var headroom float64
+		if driverCapacities[target.Driver] > 0 {
+			if reading := batteryReadings[target.Driver]; reading != nil {
+				lower, _ := fuseTargetBounds(reading, limits[target.Driver])
+				headroom = target.TargetW - lower
+				if headroom < 0 {
+					headroom = 0
+				}
+			}
+		}
 		relief := rawTarget.TargetW - target.TargetW
 		if relief <= 0 {
 			baseline = append(baseline, target)
+			baselineHeadroom += headroom
 			continue
 		}
-		candidates = append(candidates, candidate{target: target, relief: relief})
+		candidates = append(candidates, candidate{target: target, relief: relief, headroom: headroom})
 	}
 
 	sort.Slice(baseline, func(i, j int) bool {
@@ -4338,35 +4360,127 @@ func fuseSafeBaselineForRelief(raw, safe []DispatchTarget, requiredRelief, maxRe
 		return candidates[i].relief < candidates[j].relief
 	})
 
-	for remaining, budget := requiredRelief, maxRelief; remaining > 0 && budget > 0 && len(candidates) > 0; {
-		pick := -1
-		// A single safe cap that covers the remaining relief avoids taking
-		// control of another externally moving battery. The candidates are
-		// sorted by cap delta, so the first one is the least over-correction.
-		for i, c := range candidates {
-			if c.relief >= remaining && c.relief <= budget {
-				pick = i
-				break
-			}
-		}
-		if pick == -1 {
-			// No one safe cap clears the remainder. Use the largest step that
-			// still fits inside the export budget. A larger discrete clamp
-			// would trade an import-side fuse event for an export-side one.
-			for i := len(candidates) - 1; i >= 0; i-- {
-				if candidates[i].relief <= budget {
-					pick = i
-					break
+	const maxExactCandidates = 12
+	selected := uint64(0)
+	singleCandidate := -1
+	if len(candidates) <= maxExactCandidates {
+		const epsilon = 1e-9
+		goal := math.Min(requiredRelief, maxRelief)
+		bestCoverRelief := math.Inf(1)
+		bestPartialDelivered := -1.0
+		bestPartialRelief := math.Inf(1)
+		var bestCover, bestPartial uint64
+		for mask := uint64(0); mask < uint64(1)<<len(candidates); mask++ {
+			var relief, headroom float64
+			for i, c := range candidates {
+				if mask&(uint64(1)<<i) != 0 {
+					relief += c.relief
+					headroom += c.headroom
 				}
 			}
-			if pick == -1 {
+			if relief > maxRelief+epsilon {
+				continue
+			}
+			delivered := relief + baselineHeadroom + headroom
+			if delivered > maxRelief {
+				delivered = maxRelief
+			}
+			switch {
+			case delivered+epsilon >= goal:
+				if relief < bestCoverRelief-epsilon || (math.Abs(relief-bestCoverRelief) <= epsilon && mask < bestCover) {
+					bestCoverRelief = relief
+					bestCover = mask
+				}
+			case delivered > bestPartialDelivered+epsilon ||
+				(math.Abs(delivered-bestPartialDelivered) <= epsilon &&
+					(relief < bestPartialRelief-epsilon ||
+						(math.Abs(relief-bestPartialRelief) <= epsilon && mask < bestPartial))):
+				bestPartialDelivered = delivered
+				bestPartialRelief = relief
+				bestPartial = mask
+			}
+		}
+		selected = bestCover
+		if math.IsInf(bestCoverRelief, 1) {
+			selected = bestPartial
+		}
+	} else {
+		// Keep large fleets bounded while still allowing several small cap
+		// steps to clear one fuse event. Each state records discrete relief and
+		// total deliverable relief (cap steps plus continuous safe travel).
+		// States with more discrete relief and no more delivery are discarded.
+		// A fixed frontier cap bounds work even for a malformed configuration.
+		type selectionNode struct {
+			candidate int
+			previous  *selectionNode
+		}
+		type selectionState struct {
+			relief    float64
+			delivered float64
+			selected  *selectionNode
+		}
+		const maxFrontierStates = 512
+		const epsilon = 1e-9
+		goal := math.Min(requiredRelief, maxRelief)
+		frontier := []selectionState{{delivered: math.Min(baselineHeadroom, maxRelief)}}
+		for i, c := range candidates {
+			next := make([]selectionState, 0, len(frontier)*2)
+			next = append(next, frontier...)
+			for _, state := range frontier {
+				relief := state.relief + c.relief
+				if relief > maxRelief+epsilon {
+					continue
+				}
+				delivered := state.delivered + c.relief + c.headroom
+				if delivered > maxRelief {
+					delivered = maxRelief
+				}
+				next = append(next, selectionState{
+					relief:    relief,
+					delivered: delivered,
+					selected:  &selectionNode{candidate: i, previous: state.selected},
+				})
+			}
+			sort.SliceStable(next, func(i, j int) bool {
+				if next[i].relief == next[j].relief {
+					return next[i].delivered > next[j].delivered
+				}
+				return next[i].relief < next[j].relief
+			})
+			pruned := next[:0]
+			bestDelivered := -1.0
+			for _, state := range next {
+				if state.delivered <= bestDelivered+epsilon {
+					continue
+				}
+				pruned = append(pruned, state)
+				bestDelivered = state.delivered
+			}
+			if len(pruned) > maxFrontierStates {
+				bounded := make([]selectionState, 0, maxFrontierStates)
+				for j := 0; j < maxFrontierStates; j++ {
+					idx := j * (len(pruned) - 1) / (maxFrontierStates - 1)
+					bounded = append(bounded, pruned[idx])
+				}
+				pruned = bounded
+			}
+			frontier = pruned
+		}
+		choice := frontier[len(frontier)-1]
+		for _, state := range frontier {
+			if state.delivered+epsilon >= goal {
+				choice = state
 				break
 			}
 		}
-		baseline = append(baseline, candidates[pick].target)
-		remaining -= candidates[pick].relief
-		budget -= candidates[pick].relief
-		candidates = append(candidates[:pick], candidates[pick+1:]...)
+		for node := choice.selected; node != nil; node = node.previous {
+			baseline = append(baseline, candidates[node.candidate].target)
+		}
+	}
+	for i, c := range candidates {
+		if i == singleCandidate || (i < maxExactCandidates && selected&(uint64(1)<<i) != 0) {
+			baseline = append(baseline, c.target)
+		}
 	}
 
 	sort.Slice(baseline, func(i, j int) bool {
@@ -4450,7 +4564,15 @@ func fuseSaverFromLivePower(
 	}
 	_, _, predictedRaw := predictedGridFromSnapshot(rawLive, batteryReadings, meter)
 	maxRelief := predictedRaw + state.effectiveExportCeilingW(fuseMaxW)
-	safeBaseline = fuseSafeBaselineForRelief(rawLive, safeBaseline, requiredRelief, maxRelief)
+	safeBaseline = fuseSafeBaselineForRelief(
+		rawLive,
+		safeBaseline,
+		batteryReadings,
+		state.DriverLimits,
+		driverCapacities,
+		requiredRelief,
+		maxRelief,
+	)
 	if len(safeBaseline) == 0 {
 		return nil
 	}
