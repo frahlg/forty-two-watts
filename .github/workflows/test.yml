@@ -54,48 +54,17 @@ jobs:
             if [ -z "${BASE_SHA}" ] || [[ "${BASE_SHA}" =~ ^0+$ ]]; then
               BASE_SHA="$(git rev-parse HEAD^)"
             fi
-            while IFS= read -r file; do
-              [ -n "${file}" ] || continue
-              case "${file}" in
-                # contract/ is here because the Go suite is what checks the
-                # generated constants against the registry. Without it, a pull
-                # request touching only contract/registry.yaml selected no
-                # suite at all — and TestContractGenIsCurrent, the one test
-                # that catches a stale contract_gen.go, never ran.
-                go/*|contract/*|drivers/*|config*.yaml|Dockerfile|Dockerfile.updater|.dockerignore)
-                  core=true
-                  ;;
-                optimizer/*|Dockerfile.optimizer|go/internal/mpc/*|go/cmd/ftw/main.go)
-                  optimizer=true
-                  ;;
-                web/*|package.json|package-lock.json)
-                  web=true
-                  ;;
-                drivers/*.lua|drivers/BUNDLED_SOURCE.json|scripts/sync-bundled-drivers.sh)
-                  drivers=true
-                  ;;
-                Dockerfile|Dockerfile.optimizer|docker-compose*.yml|scripts/enable-modular-stack.sh|scripts/migrate-legacy-compose.sh|scripts/test-modular-compose.sh|scripts/test-container-boundaries.sh|scripts/install-macos.sh)
-                  compose=true
-                  ;;
-                Makefile|.github/workflows/test.yml)
-                  core=true
-                  optimizer=true
-                  web=true
-                  drivers=true
-                  compose=true
-                  ;;
+            mapfile -t changed_paths < <(git diff --name-only "${BASE_SHA}"..."${HEAD_SHA}")
+            printf '%s\n' "${changed_paths[@]}" | bash .github/scripts/classify-test-changes.sh > "${RUNNER_TEMP}/test-paths"
+            while IFS='=' read -r key value; do
+              case "${key}" in
+                core) core="${value}" ;;
+                optimizer) optimizer="${value}" ;;
+                web) web="${value}" ;;
+                drivers) drivers="${value}" ;;
+                compose) compose="${value}" ;;
               esac
-              case "${file}" in
-                optimizer/*|Dockerfile.optimizer|go/internal/mpc/*|go/cmd/ftw/main.go)
-                  optimizer=true
-                  ;;
-              esac
-              case "${file}" in
-                drivers/*.lua)
-                  drivers=true
-                  ;;
-              esac
-            done < <(git diff --name-only "${BASE_SHA}"..."${HEAD_SHA}")
+            done < "${RUNNER_TEMP}/test-paths"
           fi
 
           {
@@ -400,6 +369,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - run: make compose-migration-test container-boundary-test
+      - run: bash .github/scripts/test-change-classifier.sh
 
   # contract/registry.yaml is one file that lives in this repository and in
   # srcfl/ftw-webapp, and only a job with both checked out can tell whether it
