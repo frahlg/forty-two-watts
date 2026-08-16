@@ -1008,10 +1008,20 @@ func planTargetAt(state *State, now time.Time) (string, float64, string, bool) {
 
 func planDirectiveForIntent(state *State) (SlotDirective, bool) {
 	if state.controlPlanSnapshot.active {
-		if state.controlPlanSnapshot.source != controlPlanDirective {
-			return SlotDirective{}, false
+		switch state.controlPlanSnapshot.source {
+		case controlPlanDirective:
+			return state.controlPlanSnapshot.directive, state.controlPlanSnapshot.directiveOK
+		case controlPlanLegacyTarget:
+			// Legacy PI uses PlanTarget for its setpoint but keeps the energy
+			// directive as an independent sign guard. Reuse it only when both
+			// callbacks identify the same accepted plan; a replan between the
+			// two reads must not mix generations.
+			if state.controlPlanSnapshot.directiveOK &&
+				state.controlPlanSnapshot.directive.DecisionID == state.controlPlanSnapshot.legacyID {
+				return state.controlPlanSnapshot.directive, true
+			}
 		}
-		return state.controlPlanSnapshot.directive, state.controlPlanSnapshot.directiveOK
+		return SlotDirective{}, false
 	}
 	return plannerSelfDirectiveAt(state, state.now())
 }

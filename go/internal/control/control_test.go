@@ -4430,6 +4430,35 @@ func TestPlanSignFloorReadsLegacyPlanTarget(t *testing.T) {
 	}
 }
 
+func TestLegacyPlanSignGuardUsesOnlyMatchingDirectiveIdentity(t *testing.T) {
+	const decisionID = "00000000-0000-4000-8000-000000000304"
+	st := NewState(0, 0, "ferroamp")
+	st.Mode = ModePlannerArbitrage
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) { return SlotDirective{}, false }
+	st.PlanTarget = func(time.Time) (string, float64, string, bool) { return "", 0, "", false }
+	st.controlPlanSnapshot = controlPlanSnapshot{
+		active:      true,
+		source:      controlPlanLegacyTarget,
+		directiveOK: true,
+		directive: SlotDirective{
+			DecisionID:      decisionID,
+			BatteryEnergyWh: -600,
+		},
+		legacyOK:   true,
+		legacyMode: string(ModeSelfConsumption),
+		legacyID:   decisionID,
+	}
+
+	if got := planSignIntent(st); got != -1 {
+		t.Fatalf("matching legacy/directive plan sign = %d, want discharge (-1)", got)
+	}
+
+	st.controlPlanSnapshot.directive.DecisionID = "00000000-0000-4000-8000-000000000305"
+	if got := planSignIntent(st); got != 0 {
+		t.Fatalf("mixed-plan directive sign = %d, want neutral legacy intent (0)", got)
+	}
+}
+
 func TestPlanSignFloorNoOpWhenNoIntent(t *testing.T) {
 	// Neither callback wired, OR both return !ok → no plan to compare
 	// against; let the dispatch result through unchanged.
