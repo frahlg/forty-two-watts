@@ -760,10 +760,9 @@ func TestPeakCeilingForcesDischargeBelowFuse(t *testing.T) {
 	}
 }
 
-// Joint EV/battery allocator caps EV draw against the peak ceiling
-// across modes — the operator's tariff is honoured even with
-// BatteryCoversEV=false (the EV throttles, the battery isn't pulled
-// in to cover steady-state).
+// Joint EV/battery allocator caps EV draw against the peak ceiling in a
+// planner mode where BatteryCoversEV=false (the EV throttles, the battery
+// is not pulled in to cover steady state).
 func TestPeakCeilingClampsEVViaJointAllocator(t *testing.T) {
 	// House load 1 kW, EV pinned at 7 kW = 8 kW import. Peak 5 kW.
 	// Fuse 11 kW (won't fire). Battery idle (no charge or discharge).
@@ -782,7 +781,7 @@ func TestPeakCeilingClampsEVViaJointAllocator(t *testing.T) {
 
 	// Run a full dispatch cycle so the joint allocator's geometry
 	// fires (it lives inside ComputeDispatch, not as a free function).
-	st.Mode = ModeSelfConsumption
+	st.Mode = ModePlannerSelf
 	_ = ComputeDispatch(store, st, caps, 11040)
 
 	// Joint allocator should have set FuseEVMaxW so that

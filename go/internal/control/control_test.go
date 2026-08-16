@@ -925,8 +925,9 @@ func TestPeakShavingActsWhenOverLimit(t *testing.T) {
 	}
 }
 
-func TestEVChargingSignalExcludedFromGrid(t *testing.T) {
-	// Grid = +3000 includes 2500W EV charging. Effective = +500W → within tolerance.
+func TestPlannerSelfBatteryCoversEVOffExcludesEVFromGrid(t *testing.T) {
+	// Planner modes keep the opt-in policy. Grid = +3000 includes 2500 W
+	// of EV charging, so the PI sees only 500 W when BatteryCoversEV is off.
 	store := seedStore(3000, []struct {
 		name          string
 		currentW, soc float64
@@ -934,15 +935,16 @@ func TestEVChargingSignalExcludedFromGrid(t *testing.T) {
 		{"ferroamp", 0, 0.5},
 	})
 	st := NewState(0, 50, "ferroamp")
-	st.Mode = ModeSelfConsumption
+	st.Mode = ModePlannerSelf
 	st.EVChargingW = 2500
+	st.BatteryCoversEV = false
 	st.SlewRateW = 100000
 	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
-	// Effective grid 500 → beyond 50 band, but small correction expected
+	// Effective grid 500 W is outside the 50 W band, but the correction
+	// must stay far below one that covers the full site import.
 	if len(targets) > 0 {
-		// Allow small dispatch, but verify not trying to cover all 3000W
 		if math.Abs(targets[0].TargetW) > 2000 {
-			t.Errorf("EV-corrected dispatch should be modest, got %f", targets[0].TargetW)
+			t.Errorf("planner dispatch should exclude EV draw, got %f", targets[0].TargetW)
 		}
 	}
 }
@@ -1071,13 +1073,55 @@ func TestSelfConsumptionDoesNotChargeBatteryFromV2XDischargeByDefault(t *testing
 	}
 }
 
-// TestBatteryCoversEV_OffExcludesEVFromGrid mirrors the existing
-// exclusion behaviour. Grid meter reads +3000 W, 2500 W is EV, so
-// the effective grid the controller sees should be 500 W — well
-// within the dead-band — and the battery should not try to cover
-// the whole 3000 W. Regression guard that the new flag's default
-// preserves current behaviour.
-func TestBatteryCoversEV_OffExcludesEVFromGrid(t *testing.T) {
+// Björn's case: the battery charges from PV while a larger EV load makes the
+// raw site meter import. Self (manual) must react to the 5.56 kW site import,
+// not subtract the 8.11 kW EV and ask the battery to charge harder.
+func TestSelfConsumptionIncludesEVWithBatteryCoversEVOff(t *testing.T) {
+	store := seedStore(5560, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 4260, 0.5},
+	})
+	st := NewState(0, 50, "ferroamp")
+	st.Mode = ModeSelfConsumption
+	st.EVChargingW = 8110
+	st.BatteryCoversEV = false
+	st.SlewRateW = 100000
+	st.MinDispatchIntervalS = 0
+	const nonBatterySiteW = 1300.0
+	var firstTarget, lastTarget float64
+	for i := 0; i < 12; i++ {
+		targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+		if len(targets) == 0 {
+			if math.Abs(nonBatterySiteW+lastTarget) > st.GridToleranceW {
+				t.Fatalf("cycle %d: dispatch stopped outside tolerance at target %f W", i, lastTarget)
+			}
+			break
+		}
+		if len(targets) != 1 {
+			t.Fatalf("cycle %d: expected 1 target, got %d", i, len(targets))
+		}
+		lastTarget = targets[0].TargetW
+		if i == 0 {
+			firstTarget = lastTarget
+		}
+		store.Update("ferroamp", telemetry.DerBattery, lastTarget, ptrF64(0.5), nil)
+		store.Update("ferroamp", telemetry.DerMeter, nonBatterySiteW+lastTarget, nil, nil)
+		store.DriverHealthMut("ferroamp").RecordSuccess()
+	}
+	if firstTarget >= 1500 {
+		t.Errorf("Self (manual) did not react to raw site import: first target=%f W, want <1500 W", firstTarget)
+	}
+	if math.Abs(lastTarget-(-nonBatterySiteW)) > 50 {
+		t.Errorf("Self (manual) converged to %f W, want about -1300 W from the raw meter", lastTarget)
+	}
+}
+
+func TestSelfConsumptionSurplusOnlyEVStillBlocksBatteryDischarge(t *testing.T) {
+	// The EV is larger than the available PV surplus: raw site import is
+	// 3 kW while the house-side signal exports 6 kW. Surplus-only wins over
+	// the global cover toggle, so the home battery must not feed the EV.
 	store := seedStore(3000, []struct {
 		name          string
 		currentW, soc float64
@@ -1086,12 +1130,40 @@ func TestBatteryCoversEV_OffExcludesEVFromGrid(t *testing.T) {
 	})
 	st := NewState(0, 50, "ferroamp")
 	st.Mode = ModeSelfConsumption
-	st.EVChargingW = 2500
-	st.BatteryCoversEV = false // explicit — this is the default
+	st.EVChargingW = 9000
+	st.EVSurplusOnlyReserveW = 11000
+	st.BatteryCoversEV = true
 	st.SlewRateW = 100000
 	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
-	if len(targets) > 0 && math.Abs(targets[0].TargetW) > 2000 {
-		t.Errorf("with flag off, battery must not try to cover 2500W EV draw; got target=%f", targets[0].TargetW)
+	if len(targets) != 1 {
+		t.Fatalf("expected 1 target, got %d", len(targets))
+	}
+	if math.Abs(targets[0].TargetW) > 1 {
+		t.Errorf("surplus-only EV moved the home battery: target=%f W, want idle", targets[0].TargetW)
+	}
+}
+
+func TestSelfConsumptionSurplusOnlyEVStillCoversHouseLoad(t *testing.T) {
+	// Raw import is 4 kW: 3 kW EV and 1 kW house. The battery may cover
+	// the house, but surplus-only must stop it before it feeds the EV.
+	store := seedStore(4000, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	st := NewState(0, 50, "ferroamp")
+	st.Mode = ModeSelfConsumption
+	st.EVChargingW = 3000
+	st.EVSurplusOnlyReserveW = 5000
+	st.BatteryCoversEV = true
+	st.SlewRateW = 100000
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("expected 1 target, got %d", len(targets))
+	}
+	if math.Abs(targets[0].TargetW-(-1000)) > 1 {
+		t.Errorf("surplus-only house coverage target=%f W, want -1000 W", targets[0].TargetW)
 	}
 }
 

@@ -1,7 +1,7 @@
 {
   "family": "slew_limiter",
   "generated_by": "FTW_GOLDEN_DUMP=1 go test ./internal/control/ -run TestGoldenDump",
-  "ftw_commit": "68c5b6125898bb9da70728b8921259c87e96171d",
+  "ftw_commit": "303f86818a95f056f68e0b652db131a33074a421",
   "record_count": 155,
   "records": [
     {
@@ -15508,7 +15508,7 @@
         },
         {
           "driver": "sungrow",
-          "target_w": 2667.2,
+          "target_w": 1206.6,
           "clamped": false
         }
       ],
@@ -15533,9 +15533,9 @@
       },
       "site_totals": {
         "battery_current_w": 759,
-        "battery_target_sum_w": 2499.2,
+        "battery_target_sum_w": 1038.6,
         "raw_grid_w": -4768,
-        "projected_grid_w": -3027.8
+        "projected_grid_w": -4488.4
       }
     }
   ]

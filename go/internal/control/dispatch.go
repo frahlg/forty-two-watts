@@ -1491,19 +1491,18 @@ func ComputeDispatch(
 		state.liveEVChargingW = 0
 	}
 	state.EVChargingW = state.ManualEVChargingW + state.liveEVChargingW
-	// Vehicle signal: subtract vehicle power from grid so batteries don't
-	// try to cover EV/V2X charging or absorb V2X discharge by default.
-	// This makes the effective grid the controller works on the house-side
-	// portion only — a sensible default that avoids shuffling energy through
-	// stationary storage and vehicles twice on a normal day.
-	//
-	// BatteryCoversEV (default false) flips this in modes where the
-	// operator wants batteries to cover vehicle draw/interactions. In normal
-	// self-consumption the EV/V2X import/export is left outside stationary
-	// battery dispatch unless BatteryCoversEV is enabled.
+	// Self (manual) is the plain site-meter controller: EV charging stays in
+	// the signal, so the battery chases raw site import/export even when
+	// BatteryCoversEV is off. Planner and other manual modes keep the opt-in
+	// EV policy. Surplus-only limits Self later, after PI, so charging still
+	// follows real meter export while discharge stops at the house load. V2X
+	// discharge keeps its old opt-in guard so Self does not fill the home
+	// battery from a car by default.
 	gridW := rawGridW
-	if !state.BatteryCoversEV {
+	if state.Mode != ModeSelfConsumption && !state.BatteryCoversEV {
 		gridW -= state.uncoveredEVChargingW()
+	}
+	if !state.BatteryCoversEV {
 		gridW -= vehicleFlow.V2XDischargeW
 	}
 
@@ -2106,6 +2105,20 @@ func ComputeDispatch(
 				ceiling := surplus.chargeCeilingAfterEVReserveW()
 				if targetTotal2 > ceiling {
 					totalCorrection = ceiling - currentTotal
+				}
+			} else if targetTotal2 < 0 && state.Mode == ModeSelfConsumption {
+				// Self sees the raw meter, but surplus-only must not turn EV
+				// import into home-battery discharge. Allow only the discharge
+				// needed by the house-side signal. If PV already covers the
+				// house, stop at idle rather than charging while the raw meter
+				// imports for the EV.
+				houseGridW := gridW - state.EVChargingW
+				maxDischargeTargetW := currentTotal - houseGridW
+				if maxDischargeTargetW > 0 {
+					maxDischargeTargetW = 0
+				}
+				if targetTotal2 < maxDischargeTargetW {
+					totalCorrection = maxDischargeTargetW - currentTotal
 				}
 			} else if targetTotal2 < 0 && gridW <= 0 {
 				// No-discharge floor: while the EV reserve is active the
