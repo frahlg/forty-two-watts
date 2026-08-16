@@ -83,3 +83,40 @@ func TestEmptyAppLinkSectionRemainsOff(t *testing.T) {
 		t.Fatalf("empty app_link section must remain off, got %+v", cfg.AppLink)
 	}
 }
+
+func TestAppLinkNullPostedThroughAPIStaysOffAfterRestart(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	cfg := &config.Config{}
+	var cfgMu sync.RWMutex
+	var ctrlMu sync.Mutex
+	srv := api.New(&api.Deps{
+		Ctrl: control.NewState(0, 42, ""), CtrlMu: &ctrlMu,
+		Cfg: cfg, CfgMu: &cfgMu,
+		ConfigPath: configPath,
+		DriverDir:  dir, UserDriverDir: dir,
+		SaveConfig: config.SaveAtomic,
+	})
+	body := []byte(`{
+  "site": {"name": "Test", "smoothing_alpha": 0.3},
+  "fuse": {"max_amps": 16, "phases": 3, "voltage": 230},
+  "api": {"port": 8080},
+  "drivers": [],
+  "app_link": null
+}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/config", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("POST /api/config = %d: %s", rr.Code, rr.Body.String())
+	}
+
+	restarted, err := config.Load(configPath)
+	if err != nil {
+		t.Fatalf("reload saved config: %v", err)
+	}
+	if restarted.AppLink == nil || restarted.AppLink.On() {
+		t.Fatalf("explicit JSON null did not persist as disabled: %+v", restarted.AppLink)
+	}
+}

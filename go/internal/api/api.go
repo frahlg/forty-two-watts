@@ -1421,10 +1421,22 @@ func restoreDriverConfigSecrets(incoming, existing *config.Config, secretsByLua 
 }
 
 func (s *Server) handlePostConfig(w http.ResponseWriter, r *http.Request) {
-	var newCfg config.Config
-	if err := readJSON(r, &newCfg); err != nil {
+	var posted struct {
+		config.Config
+		AppLink json.RawMessage `json:"app_link"`
+	}
+	if err := readJSON(r, &posted); err != nil {
 		writeJSON(w, 400, map[string]string{"error": "invalid config: " + err.Error()})
 		return
+	}
+	newCfg := posted.Config
+	if posted.AppLink != nil {
+		if bytes.Equal(bytes.TrimSpace(posted.AppLink), []byte("null")) {
+			newCfg.AppLink = &config.AppLink{Enabled: false}
+		} else if err := json.Unmarshal(posted.AppLink, &newCfg.AppLink); err != nil {
+			writeJSON(w, 400, map[string]string{"error": "invalid config: app_link: " + err.Error()})
+			return
+		}
 	}
 	// Preserve secrets the UI sent back as empty (masked) values.
 	s.deps.CfgMu.RLock()
