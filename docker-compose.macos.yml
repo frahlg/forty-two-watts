@@ -53,6 +53,9 @@ services:
       # In-app self-update feature (version banner + Update/Restart
       # buttons). Wired to the ftw-updater sidecar below.
       FTW_SELFUPDATE_ENABLED: "1"
+      # Selects the exact build-bound beta or stable identity. The updater
+      # pins this tag in .env after an update.
+      FTW_IMAGE_TAG: ${FTW_IMAGE_TAG:-}
       # Optional Bearer token for mutations through public/FQDN hostnames.
       # Store it in .env so updater-driven recreates retain it.
       FTW_API_TOKEN: ${FTW_API_TOKEN:-}

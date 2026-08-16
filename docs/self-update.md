@@ -20,13 +20,28 @@ After that PR merges:
 
 1. run [`beta.yml`](../.github/workflows/beta.yml) with `vX.Y.Z-beta.N`;
 2. validate that immutable build on real sites;
-3. manually dispatch [`release.yml`](../.github/workflows/release.yml) from that same commit;
-4. stable promotion verifies that a matching beta tag resolves to the exact
+3. manually dispatch [`release.yml`](../.github/workflows/release.yml) from that
+   same commit and set `source_beta` to the exact candidate tested on sites;
+4. stable promotion verifies that the selected beta tag resolves to the exact
    stable candidate commit;
 5. release assets publish `vX.Y.Z` and move the stable aliases.
 
+A hand-pushed stable tag does not publish assets. Use `release.yml`; its
+explicit dispatch binds the chosen beta before `release-assets.yml` can run.
+
 Stable therefore cannot be the first public channel for new code. Beta and
-stable may have different tags but identify the same source commit.
+stable use different tags for the same source commit and the same Core and
+updater image digests. The beta prerelease records both index digests; stable
+fails if either beta tag moves and promotes only those recorded digests. The
+first stable promotion also records the chosen beta and both digests on the
+stable release. Asset reruns must reuse that receipt and cannot select a newer
+beta from the same commit. The candidate image already contains the stable
+product version. Compose passes
+its pinned `FTW_IMAGE_TAG` into Core so status, update
+checks and fleet reports still show the exact beta tag during site validation.
+Core accepts only that build-bound beta tag or the baked stable version; another
+environment value cannot invent a release identity. Stable promotion only adds
+stable aliases to that validated manifest.
 
 ## Immutable update targets
 
