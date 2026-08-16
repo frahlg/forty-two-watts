@@ -66,7 +66,7 @@ func RestartRequiredFor(oldCfg, newCfg *Config) []string {
 	if !pointerEqual(oldCfg.Nova, newCfg.Nova) {
 		reasons = append(reasons, "nova — federation client is constructed once at startup")
 	}
-	if !pointerEqual(oldCfg.AppLink, newCfg.AppLink) {
+	if oldCfg.AppLink.On() != newCfg.AppLink.On() {
 		reasons = append(reasons, "app_link — the app uplink is connected at startup")
 	}
 	// fleet_ping.enabled is read at each send, so the switch takes effect at
