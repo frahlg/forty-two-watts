@@ -28,7 +28,7 @@ jobs:
       base_sha: ${{ steps.paths.outputs.base_sha }}
       head_sha: ${{ steps.paths.outputs.head_sha }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - id: paths
@@ -114,7 +114,7 @@ jobs:
     if: needs.changes.outputs.core == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
           go-version: '1.26'
@@ -140,7 +140,7 @@ jobs:
     if: needs.changes.outputs.optimizer == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
@@ -168,7 +168,7 @@ jobs:
     if: needs.changes.outputs.web == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
           node-version: '22'
@@ -188,7 +188,7 @@ jobs:
     if: needs.changes.outputs.drivers == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
           go-version: '1.26'
@@ -238,7 +238,7 @@ jobs:
     if: needs.changes.outputs.drivers == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - uses: actions/setup-go@v7
@@ -288,7 +288,7 @@ jobs:
     env:
       DEVICE_SUPPORT_TOKEN: ${{ secrets.SOURCEFUL_CI_REPO_TOKEN }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7
         if: env.DEVICE_SUPPORT_TOKEN != ''
         with:
@@ -318,7 +318,7 @@ jobs:
 
       - name: Check out canonical Device Support package source
         if: env.DEVICE_SUPPORT_TOKEN != ''
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
           repository: ${{ steps.baseline.outputs.repository }}
           ref: ${{ steps.baseline.outputs.commit }}
@@ -398,7 +398,7 @@ jobs:
     if: needs.changes.outputs.compose == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - run: make compose-migration-test container-boundary-test
 
   # contract/registry.yaml is one file that lives in this repository and in
@@ -414,7 +414,7 @@ jobs:
     name: the registry has not drifted from the app
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       # A change that lands in both repositories at once cannot be compared
       # against the other one's default branch: the counterpart is not there
@@ -448,7 +448,7 @@ jobs:
 
       # One file, not the app's whole history.
       - name: Check out the app
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
           repository: srcfl/ftw-webapp
           ref: ${{ steps.pair.outputs.ref }}
@@ -494,7 +494,7 @@ jobs:
     if: needs.changes.outputs.core == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
           go-version: '1.26'

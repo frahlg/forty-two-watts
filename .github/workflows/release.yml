@@ -66,7 +66,7 @@ jobs:
       version:   ${{ steps.publish.outputs.version }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
           # changesets/action needs full history so it can detect
           # which changesets have already been consumed by past

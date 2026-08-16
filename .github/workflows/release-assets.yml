@@ -107,7 +107,7 @@ jobs:
             archive: zip
     steps:
       - name: Checkout tag
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
           # Check out the tag so -X main.Version matches what users install.
           ref: ${{ needs.meta.outputs.tag }}
@@ -250,7 +250,7 @@ jobs:
             description: Sidecar that executes docker compose pull + up for in-app updates
     steps:
       - name: Checkout tag
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
           ref: ${{ needs.meta.outputs.tag }}
 
