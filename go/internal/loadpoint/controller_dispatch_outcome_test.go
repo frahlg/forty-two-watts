@@ -321,6 +321,153 @@ func TestBlockedChargerDoesNotStallAnotherLoadpoint(t *testing.T) {
 	}
 }
 
+// The operator API gives ForceStartVehicle 15 seconds because a BLE-backed
+// vehicle command can take far longer than the short periodic dispatch
+// deadline. Keep that caller deadline when the controller has a fast tick.
+func TestForceStartKeepsVehicleCallerDeadline(t *testing.T) {
+	m := NewManager()
+	m.Load([]Config{{ID: "garage", DriverName: "easee"}})
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	send := SenderFunc(func(ctx context.Context, driver string, _ []byte) error {
+		if driver != "tesla" {
+			t.Fatalf("ForceStart sent to %q, want tesla", driver)
+		}
+		close(entered)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-release:
+			return nil
+		}
+	})
+	c := NewController(m, nil, nil, send)
+	c.SetVehicleStatus(func(string) (string, string, bool) { return "tesla", "Stopped", true })
+	c.SetCommandTimeout(10 * time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		_, err := c.ForceStartVehicle(ctx, "garage")
+		result <- err
+	}()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("ForceStart did not reach the vehicle sender")
+	}
+	select {
+	case err := <-result:
+		t.Fatalf("ForceStart returned after the dispatch timeout: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("ForceStart returned %v, want nil after the slow vehicle send", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("ForceStart did not return after the vehicle sender released")
+	}
+}
+
+// A schedule edit asks RefreshVehicle for a fresh vehicle reading. It shares
+// the vehicle-send path with ForceStart and must not inherit the tick timeout.
+func TestScheduleRefreshKeepsVehicleCallerDeadline(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	send := SenderFunc(func(ctx context.Context, driver string, _ []byte) error {
+		if driver != "tesla" {
+			t.Fatalf("RefreshVehicle sent to %q, want tesla", driver)
+		}
+		close(entered)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-release:
+			return nil
+		}
+	})
+	c := NewController(NewManager(), nil, nil, send)
+	c.SetVehicleStatus(func(string) (string, string, bool) { return "tesla", "Stopped", true })
+	c.SetCommandTimeout(10 * time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	result := make(chan error, 1)
+	go func() { result <- c.RefreshVehicle(ctx, "garage") }()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("schedule refresh did not reach the vehicle sender")
+	}
+	select {
+	case err := <-result:
+		t.Fatalf("schedule refresh returned after the dispatch timeout: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("schedule refresh returned %v, want nil after the slow vehicle send", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("schedule refresh did not return after the vehicle sender released")
+	}
+}
+
+// The automatic charge_start runs from the control tick without an API
+// deadline. It must use vehicleWakeTimeout, not the periodic charger limit.
+func TestAutoChargeStartKeepsVehicleWakeTimeout(t *testing.T) {
+	now := time.Date(2026, 8, 16, 13, 0, 0, 0, time.UTC)
+	vehicleEntered := make(chan struct{})
+	releaseVehicle := make(chan struct{})
+	send := SenderFunc(func(ctx context.Context, driver string, payload []byte) error {
+		var command struct {
+			Action string `json:"action"`
+		}
+		if err := json.Unmarshal(payload, &command); err != nil {
+			return err
+		}
+		if driver != "tesla" || command.Action != "charge_start" {
+			return nil
+		}
+		close(vehicleEntered)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-releaseVehicle:
+			return nil
+		}
+	})
+	c, _, _ := outcomeFixture(t, now, &outcomeSender{})
+	c.send = send
+	c.SetVehicleStatus(func(string) (string, string, bool) { return "tesla", "Stopped", true })
+	c.SetCommandTimeout(10 * time.Millisecond)
+	done := make(chan struct{})
+	go func() {
+		c.Tick(context.Background(), now)
+		close(done)
+	}()
+	select {
+	case <-vehicleEntered:
+	case <-time.After(time.Second):
+		t.Fatal("automatic charge_start did not reach the vehicle sender")
+	}
+	select {
+	case <-done:
+		t.Fatal("automatic charge_start returned after the dispatch timeout")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(releaseVehicle)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("tick did not return after the vehicle sender released")
+	}
+}
+
 // The 0 W standdown is core withdrawing under a stale site meter, not core
 // actuating. The staleness tracker owns that transition, and a charger that
 // refuses the standdown must not be excluded for a fault belonging to the

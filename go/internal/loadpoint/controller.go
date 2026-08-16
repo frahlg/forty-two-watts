@@ -535,8 +535,9 @@ func (c *Controller) driverCanDispatch(driver string) bool {
 
 const defaultDriverCommandTimeout = 2 * time.Second
 
-// SetCommandTimeout sets the per-send ceiling used by the sequential tick and
-// async wallbox cycle. Non-positive values restore the safe default.
+// SetCommandTimeout sets the per-send ceiling for periodic charger dispatch
+// and the async wallbox cycle. Vehicle commands keep their caller deadline,
+// capped by vehicleWakeTimeout. Non-positive values restore the safe default.
 func (c *Controller) SetCommandTimeout(timeout time.Duration) {
 	if c == nil {
 		return
@@ -544,7 +545,7 @@ func (c *Controller) SetCommandTimeout(timeout time.Duration) {
 	c.commandTimeout = timeout
 }
 
-func (c *Controller) sendWithDeadline(ctx context.Context, driver string, payload []byte) error {
+func (c *Controller) sendDispatchWithDeadline(ctx context.Context, driver string, payload []byte) error {
 	if c == nil || c.send == nil {
 		return nil
 	}
@@ -558,6 +559,21 @@ func (c *Controller) sendWithDeadline(ctx context.Context, driver string, payloa
 	cmdCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	return c.send(cmdCtx, driver, payload)
+}
+
+// sendVehicle keeps vehicle operations out of the short periodic-dispatch
+// deadline. The API supplies a 15-second caller deadline for operator work;
+// background wake paths receive the 30-second vehicleWakeTimeout cap.
+func (c *Controller) sendVehicle(ctx context.Context, driver string, payload []byte) error {
+	if c == nil || c.send == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	vehicleCtx, cancel := context.WithTimeout(ctx, vehicleWakeTimeout)
+	defer cancel()
+	return c.send(vehicleCtx, driver, payload)
 }
 
 func (c *Controller) sendOutcomeWithDeadline(
@@ -1043,7 +1059,7 @@ func (c *Controller) RefreshVehicle(ctx context.Context, lpID string) error {
 	c.wakeLast[lpID] = time.Now()
 	c.wakeMu.Unlock()
 	slog.Info("loadpoint manual wake (schedule edit)", "lp", lpID, "vehicle_driver", driver)
-	return c.sendWithDeadline(ctx, driver, payload)
+	return c.sendVehicle(ctx, driver, payload)
 }
 
 // ForceStart outcome sentinels. The API layer maps each to a distinct
@@ -1120,7 +1136,7 @@ func (c *Controller) ForceStartVehicle(ctx context.Context, lpID string) (string
 		slog.Warn("loadpoint force-start: payload marshal", "lp", lpID, "err", err)
 		return driver, err
 	}
-	sendErr := c.sendWithDeadline(ctx, driver, payload)
+	sendErr := c.sendVehicle(ctx, driver, payload)
 	if sendErr != nil {
 		slog.Warn("loadpoint force-start (operator) — send failed",
 			"lp", lpID, "vehicle_driver", driver, "err", sendErr)
@@ -1171,9 +1187,7 @@ func (c *Controller) wakeVehicleAuto(ctx context.Context, lpID string, reason st
 	}
 	slog.Info("loadpoint auto-wake (vehicle telemetry refresh)",
 		"lp", lpID, "vehicle_driver", driver, "reason", reason)
-	sendCtx, cancel := context.WithTimeout(ctx, vehicleWakeTimeout)
-	defer cancel()
-	if err := c.send(sendCtx, driver, payload); err != nil {
+	if err := c.sendVehicle(ctx, driver, payload); err != nil {
 		slog.Warn("loadpoint auto-wake send failed",
 			"lp", lpID, "vehicle_driver", driver, "err", err)
 	}
@@ -1464,7 +1478,7 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config, d
 			"power_w": 0,
 		})
 		if err == nil && c.send != nil {
-			if err := c.sendWithDeadline(ctx, lpCfg.DriverName, payload); err != nil {
+			if err := c.sendDispatchWithDeadline(ctx, lpCfg.DriverName, payload); err != nil {
 				slog.Warn("loadpoint safety standdown", "lp", lpCfg.ID,
 					"driver", lpCfg.DriverName, "err", err)
 			}
@@ -1860,7 +1874,7 @@ func (c *Controller) maybeWakeVehicle(ctx context.Context, now time.Time, lpCfg 
 	}
 	slog.Info("loadpoint auto-wake", "lp", lpID, "vehicle_driver", driver,
 		"vehicle_state", state, "cmd_w", pw)
-	if err := c.sendWithDeadline(ctx, driver, payload); err != nil {
+	if err := c.sendVehicle(ctx, driver, payload); err != nil {
 		slog.Warn("loadpoint auto-wake failed", "lp", lpID,
 			"vehicle_driver", driver, "err", err)
 	}
