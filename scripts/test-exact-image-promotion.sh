@@ -88,6 +88,38 @@ if sed -n "${beta_build},${beta_release}p" "${beta}" | grep -Fq ':beta'; then
   exit 1
 fi
 
+beta_channel_block="$(sed -n "${beta_channel},\$p" "${beta}")"
+channel_line() {
+  awk -v needle="$1" 'index($0, needle) { print NR; exit }' <<<"${beta_channel_block}"
+}
+canonical_login="$(channel_line 'name: Login to canonical GHCR namespace')"
+canonical_write="$(channel_line 'name: Move canonical aliases after both exact manifests are recorded')"
+compatibility_login="$(channel_line 'name: Login to compatibility GHCR namespace')"
+compatibility_write="$(channel_line 'name: Mirror beta aliases to compatibility namespace')"
+if [ -z "${canonical_login}" ] || [ -z "${canonical_write}" ] || \
+   [ -z "${compatibility_login}" ] || [ -z "${compatibility_write}" ]; then
+  echo "beta alias publication must have separate canonical and compatibility phases" >&2
+  exit 1
+fi
+if [ "${canonical_login}" -ge "${canonical_write}" ] || \
+   [ "${canonical_write}" -ge "${compatibility_login}" ] || \
+   [ "${compatibility_login}" -ge "${compatibility_write}" ]; then
+  echo "each beta alias write must run under its namespace credential" >&2
+  exit 1
+fi
+canonical_block="$(sed -n "${canonical_write},$((compatibility_login - 1))p" <<<"${beta_channel_block}")"
+if ! grep -Fq -- '--tag "${canonical}:beta"' <<<"${canonical_block}" || \
+   grep -Fq -- '--tag "${compatibility}:beta"' <<<"${canonical_block}"; then
+  echo "canonical beta aliases must move before the compatibility login" >&2
+  exit 1
+fi
+compatibility_block="$(sed -n "${compatibility_write},\$p" <<<"${beta_channel_block}")"
+if ! grep -Fq -- '--tag "${compatibility}:beta"' <<<"${compatibility_block}" || \
+   ! grep -Fq '"${canonical_version}@${expected}"' <<<"${compatibility_block}"; then
+  echo "compatibility beta aliases must copy the exact canonical manifests" >&2
+  exit 1
+fi
+
 promotion_upload="$(grep -n 'gh release upload "${TAG}" "${PROMOTION_RECORD}"' "${assets}" | cut -d: -f1)"
 stable_docker="$(grep -n '^  docker:$' "${assets}" | cut -d: -f1)"
 if [ "${promotion_upload}" -ge "${stable_docker}" ]; then

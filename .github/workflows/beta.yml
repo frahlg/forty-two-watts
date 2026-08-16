@@ -469,14 +469,8 @@ jobs:
           username: ${{ vars.SOURCEFUL_GHCR_USER || github.actor }}
           password: ${{ secrets.SOURCEFUL_GHCR_TOKEN || secrets.GITHUB_TOKEN }}
 
-      - name: Login to compatibility GHCR namespace
-        uses: docker/login-action@v4.6.0
-        with:
-          registry: ghcr.io
-          username: frahlg
-          password: ${{ secrets.LEGACY_GHCR_TOKEN || secrets.GITHUB_TOKEN }}
-
-      - name: Move aliases only after both exact manifests are recorded
+      - name: Move canonical aliases after both exact manifests are recorded
+        id: canonical_aliases
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ needs.tag.outputs.version }}
@@ -496,6 +490,7 @@ jobs:
           fi
           if [ "${TAG}" != "${newest_beta}" ]; then
             echo "Not moving :beta aliases backwards from ${newest_beta} to ${TAG}."
+            echo "move=false" >> "${GITHUB_OUTPUT}"
             exit 0
           fi
 
@@ -535,17 +530,51 @@ jobs:
             test "$(scripts/inspect-image-digest.sh "${compatibility_version}")" = "${expected}"
           done
 
+          echo "core_digest=${core_digest}" >> "${GITHUB_OUTPUT}"
+          echo "updater_digest=${updater_digest}" >> "${GITHUB_OUTPUT}"
+          echo "move=true" >> "${GITHUB_OUTPUT}"
+
           for item in \
-            "${core_digest}|ghcr.io/srcfl/ftw|ghcr.io/frahlg/forty-two-watts" \
-            "${updater_digest}|ghcr.io/srcfl/ftw-updater|ghcr.io/frahlg/forty-two-watts-updater"; do
+            "${core_digest}|ghcr.io/srcfl/ftw" \
+            "${updater_digest}|ghcr.io/srcfl/ftw-updater"; do
+            expected="${item%%|*}"
+            canonical="${item#*|}"
+            canonical_version="${canonical}:${TAG}"
+            docker buildx imagetools create --prefer-index=false \
+              --tag "${canonical}:beta" "${canonical_version}@${expected}"
+            test "$(scripts/inspect-image-digest.sh "${canonical}:beta")" = "${expected}"
+          done
+
+      # Docker stores one credential per registry host. Keep the canonical
+      # credential active until all srcfl aliases have moved, then replace it
+      # with the credential that can write the compatibility namespace.
+      - name: Login to compatibility GHCR namespace
+        if: ${{ steps.canonical_aliases.outputs.move == 'true' }}
+        uses: docker/login-action@v4.6.0
+        with:
+          registry: ghcr.io
+          username: frahlg
+          password: ${{ secrets.LEGACY_GHCR_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Mirror beta aliases to compatibility namespace
+        if: ${{ steps.canonical_aliases.outputs.move == 'true' }}
+        env:
+          TAG: ${{ needs.tag.outputs.version }}
+          CORE_DIGEST: ${{ steps.canonical_aliases.outputs.core_digest }}
+          UPDATER_DIGEST: ${{ steps.canonical_aliases.outputs.updater_digest }}
+        run: |
+          set -euo pipefail
+          test -n "${CORE_DIGEST}"
+          test -n "${UPDATER_DIGEST}"
+          for item in \
+            "${CORE_DIGEST}|ghcr.io/srcfl/ftw|ghcr.io/frahlg/forty-two-watts" \
+            "${UPDATER_DIGEST}|ghcr.io/srcfl/ftw-updater|ghcr.io/frahlg/forty-two-watts-updater"; do
             expected="${item%%|*}"
             remainder="${item#*|}"
             canonical="${remainder%%|*}"
             compatibility="${remainder#*|}"
             canonical_version="${canonical}:${TAG}"
-            for target in "${canonical}:beta" "${compatibility}:beta"; do
-              docker buildx imagetools create --prefer-index=false \
-                --tag "${target}" "${canonical_version}@${expected}"
-              test "$(scripts/inspect-image-digest.sh "${target}")" = "${expected}"
-            done
+            docker buildx imagetools create --prefer-index=false \
+              --tag "${compatibility}:beta" "${canonical_version}@${expected}"
+            test "$(scripts/inspect-image-digest.sh "${compatibility}:beta")" = "${expected}"
           done
