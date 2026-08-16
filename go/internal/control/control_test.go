@@ -5732,6 +5732,47 @@ func TestControlSlotIdentityTracksLegacyPlan(t *testing.T) {
 	}
 }
 
+func TestLegacyPlanCallbacksUseOneTickTime(t *testing.T) {
+	boundary := time.Date(2026, 8, 16, 12, 15, 0, 0, time.UTC)
+	clockCalls := 0
+	var directiveAt, targetAt time.Time
+	const decisionID = "00000000-0000-4000-8000-000000000306"
+
+	store := seedStore(0, []struct {
+		name          string
+		currentW, soc float64
+	}{{"ferroamp", 0, 0.5}})
+	st := NewState(0, 0, "ferroamp")
+	st.Mode = ModePlannerArbitrage
+	st.SlewRateW = 100000
+	st.MinDispatchIntervalS = 0
+	st.clock = func() time.Time {
+		clockCalls++
+		if clockCalls == 1 {
+			return boundary.Add(-time.Nanosecond)
+		}
+		return boundary
+	}
+	st.SlotDirective = func(at time.Time) (SlotDirective, bool) {
+		directiveAt = at
+		return SlotDirective{
+			DecisionID:      decisionID,
+			SlotStart:       boundary.Add(-15 * time.Minute),
+			SlotEnd:         boundary,
+			BatteryEnergyWh: -600,
+		}, true
+	}
+	st.PlanTarget = func(at time.Time) (string, float64, string, bool) {
+		targetAt = at
+		return string(ModeSelfConsumption), 0, decisionID, true
+	}
+
+	_ = ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if !directiveAt.Equal(targetAt) {
+		t.Fatalf("one control tick read directive at %s and legacy target at %s", directiveAt, targetAt)
+	}
+}
+
 //  1. The accumulator integrates current battery total × dt across
 //     multiple ticks within the same slot.
 func TestSlotMetricsAccumulatesActualWhAcrossTicks(t *testing.T) {

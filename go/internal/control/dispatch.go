@@ -305,6 +305,7 @@ const (
 type controlPlanSnapshot struct {
 	active bool
 	source controlPlanSource
+	tickAt time.Time
 
 	directiveCaptured bool
 	directiveOK       bool
@@ -973,7 +974,7 @@ func plannerSelfDirectiveAt(state *State, now time.Time) (SlotDirective, bool) {
 		if !state.controlPlanSnapshot.directiveCaptured {
 			state.controlPlanSnapshot.directiveCaptured = true
 			if state.SlotDirective != nil {
-				state.controlPlanSnapshot.directive, state.controlPlanSnapshot.directiveOK = state.SlotDirective(now)
+				state.controlPlanSnapshot.directive, state.controlPlanSnapshot.directiveOK = state.SlotDirective(state.controlPlanSnapshot.tickAt)
 			}
 		}
 		return state.controlPlanSnapshot.directive, state.controlPlanSnapshot.directiveOK
@@ -992,7 +993,7 @@ func planTargetAt(state *State, now time.Time) (string, float64, string, bool) {
 				state.controlPlanSnapshot.legacyMode,
 					state.controlPlanSnapshot.legacyGridW,
 					state.controlPlanSnapshot.legacyID,
-					state.controlPlanSnapshot.legacyOK = state.PlanTarget(now)
+					state.controlPlanSnapshot.legacyOK = state.PlanTarget(state.controlPlanSnapshot.tickAt)
 			}
 		}
 		return state.controlPlanSnapshot.legacyMode,
@@ -1290,7 +1291,8 @@ func ComputeDispatch(
 	// Each tick reports only the plan identity it actually consulted for its
 	// main battery decision.
 	state.controlSlotDecisionID = ""
-	state.controlPlanSnapshot = controlPlanSnapshot{active: true}
+	tickAt := state.now()
+	state.controlPlanSnapshot = controlPlanSnapshot{active: true, tickAt: tickAt}
 	defer func() { state.controlPlanSnapshot = controlPlanSnapshot{} }()
 	// ---- Per-slot Wh delivery observability (path-agnostic) ----
 	// Runs on EVERY tick before any mode/short-circuit decision so the
@@ -1306,7 +1308,7 @@ func ComputeDispatch(
 	// from this data. The point is to measure first, decide whether a
 	// cap is warranted later.
 	{
-		now := state.now()
+		now := tickAt
 		var liveBatTotal float64
 		for name := range driverCapacities {
 			if r := store.Get(name, telemetry.DerBattery); r != nil {
