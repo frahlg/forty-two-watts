@@ -67,6 +67,10 @@ Several people run agents against this repository at the same time. These
 rules exist because each one has already been broken once, and the cost
 landed on somebody else's finished work.
 
+- **Name the pull request in every CLI read.** Run `gh pr view` with an
+  explicit PR number or URL. Never omit the target or build it from a variable
+  that may be empty; without a target, `gh` tries the current branch, often
+  `master`.
 - **Read a pull request's reviews before judging it.** Never recommend
   closing, superseding or reworking an open PR without reading what the
   reviewers actually wrote. "A review exists" is not the same as knowing
