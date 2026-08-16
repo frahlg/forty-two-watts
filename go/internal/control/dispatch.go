@@ -1748,6 +1748,13 @@ func ComputeDispatch(
 
 	// ---- Compute totalCorrection — paths diverge here ----
 	var totalCorrection float64
+	// meterClampMoveW records the direction of an absolute live-meter
+	// correction. Slew may smooth an ordinary request, but it must not move a
+	// target back toward the measured output after this clamp has already
+	// removed that motion. A non-following battery would otherwise recreate
+	// the unsafe command on every tick (#816).
+	var meterClampMoveW float64
+	var meterClampActive bool
 	switch {
 	case manualHoldActive:
 		// Drive the aggregate battery toward the operator's setpoint.
@@ -2222,6 +2229,8 @@ func ComputeDispatch(
 			allowed = targetTotal
 		}
 		if allowed != targetTotal {
+			meterClampActive = true
+			meterClampMoveW = allowed - currentTotal
 			slog.Warn("dispatch: meter clamp reduced battery target",
 				"requested_total_w", targetTotal,
 				"clamped_total_w", allowed,
@@ -2440,14 +2449,24 @@ func ComputeDispatch(
 	// and lets the dispatch pivot immediately when the setpoint reverses.
 	// Falls back to the previous command if no reading is available
 	// (driver just started, or stale telemetry).
+	slewPoints := make([]slewFleetPoint, 0, len(raw))
 	for i := range raw {
+		preSlewTarget := raw[i].TargetW
 		anchor, hasAnchor := state.PrevTargets[raw[i].Driver]
 		if r := store.Get(raw[i].Driver, telemetry.DerBattery); r != nil {
 			anchor = r.SmoothedW
 			hasAnchor = true
 		}
 		if !hasAnchor {
+			slewPoints = append(slewPoints, slewFleetPoint{
+				index: i,
+				liveW: preSlewTarget, preSlewW: preSlewTarget, ordinaryW: preSlewTarget,
+			})
 			continue
+		}
+		point := slewFleetPoint{
+			index: i,
+			liveW: anchor, preSlewW: preSlewTarget, ordinaryW: preSlewTarget,
 		}
 		// Planned PV-export slots are explicitly trying to stop battery
 		// motion and let the surplus cross the meter. Slew-limiting that
@@ -2461,6 +2480,8 @@ func ComputeDispatch(
 			(manualHoldActive && math.Abs(manualHold.PowerW) < 1)) &&
 			math.Abs(raw[i].TargetW) < 1 {
 			raw[i].TargetW = 0
+			point.ordinaryW = 0
+			slewPoints = append(slewPoints, point)
 			continue
 		}
 		// Slew limiter is opt-out. Both inverter families ramp internally;
@@ -2469,6 +2490,7 @@ func ComputeDispatch(
 		// safe rate. Saves the windup-recovery delay we observed on
 		// 2026-05-25.
 		if !state.SlewEnabled {
+			slewPoints = append(slewPoints, point)
 			continue
 		}
 		delta := raw[i].TargetW - anchor
@@ -2478,8 +2500,23 @@ func ComputeDispatch(
 				sign = -1.0
 			}
 			raw[i].TargetW = anchor + sign*state.SlewRateW
+			point.ordinaryW = raw[i].TargetW
+			// The meter clamp above chose an absolute correction from the
+			// same live reading used as this slew anchor. Start by snapping
+			// a command that reopens the side the clamp removed. The fleet
+			// projection below restores only the watts needed when several
+			// local snaps would cross the aggregate target.
+			if meterClampMoveW < 0 && raw[i].TargetW > preSlewTarget {
+				raw[i].TargetW = preSlewTarget
+			} else if meterClampMoveW > 0 && raw[i].TargetW < preSlewTarget {
+				raw[i].TargetW = preSlewTarget
+			}
 			raw[i].Clamped = true
 		}
+		slewPoints = append(slewPoints, point)
+	}
+	if meterClampActive {
+		raw = projectSlewToFleetClamp(raw, slewPoints)
 	}
 
 	// ---- Re-clamp after slew ----
@@ -2500,6 +2537,77 @@ func ComputeDispatch(
 		updatePrevTargets: true,
 		recordDispatch:    true,
 	})
+}
+
+type slewFleetPoint struct {
+	index     int
+	liveW     float64
+	preSlewW  float64
+	ordinaryW float64
+}
+
+// projectSlewToFleetClamp keeps a per-driver safety snap from crossing the
+// aggregate live-meter target. Mixed fleets can need opposite per-driver
+// moves while their total moves in one direction. Snapping every driver to
+// its own allocation can then carry the sum past the upstream target even
+// though each command is locally between its live value and target.
+//
+// Restore only enough of the ordinary slew vector to land on the nearest
+// fleet boundary. Interpolation follows each driver's ordinary slew by the
+// same fraction, so input order cannot change the allocation. Both endpoints
+// lie inside each driver's live-to-target interval, so the result does too.
+func projectSlewToFleetClamp(targets []DispatchTarget, points []slewFleetPoint) []DispatchTarget {
+	if len(targets) == 0 || len(points) == 0 {
+		return targets
+	}
+	var liveTotalW, preSlewTotalW, targetTotalW float64
+	for _, point := range points {
+		liveTotalW += point.liveW
+		preSlewTotalW += point.preSlewW
+		targetTotalW += targets[point.index].TargetW
+	}
+	lowerW := math.Min(liveTotalW, preSlewTotalW)
+	upperW := math.Max(liveTotalW, preSlewTotalW)
+	const epsilonW = 1e-6
+	if targetTotalW >= lowerW-epsilonW && targetTotalW <= upperW+epsilonW {
+		return targets
+	}
+	boundaryW := lowerW
+	if targetTotalW > upperW {
+		boundaryW = upperW
+	}
+
+	var ordinaryTotalW float64
+	for _, point := range points {
+		ordinaryTotalW += point.ordinaryW
+	}
+	denominatorW := ordinaryTotalW - targetTotalW
+	fraction := 0.0
+	useEndpoint := math.Abs(denominatorW) <= epsilonW
+	if !useEndpoint {
+		fraction = (boundaryW - targetTotalW) / denominatorW
+		useEndpoint = fraction < 0 || fraction > 1
+	}
+	if useEndpoint {
+		// Defensive fallback: the ordinary vector should bracket the fleet
+		// boundary. If another safety stage changes that relation, the live or
+		// pre-slew endpoint whose sum is the boundary remains a valid projection.
+		fraction = 1
+	}
+	for _, point := range points {
+		currentW := targets[point.index].TargetW
+		restoreW := point.ordinaryW
+		if useEndpoint {
+			if math.Abs(boundaryW-liveTotalW) <= epsilonW {
+				restoreW = point.liveW
+			} else {
+				restoreW = point.preSlewW
+			}
+		}
+		targets[point.index].TargetW = currentW + fraction*(restoreW-currentW)
+		targets[point.index].Clamped = true
+	}
+	return targets
 }
 
 // chargeBlockedDrivers is the set of online batteries that told us this tick
