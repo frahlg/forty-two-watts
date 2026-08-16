@@ -430,12 +430,21 @@ jobs:
           # push would be invisible and the job would compare against the wrong
           # branch while looking like it had worked.
           GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          BODY=$(gh pr view "${{ github.event.pull_request.number }}" \
-                   --repo "${{ github.repository }}" --json body -q .body)
-          REF=$(printf '%s\n' "$BODY" | sed -n 's|^Contract-pair: *srcfl/ftw-webapp@||p' | head -1 | tr -d '\r')
-          echo "ref=${REF:-main}" >> "$GITHUB_OUTPUT"
-          echo "comparing against srcfl/ftw-webapp@${REF:-main}"
+          set -euo pipefail
+          REF=main
+          if [ "${EVENT_NAME}" = pull_request ]; then
+            BODY=$(gh pr view "${PULL_REQUEST_NUMBER}" \
+                     --repo "${{ github.repository }}" --json body -q .body)
+            PAIR_REF=$(printf '%s\n' "$BODY" | sed -n 's|^Contract-pair: *srcfl/ftw-webapp@||p' | head -1 | tr -d '\r')
+            if [ -n "${PAIR_REF}" ]; then
+              REF="${PAIR_REF}"
+            fi
+          fi
+          echo "ref=${REF}" >> "$GITHUB_OUTPUT"
+          echo "comparing against srcfl/ftw-webapp@${REF}"
 
       # One file, not the app's whole history.
       - name: Check out the app
