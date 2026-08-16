@@ -13,7 +13,9 @@ permissions:
   packages: write
 
 concurrency:
-  group: beta-${{ inputs.version }}
+  # Versioned tags are immutable, while every completed candidate may move the
+  # shared :beta aliases. Serialize the full flow so aliases cannot race.
+  group: beta-release-channel
   cancel-in-progress: false
 
 jobs:
@@ -22,7 +24,10 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
+      runtime_version: ${{ steps.version.outputs.runtime_version }}
+      oci_version: ${{ steps.version.outputs.oci_version }}
       state_schema: ${{ steps.version.outputs.state_schema }}
+      created: ${{ steps.version.outputs.created }}
     steps:
       - name: Checkout selected commit
         uses: actions/checkout@v7
@@ -46,6 +51,10 @@ jobs:
             echo "${TAG} does not match package.json version ${PACKAGE_VERSION}" >&2
             exit 1
           fi
+          # Build the future stable identity now. Stable promotion copies this
+          # exact manifest; docker-compose supplies the immutable beta tag to
+          # the process while a site is validating the candidate.
+          RUNTIME_VERSION="v${PACKAGE_VERSION}"
           STATE_SCHEMA="$(node -p "require('./state-schema.json').version")"
           if [[ ! "${STATE_SCHEMA}" =~ ^[1-9][0-9]*$ ]]; then
             echo "state-schema.json must contain a positive integer version" >&2
@@ -54,6 +63,7 @@ jobs:
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          TAG_CREATED=false
           if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
             git fetch --force origin "refs/tags/${TAG}:refs/tags/${TAG}"
             TAG_COMMIT="$(git rev-list -n 1 "${TAG}")"
@@ -64,14 +74,191 @@ jobs:
           else
             git tag -a "${TAG}" -m "Beta release ${TAG}" "${GITHUB_SHA}"
             git push origin "refs/tags/${TAG}"
+            TAG_CREATED=true
           fi
           echo "version=${TAG}" >> "${GITHUB_OUTPUT}"
+          echo "runtime_version=${RUNTIME_VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "oci_version=${PACKAGE_VERSION}" >> "${GITHUB_OUTPUT}"
           echo "state_schema=${STATE_SCHEMA}" >> "${GITHUB_OUTPUT}"
+          echo "created=${TAG_CREATED}" >> "${GITHUB_OUTPUT}"
+
+  candidate:
+    name: guard immutable beta candidate
+    runs-on: ubuntu-latest
+    needs: tag
+    outputs:
+      receipt_found: ${{ steps.guard.outputs.receipt_found }}
+      core_build: ${{ steps.guard.outputs.core_build }}
+      core_digest: ${{ steps.guard.outputs.core_digest }}
+      updater_build: ${{ steps.guard.outputs.updater_build }}
+      updater_digest: ${{ steps.guard.outputs.updater_digest }}
+    steps:
+      - name: Checkout beta tag
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.tag.outputs.version }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Login to canonical GHCR namespace
+        uses: docker/login-action@v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ vars.SOURCEFUL_GHCR_USER || github.actor }}
+          password: ${{ secrets.SOURCEFUL_GHCR_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Refuse to move a published candidate
+        id: guard
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.tag.outputs.version }}
+        run: |
+          set -euo pipefail
+          STABLE_VERSION="${TAG#v}"
+          STABLE_VERSION="${STABLE_VERSION%-beta.*}"
+
+          mkdir -p receipt
+          release_json="${RUNNER_TEMP}/beta-release.json"
+          release_status="$(curl -sS -L -o "${release_json}" -w '%{http_code}' \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}")"
+          case "${release_status}" in
+            200)
+              receipt_count="$(jq '[.assets[] | select(.name == "ftw-image-digests.json")] | length' "${release_json}")"
+              if [ "${receipt_count}" -gt 1 ]; then
+                echo "${TAG} has duplicate digest receipts; refusing to recover it." >&2
+                exit 1
+              fi
+              ;;
+            404)
+              receipt_count=0
+              ;;
+            *)
+              echo "Could not determine whether ${TAG} has a digest receipt (HTTP ${release_status}); refusing to publish." >&2
+              exit 1
+              ;;
+          esac
+
+          if [ "${receipt_count}" -eq 1 ]; then
+            receipt_url="$(jq -er '.assets[] | select(.name == "ftw-image-digests.json") | .url' "${release_json}")"
+            curl -fsSL -L \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H 'Accept: application/octet-stream' \
+              -H 'X-GitHub-Api-Version: 2022-11-28' \
+              "${receipt_url}" > receipt/ftw-image-digests.json
+            record="receipt/ftw-image-digests.json"
+            jq -e \
+              --arg tag "${TAG}" \
+              --arg commit "${GITHUB_SHA}" \
+              --arg version "${STABLE_VERSION}" '
+                .schema == 1
+                and .tag == $tag
+                and .commit == $commit
+                and .stable_version == $version
+                and (.images.core.digest | test("^sha256:[0-9a-f]{64}$"))
+                and (.images.updater.digest | test("^sha256:[0-9a-f]{64}$"))
+              ' "${record}" >/dev/null
+
+            for item in \
+              "core|ghcr.io/srcfl/ftw:${TAG}" \
+              "updater|ghcr.io/srcfl/ftw-updater:${TAG}"; do
+              key="${item%%|*}"
+              image="${item#*|}"
+              recorded="$(jq -r --arg key "${key}" '.images[$key].digest' "${record}")"
+              current="$(scripts/inspect-image-digest.sh "${image}")"
+              if [ "${current}" != "${recorded}" ]; then
+                echo "${image} moved after publication: recorded ${recorded}, current ${current}." >&2
+                exit 1
+              fi
+              echo "${key}_build=false" >> "${GITHUB_OUTPUT}"
+              echo "${key}_digest=${recorded}" >> "${GITHUB_OUTPUT}"
+            done
+            echo "receipt_found=true" >> "${GITHUB_OUTPUT}"
+            echo "Reusing completed immutable ${TAG}."
+            exit 0
+          fi
+
+          echo "receipt_found=false" >> "${GITHUB_OUTPUT}"
+
+          manifest_status() {
+            local repository="$1"
+            local token http_status
+            token="$(curl -fsSL --get \
+              --data-urlencode service=ghcr.io \
+              --data-urlencode "scope=repository:${repository}:pull" \
+              https://ghcr.io/token | jq -er '.token')"
+            http_status="$(curl -sS -o /dev/null -w '%{http_code}' -I \
+              -H "Authorization: Bearer ${token}" \
+              -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json' \
+              "https://ghcr.io/v2/${repository}/manifests/${TAG}")"
+            printf '%s\n' "${http_status}"
+          }
+
+          validate_existing_component() {
+            local key="$1"
+            local image="$2"
+            local digest metadata
+            digest="$(scripts/inspect-image-digest.sh "${image}")"
+            metadata="${RUNNER_TEMP}/${key}-unfinished.json"
+            docker buildx imagetools inspect "${image}@${digest}" \
+              --format '{{json .Image}}' > "${metadata}"
+            python3 - "${metadata}" "${GITHUB_SHA}" "${STABLE_VERSION}" "${image}" <<'PY'
+          import json
+          import sys
+
+          path, expected_revision, expected_version, image_ref = sys.argv[1:]
+          with open(path, encoding="utf-8") as source:
+              images = json.load(source)
+          for platform in ("linux/amd64", "linux/arm64"):
+              image = images.get(platform)
+              if image is None:
+                  raise SystemExit(f"{image_ref} is missing required platform {platform}")
+              labels = image.get("config", {}).get("Labels", {})
+              revision = labels.get("org.opencontainers.image.revision")
+              version = labels.get("org.opencontainers.image.version")
+              if revision != expected_revision or version != expected_version:
+                  raise SystemExit(
+                      f"{image_ref} metadata mismatch for {platform}: "
+                      f"revision={revision!r} version={version!r}"
+                  )
+          PY
+            echo "${key}_build=false" >> "${GITHUB_OUTPUT}"
+            echo "${key}_digest=${digest}" >> "${GITHUB_OUTPUT}"
+            echo "Reusing verified unfinished component ${image}@${digest}."
+          }
+
+          for item in \
+            "core|srcfl/ftw|ghcr.io/srcfl/ftw:${TAG}" \
+            "updater|srcfl/ftw-updater|ghcr.io/srcfl/ftw-updater:${TAG}"; do
+            key="${item%%|*}"
+            remainder="${item#*|}"
+            repository="${remainder%%|*}"
+            image="${remainder#*|}"
+            http_status="$(manifest_status "${repository}")"
+            case "${http_status}" in
+              404)
+                echo "${key}_build=true" >> "${GITHUB_OUTPUT}"
+                echo "${key}_digest=" >> "${GITHUB_OUTPUT}"
+                echo "Building truly absent unfinished component ${image}."
+                ;;
+              200)
+                validate_existing_component "${key}" "${image}"
+                ;;
+              *)
+                echo "Could not prove ghcr.io/${repository}:${TAG} is absent (HTTP ${http_status}); refusing to publish." >&2
+                exit 1
+                ;;
+            esac
+          done
 
   docker:
     name: beta docker (${{ matrix.target }})
     runs-on: ubuntu-latest
-    needs: tag
+    needs: [tag, candidate]
+    if: ${{ needs.candidate.outputs.receipt_found != 'true' }}
     strategy:
       fail-fast: false
       matrix:
@@ -79,9 +266,13 @@ jobs:
           - target: main
             dockerfile: ./Dockerfile
             image_suffix: ""
+            build_required: ${{ needs.candidate.outputs.core_build }}
+            existing_digest: ${{ needs.candidate.outputs.core_digest }}
           - target: updater
             dockerfile: ./Dockerfile.updater
             image_suffix: "-updater"
+            build_required: ${{ needs.candidate.outputs.updater_build }}
+            existing_digest: ${{ needs.candidate.outputs.updater_digest }}
     steps:
       - name: Checkout beta tag
         uses: actions/checkout@v7
@@ -92,9 +283,11 @@ jobs:
       # drivers/BUNDLED_SOURCE.json. The image copies it, so it has to exist
       # in the build context before buildx runs.
       - name: Fetch the bundled drivers
+        if: ${{ matrix.build_required == 'true' }}
         run: make drivers
 
       - name: Set up QEMU
+        if: ${{ matrix.build_required == 'true' }}
         uses: docker/setup-qemu-action@v4
 
       - name: Set up Docker Buildx
@@ -108,6 +301,7 @@ jobs:
           password: ${{ secrets.SOURCEFUL_GHCR_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: Build and publish beta image
+        if: ${{ matrix.build_required == 'true' }}
         id: build
         uses: docker/build-push-action@v7
         with:
@@ -117,18 +311,40 @@ jobs:
           push: true
           tags: |
             ghcr.io/srcfl/ftw${{ matrix.image_suffix }}:${{ needs.tag.outputs.version }}
-            ghcr.io/srcfl/ftw${{ matrix.image_suffix }}:beta
           labels: |
             org.opencontainers.image.source=https://github.com/srcfl/ftw
             org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.version=${{ needs.tag.outputs.version }}
+            org.opencontainers.image.version=${{ needs.tag.outputs.oci_version }}
             org.opencontainers.image.licenses=Apache-2.0
           build-args: |
-            VERSION=${{ needs.tag.outputs.version }}
+            VERSION=${{ needs.tag.outputs.runtime_version }}
+            CANDIDATE_TAG=${{ needs.tag.outputs.version }}
             BUILD_SHA=${{ github.sha }}
           # Reuse the same content-addressed layers as stable.
           cache-from: type=gha,scope=${{ matrix.target }}
           cache-to: type=gha,mode=max,scope=${{ matrix.target }}
+
+      - name: Resolve exact candidate digest
+        id: source
+        env:
+          BUILD_REQUIRED: ${{ matrix.build_required }}
+          BUILT_DIGEST: ${{ steps.build.outputs.digest }}
+          EXISTING_DIGEST: ${{ matrix.existing_digest }}
+          IMAGE: ghcr.io/srcfl/ftw${{ matrix.image_suffix }}:${{ needs.tag.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [ "${BUILD_REQUIRED}" = "true" ]; then
+            source_digest="${BUILT_DIGEST}"
+          else
+            source_digest="${EXISTING_DIGEST}"
+          fi
+          test -n "${source_digest}"
+          current_digest="$(scripts/inspect-image-digest.sh "${IMAGE}")"
+          if [ "${current_digest}" != "${source_digest}" ]; then
+            echo "${IMAGE} resolved to ${current_digest}, expected ${source_digest}." >&2
+            exit 1
+          fi
+          echo "digest=${source_digest}" >> "${GITHUB_OUTPUT}"
 
       - name: Login to compatibility GHCR namespace
         uses: docker/login-action@v4.6.0
@@ -140,24 +356,57 @@ jobs:
       - name: Mirror exact beta manifests to compatibility namespace
         env:
           IMAGE_SUFFIX: ${{ matrix.image_suffix }}
-          SOURCE_DIGEST: ${{ steps.build.outputs.digest }}
+          SOURCE_DIGEST: ${{ steps.source.outputs.digest }}
           VERSION: ${{ needs.tag.outputs.version }}
         run: |
           set -euo pipefail
           test -n "${SOURCE_DIGEST}"
-          for tag in "${VERSION}" beta; do
-            source="ghcr.io/srcfl/ftw${IMAGE_SUFFIX}:${tag}"
-            legacy="ghcr.io/frahlg/forty-two-watts${IMAGE_SUFFIX}:${tag}"
-            docker buildx imagetools create --prefer-index=false --tag "${legacy}" "${source}"
-            legacy_digest="$(scripts/inspect-image-digest.sh "${legacy}")"
-            test "${SOURCE_DIGEST}" = "${legacy_digest}"
-          done
+          source="ghcr.io/srcfl/ftw${IMAGE_SUFFIX}:${VERSION}"
+          legacy_repository="frahlg/forty-two-watts${IMAGE_SUFFIX}"
+          legacy="ghcr.io/${legacy_repository}:${VERSION}"
+
+          token="$(curl -fsSL --get \
+            --data-urlencode service=ghcr.io \
+            --data-urlencode "scope=repository:${legacy_repository}:pull" \
+            https://ghcr.io/token | jq -er '.token')"
+          http_status="$(curl -sS -o /dev/null -w '%{http_code}' -I \
+            -H "Authorization: Bearer ${token}" \
+            -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json' \
+            "https://ghcr.io/v2/${legacy_repository}/manifests/${VERSION}")"
+          case "${http_status}" in
+            404)
+              docker buildx imagetools create --prefer-index=false \
+                --tag "${legacy}" "${source}@${SOURCE_DIGEST}"
+              ;;
+            200)
+              legacy_digest="$(scripts/inspect-image-digest.sh "${legacy}")"
+              if [ "${legacy_digest}" != "${SOURCE_DIGEST}" ]; then
+                echo "${legacy} already points to ${legacy_digest}; refusing to overwrite it with ${SOURCE_DIGEST}." >&2
+                exit 1
+              fi
+              ;;
+            *)
+              echo "Could not determine whether ${legacy} exists (HTTP ${http_status}); refusing to publish." >&2
+              exit 1
+              ;;
+          esac
+          legacy_digest="$(scripts/inspect-image-digest.sh "${legacy}")"
+          test "${SOURCE_DIGEST}" = "${legacy_digest}"
 
   release:
     name: publish GitHub prerelease
     runs-on: ubuntu-latest
-    needs: [tag, docker]
+    needs: [tag, candidate, docker]
+    if: ${{ always() && needs.tag.result == 'success' && needs.candidate.result == 'success' && (needs.docker.result == 'success' || needs.docker.result == 'skipped') }}
     steps:
+      - name: Checkout beta tag
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.tag.outputs.version }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
       - name: Publish prerelease after images are available
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -165,13 +414,138 @@ jobs:
           STATE_SCHEMA: ${{ needs.tag.outputs.state_schema }}
         run: |
           set -euo pipefail
+          CORE_DIGEST="$(scripts/inspect-image-digest.sh "ghcr.io/srcfl/ftw:${TAG}")"
+          UPDATER_DIGEST="$(scripts/inspect-image-digest.sh "ghcr.io/srcfl/ftw-updater:${TAG}")"
+          test -n "${CORE_DIGEST}"
+          test -n "${UPDATER_DIGEST}"
+          STABLE_VERSION="${TAG#v}"
+          STABLE_VERSION="${STABLE_VERSION%-beta.*}"
+          jq -n \
+            --arg tag "${TAG}" \
+            --arg commit "${GITHUB_SHA}" \
+            --arg version "${STABLE_VERSION}" \
+            --arg core "${CORE_DIGEST}" \
+            --arg updater "${UPDATER_DIGEST}" \
+            '{schema: 1, tag: $tag, commit: $commit, stable_version: $version, images: {core: {digest: $core}, updater: {digest: $updater}}}' \
+            > ftw-image-digests.json
+
           if gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-            echo "GitHub prerelease ${TAG} already exists"
+            mkdir -p existing
+            if gh release download "${TAG}" --repo "${GITHUB_REPOSITORY}" \
+              --pattern ftw-image-digests.json --dir existing >/dev/null 2>&1; then
+              cmp ftw-image-digests.json existing/ftw-image-digests.json
+              echo "GitHub prerelease ${TAG} already records these exact image digests"
+              exit 0
+            fi
+          else
+            gh release create "${TAG}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "${TAG}" \
+              --prerelease \
+              --notes "<!-- ftw-state-schema:${STATE_SCHEMA} -->" \
+              --generate-notes
+          fi
+          gh release upload "${TAG}" ftw-image-digests.json \
+            --repo "${GITHUB_REPOSITORY}"
+
+  channel:
+    name: publish coherent beta aliases
+    runs-on: ubuntu-latest
+    needs: [tag, release]
+    steps:
+      - name: Checkout beta tag
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.tag.outputs.version }}
+          fetch-depth: 0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Login to canonical GHCR namespace
+        uses: docker/login-action@v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ vars.SOURCEFUL_GHCR_USER || github.actor }}
+          password: ${{ secrets.SOURCEFUL_GHCR_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Login to compatibility GHCR namespace
+        uses: docker/login-action@v4.6.0
+        with:
+          registry: ghcr.io
+          username: frahlg
+          password: ${{ secrets.LEGACY_GHCR_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Move aliases only after both exact manifests are recorded
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.tag.outputs.version }}
+        run: |
+          set -euo pipefail
+          git fetch --force --tags origin
+          newest_beta=""
+          while IFS= read -r candidate; do
+            if [[ "${candidate}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-beta\.[0-9]+$ ]]; then
+              newest_beta="${candidate}"
+              break
+            fi
+          done < <(git tag --list 'v*-beta.*' --sort=-v:refname)
+          if [ -z "${newest_beta}" ]; then
+            echo "No beta tag is available for the moving channel." >&2
+            exit 1
+          fi
+          if [ "${TAG}" != "${newest_beta}" ]; then
+            echo "Not moving :beta aliases backwards from ${newest_beta} to ${TAG}."
             exit 0
           fi
-          gh release create "${TAG}" \
+
+          mkdir -p receipt
+          gh release download "${TAG}" \
             --repo "${GITHUB_REPOSITORY}" \
-            --title "${TAG}" \
-            --prerelease \
-            --notes "<!-- ftw-state-schema:${STATE_SCHEMA} -->" \
-            --generate-notes
+            --pattern ftw-image-digests.json \
+            --dir receipt
+          record="receipt/ftw-image-digests.json"
+          jq -e \
+            --arg tag "${TAG}" \
+            --arg commit "${GITHUB_SHA}" '
+              .schema == 1
+              and .tag == $tag
+              and .commit == $commit
+              and (.images.core.digest | test("^sha256:[0-9a-f]{64}$"))
+              and (.images.updater.digest | test("^sha256:[0-9a-f]{64}$"))
+            ' "${record}" >/dev/null
+
+          core_digest="$(jq -r '.images.core.digest' "${record}")"
+          updater_digest="$(jq -r '.images.updater.digest' "${record}")"
+
+          # Validate every permanent source before the first moving write. A
+          # failed check must not leave one component's channel ahead of the
+          # other solely because validation happened later in the loop.
+          for item in \
+            "core|ghcr.io/srcfl/ftw|ghcr.io/frahlg/forty-two-watts" \
+            "updater|ghcr.io/srcfl/ftw-updater|ghcr.io/frahlg/forty-two-watts-updater"; do
+            key="${item%%|*}"
+            remainder="${item#*|}"
+            canonical="${remainder%%|*}"
+            compatibility="${remainder#*|}"
+            if [ "${key}" = core ]; then expected="${core_digest}"; else expected="${updater_digest}"; fi
+            canonical_version="${canonical}:${TAG}"
+            compatibility_version="${compatibility}:${TAG}"
+            test "$(scripts/inspect-image-digest.sh "${canonical_version}")" = "${expected}"
+            test "$(scripts/inspect-image-digest.sh "${compatibility_version}")" = "${expected}"
+          done
+
+          for item in \
+            "${core_digest}|ghcr.io/srcfl/ftw|ghcr.io/frahlg/forty-two-watts" \
+            "${updater_digest}|ghcr.io/srcfl/ftw-updater|ghcr.io/frahlg/forty-two-watts-updater"; do
+            expected="${item%%|*}"
+            remainder="${item#*|}"
+            canonical="${remainder%%|*}"
+            compatibility="${remainder#*|}"
+            canonical_version="${canonical}:${TAG}"
+            for target in "${canonical}:beta" "${compatibility}:beta"; do
+              docker buildx imagetools create --prefer-index=false \
+                --tag "${target}" "${canonical_version}@${expected}"
+              test "$(scripts/inspect-image-digest.sh "${target}")" = "${expected}"
+            done
+          done

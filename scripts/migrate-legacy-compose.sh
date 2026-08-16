@@ -154,6 +154,7 @@ config_check=""
 expected_data_source=""
 new_main_id=""
 optimizer_service_added=false
+release_identity_override_needed=false
 optimizer_container_changed=false
 modular_override_created=""
 modular_tmp=""
@@ -336,7 +337,22 @@ fi
 config_check="$(mktemp)"
 # Scope the mount check to the selected main service. A global grep could be
 # fooled by an unrelated helper service that happens to mount /app/data.
-compose config "$main_service" >"$config_check"
+identity_probe="ftw-image-tag-probe"
+FTW_IMAGE_TAG="$identity_probe" "${compose_command[@]}" config "$main_service" >"$config_check"
+if ! grep -Eq "^[[:space:]]+FTW_IMAGE_TAG:[[:space:]]*[\"']?${identity_probe}[\"']?[[:space:]]*$" "$config_check"; then
+  if [ "$optimizer_service_added" = false ]; then
+    for candidate in \
+      docker-compose.override.yml \
+      docker-compose.override.yaml \
+      compose.override.yml \
+      compose.override.yaml; do
+      if [ -e "$candidate" ]; then
+        die "$candidate does not pass FTW_IMAGE_TAG into $main_service; add that mapping manually before migration"
+      fi
+    done
+    release_identity_override_needed=true
+  fi
+fi
 data_mount="$(awk '
   /^[[:space:]]*-[[:space:]]+type:/ {
     type = $0
@@ -423,7 +439,7 @@ done
 cp -p "${compose_files[@]}" "$compose_backup_dir/"
 log "Compose rollback backup: $compose_backup_dir"
 
-if [ "$optimizer_service_added" = true ]; then
+if [ "$optimizer_service_added" = true ] || [ "$release_identity_override_needed" = true ]; then
   modular_override_created="$install_dir/docker-compose.override.yml"
   modular_tmp="$modular_override_created.tmp"
   {
@@ -431,27 +447,41 @@ if [ "$optimizer_service_added" = true ]; then
     echo 'services:'
     echo "  ${main_service}:"
     echo '    environment:'
-    echo '      FTW_OPTIMIZER_TRANSPORT: ${FTW_OPTIMIZER_TRANSPORT:-unix}'
-    echo '      FTW_OPTIMIZER_SOCKET: /run/ftw-optimizer/optimizer.sock'
-    echo '    volumes:'
-    echo '      - optimizer-ipc:/run/ftw-optimizer'
-    echo '  ftw-optimizer:'
-    echo '    image: ghcr.io/srcfl/ftw-optimizer:${FTW_OPTIMIZER_IMAGE_TAG:-latest}'
-    echo '    container_name: ftw-optimizer'
-    echo '    restart: unless-stopped'
-    echo '    network_mode: none'
-    echo '    environment:'
-    echo '      FTW_OPTIMIZER_SOCKET: /run/ftw-optimizer/optimizer.sock'
-    echo '    volumes:'
-    echo '      - optimizer-ipc:/run/ftw-optimizer'
-    echo 'volumes:'
-    echo '  optimizer-ipc:'
+    echo '      FTW_IMAGE_TAG: ${FTW_IMAGE_TAG:-}'
+    if [ "$optimizer_service_added" = true ]; then
+      echo '      FTW_OPTIMIZER_TRANSPORT: ${FTW_OPTIMIZER_TRANSPORT:-unix}'
+      echo '      FTW_OPTIMIZER_SOCKET: /run/ftw-optimizer/optimizer.sock'
+      echo '    volumes:'
+      echo '      - optimizer-ipc:/run/ftw-optimizer'
+      echo '  ftw-optimizer:'
+      echo '    image: ghcr.io/srcfl/ftw-optimizer:${FTW_OPTIMIZER_IMAGE_TAG:-latest}'
+      echo '    container_name: ftw-optimizer'
+      echo '    restart: unless-stopped'
+      echo '    network_mode: none'
+      echo '    environment:'
+      echo '      FTW_OPTIMIZER_SOCKET: /run/ftw-optimizer/optimizer.sock'
+      echo '    volumes:'
+      echo '      - optimizer-ipc:/run/ftw-optimizer'
+      echo 'volumes:'
+      echo '  optimizer-ipc:'
+    fi
   } >"$modular_tmp"
   docker compose -f "$compose_file" -f "$modular_tmp" config >/dev/null
   mv "$modular_tmp" "$modular_override_created"
   modular_tmp=""
   compose_files+=(docker-compose.override.yml)
-  log "added modular optimizer override: $modular_override_created"
+  identity_check="$(mktemp)"
+  FTW_IMAGE_TAG="$identity_probe" "${compose_command[@]}" config "$main_service" >"$identity_check"
+  if ! grep -Eq "^[[:space:]]+FTW_IMAGE_TAG:[[:space:]]*[\"']?${identity_probe}[\"']?[[:space:]]*$" "$identity_check"; then
+    rm -f "$identity_check"
+    die "generated override does not pass FTW_IMAGE_TAG into $main_service"
+  fi
+  rm -f "$identity_check"
+  if [ "$optimizer_service_added" = true ]; then
+    log "added modular optimizer override: $modular_override_created"
+  else
+    log "added release identity override: $modular_override_created"
+  fi
 fi
 
 capture_service_image() {

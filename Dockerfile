@@ -29,10 +29,11 @@ COPY go/ ./go/
 ARG TARGETOS=linux
 ARG TARGETARCH
 ARG VERSION=dev
+ARG CANDIDATE_TAG
 RUN cd go && \
     target_arch="${TARGETARCH:-$(go env GOARCH)}" && \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${target_arch} \
-    go build -trimpath -ldflags="-s -w -X main.Version=${VERSION}" \
+    go build -trimpath -ldflags="-s -w -X main.Version=${VERSION} -X main.CandidateTag=${CANDIDATE_TAG}" \
     -o /out/ftw ./cmd/ftw && \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${target_arch} \
     go build -trimpath -ldflags="-s -w -X main.Version=${VERSION}" \

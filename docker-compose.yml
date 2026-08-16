@@ -47,6 +47,10 @@ services:
       # sidecar below; native / OS-image deploys leave this unset so the
       # UI hides the feature entirely. See docs/self-update.md.
       FTW_SELFUPDATE_ENABLED: "1"
+      # Beta and stable point at one exact image digest. The image binds both
+      # allowed release identities; this immutable tag selects one of them.
+      # The updater pins it in .env after update.
+      FTW_IMAGE_TAG: ${FTW_IMAGE_TAG:-}
       # Optional Bearer token for API mutations addressed through a public or
       # fully-qualified hostname. Keep it in .env so updater-driven recreates
       # retain it. Local LAN addresses continue to work without a token.

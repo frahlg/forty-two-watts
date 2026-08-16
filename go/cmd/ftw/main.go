@@ -72,6 +72,68 @@ import (
 // local runs.
 var Version = "dev"
 
+// CandidateTag gets injected into release container builds. It binds the
+// binary to the one beta identity that produced the image manifest.
+var CandidateTag = ""
+
+// runtimeVersionFromImageTag lets one content-addressed image serve first as
+// a beta candidate and then as stable without changing its bytes. Release
+// images bake the stable product version into the binary. docker-compose
+// supplies the immutable deployed tag. The process accepts only the stable
+// identity and the exact beta identity bound into the binary at build time.
+func runtimeVersionFromImageTag(baked, candidate, imageTag string) (string, bool) {
+	imageTag = strings.TrimSpace(imageTag)
+	if imageTag == "" {
+		return baked, false
+	}
+	base, stable := releaseVersionBase(baked)
+	if !stable || base != baked {
+		return baked, false
+	}
+	if imageTag == baked {
+		return baked, true
+	}
+	candidateBase, beta := releaseVersionBase(candidate)
+	if !beta || candidateBase != baked || candidate == candidateBase || imageTag != candidate {
+		return baked, false
+	}
+	return candidate, true
+}
+
+func releaseVersionBase(tag string) (string, bool) {
+	if !strings.HasPrefix(tag, "v") {
+		return "", false
+	}
+	base := tag
+	if i := strings.Index(base, "-beta."); i >= 0 {
+		if i+len("-beta.") == len(base) || !decimalDigits(base[i+len("-beta."):]) {
+			return "", false
+		}
+		base = base[:i]
+	} else if strings.Contains(base, "-") {
+		return "", false
+	}
+	parts := strings.Split(strings.TrimPrefix(base, "v"), ".")
+	if len(parts) != 3 {
+		return "", false
+	}
+	for _, part := range parts {
+		if part == "" || !decimalDigits(part) {
+			return "", false
+		}
+	}
+	return base, true
+}
+
+func decimalDigits(s string) bool {
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return s != ""
+}
+
 // siteIdentityLoad is the machine's own identity, not a user's.
 //
 // Bound is set when nova.key has been adopted into a hardware-protected
@@ -234,6 +296,11 @@ func adoptGatewayIdentityWith(
 }
 
 func main() {
+	imageTag := os.Getenv("FTW_IMAGE_TAG")
+	builtVersion := Version
+	resolvedVersion, imageTagApplied := runtimeVersionFromImageTag(builtVersion, CandidateTag, imageTag)
+	Version = resolvedVersion
+
 	// Subcommand dispatch — a bare first non-flag argument selects one
 	// of the bootstrap CLIs, e.g. `ftw nova-claim --url=…`.
 	// Everything else is the long-running service.
@@ -286,6 +353,9 @@ func main() {
 	stdoutHandler := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})
 	logger := slog.New(telemetry.NewLogHandler(stdoutHandler, logRing))
 	slog.SetDefault(logger)
+	if imageTag != "" && !imageTagApplied {
+		slog.Warn("ignoring FTW_IMAGE_TAG that does not match a built release identity", "built_version", builtVersion, "built_candidate", CandidateTag, "image_tag", imageTag)
+	}
 	slog.Info("FTW starting", "version", Version, "config", *configPath)
 
 	// Route "drivers/<name>.lua" path resolution through the drivers dir

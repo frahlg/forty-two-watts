@@ -64,6 +64,7 @@ trap cleanup EXIT
   echo 'services:'
   echo "  ${main}:"
   echo '    environment:'
+  echo '      FTW_IMAGE_TAG: ${FTW_IMAGE_TAG:-}'
   echo '      FTW_OPTIMIZER_TRANSPORT: ${FTW_OPTIMIZER_TRANSPORT:-unix}'
   echo '      FTW_OPTIMIZER_SOCKET: /run/ftw-optimizer/optimizer.sock'
   echo '    volumes:'

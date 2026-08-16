@@ -62,6 +62,7 @@ override="$TMP/fresh/docker-compose.override.yml"
 test -f "$override"
 grep -q '^  ftw-optimizer:' "$override"
 grep -q 'optimizer-ipc:/run/ftw-optimizer' "$override"
+grep -q 'FTW_IMAGE_TAG: ${FTW_IMAGE_TAG:-}' "$override"
 grep -q 'FTW_OPTIMIZER_TRANSPORT: ${FTW_OPTIMIZER_TRANSPORT:-unix}' "$override"
 grep -q '^up -d ftw-optimizer ftw$' "$DOCKER_LOG"
 
@@ -264,6 +265,10 @@ case "$command" in
             esac
             ;;
           ftw)
+            if grep -q 'FTW_IMAGE_TAG:' docker-compose.yml 2>/dev/null || \
+              { [ -f docker-compose.override.yml ] && grep -q 'FTW_IMAGE_TAG:' docker-compose.override.yml; }; then
+              printf 'environment:\n  FTW_IMAGE_TAG: %s\n' "${FTW_IMAGE_TAG:-}"
+            fi
             printf 'volumes:\n  - type: bind\n    source: %s\n    target: /app/data\n' "$data"
             ;;
         esac
@@ -318,12 +323,44 @@ FAKE_DATA_DIR="$TMP/migrate/data" \
 bash "$ROOT/scripts/migrate-legacy-compose.sh" --dir "$TMP/migrate"
 
 grep -q '^  ftw-optimizer:' "$TMP/migrate/docker-compose.override.yml"
+grep -q 'FTW_IMAGE_TAG: ${FTW_IMAGE_TAG:-}' "$TMP/migrate/docker-compose.override.yml"
 grep -q 'FTW_OPTIMIZER_TRANSPORT: ${FTW_OPTIMIZER_TRANSPORT:-unix}' \
   "$TMP/migrate/docker-compose.override.yml"
 test -f "$TMP/migrate/state/ftw"
 test -f "$TMP/migrate/state/ftw-updater"
 test -f "$TMP/migrate/state/ftw-optimizer"
 test -f "$TMP/migrate"/.ftw-migration-backup-*/previous-images.tsv
+
+# A legacy layout that already has the optimizer still needs the deploy tag
+# inside Core. The migration creates a narrow identity-only override instead
+# of skipping the mapping with the optimizer service.
+mkdir -p "$TMP/existing-optimizer/bin" "$TMP/existing-optimizer/data" "$TMP/existing-optimizer/state"
+cp "$TMP/migrate/bin/"* "$TMP/existing-optimizer/bin/"
+touch "$TMP/existing-optimizer/data/state.db"
+cat >"$TMP/existing-optimizer/docker-compose.yml" <<'YAML'
+services:
+  ftw:
+    image: example.invalid/old-core:latest
+    volumes:
+      - ./data:/app/data
+  ftw-updater:
+    image: example.invalid/old-updater:latest
+  ftw-optimizer:
+    image: example.invalid/old-optimizer:latest
+YAML
+PATH="$TMP/existing-optimizer/bin:$PATH" \
+FAKE_STATE_DIR="$TMP/existing-optimizer/state" \
+FAKE_DATA_DIR="$TMP/existing-optimizer/data" \
+bash "$ROOT/scripts/migrate-legacy-compose.sh" --dir "$TMP/existing-optimizer"
+grep -q 'FTW_IMAGE_TAG: ${FTW_IMAGE_TAG:-}' \
+  "$TMP/existing-optimizer/docker-compose.override.yml"
+if grep -q '^  ftw-optimizer:' "$TMP/existing-optimizer/docker-compose.override.yml"; then
+  echo "existing optimizer migration should create only the Core identity override" >&2
+  exit 1
+fi
+test -f "$TMP/existing-optimizer/state/ftw"
+test -f "$TMP/existing-optimizer/state/ftw-updater"
+test -f "$TMP/existing-optimizer/state/ftw-optimizer"
 
 # Generated container names still carry Compose labels. The migration must
 # reuse their explicit project name instead of creating a parallel default.

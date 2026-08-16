@@ -22,8 +22,8 @@ name: release
 #        to true and 422-collides with our own `gh release create`.
 #      - After the Version PR merges, dispatch beta.yml from that exact commit
 #        and validate it on real sites.
-#      - Manually dispatch this workflow to promote the tested commit to stable.
-#        Promotion refuses a version without a matching beta tag on that commit.
+#      - Manually dispatch this workflow with the exact tested beta tag.
+#        Promotion refuses a beta that does not point to this commit.
 #
 # Stable publication is deliberately workflow_dispatch-only. A merge creates
 # the version candidate; an operator chooses when its beta is ready to promote.
@@ -42,6 +42,11 @@ on:
       - 'scripts/apply-codename.cjs'
       - '.github/workflows/release.yml'
   workflow_dispatch:
+    inputs:
+      source_beta:
+        description: "Exact beta tag validated on real sites"
+        required: true
+        type: string
 
 # changesets/action needs to push the Version PR. The publish step
 # pushes the tag + creates the GH release + dispatches release-assets.
@@ -64,6 +69,7 @@ jobs:
     outputs:
       published: ${{ steps.publish.outputs.published }}
       version:   ${{ steps.publish.outputs.version }}
+      beta_tag:  ${{ steps.publish.outputs.beta_tag }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -144,6 +150,7 @@ jobs:
         if: github.event_name == 'workflow_dispatch' && steps.changesets.outputs.hasChangesets == 'false'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_BETA: ${{ inputs.source_beta }}
         run: |
           set -euo pipefail
 
@@ -153,6 +160,12 @@ jobs:
           TAG_EXISTS=false
           if git ls-remote --exit-code --tags origin "${TAG}" >/dev/null 2>&1; then
             TAG_EXISTS=true
+            git fetch --force origin "refs/tags/${TAG}:refs/tags/${TAG}"
+            STABLE_COMMIT="$(git rev-list -n 1 "${TAG}")"
+            if [ "${STABLE_COMMIT}" != "${GITHUB_SHA}" ]; then
+              echo "Existing stable tag ${TAG} points to ${STABLE_COMMIT}, not candidate ${GITHUB_SHA}." >&2
+              exit 1
+            fi
           fi
           RELEASE_EXISTS=false
           if gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
@@ -174,9 +187,14 @@ jobs:
           # Stable is a promotion, never the first public channel for a commit.
           # beta.yml also checks that the prerelease base matches package.json.
           git fetch --force --tags origin
-          BETA_TAG="$(git tag --list "${TAG}-beta.*" --sort=-v:refname | head -n 1)"
-          if [ -z "${BETA_TAG}" ]; then
-            echo "No ${TAG}-beta.N tag exists. Publish and validate beta first, then rerun release." >&2
+          BETA_TAG="${INPUT_BETA}"
+          if [[ ! "${BETA_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-beta\.[0-9]+$ ]] || \
+             [ "${BETA_TAG%-beta.*}" != "${TAG}" ]; then
+            echo "source_beta must name the exact tested ${TAG}-beta.N candidate." >&2
+            exit 1
+          fi
+          if ! git show-ref --verify --quiet "refs/tags/${BETA_TAG}"; then
+            echo "Selected beta tag ${BETA_TAG} does not exist." >&2
             exit 1
           fi
           BETA_COMMIT="$(git rev-list -n 1 "${BETA_TAG}")"
@@ -199,16 +217,44 @@ jobs:
             exit 1
           fi
 
+          DIGEST_DIR="${RUNNER_TEMP}/beta-digests"
+          mkdir -p "${DIGEST_DIR}"
+          gh release download "${BETA_TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern ftw-image-digests.json \
+            --dir "${DIGEST_DIR}"
+          DIGEST_RECORD="${DIGEST_DIR}/ftw-image-digests.json"
+          jq -e \
+            --arg tag "${BETA_TAG}" \
+            --arg commit "${GITHUB_SHA}" \
+            --arg version "${VERSION}" '
+              .schema == 1
+              and .tag == $tag
+              and .commit == $commit
+              and .stable_version == $version
+              and (.images.core.digest | test("^sha256:[0-9a-f]{64}$"))
+              and (.images.updater.digest | test("^sha256:[0-9a-f]{64}$"))
+            ' "${DIGEST_RECORD}" >/dev/null
+          CORE_DIGEST="$(jq -r '.images.core.digest' "${DIGEST_RECORD}")"
+          UPDATER_DIGEST="$(jq -r '.images.updater.digest' "${DIGEST_RECORD}")"
+
           verify_beta_image() {
             local image_ref="$1"
+            local expected_digest="$2"
             local metadata
+            local current_digest
             metadata="${RUNNER_TEMP}/$(echo "${image_ref}" | tr '/:' '--').json"
-            if ! docker buildx imagetools inspect "${image_ref}" \
+            current_digest="$(scripts/inspect-image-digest.sh "${image_ref}")"
+            if [ "${current_digest}" != "${expected_digest}" ]; then
+              echo "Published beta tag ${image_ref} moved: recorded ${expected_digest}, current ${current_digest}." >&2
+              exit 1
+            fi
+            if ! docker buildx imagetools inspect "${image_ref}@${expected_digest}" \
               --format '{{json .Image}}' > "${metadata}"; then
               echo "Published beta image ${image_ref} is unavailable." >&2
               exit 1
             fi
-            python3 - "${metadata}" "${GITHUB_SHA}" "${BETA_TAG}" "${image_ref}" <<'PY'
+            python3 - "${metadata}" "${GITHUB_SHA}" "${VERSION}" "${image_ref}" <<'PY'
           import json
           import sys
 
@@ -232,8 +278,8 @@ jobs:
           PY
           }
 
-          verify_beta_image "ghcr.io/srcfl/ftw:${BETA_TAG}"
-          verify_beta_image "ghcr.io/srcfl/ftw-updater:${BETA_TAG}"
+          verify_beta_image "ghcr.io/srcfl/ftw:${BETA_TAG}" "${CORE_DIGEST}"
+          verify_beta_image "ghcr.io/srcfl/ftw-updater:${BETA_TAG}" "${UPDATER_DIGEST}"
           echo "Promoting tested ${BETA_TAG} to ${TAG}."
 
           # Build codename-annotated release notes. The script extracts
@@ -253,11 +299,9 @@ jobs:
 
           if [ "${TAG_EXISTS}" = "false" ]; then
             git tag -a "${TAG}" -m "Release ${TAG}"
-            # Pushed over origin's persisted GITHUB_TOKEN creds. GITHUB_TOKEN
-            # pushes don't cascade workflows, so release-assets.yml's
-            # `push: tags` trigger stays dormant and the manual dispatch below
-            # remains its single trigger. (This is why checkout must NOT
-            # persist the CI_TOKEN PAT — see the Checkout step.)
+            # Push with the persisted GITHUB_TOKEN credentials. The explicit
+            # dispatch below binds the chosen beta before assets can publish.
+            # Checkout must not persist the CI_TOKEN PAT; see the Checkout step.
             git push origin "${TAG}"
           fi
 
@@ -271,21 +315,22 @@ jobs:
           {
             echo "published=true"
             echo "version=${VERSION}"
+            echo "beta_tag=${BETA_TAG}"
           } >> "${GITHUB_OUTPUT}"
           echo "Published ${TAG}"
 
       - name: Dispatch release-assets workflow
-        # GitHub does NOT fire downstream `push: tags` workflows from
-        # events created by GITHUB_TOKEN, so the tag push above won't
-        # auto-trigger release-assets.yml. workflow_dispatch via gh
-        # CLI does. (u-front uses the identical pattern.)
+        # release-assets.yml only accepts explicit dispatches, which carry the
+        # exact validated beta selected above.
         if: steps.publish.outputs.published == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: v${{ steps.publish.outputs.version }}
+          BETA_TAG: ${{ steps.publish.outputs.beta_tag }}
         run: |
           set -euo pipefail
           echo "Dispatching release-assets.yml for ${TAG}"
           gh workflow run release-assets.yml \
             --repo "${GITHUB_REPOSITORY}" \
-            --ref "${TAG}"
+            --ref "${TAG}" \
+            -f source_beta="${BETA_TAG}"
