@@ -190,18 +190,19 @@ driver configuration.
 
 ### A device `.local` name does not resolve
 
-FTW resolves `.local` device names itself; the OS resolver is not involved,
-because a `CGO_ENABLED=0` Go binary never consults NSS. There are two places an
-answer can come from, and the log line for a successful lookup says which:
+With `allow_unverified_local` enabled, FTW resolves `.local` device names
+itself because a `CGO_ENABLED=0` Go binary never consults NSS. Without the
+option, FTW leaves the name to Go's system DNS path. FTW's own lookup has two
+backends, and the log line for a successful lookup says which:
 
 ```
 resolved host over mDNS host=zap.local addr=192.168.1.42 via=avahi
 ```
 
 **`via=avahi`** — the host's `avahi-daemon` answered over its socket. This is
-preferred when available: avahi already holds a record cache, and it is the
-same daemon that `getent hosts zap.local` inside the container goes through, so
-FTW and your shell cannot disagree about an address.
+preferred when available because avahi already holds a record cache. When NSS
+and the socket mount are configured, `getent hosts zap.local` asks the same
+daemon, though cache timing can still differ.
 
 **`via=multicast`** — FTW queried the LAN directly. This is what happens when
 the avahi socket is not mounted, which is the default, and it needs no host
@@ -254,9 +255,9 @@ where nothing else resolves `.local` — a plain Compose or Raspberry Pi install
 whose `resolv.conf` points at the router — because there the name will simply
 not resolve until you opt in.
 
-Note the limit of the gate: where an HTTP proxy is configured, FTW never
-resolves the destination at all, so the flag has nothing to say about that path.
-A TLS pin does not bypass the gate yet.
+HTTP and WebSocket requests to `.local` hosts always bypass configured proxies,
+so credentials and control payloads stay on the LAN path. Ordinary DNS names
+still use the configured proxy. A TLS pin does not bypass the mDNS gate yet.
 
 #### Letting FTW use avahi
 

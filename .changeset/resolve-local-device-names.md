@@ -22,14 +22,18 @@ directory is left to the operator. A successful lookup logs which one answered.
 
 Every driver transport uses it — Modbus TCP, MQTT (driver and Home Assistant
 bridge), HTTP including TLS-pinned clients, WebSocket and raw TCP.
+HTTP and WebSocket requests to `.local` hosts bypass configured proxies so
+device credentials and control payloads cannot leave through them. Ordinary
+DNS names keep the configured proxy path.
 
 Resolution happens per dial rather than once at startup, so a device that moves
 to a new DHCP lease is found again on the next reconnect without a config edit.
 Answers are cached (30–120 s, following the record TTL where there is one) so
-reconnect loops do not flood the LAN, and failures are cached briefly so a
-device that is still booting is retried soon. A failed resolution logs
-`mDNS resolution failed` and names the mechanism, instead of surfacing as a
-generic dial error.
+reconnect loops do not flood the LAN. If every cached address fails to connect,
+FTW drops that unchanged entry and resolves once more. Failures are cached
+briefly so a device that is still booting is retried soon. A failed resolution
+logs `mDNS resolution failed` and names the mechanism, instead of surfacing as
+a generic dial error.
 
 Only `.local` names take this path; literal IPs and ordinary DNS names dial
 exactly as before. Multicast still has to reach the LAN, which the Linux
@@ -54,9 +58,9 @@ Network scanning now reports the name a device answers for itself. It used to
 ask unicast reverse DNS first and only fall back to mDNS, which meant the
 router's label for the lease — `zap-000064963cd51edc.localdomain` on a UniFi
 network — was what reached the setup wizard, and the wizard fell back to the
-raw IP because that is not a `.local` name. Both queries now run together and a
-`.local` answer wins. Reverse mDNS alone is not enough either: RFC 6762 leaves
-`in-addr.arpa` mapping optional and many responders publish a forward `A`
-record without one, so where no reverse record exists FTW re-asks the label
-forward as `<label>.local` and keeps it only when it resolves back to the same
-address. Unverified names are still shown, but only as display text.
+raw IP because that is not a `.local` name. Both queries now run together. FTW
+resolves every `.local` candidate forward, including reverse mDNS answers, and
+keeps it only when it maps back to the scanned address. This also covers
+responders that publish a forward `A` record without a reverse PTR, which RFC
+6762 makes optional. Unverified non-local names are still shown as display
+text.

@@ -16,13 +16,15 @@ drivers:
     lua: drivers/zap.lua
     is_site_meter: true
     capabilities:
+      allow_unverified_local: true
       http:
         allowed_hosts: ["zap.local"]
     config:
       host: zap.local
 ```
 
-Use the Zap's LAN IP in both places when mDNS does not cross the network.
+The opt-in lets FTW use its own unauthenticated mDNS answer. Use the Zap's LAN
+IP in both places when multicast does not cross the network.
 
 With several meters, `meter_serial` pins the site meter; otherwise the first
 P1/HAN device is preferred.
@@ -61,10 +63,10 @@ go test ./internal/drivers -run 'Zap|zap'
 
 - not found: confirm Zap is on Wi-Fi and reachable at
   `http://zap.local/api/system` from the FTW host;
-- `.local` name does not resolve: FTW resolves `.local` itself — via the host's
-  `avahi-daemon` where its socket is mounted, otherwise by querying the LAN —
-  rather than through the OS resolver, so it needs to be on the same L2 segment
-  as the device. That is the case with the Linux Compose topology
+- `.local` name does not resolve: with `allow_unverified_local` enabled, FTW
+  asks the host's `avahi-daemon` where its socket is mounted, then queries the
+  LAN. It needs to be on the same L2 segment as the device. That is the case
+  with the Linux Compose topology
   (`network_mode: host`); under `docker-compose.macos.yml` the container is
   bridged and multicast does not reach the LAN, so configure the device by IP
   there. The log line naming the failure is `mDNS resolution failed`, and a

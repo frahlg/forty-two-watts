@@ -51,7 +51,7 @@ func newGorillaWSDialer(allowUnverifiedLocal bool, proxy func(*net_http.Request)
 	if proxy == nil {
 		proxy = dialer.Proxy
 	}
-	dialer.Proxy = proxy
+	dialer.Proxy = proxyExceptLocal(proxy)
 	mdnsDialer := mdnsresolve.Dialer{AllowUnverifiedLocal: allowUnverifiedLocal}
 	dialer.NetDialContext = mdnsDialer.DialContext
 	return dialer
@@ -87,9 +87,9 @@ func (g *gorillaWS) Open(url string, headers map[string]string) error {
 		}
 		hdr.Set(k, v)
 	}
-	// ".local" hosts need mDNS; everything else falls through to a plain dial.
-	// Guard the proxy callback too: gorilla selects a proxy before it invokes
-	// NetDialContext.
+	// ".local" hosts need mDNS and must bypass proxies, which otherwise see the
+	// upgrade headers before gorilla invokes NetDialContext. Everything else
+	// keeps the default proxy and dial behaviour.
 	dialer := newGorillaWSDialer(g.allowUnverifiedLocal, nil)
 	if len(subprotocols) > 0 {
 		dialer.Subprotocols = subprotocols

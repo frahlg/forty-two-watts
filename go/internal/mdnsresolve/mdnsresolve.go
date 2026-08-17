@@ -40,6 +40,7 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -126,6 +127,19 @@ func cacheStore(key string, addrs []netip.Addr, ttl time.Duration) {
 	cacheMu.Lock()
 	defer cacheMu.Unlock()
 	cache[key] = cacheEntry{addrs: addrs, expires: now().Add(ttl)}
+}
+
+// cacheDeleteIfEqual removes only the entry that supplied failed dial
+// addresses. A concurrent lookup that has already stored a new answer wins.
+func cacheDeleteIfEqual(key string, addrs []netip.Addr) bool {
+	cacheMu.Lock()
+	defer cacheMu.Unlock()
+	entry, ok := cache[key]
+	if !ok || !slices.Equal(entry.addrs, addrs) {
+		return false
+	}
+	delete(cache, key)
+	return true
 }
 
 // Flush drops every cached answer. Tests use it; nothing in production does.
@@ -223,6 +237,8 @@ func (d *Dialer) DialContext(ctx context.Context, network, address string) (net.
 		return d.systemFallback(ctx, network, address, err)
 	}
 
+	key := canonical(host)
+	cachedAddrs, fromCache := cacheLookup(key)
 	addrs, err := Lookup(ctx, host)
 	if err != nil {
 		// Name the mechanism. Without this the operator sees a bare dial
@@ -232,9 +248,27 @@ func (d *Dialer) DialContext(ctx context.Context, network, address string) (net.
 		return d.systemFallback(ctx, network, address, err)
 	}
 
+	conn, dialErr := d.dialResolved(ctx, network, port, addrs)
+	if dialErr == nil {
+		return conn, nil
+	}
+	if fromCache && ctx.Err() == nil && slices.Equal(cachedAddrs, addrs) && cacheDeleteIfEqual(key, addrs) {
+		refreshed, refreshErr := Lookup(ctx, host)
+		if refreshErr == nil {
+			conn, refreshedDialErr := d.dialResolved(ctx, network, port, refreshed)
+			if refreshedDialErr == nil {
+				return conn, nil
+			}
+			dialErr = refreshedDialErr
+		}
+	}
+	return nil, fmt.Errorf("dial %s over mDNS: %w", host, dialErr)
+}
+
+func (d *Dialer) dialResolved(ctx context.Context, network, port string, addrs []netip.Addr) (net.Conn, error) {
 	var firstErr error
-	for _, a := range addrs {
-		conn, err := d.Dialer.DialContext(ctx, network, net.JoinHostPort(a.String(), port))
+	for _, addr := range addrs {
+		conn, err := d.Dialer.DialContext(ctx, network, net.JoinHostPort(addr.String(), port))
 		if err == nil {
 			return conn, nil
 		}
@@ -242,7 +276,7 @@ func (d *Dialer) DialContext(ctx context.Context, network, address string) (net.
 			firstErr = err
 		}
 	}
-	return nil, fmt.Errorf("dial %s over mDNS: %w", host, firstErr)
+	return nil, firstErr
 }
 
 // systemFallback hands a ".local" name that mDNS could not resolve to the

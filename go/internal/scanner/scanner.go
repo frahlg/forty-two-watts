@@ -155,8 +155,8 @@ func resolveHostnames(ctx context.Context, devices []FoundDevice) {
 	}
 }
 
-// lookupName picks the best name for ip, preferring one the device answers
-// for itself.
+// lookupName picks the best name for ip, preferring one the device confirms
+// resolves back to itself.
 //
 // The preference is the whole point, and it used to run the other way round.
 // Unicast reverse DNS is answered by the router, which hands back its own
@@ -187,11 +187,8 @@ func lookupName(ctx context.Context, resolver *net.Resolver, ip string) string {
 	}()
 	wg.Wait()
 
-	if isLocalName(mdnsName) {
-		return mdnsName
-	}
-	// No reverse mDNS record is the common case, not a failure: try the label
-	// we did get as a forward ".local" name and let the device confirm it.
+	// A reverse mDNS answer is still untrusted input. Resolve every candidate
+	// forward and keep it only when it maps back to the scanned address.
 	if label := hostLabel(firstNonEmpty(mdnsName, unicastName)); label != "" && ctx.Err() == nil {
 		c, cancel := context.WithTimeout(ctx, mdnsLookupTimeout)
 		defer cancel()
@@ -199,8 +196,20 @@ func lookupName(ctx context.Context, resolver *net.Resolver, ip string) string {
 			return verified
 		}
 	}
+	// Do not let an unverified reverse mDNS name reach the wizard as a
+	// dialable ".local" address. The router's label is still useful display
+	// text when it is not itself a ".local" name.
+	if isLocalName(mdnsName) {
+		if isLocalName(unicastName) {
+			return ""
+		}
+		return unicastName
+	}
 	// Nothing the device owns. Return the router's label as a display name;
 	// the wizard knows not to save a non-".local" name as an address.
+	if isLocalName(unicastName) {
+		return mdnsName
+	}
 	return firstNonEmpty(mdnsName, unicastName)
 }
 

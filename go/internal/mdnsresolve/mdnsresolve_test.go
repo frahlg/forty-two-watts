@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/netip"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -599,6 +600,38 @@ func TestDialerWithOptInUsesOurAnswer(t *testing.T) {
 		t.Fatalf("dial with opt-in: %v", err)
 	}
 	conn.Close()
+}
+
+func TestDialerRefreshesFailedCachedAddressesOnce(t *testing.T) {
+	Flush()
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	_, port, _ := net.SplitHostPort(listener.Addr().String())
+
+	// An IPv6 answer cannot be dialled on tcp4, so the cached attempt fails
+	// at once without relying on a reserved address or a network timeout.
+	cacheStore("inverter.local", []netip.Addr{netip.MustParseAddr("::1")}, time.Minute)
+	var lookups atomic.Int32
+	fakeAvahi(t, func(command, name string) string {
+		if command == "RESOLVE-HOSTNAME-IPV4" && name == "inverter.local" {
+			lookups.Add(1)
+			return "+ 2 0 inverter.local 127.0.0.1"
+		}
+		return "- 15 Timeout reached"
+	})
+
+	d := Dialer{AllowUnverifiedLocal: true, Dialer: net.Dialer{Timeout: time.Second}}
+	conn, err := d.Dial("tcp4", "inverter.local:"+port)
+	if err != nil {
+		t.Fatalf("Dial after stale cached address: %v", err)
+	}
+	_ = conn.Close()
+	if got := lookups.Load(); got != 1 {
+		t.Fatalf("fresh lookups = %d, want 1", got)
+	}
 }
 
 func TestDialerLeavesOrdinaryDNSAndIPUnchanged(t *testing.T) {

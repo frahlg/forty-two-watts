@@ -33,20 +33,43 @@ func stubProbes(t *testing.T, reverseMDNS func(context.Context, string) string, 
 	}
 }
 
-// A name the device answers for itself wins outright — the router's label for
-// the same lease must not displace it.
+// A reverse name that resolves forward to the scanned address wins over the
+// router's label for the same lease.
 func TestLookupNamePrefersTheDeviceOwnedLocalName(t *testing.T) {
+	var askedLabel, askedIP string
 	stubProbes(t,
 		func(context.Context, string) string { return "inverter.local" },
-		func(context.Context, string, string) string {
-			t.Fatal("forward verification should not run when reverse mDNS already answered")
-			return ""
+		func(_ context.Context, label, ip string) string {
+			askedLabel, askedIP = label, ip
+			return "inverter.local"
 		},
 		func(context.Context, *net.Resolver, string) string { return "inverter.localdomain" },
 	)
 
 	if got := lookupName(context.Background(), &net.Resolver{}, "192.168.1.141"); got != "inverter.local" {
 		t.Fatalf("hostname = %q, want inverter.local", got)
+	}
+	if askedLabel != "inverter" || askedIP != "192.168.1.141" {
+		t.Fatalf("forward verification = (%q, %q), want (inverter, 192.168.1.141)", askedLabel, askedIP)
+	}
+}
+
+func TestLookupNameRejectsWrongReverseLocalNameWithoutForwardMatch(t *testing.T) {
+	verifyCalled := false
+	stubProbes(t,
+		func(context.Context, string) string { return "wrong-device.local" },
+		func(context.Context, string, string) string {
+			verifyCalled = true
+			return ""
+		},
+		func(context.Context, *net.Resolver, string) string { return "router-label.localdomain" },
+	)
+
+	if got := lookupName(context.Background(), &net.Resolver{}, "192.168.1.141"); got != "router-label.localdomain" {
+		t.Fatalf("hostname = %q, want router-label.localdomain", got)
+	}
+	if !verifyCalled {
+		t.Fatal("reverse mDNS name was not verified forward")
 	}
 }
 

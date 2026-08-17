@@ -13,7 +13,12 @@ import (
 	"github.com/srcfl/ftw/go/internal/mdnsresolve"
 )
 
-var mdnsAddr = &net.UDPAddr{IP: net.IPv4(224, 0, 0, 251), Port: 5353}
+const (
+	mdnsPort          = 5353
+	mdnsCacheFlushBit = dnsmessage.Class(0x8000)
+)
+
+var mdnsAddr = &net.UDPAddr{IP: net.IPv4(224, 0, 0, 251), Port: mdnsPort}
 
 // reverseMDNS sends a reverse PTR query with the QU bit set so devices reply
 // directly to our ephemeral socket instead of requiring a bind to port 5353.
@@ -49,11 +54,11 @@ func reverseMDNS(ctx context.Context, ip string) string {
 	}
 	buf := make([]byte, 1500)
 	for {
-		n, _, err := conn.ReadFromUDP(buf)
+		n, source, err := conn.ReadFromUDP(buf)
 		if err != nil {
 			return ""
 		}
-		if host := parsePTRAnswer(buf[:n], qname); host != "" {
+		if host := parsePTRAnswer(buf[:n], qname, source); host != "" {
 			return host
 		}
 	}
@@ -74,7 +79,7 @@ func hostLabel(name string) string {
 }
 
 // verifiedLocalName turns a host label into a ".local" name the device has
-// confirmed is its own.
+// confirmed resolves back to its scanned address.
 //
 // A reverse PTR query is the obvious way to learn a device's mDNS name, and
 // an unreliable one: RFC 6762 makes in-addr.arpa mapping optional, and plenty
@@ -82,10 +87,10 @@ func hostLabel(name string) string {
 // query. A Sourceful Zap is one — it answers "zap.local" all day and returns
 // nothing for 141.1.168.192.in-addr.arpa.
 //
-// So take the label from whatever name we do have, ask for "<label>.local"
-// forward, and keep the answer only when it resolves back to the address we
-// started from. That last check is the point of the function: without it the
-// router's naming would decide what FTW dials, on the strength of a guess.
+// Take the label from whatever name we have, including a reverse mDNS PTR,
+// ask for "<label>.local" forward, and keep the answer only when it resolves
+// back to the address we started from. That last check is the point of the
+// function: without it an unrelated responder could decide what FTW dials.
 func verifiedLocalName(ctx context.Context, label, ip string) string {
 	want, err := netip.ParseAddr(ip)
 	if err != nil || label == "" {
@@ -104,9 +109,13 @@ func verifiedLocalName(ctx context.Context, label, ip string) string {
 	return ""
 }
 
-func parsePTRAnswer(packet []byte, qname string) string {
+func parsePTRAnswer(packet []byte, qname string, source *net.UDPAddr) string {
+	if source == nil || source.Port != mdnsPort {
+		return ""
+	}
 	var p dnsmessage.Parser
-	if _, err := p.Start(packet); err != nil {
+	header, err := p.Start(packet)
+	if err != nil || !header.Response || header.RCode != dnsmessage.RCodeSuccess {
 		return ""
 	}
 	if err := p.SkipAllQuestions(); err != nil {
@@ -117,7 +126,9 @@ func parsePTRAnswer(packet []byte, qname string) string {
 		if err != nil {
 			return ""
 		}
-		if h.Type == dnsmessage.TypePTR && strings.EqualFold(h.Name.String(), qname) {
+		if h.Type == dnsmessage.TypePTR &&
+			h.Class&^mdnsCacheFlushBit == dnsmessage.ClassINET &&
+			strings.EqualFold(h.Name.String(), qname) {
 			ptr, err := p.PTRResource()
 			if err != nil {
 				return ""

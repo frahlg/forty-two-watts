@@ -623,10 +623,22 @@ func newLuaHTTPTransport(allowUnverifiedLocal bool, proxy func(*net_http.Request
 	if proxy == nil {
 		proxy = transport.Proxy
 	}
-	transport.Proxy = proxy
+	transport.Proxy = proxyExceptLocal(proxy)
 	mdnsDialer := mdnsresolve.Dialer{AllowUnverifiedLocal: allowUnverifiedLocal}
 	transport.DialContext = mdnsDialer.DialContext
 	return transport
+}
+
+func proxyExceptLocal(proxy func(*net_http.Request) (*net_url.URL, error)) func(*net_http.Request) (*net_url.URL, error) {
+	return func(req *net_http.Request) (*net_url.URL, error) {
+		if req != nil && req.URL != nil && mdnsresolve.IsLocal(req.URL.Hostname()) {
+			return nil, nil
+		}
+		if proxy == nil {
+			return nil, nil
+		}
+		return proxy(req)
+	}
 }
 
 func registerHost(L *lua.LState, env *HostEnv) {
@@ -1227,9 +1239,10 @@ func registerHost(L *lua.LState, env *HostEnv) {
 	}
 
 	// Drivers routinely address a device by its ".local" name, which the
-	// stdlib resolver cannot answer. Clone the default transport so proxying,
-	// HTTP/2 and connection pooling are all unchanged. Guard proxy selection
-	// as well as the dial step: net/http chooses a proxy before DialContext.
+	// stdlib resolver cannot answer. Clone the default transport so HTTP/2 and
+	// connection pooling stay unchanged. Never proxy ".local" requests: a
+	// proxy would receive device credentials and control payloads before the
+	// mDNS-aware dialer runs.
 	transport := newLuaHTTPTransport(env.AllowUnverifiedLocal, nil)
 
 	httpClient := &net_http.Client{
