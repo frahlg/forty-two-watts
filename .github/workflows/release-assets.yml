@@ -16,9 +16,11 @@ name: release-assets
 #     dozen asset jobs every time.
 #   - asset builds run on the tag ref directly — no need for the meta
 #     job to thread `outputs.version` from a different workflow run.
-#   - failures here don't block the next release. Before the first promotion
-#     receipt exists, rerun with `--ref vX.Y.Z -f source_beta=vX.Y.Z-beta.N`.
-#     Later reruns need only `--ref vX.Y.Z` and reuse the receipt.
+#   - failures here don't block the next release. To use a workflow fix that
+#     landed after the tag, rerun the first promotion with
+#     `--ref master -f tag=vX.Y.Z -f source_beta=vX.Y.Z-beta.N -f release_id=123`.
+#     After the receipt exists, rerun with
+#     `--ref master -f tag=vX.Y.Z -f release_id=123`.
 
 on:
   workflow_dispatch:
@@ -805,7 +807,7 @@ jobs:
               and .publishedAt == null
             ' <<<"${draft_json}" >/dev/null
           fi
-          scripts/promote-paired-latest.sh
+          .release-workflow/scripts/promote-paired-latest.sh
 
   discord:
     name: announce release on Discord

@@ -168,7 +168,9 @@ grep -Fq -- '--draft' "${release}"
 grep -Fq 'name: Validate both exact candidate manifests' "${assets}"
 grep -Fq 'name: Preflight all exact stable aliases' "${assets}"
 grep -Fq 'name: Publish and verify exact stable aliases updater before Core' "${assets}"
-grep -Fq 'scripts/promote-paired-latest.sh' "${assets}"
+grep -Fq '.release-workflow/scripts/promote-paired-latest.sh' "${assets}"
+grep -Fq -- '--ref master -f tag=vX.Y.Z -f source_beta=vX.Y.Z-beta.N -f release_id=123' "${assets}"
+grep -Fq -- '--ref master -f tag=vX.Y.Z -f release_id=123' "${assets}"
 grep -Fq 'name: verify complete draft assets' "${assets}"
 grep -Fq 'python3 scripts/check-stable-release.py order "${TAG}"' "${assets}"
 grep -Fq 'python3 scripts/check-stable-release.py assets "${TAG}"' "${assets}"
@@ -364,7 +366,7 @@ paired_validation="$(grep -n 'name: Validate both exact candidate manifests' "${
 exact_preflight="$(grep -n 'name: Preflight all exact stable aliases' "${assets}" | cut -d: -f1)"
 exact_publish="$(grep -n 'name: Publish and verify exact stable aliases updater before Core' "${assets}" | cut -d: -f1)"
 stable_publish_job="$(grep -n '^  publish:$' "${assets}" | cut -d: -f1)"
-latest_transaction="$(grep -n 'scripts/promote-paired-latest.sh' "${assets}" | cut -d: -f1)"
+latest_transaction="$(grep -n '.release-workflow/scripts/promote-paired-latest.sh' "${assets}" | cut -d: -f1)"
 if [ "${paired_validation}" -ge "${exact_preflight}" ] || \
    [ "${exact_preflight}" -ge "${exact_publish}" ] || \
    [ "${exact_publish}" -ge "${stable_publish_job}" ] || \
@@ -463,7 +465,7 @@ for required in \
   'packages: write' \
   '.isDraft == true' \
   'for alias in "${TAG}" "${VERSION}" "sha-${short_sha}"; do' \
-  'scripts/promote-paired-latest.sh'; do
+  '.release-workflow/scripts/promote-paired-latest.sh'; do
   if ! grep -Fq -- "${required}" <<<"${final_publish_block}"; then
     echo "final stable publication gate is missing ${required}" >&2
     exit 1

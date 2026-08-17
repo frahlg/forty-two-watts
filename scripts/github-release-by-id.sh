@@ -42,6 +42,39 @@ show_release() {
   retry_gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}"
 }
 
+delete_asset() {
+  local release_id="$1"
+  local asset_id="$2"
+  local attempt=1
+  local release_json
+  valid_release_id "${release_id}"
+  valid_release_id "${asset_id}"
+
+  while [ "${attempt}" -le 5 ]; do
+    if "${gh_command}" api --method DELETE \
+      "repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}" >/dev/null; then
+      return 0
+    fi
+
+    # DELETE is not idempotent. If GitHub accepted it but the client lost the
+    # response, a retry returns 404. Re-read the bound release and accept an
+    # already absent asset instead of failing the whole recovery.
+    if release_json="$(show_release "${release_id}")" &&
+       jq -e '.assets | type == "array"' <<<"${release_json}" >/dev/null &&
+       ! jq -e --arg id "${asset_id}" \
+         '.assets[] | select((.id | tostring) == $id)' \
+         <<<"${release_json}" >/dev/null; then
+      return 0
+    fi
+
+    if [ "${attempt}" -lt 5 ]; then
+      sleep $((attempt * retry_sleep_seconds))
+    fi
+    attempt=$((attempt + 1))
+  done
+  return 1
+}
+
 download_assets() {
   local release_id="$1"
   local destination="$2"
@@ -98,8 +131,7 @@ upload_assets() {
     while IFS= read -r asset_id; do
       [ -z "${asset_id}" ] && continue
       [[ "${asset_id}" =~ ^[1-9][0-9]*$ ]]
-      retry_gh api --method DELETE \
-        "repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}" >/dev/null
+      delete_asset "${release_id}" "${asset_id}"
     done <<<"${existing}"
     encoded="$(jq -rn --arg value "${name}" '$value | @uri')"
     upload_json="$(retry_gh api --method POST \
