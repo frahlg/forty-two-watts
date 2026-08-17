@@ -3,6 +3,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -16,7 +17,11 @@ import (
 // os.OpenFile would leave a race in which another local user could read the
 // credentials in the temp file before the ACL was tightened.
 func createConfigTemp(path string, _ os.FileMode) (*os.File, error) {
-	sd, err := ownerOnlyConfigSecurityDescriptor()
+	ownerSID, err := currentProcessUserSID()
+	if err != nil {
+		return nil, fmt.Errorf("read config owner SID: %w", err)
+	}
+	sd, err := ownerOnlyConfigSecurityDescriptor(ownerSID)
 	if err != nil {
 		return nil, fmt.Errorf("build private config security descriptor: %w", err)
 	}
@@ -34,7 +39,9 @@ func createConfigTemp(path string, _ os.FileMode) (*os.File, error) {
 	}
 	h, err := windows.CreateFile(
 		pathPtr,
-		windows.GENERIC_WRITE,
+		// Microsoft recommends read+write for network files; write-only handles
+		// can intermittently fail with ERROR_ACCESS_DENIED over SMB.
+		windows.GENERIC_READ|windows.GENERIC_WRITE,
 		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
 		sa,
 		windows.CREATE_NEW,
@@ -43,6 +50,16 @@ func createConfigTemp(path string, _ os.FileMode) (*os.File, error) {
 	)
 	if err != nil {
 		return nil, err
+	}
+	if err := verifyOwnerOnlyConfigHandle(h, ownerSID); err != nil {
+		cleanupErrs := []error{fmt.Errorf("verify private config ACL before write: %w", err)}
+		if err := windows.CloseHandle(h); err != nil {
+			cleanupErrs = append(cleanupErrs, fmt.Errorf("close rejected config temp: %w", err))
+		}
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			cleanupErrs = append(cleanupErrs, fmt.Errorf("remove rejected config temp: %w", err))
+		}
+		return nil, errors.Join(cleanupErrs...)
 	}
 	f := os.NewFile(uintptr(h), path)
 	if f == nil {
@@ -131,7 +148,7 @@ func isWindowsSeparator(c byte) bool {
 	return c == '\\' || c == '/'
 }
 
-func ownerOnlyConfigSecurityDescriptor() (*windows.SECURITY_DESCRIPTOR, error) {
+func currentProcessUserSID() (*windows.SID, error) {
 	token, err := windows.OpenCurrentProcessToken()
 	if err != nil {
 		return nil, fmt.Errorf("open current process token: %w", err)
@@ -141,7 +158,17 @@ func ownerOnlyConfigSecurityDescriptor() (*windows.SECURITY_DESCRIPTOR, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read current user SID: %w", err)
 	}
-	ownerSID := user.User.Sid
+	ownerSID, err := user.User.Sid.Copy()
+	if err != nil {
+		return nil, fmt.Errorf("copy current user SID: %w", err)
+	}
+	return ownerSID, nil
+}
+
+func ownerOnlyConfigSecurityDescriptor(ownerSID *windows.SID) (*windows.SECURITY_DESCRIPTOR, error) {
+	if ownerSID == nil {
+		return nil, fmt.Errorf("owner SID is nil")
+	}
 
 	acl, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{{
 		AccessPermissions: windows.GENERIC_ALL,
@@ -172,6 +199,84 @@ func ownerOnlyConfigSecurityDescriptor() (*windows.SECURITY_DESCRIPTOR, error) {
 		return nil, fmt.Errorf("protect security descriptor DACL: %w", err)
 	}
 	return sd.ToSelfRelative()
+}
+
+func verifyOwnerOnlyConfigHandle(h windows.Handle, ownerSID *windows.SID) error {
+	sd, err := windows.GetSecurityInfo(
+		h,
+		windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+	)
+	if err != nil {
+		return fmt.Errorf("read created config security descriptor: %w", err)
+	}
+	return validateOwnerOnlyConfigSecurityDescriptor(sd, ownerSID)
+}
+
+const windowsFileAllAccess windows.ACCESS_MASK = windows.STANDARD_RIGHTS_REQUIRED | windows.SYNCHRONIZE | 0x1ff
+
+// validateOwnerOnlyConfigSecurityDescriptor checks the descriptor that the
+// filesystem actually stored. CreateFile can succeed on filesystems that do
+// not enforce the descriptor supplied at creation time, so this check must run
+// before config bytes are written.
+func validateOwnerOnlyConfigSecurityDescriptor(sd *windows.SECURITY_DESCRIPTOR, ownerSID *windows.SID) error {
+	if sd == nil {
+		return fmt.Errorf("security descriptor is nil")
+	}
+	if ownerSID == nil {
+		return fmt.Errorf("expected owner SID is nil")
+	}
+	control, _, err := sd.Control()
+	if err != nil {
+		return fmt.Errorf("read security descriptor control: %w", err)
+	}
+	if control&windows.SE_DACL_PROTECTED == 0 {
+		return fmt.Errorf("config DACL is not protected: control=%#x", control)
+	}
+	owner, defaulted, err := sd.Owner()
+	if err != nil {
+		return fmt.Errorf("read config owner: %w", err)
+	}
+	if owner == nil || !owner.Equals(ownerSID) {
+		return fmt.Errorf("config owner does not match current user")
+	}
+	if defaulted {
+		return fmt.Errorf("config owner is defaulted")
+	}
+	dacl, defaulted, err := sd.DACL()
+	if err != nil {
+		return fmt.Errorf("read config DACL: %w", err)
+	}
+	if dacl == nil {
+		return fmt.Errorf("config DACL is nil")
+	}
+	if defaulted {
+		return fmt.Errorf("config DACL is defaulted")
+	}
+	if dacl.AceCount != 1 {
+		return fmt.Errorf("config DACL ACE count = %d, want one owner ACE", dacl.AceCount)
+	}
+	var ace *windows.ACCESS_ALLOWED_ACE
+	if err := windows.GetAce(dacl, 0, &ace); err != nil {
+		return fmt.Errorf("read config DACL ACE: %w", err)
+	}
+	if ace == nil {
+		return fmt.Errorf("config owner ACE is nil")
+	}
+	if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE {
+		return fmt.Errorf("config DACL ACE type = %d, want allow", ace.Header.AceType)
+	}
+	if ace.Header.AceFlags != windows.NO_INHERITANCE {
+		return fmt.Errorf("config owner ACE flags = %#x, want no inheritance", ace.Header.AceFlags)
+	}
+	aceSID := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+	if !aceSID.Equals(ownerSID) {
+		return fmt.Errorf("config DACL ACE does not belong to current user")
+	}
+	if ace.Mask != windows.ACCESS_MASK(windows.GENERIC_ALL) && ace.Mask != windowsFileAllAccess {
+		return fmt.Errorf("config owner ACE mask = %#x, want full control", ace.Mask)
+	}
+	return nil
 }
 
 func replaceConfigTemp(tmp, path string) error {

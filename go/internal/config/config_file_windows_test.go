@@ -5,11 +5,11 @@ package config
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
@@ -19,12 +19,7 @@ func verifyConfigFileOwnerOnly(path string) error {
 	if err != nil {
 		return fmt.Errorf("normalize config path: %w", err)
 	}
-	token, err := windows.OpenCurrentProcessToken()
-	if err != nil {
-		return fmt.Errorf("open current process token: %w", err)
-	}
-	defer token.Close()
-	user, err := token.GetTokenUser()
+	ownerSID, err := currentProcessUserSID()
 	if err != nil {
 		return fmt.Errorf("read current user SID: %w", err)
 	}
@@ -36,43 +31,7 @@ func verifyConfigFileOwnerOnly(path string) error {
 	if err != nil {
 		return fmt.Errorf("read config security descriptor: %w", err)
 	}
-	control, _, err := sd.Control()
-	if err != nil {
-		return fmt.Errorf("read security descriptor control: %w", err)
-	}
-	if control&windows.SE_DACL_PROTECTED == 0 {
-		return fmt.Errorf("config DACL is inheritable: control=%#x", control)
-	}
-	owner, _, err := sd.Owner()
-	if err != nil {
-		return fmt.Errorf("read config owner: %w", err)
-	}
-	if !owner.Equals(user.User.Sid) {
-		return fmt.Errorf("config owner SID = %s, want current user %s", owner.String(), user.User.Sid.String())
-	}
-	dacl, _, err := sd.DACL()
-	if err != nil {
-		return fmt.Errorf("read config DACL: %w", err)
-	}
-	if dacl.AceCount != 1 {
-		return fmt.Errorf("config DACL ACE count = %d, want one owner ACE", dacl.AceCount)
-	}
-	var ace *windows.ACCESS_ALLOWED_ACE
-	if err := windows.GetAce(dacl, 0, &ace); err != nil {
-		return fmt.Errorf("read config DACL ACE: %w", err)
-	}
-	if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE {
-		return fmt.Errorf("config DACL ACE type = %d, want allow", ace.Header.AceType)
-	}
-	aceSID := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
-	if !aceSID.Equals(user.User.Sid) {
-		return fmt.Errorf("config DACL ACE SID = %s, want current user %s", aceSID.String(), user.User.Sid.String())
-	}
-	required := uint32(windows.FILE_READ_DATA | windows.FILE_WRITE_DATA)
-	if uint32(ace.Mask)&required != required {
-		return fmt.Errorf("config owner ACE mask = %#x, lacks read/write", ace.Mask)
-	}
-	return nil
+	return validateOwnerOnlyConfigSecurityDescriptor(sd, ownerSID)
 }
 
 func TestCreateConfigTempUsesOwnerOnlyACLBeforeFirstWrite(t *testing.T) {
@@ -85,8 +44,78 @@ func TestCreateConfigTempUsesOwnerOnlyACLBeforeFirstWrite(t *testing.T) {
 	if err := verifyConfigFileOwnerOnly(path); err != nil {
 		t.Fatal(err)
 	}
+	if n, err := f.Read(make([]byte, 1)); n != 0 || !errors.Is(err, io.EOF) {
+		t.Fatalf("config temp handle lacks network-safe read access: read = %d, %v", n, err)
+	}
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestValidateOwnerOnlyConfigSecurityDescriptorFailsClosed(t *testing.T) {
+	ownerSID, err := currentProcessUserSID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	valid, err := ownerOnlyConfigSecurityDescriptor(ownerSID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateOwnerOnlyConfigSecurityDescriptor(valid, ownerSID); err != nil {
+		t.Fatalf("owner-only descriptor was rejected: %v", err)
+	}
+
+	missingDACL, err := windows.NewSecurityDescriptor()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := missingDACL.SetOwner(ownerSID, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := missingDACL.SetControl(windows.SE_DACL_PROTECTED, windows.SE_DACL_PROTECTED); err != nil {
+		t.Fatal(err)
+	}
+
+	worldSID, err := windows.CreateWellKnownSid(windows.WinWorldSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worldACL, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{{
+		AccessPermissions: windows.GENERIC_ALL,
+		AccessMode:        windows.GRANT_ACCESS,
+		Inheritance:       windows.NO_INHERITANCE,
+		Trustee: windows.TRUSTEE{
+			TrusteeForm:  windows.TRUSTEE_IS_SID,
+			TrusteeType:  windows.TRUSTEE_IS_WELL_KNOWN_GROUP,
+			TrusteeValue: windows.TrusteeValueFromSID(worldSID),
+		},
+	}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	permissive, err := windows.NewSecurityDescriptor()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := permissive.SetOwner(ownerSID, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := permissive.SetDACL(worldACL, true, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := permissive.SetControl(windows.SE_DACL_PROTECTED, windows.SE_DACL_PROTECTED); err != nil {
+		t.Fatal(err)
+	}
+
+	for name, sd := range map[string]*windows.SECURITY_DESCRIPTOR{
+		"missing DACL":    missingDACL,
+		"permissive DACL": permissive,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := validateOwnerOnlyConfigSecurityDescriptor(sd, ownerSID); err == nil {
+				t.Fatal("unsafe security descriptor was accepted")
+			}
+		})
 	}
 }
 
