@@ -61,10 +61,10 @@ const (
 	// a slow one, and the reconnect path handles dead sockets well.
 	writeTimeout = 10 * time.Second
 
-	// readTimeout is three relay heartbeats. The relay pings every fifteen
+	// defaultReadTimeout is three relay heartbeats. The relay pings every fifteen
 	// seconds; missing three means the socket is gone whatever TCP thinks,
 	// which is the case a NAT drop produces and neither end otherwise sees.
-	readTimeout = 45 * time.Second
+	defaultReadTimeout = 45 * time.Second
 
 	// backoffBase is where the first retry lands.
 	backoffBase = 500 * time.Millisecond
@@ -173,6 +173,7 @@ type Uplink struct {
 	deadmanOrigin  string
 	deadmanHTTP    *http.Client
 	deadmanRefresh time.Duration
+	readTimeout    time.Duration
 }
 
 // DropSessionsByAppKey tears down every live session a revoked key holds.
@@ -223,6 +224,7 @@ func New(opts Options) (*Uplink, error) {
 		deadmanHTTP:    opts.DeadmanHTTP,
 		deadmanPosted:  map[string]bool{},
 		deadmanRefresh: opts.DeadmanRefresh,
+		readTimeout:    defaultReadTimeout,
 	}
 	if u.dialer == nil {
 		u.dialer = productionDialer()
@@ -406,9 +408,17 @@ func (u *Uplink) serve(ctx context.Context, conn *websocket.Conn) (int, string, 
 	}
 
 	conn.SetReadLimit(maxFrameBytes)
-	_ = conn.SetReadDeadline(time.Now().Add(readTimeout))
+	_ = conn.SetReadDeadline(time.Now().Add(u.readTimeout))
 	conn.SetPongHandler(func(string) error {
-		return conn.SetReadDeadline(time.Now().Add(readTimeout))
+		return conn.SetReadDeadline(time.Now().Add(u.readTimeout))
+	})
+	conn.SetPingHandler(func(message string) error {
+		if err := conn.SetReadDeadline(time.Now().Add(u.readTimeout)); err != nil {
+			return err
+		}
+		// Gorilla's default PingHandler answers with the same payload. Keep
+		// that response while also treating the relay heartbeat as activity.
+		return conn.WriteControl(websocket.PongMessage, []byte(message), time.Now().Add(writeTimeout))
 	})
 
 	// The context ending has to reach a blocked read, and gorilla has no
@@ -440,7 +450,7 @@ func (u *Uplink) serve(ctx context.Context, conn *websocket.Conn) (int, string, 
 			}
 			return 0, "", err
 		}
-		_ = conn.SetReadDeadline(time.Now().Add(readTimeout))
+		_ = conn.SetReadDeadline(time.Now().Add(u.readTimeout))
 
 		switch kind {
 		case websocket.BinaryMessage:

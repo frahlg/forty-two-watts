@@ -7,8 +7,10 @@ import (
 	"encoding/hex"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -333,6 +335,94 @@ func TestTheBoxJoinsUnderTheDerivedHandle(t *testing.T) {
 	handles := r.relay.seenHandles()
 	if len(handles) == 0 || handles[0] != want {
 		t.Fatalf("joined as %v, want %s", handles, want)
+	}
+}
+
+func TestRelayPingKeepsAnIdleUplinkAlive(t *testing.T) {
+	const (
+		heartbeat = 5 * time.Millisecond
+		timeout   = 30 * time.Millisecond
+	)
+
+	pongs := make(chan struct{}, 8)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		upgrader := websocket.Upgrader{}
+		conn, err := upgrader.Upgrade(w, req, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		conn.SetPongHandler(func(string) error {
+			select {
+			case pongs <- struct{}{}:
+			default:
+			}
+			return nil
+		})
+
+		go func() {
+			ticker := time.NewTicker(heartbeat)
+			defer ticker.Stop()
+			for range ticker.C {
+				if err := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(time.Second)); err != nil {
+					return
+				}
+			}
+		}()
+		for {
+			_, _, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+		}
+	}))
+	defer server.Close()
+
+	enroll, err := appenroll.LoadOrCreate(filepath.Join(t.TempDir(), "nova.key"))
+	if err != nil {
+		t.Fatalf("LoadOrCreate: %v", err)
+	}
+	u, err := New(Options{
+		Endpoint: "ws" + strings.TrimPrefix(server.URL, "http"),
+		Enroll:   enroll,
+		Handler:  newHandler,
+		Logger:   slog.New(slog.DiscardHandler),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	u.readTimeout = timeout
+
+	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := u.serve(ctx, conn)
+		done <- err
+	}()
+
+	select {
+	case <-pongs:
+	case <-time.After(time.Second):
+		t.Fatal("the uplink did not answer the relay ping")
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("idle uplink stopped despite relay pings: %v", err)
+	case <-time.After(3 * timeout):
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("serve did not stop after cancellation")
 	}
 }
 
