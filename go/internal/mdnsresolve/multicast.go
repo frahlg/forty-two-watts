@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"golang.org/x/net/dns/dnsmessage"
+	"golang.org/x/net/ipv4"
+	"golang.org/x/net/ipv6"
 )
 
 // This file is the fallback described in the package comment: a direct RFC
@@ -25,19 +27,52 @@ var mdnsAddr = &net.UDPAddr{IP: net.IPv4(224, 0, 0, 251), Port: mdnsPort}
 // to a copy for each query because ff02::fb is link-local by definition.
 var mdnsAddr6 = &net.UDPAddr{IP: net.ParseIP("ff02::fb"), Port: mdnsPort}
 
-// multicastInterfaces and listenMulticastPacket are vars so tests can select
-// a stable interface and responder without touching the host LAN.
+// multicastInterfaces and listenMulticastPacket are vars so tests can select a
+// stable interface and responder without touching the host LAN.
 var multicastInterfaces = net.Interfaces
 
-// listenMulticastPacket opens an ephemeral socket on one selected interface.
-// It deliberately does not bind port 5353: avahi-daemon may already own it,
-// and the QU bit asks responders to reply directly to this socket instead.
-var listenMulticastPacket = func(network string, iface *net.Interface, group *net.UDPAddr) (*net.UDPConn, error) {
-	return net.ListenMulticastUDP(network, iface, &net.UDPAddr{
-		IP:   group.IP,
-		Port: 0,
-		Zone: group.Zone,
-	})
+// listenQueryPacket opens the ephemeral socket that sends the QU query and
+// receives its unicast reply. Binding the multicast group here would prevent
+// Linux from delivering a reply sent to the interface's unicast address.
+var listenMulticastPacket = openQueryPacket
+
+func openQueryPacket(network string, iface *net.Interface, _ *net.UDPAddr) (*net.UDPConn, error) {
+	var local *net.UDPAddr
+	switch network {
+	case "udp4":
+		local = &net.UDPAddr{IP: net.IPv4zero}
+	case "udp6":
+		local = &net.UDPAddr{IP: net.IPv6unspecified}
+	default:
+		return nil, fmt.Errorf("mdns: unsupported network %q", network)
+	}
+	conn, err := net.ListenUDP(network, local)
+	if err != nil {
+		return nil, err
+	}
+	closeOnError := func(err error) (*net.UDPConn, error) {
+		_ = conn.Close()
+		return nil, err
+	}
+	switch network {
+	case "udp4":
+		packet := ipv4.NewPacketConn(conn)
+		if err := packet.SetMulticastInterface(iface); err != nil {
+			return closeOnError(fmt.Errorf("set IPv4 multicast interface: %w", err))
+		}
+		if err := packet.SetMulticastLoopback(false); err != nil {
+			return closeOnError(fmt.Errorf("disable IPv4 multicast loopback: %w", err))
+		}
+	case "udp6":
+		packet := ipv6.NewPacketConn(conn)
+		if err := packet.SetMulticastInterface(iface); err != nil {
+			return closeOnError(fmt.Errorf("set IPv6 multicast interface: %w", err))
+		}
+		if err := packet.SetMulticastLoopback(false); err != nil {
+			return closeOnError(fmt.Errorf("disable IPv6 multicast loopback: %w", err))
+		}
+	}
+	return conn, nil
 }
 
 // classQU is IN with the RFC 6762 unicast-response bit set.
@@ -166,7 +201,7 @@ func queryInterfaces(ctx context.Context, packed []byte, name string, ifaces []n
 			if zoneMode == "interface" && target.IP.IsLinkLocalMulticast() {
 				target.Zone = iface.Name
 			}
-			_, _, err := exchange(queryCtx, packed, &target, func() (*net.UDPConn, error) {
+			_, _, err := exchange(queryCtx, packed, &target, network, &iface, func() (*net.UDPConn, error) {
 				return listenMulticastPacket(network, &iface, &target)
 			}, func(packet []byte, source *net.UDPAddr) bool {
 				got, gotTTL, ok := parseAddrAnswer(packet, name+".", source, network, &iface)
@@ -214,10 +249,83 @@ func queryInterfaces(ctx context.Context, packed []byte, name string, ifaces []n
 // accepts one or the deadline passes. Closing the socket on context cancel is
 // important: a cancelled family/interface query must not linger until the
 // original read deadline.
-func exchange(ctx context.Context, packed []byte, target *net.UDPAddr, open func() (*net.UDPConn, error), handle func([]byte, *net.UDPAddr) bool) ([]netip.Addr, time.Duration, error) {
+type packetInfo struct {
+	ifIndex int
+	dst     net.IP
+}
+
+type packetReadFunc func([]byte) (int, *net.UDPAddr, *packetInfo, error)
+
+func preparePacketReader(network string, conn *net.UDPConn) (packetReadFunc, error) {
+	switch network {
+	case "udp4":
+		packet := ipv4.NewPacketConn(conn)
+		if err := packet.SetControlMessage(ipv4.FlagInterface|ipv4.FlagDst, true); err != nil {
+			return nil, fmt.Errorf("enable IPv4 packet info: %w", err)
+		}
+		return func(buf []byte) (int, *net.UDPAddr, *packetInfo, error) {
+			n, cm, source, err := packet.ReadFrom(buf)
+			if err != nil {
+				return 0, nil, nil, err
+			}
+			udpSource, _ := source.(*net.UDPAddr)
+			if cm == nil {
+				return n, udpSource, nil, nil
+			}
+			return n, udpSource, &packetInfo{ifIndex: cm.IfIndex, dst: append(net.IP(nil), cm.Dst...)}, nil
+		}, nil
+	case "udp6":
+		packet := ipv6.NewPacketConn(conn)
+		if err := packet.SetControlMessage(ipv6.FlagInterface|ipv6.FlagDst, true); err != nil {
+			return nil, fmt.Errorf("enable IPv6 packet info: %w", err)
+		}
+		return func(buf []byte) (int, *net.UDPAddr, *packetInfo, error) {
+			n, cm, source, err := packet.ReadFrom(buf)
+			if err != nil {
+				return 0, nil, nil, err
+			}
+			udpSource, _ := source.(*net.UDPAddr)
+			if cm == nil {
+				return n, udpSource, nil, nil
+			}
+			return n, udpSource, &packetInfo{ifIndex: cm.IfIndex, dst: append(net.IP(nil), cm.Dst...)}, nil
+		}, nil
+	default:
+		return nil, fmt.Errorf("unsupported packet network %q", network)
+	}
+}
+
+func validPacketInfo(info *packetInfo, iface *net.Interface, network string) bool {
+	if info == nil || iface == nil || iface.Index <= 0 || info.ifIndex != iface.Index || info.dst == nil {
+		return false
+	}
+	dst, ok := netip.AddrFromSlice(info.dst)
+	if !ok {
+		return false
+	}
+	dst = dst.Unmap()
+	if dst.IsUnspecified() || dst.IsMulticast() {
+		return false
+	}
+	switch network {
+	case "udp4":
+		return dst.Is4()
+	case "udp6":
+		return dst.Is6()
+	default:
+		return false
+	}
+}
+
+func exchange(ctx context.Context, packed []byte, target *net.UDPAddr, network string, iface *net.Interface, open func() (*net.UDPConn, error), handle func([]byte, *net.UDPAddr) bool) ([]netip.Addr, time.Duration, error) {
 	conn, err := open()
 	if err != nil {
-		return nil, 0, fmt.Errorf("mdns: open socket: %w", err)
+		return nil, 0, fmt.Errorf("mdns: open query socket: %w", err)
+	}
+	readPacket, err := preparePacketReader(network, conn)
+	if err != nil {
+		_ = conn.Close()
+		return nil, 0, fmt.Errorf("mdns: prepare query socket: %w", err)
 	}
 	done := make(chan struct{})
 	defer close(done)
@@ -235,7 +343,7 @@ func exchange(ctx context.Context, packed []byte, target *net.UDPAddr, open func
 		deadline = d
 	}
 	if err := conn.SetDeadline(deadline); err != nil {
-		return nil, 0, fmt.Errorf("mdns: set deadline: %w", err)
+		return nil, 0, fmt.Errorf("mdns: set query deadline: %w", err)
 	}
 	if _, err := conn.WriteToUDP(packed, target); err != nil {
 		return nil, 0, fmt.Errorf("mdns: send query: %w", err)
@@ -243,13 +351,14 @@ func exchange(ctx context.Context, packed []byte, target *net.UDPAddr, open func
 
 	buf := make([]byte, 1500)
 	for {
-		n, source, err := conn.ReadFromUDP(buf)
+		n, source, info, err := readPacket(buf)
 		if err != nil {
 			return nil, 0, fmt.Errorf("mdns: no usable answer: %w", err)
 		}
+		if !validPacketInfo(info, iface, network) {
+			continue
+		}
 		if handle(buf[:n], source) {
-			// The callback stores the parsed answer in its closure. The
-			// caller only needs the success signal here.
 			return nil, 0, nil
 		}
 	}

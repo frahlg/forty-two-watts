@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"golang.org/x/net/dns/dnsmessage"
+	"golang.org/x/net/ipv4"
+	"golang.org/x/net/ipv6"
 )
 
 func TestIsLocal(t *testing.T) {
@@ -265,6 +267,213 @@ func TestParseAddrAnswerUsesSelectedInterfaceForLinkLocalIPv6(t *testing.T) {
 	}
 }
 
+func activeLoopbackInterface(t *testing.T) *net.Interface {
+	t.Helper()
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range ifaces {
+		if ifaces[i].Flags&net.FlagUp != 0 && ifaces[i].Flags&net.FlagLoopback != 0 {
+			return &ifaces[i]
+		}
+	}
+	t.Fatal("no active loopback interface")
+	return nil
+}
+
+// A QU response is sent to the interface address and the query's ephemeral
+// port. Keep that endpoint wildcard-bound rather than bound to the multicast
+// group, then prove it accepts traffic sent to a local unicast address.
+func TestOpenQueryPacketBindsWildcardAndReceivesQUUnicast(t *testing.T) {
+	loopback := activeLoopbackInterface(t)
+
+	conn, err := openQueryPacket("udp4", loopback, mdnsAddr)
+	if err != nil {
+		t.Fatalf("open query packet: %v", err)
+	}
+	defer conn.Close()
+	local := conn.LocalAddr().(*net.UDPAddr)
+	if !local.IP.IsUnspecified() {
+		t.Fatalf("query socket bound to %v, want an unspecified local address", local.IP)
+	}
+
+	sender, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sender.Close()
+	if _, err := sender.WriteToUDP([]byte("qu reply"), &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: local.Port}); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 32)
+	n, _, err := conn.ReadFromUDP(buf)
+	if err != nil {
+		t.Fatalf("read QU reply: %v", err)
+	}
+	if got := string(buf[:n]); got != "qu reply" {
+		t.Fatalf("reply = %q, want qu reply", got)
+	}
+
+}
+
+func TestOpenQueryPacketUsesSelectedMulticastInterface(t *testing.T) {
+	selectedIface := activeLoopbackInterface(t)
+	for _, network := range []string{"udp4", "udp6"} {
+		t.Run(network, func(t *testing.T) {
+			conn, err := openQueryPacket(network, selectedIface, nil)
+			if err != nil {
+				t.Fatalf("open query packet: %v", err)
+			}
+			defer conn.Close()
+
+			var selected *net.Interface
+			switch network {
+			case "udp4":
+				selected, err = ipv4.NewPacketConn(conn).MulticastInterface()
+			case "udp6":
+				selected, err = ipv6.NewPacketConn(conn).MulticastInterface()
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Linux does not return the IPv4 interface index through
+			// IP_MULTICAST_IF, even when it accepted that index when set.
+			// The invalid-interface test below still proves that this call
+			// went through SetMulticastInterface.
+			if network == "udp4" && selected == nil {
+				return
+			}
+			if selected == nil || selected.Index != selectedIface.Index {
+				t.Fatalf("multicast interface = %+v, want index %d", selected, selectedIface.Index)
+			}
+		})
+	}
+}
+
+func TestOpenQueryPacketRejectsInvalidMulticastInterface(t *testing.T) {
+	invalid := &net.Interface{Index: 1 << 30, Name: "missing0", Flags: net.FlagUp | net.FlagMulticast}
+	for _, network := range []string{"udp4", "udp6"} {
+		t.Run(network, func(t *testing.T) {
+			conn, err := openQueryPacket(network, invalid, nil)
+			if conn != nil {
+				conn.Close()
+			}
+			if err == nil {
+				t.Fatal("open query packet accepted a missing multicast interface")
+			}
+		})
+	}
+}
+
+func TestValidPacketInfoPinsTheSelectedInterface(t *testing.T) {
+	iface := &net.Interface{Index: 7, Name: "lan0", Flags: net.FlagUp | net.FlagMulticast}
+	for _, tc := range []struct {
+		name    string
+		info    *packetInfo
+		network string
+		want    bool
+	}{
+		{name: "nil info", network: "udp4"},
+		{name: "wrong interface", info: &packetInfo{ifIndex: 8, dst: net.IPv4(192, 0, 2, 10)}, network: "udp4"},
+		{name: "nil destination", info: &packetInfo{ifIndex: 7}, network: "udp4"},
+		{name: "multicast destination", info: &packetInfo{ifIndex: 7, dst: net.IPv4(224, 0, 0, 251)}, network: "udp4"},
+		{name: "wrong family", info: &packetInfo{ifIndex: 7, dst: net.ParseIP("2001:db8::1")}, network: "udp4"},
+		{name: "IPv4 unicast on selected interface", info: &packetInfo{ifIndex: 7, dst: net.IPv4(192, 0, 2, 10)}, network: "udp4", want: true},
+		{name: "IPv6 unicast on selected interface", info: &packetInfo{ifIndex: 7, dst: net.ParseIP("2001:db8::1")}, network: "udp6", want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := validPacketInfo(tc.info, iface, tc.network); got != tc.want {
+				t.Fatalf("validPacketInfo = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestExchangeCancellationClosesQuerySocket(t *testing.T) {
+	responder, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer responder.Close()
+	loopback := activeLoopbackInterface(t)
+	selected := &net.Interface{Index: loopback.Index, Name: "test0", Flags: net.FlagUp | net.FlagMulticast}
+	origNow := now
+	now = func() time.Time { return time.Now().Add(3 * time.Second) }
+	t.Cleanup(func() { now = origNow })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		buf := make([]byte, 32)
+		_ = responder.SetReadDeadline(time.Now().Add(time.Second))
+		_, _, err := responder.ReadFromUDP(buf)
+		if err == nil {
+			cancel()
+		}
+		done <- err
+	}()
+
+	started := time.Now()
+	_, _, err = exchange(ctx, []byte("query"), responder.LocalAddr().(*net.UDPAddr), "udp4", selected,
+		func() (*net.UDPConn, error) {
+			return net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+		}, func([]byte, *net.UDPAddr) bool { return false })
+	if err == nil {
+		t.Fatal("exchange succeeded after cancellation")
+	}
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("cancellation took %v", elapsed)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("responder: %v", err)
+	}
+}
+
+func TestExchangeRejectsReplyFromWrongInterface(t *testing.T) {
+	responder, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer responder.Close()
+	loopback := activeLoopbackInterface(t)
+	selected := &net.Interface{Index: loopback.Index + 1000, Name: "other0", Flags: net.FlagUp | net.FlagMulticast}
+
+	done := make(chan error, 1)
+	go func() {
+		buf := make([]byte, 32)
+		_ = responder.SetReadDeadline(time.Now().Add(time.Second))
+		_, queryFrom, err := responder.ReadFromUDP(buf)
+		if err == nil {
+			_, err = responder.WriteToUDP([]byte("answer"), queryFrom)
+		}
+		done <- err
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	handled := false
+	_, _, err = exchange(ctx, []byte("query"), responder.LocalAddr().(*net.UDPAddr), "udp4", selected,
+		func() (*net.UDPConn, error) {
+			return net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+		}, func([]byte, *net.UDPAddr) bool {
+			handled = true
+			return true
+		})
+	if err == nil {
+		t.Fatal("exchange accepted a reply from the wrong interface")
+	}
+	if handled {
+		t.Fatal("wrong-interface packet reached the answer handler")
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("responder: %v", err)
+	}
+}
+
 func TestQueryIPv6UsesSelectedInterfaceForLinkLocalAnswer(t *testing.T) {
 	qname := "inverter.local"
 	qnameWire := mustDNSName(t, qname+".")
@@ -287,10 +496,11 @@ func TestQueryIPv6UsesSelectedInterfaceForLinkLocalAnswer(t *testing.T) {
 	}
 	defer responseConn.Close()
 
+	loopbackIndex := activeLoopbackInterface(t).Index
 	origAddr, origInterfaces, origListen := mdnsAddr6, multicastInterfaces, listenMulticastPacket
 	mdnsAddr6 = responder.LocalAddr().(*net.UDPAddr)
 	multicastInterfaces = func() ([]net.Interface, error) {
-		return []net.Interface{{Index: 7, Name: "test0", Flags: net.FlagUp | net.FlagMulticast}}, nil
+		return []net.Interface{{Index: loopbackIndex, Name: "test0", Flags: net.FlagUp | net.FlagMulticast}}, nil
 	}
 	listenMulticastPacket = func(network string, iface *net.Interface, group *net.UDPAddr) (*net.UDPConn, error) {
 		if network != "udp6" || iface.Name != "test0" {
@@ -385,10 +595,11 @@ func startResponder(t *testing.T, answers []dnsmessage.Resource) {
 		t.Skipf("mDNS response port unavailable: %v", err)
 	}
 
+	loopbackIndex := activeLoopbackInterface(t).Index
 	origAddr, origMulticast, origInterfaces := mdnsAddr, listenMulticastPacket, multicastInterfaces
 	mdnsAddr = rc.LocalAddr().(*net.UDPAddr)
 	multicastInterfaces = func() ([]net.Interface, error) {
-		return []net.Interface{{Index: 1, Name: "test0", Flags: net.FlagUp | net.FlagMulticast}}, nil
+		return []net.Interface{{Index: loopbackIndex, Name: "test0", Flags: net.FlagUp | net.FlagMulticast}}, nil
 	}
 	listenMulticastPacket = func(network string, iface *net.Interface, group *net.UDPAddr) (*net.UDPConn, error) {
 		if network != "udp4" {
