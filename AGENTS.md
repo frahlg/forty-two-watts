@@ -123,8 +123,22 @@ Only two release channels exist:
 - **stable** promotes the exact commit already published and validated as beta.
 
 There is no edge channel. Core and signed driver artifacts can release
-independently but follow the same beta-to-stable progression. See
-[docs/self-update.md](docs/self-update.md).
+independently but follow the same beta-to-stable progression.
+
+Normal path:
+
+1. Merge the Version Packages PR.
+2. Publish beta `vX.Y.Z-beta.N` from that exact commit.
+3. Validate that beta on real sites.
+4. Promote the same commit to stable `vX.Y.Z`.
+
+Do not create a new beta, tag, draft or candidate to recover a failed
+stable publish. Resume the existing draft by its numeric GitHub Release
+id, with workflow code from `master` and binaries from the immutable
+tag. GitHub 5xx is an external retry condition, not a reason to rebuild
+the candidate.
+
+See [docs/self-update.md](docs/self-update.md).
 
 A release is one workflow dispatch, not a manual list of registry commands.
 The `srcfl/*` images use the job-scoped `GITHUB_TOKEN`; each package must grant
