@@ -5,6 +5,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -68,7 +70,7 @@ func TestReplaceUpdaterPullsThenStartsDetachedHelper(t *testing.T) {
 		// disk by definition. Pulling a new one first would be a second thing
 		// that can fail before anything is fixed.
 		"sha256:current",
-		"up -d --no-deps ftw-updater",
+		"'up' '-d' '--no-deps' 'ftw-updater'",
 	} {
 		if !strings.Contains(run, want) {
 			t.Errorf("helper command missing %q\ngot: %s", want, run)
@@ -95,9 +97,48 @@ func TestReplaceUpdaterPullAndHelperResolveTheSameConfig(t *testing.T) {
 		t.Errorf("pull must not depend on the transient override either\ngot: %s", pull)
 	}
 	// Same -f list on both sides.
-	files := "-f " + s.composeFile
-	if !strings.Contains(pull, files) || !strings.Contains(helper, files) {
+	pullFiles := "-f " + s.composeFile
+	helperFiles := "'-f' " + shellQuote(s.composeFile)
+	if !strings.Contains(pull, pullFiles) || !strings.Contains(helper, helperFiles) {
 		t.Errorf("pull and helper disagree on compose files\npull:   %s\nhelper: %s", pull, helper)
+	}
+}
+
+func TestReplaceUpdaterShellQuotesApostropheInProjectPath(t *testing.T) {
+	s, runner := newTestServer(t)
+	projectDir := filepath.Join(t.TempDir(), "Fred's FTW")
+	if err := os.Mkdir(projectDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	s.composeFile = filepath.Join(projectDir, "docker-compose.yml")
+	writeCompose(t, s.composeFile, `services:
+  ftw:
+    image: ghcr.io/srcfl/ftw:${FTW_IMAGE_TAG:-latest}
+  ftw-updater:
+    image: ghcr.io/srcfl/ftw-updater:${FTW_UPDATER_IMAGE_TAG:-latest}
+`)
+
+	if err := s.replaceUpdater(context.Background(), "v2.0.0-beta.1"); err != nil {
+		t.Fatalf("replaceUpdater: %v", err)
+	}
+	runArgs := runner.snapshot()[2]
+	script := runArgs[len(runArgs)-1]
+	if out, err := exec.Command("sh", "-n", "-c", script).CombinedOutput(); err != nil {
+		t.Fatalf("helper script is invalid for apostrophe path: %v\n%s\n%s", err, out, script)
+	}
+	if !strings.Contains(script, shellQuote(s.composeFile)) {
+		t.Fatalf("compose path is not one quoted shell word:\n%s", script)
+	}
+	wantMount := projectDir + ":" + projectDir
+	foundMount := false
+	for _, arg := range runArgs {
+		if arg == wantMount {
+			foundMount = true
+			break
+		}
+	}
+	if !foundMount {
+		t.Fatalf("detached helper lost exact bind argument %q: %v", wantMount, runArgs)
 	}
 }
 

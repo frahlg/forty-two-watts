@@ -92,7 +92,7 @@ func (s *server) replaceUpdater(ctx context.Context, target string) error {
 	} else {
 		steps = append(steps, pinStep)
 	}
-	steps = append(steps, "exec docker "+strings.Join(upArgs, " "))
+	steps = append(steps, "exec docker "+shellJoin(upArgs))
 	script := strings.Join(steps, "; ")
 
 	runArgs := []string{

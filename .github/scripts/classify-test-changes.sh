@@ -34,6 +34,9 @@ while IFS= read -r file; do
     Dockerfile|Dockerfile.optimizer|docker-compose*.yml|scripts/enable-modular-stack.sh|scripts/migrate-legacy-compose.sh|scripts/test-modular-compose.sh|scripts/test-container-boundaries.sh|scripts/install-macos.sh|.github/scripts/classify-test-changes.sh|.github/scripts/test-change-classifier.sh)
       compose=true
       ;;
+    .github/workflows/beta.yml|.github/workflows/release.yml|.github/workflows/release-assets.yml|scripts/check-stable-release.py|scripts/test-exact-image-promotion.sh|scripts/promote-paired-latest.sh|scripts/test-promote-paired-latest.sh)
+      compose=true
+      ;;
     Makefile|.github/workflows/test.yml)
       core=true
       optimizer=true

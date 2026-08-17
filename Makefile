@@ -103,12 +103,15 @@ compose-migration-test:
 	bash -n scripts/enable-modular-stack.sh scripts/migrate-legacy-compose.sh scripts/install-macos.sh scripts/sync-bundled-drivers.sh scripts/check-driver-versions.sh scripts/check-debian-base.sh
 	bash scripts/test-modular-compose.sh
 
-container-boundary-test:
+container-boundary-test: release-workflow-test
 	bash scripts/test-container-boundaries.sh
 
 release-workflow-test:
 	bash -n scripts/test-exact-image-promotion.sh
+	bash -n scripts/promote-paired-latest.sh
+	bash -n scripts/test-promote-paired-latest.sh
 	bash scripts/test-exact-image-promotion.sh
+	bash scripts/test-promote-paired-latest.sh
 
 optimizer/.venv/.installed: optimizer/pyproject.toml
 	$(MAKE) optimizer-install

@@ -2,11 +2,12 @@ name: release
 
 # Changesets-driven release. Pattern lifted from umara/u-front.
 #
-# This workflow ONLY handles the changesets flow + tag + GitHub Release
-# creation. The cross-platform binaries, docker images, and
+# This workflow ONLY handles the changesets flow + tag + draft GitHub Release
+# preparation. The cross-platform binaries, docker images, and
 # Discord announcement live in `release-assets.yml` and are triggered
 # explicitly via `gh workflow run release-assets.yml --ref vX.Y.Z` at
-# the end of the publish step. Keeping the heavy build matrix out of
+# the end of the draft step. release-assets.yml publishes the release only
+# after it verifies every required output. Keeping the heavy build matrix out of
 # this workflow means regular changeset-PR merges to master don't
 # queue + skip ~half a dozen asset jobs on every single push.
 #
@@ -48,8 +49,8 @@ on:
         required: true
         type: string
 
-# changesets/action needs to push the Version PR. The publish step
-# pushes the tag + creates the GH release + dispatches release-assets.
+# changesets/action needs to push the Version PR. The draft step pushes the tag,
+# creates or reuses a draft release, and dispatches release-assets.
 permissions:
   contents: write
   issues: write
@@ -153,7 +154,7 @@ jobs:
         if: github.event_name == 'workflow_dispatch' && steps.changesets.outputs.hasChangesets == 'false'
         uses: docker/setup-buildx-action@v4
 
-      - name: Tag and create GitHub Release
+      - name: Tag and prepare draft GitHub Release
         id: publish
         # Stable is an explicit promotion after real beta validation. Pushes
         # still maintain the Version Packages PR but never publish stable.
@@ -178,20 +179,42 @@ jobs:
             fi
           fi
           RELEASE_EXISTS=false
-          if gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+          RELEASE_IS_DRAFT=false
+          # List raw release records so a network/auth/API error fails the
+          # step instead of being mistaken for an absent release. The REST
+          # collection includes drafts for this contents:write token.
+          RELEASE_PAGES="$(gh api --paginate --slurp \
+            "repos/${GITHUB_REPOSITORY}/releases?per_page=100")"
+          RELEASE_COUNT="$(jq --arg tag "${TAG}" '[.[][] | select(.tag_name == $tag)] | length' <<<"${RELEASE_PAGES}")"
+          if [ "${RELEASE_COUNT}" -gt 1 ]; then
+            echo "More than one GitHub Release uses ${TAG}; refusing to continue." >&2
+            exit 1
+          fi
+          RELEASE_JSON="$(jq -c --arg tag "${TAG}" '.[][] | select(.tag_name == $tag)' <<<"${RELEASE_PAGES}")"
+          if [ -n "${RELEASE_JSON}" ]; then
+            jq -e --arg tag "${TAG}" '
+              .tag_name == $tag
+              and .prerelease == false
+              and ((.draft == true and .published_at == null)
+                   or (.draft == false and (.published_at | type == "string")))
+            ' \
+              <<<"${RELEASE_JSON}" >/dev/null
             RELEASE_EXISTS=true
+            RELEASE_IS_DRAFT="$(jq -r '.draft' <<<"${RELEASE_JSON}")"
           fi
 
-          # Already-done case: a previous run completed cleanly. No
-          # new release was cut on THIS run, so the release-assets
-          # dispatch below should skip — emit `published=false`.
-          if [ "${TAG_EXISTS}" = "true" ] && [ "${RELEASE_EXISTS}" = "true" ]; then
-            echo "Tag ${TAG} and GitHub Release already exist — nothing to publish."
-            {
-              echo "published=false"
-              echo "version=${VERSION}"
-            } >> "${GITHUB_OUTPUT}"
-            exit 0
+          if [ "${RELEASE_EXISTS}" = "true" ] && [ "${TAG_EXISTS}" != "true" ]; then
+            echo "GitHub Release ${TAG} exists without its annotated tag; refusing to continue." >&2
+            exit 1
+          fi
+
+          # A draft is deliberately not done: validate the chosen beta again
+          # and redispatch assets so an interrupted run can resume. Never run
+          # clobbering upload jobs against a release that is already public.
+          if [ "${TAG_EXISTS}" = "true" ] && [ "${RELEASE_EXISTS}" = "true" ] && \
+             [ "${RELEASE_IS_DRAFT}" = "false" ]; then
+            echo "${TAG} is already public; refusing to rerun draft asset uploads." >&2
+            exit 1
           fi
 
           # Stable is a promotion, never the first public channel for a commit.
@@ -318,16 +341,37 @@ jobs:
           if [ "${RELEASE_EXISTS}" = "false" ]; then
             gh release create "${TAG}" \
               --repo "${GITHUB_REPOSITORY}" \
+              --verify-tag \
+              --title "${TAG}" \
+              --notes-file release-notes.md \
+              --draft
+          else
+            test "${RELEASE_IS_DRAFT}" = "true"
+            gh release edit "${TAG}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --draft=true \
+              --prerelease=false \
               --title "${TAG}" \
               --notes-file release-notes.md
+            echo "Refreshed draft GitHub Release ${TAG}; release-assets will resume it."
           fi
+
+          # A prior failed attempt may have left stale notes. The state-schema
+          # marker controls updater backup policy, so dispatch only the exact
+          # body built from this candidate.
+          DRAFT_JSON="$(gh release view "${TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --json tagName,name,body,isDraft,isPrerelease,publishedAt)"
+          printf '%s' "${DRAFT_JSON}" | \
+            python3 scripts/check-stable-release.py draft \
+              "${TAG}" "${STATE_SCHEMA}" release-notes.md
 
           {
             echo "published=true"
             echo "version=${VERSION}"
             echo "beta_tag=${BETA_TAG}"
           } >> "${GITHUB_OUTPUT}"
-          echo "Published ${TAG}"
+          echo "Prepared draft ${TAG} for verified asset publication"
 
       - name: Dispatch release-assets workflow
         # release-assets.yml only accepts explicit dispatches, which carry the

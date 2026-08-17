@@ -34,4 +34,13 @@ assert_paths '.github/workflows/test.yml' \
 assert_paths '.github/scripts/classify-test-changes.sh' \
   'core=false' 'optimizer=false' 'web=false' 'drivers=false' 'compose=true'
 
+assert_paths '.github/workflows/release-assets.yml' \
+  'core=false' 'optimizer=false' 'web=false' 'drivers=false' 'compose=true'
+
+assert_paths 'scripts/promote-paired-latest.sh' \
+  'core=false' 'optimizer=false' 'web=false' 'drivers=false' 'compose=true'
+
+assert_paths 'scripts/check-stable-release.py' \
+  'core=false' 'optimizer=false' 'web=false' 'drivers=false' 'compose=true'
+
 echo "test workflow path classifier contract passed"

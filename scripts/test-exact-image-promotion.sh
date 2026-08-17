@@ -8,6 +8,72 @@ assets="${root}/.github/workflows/release-assets.yml"
 compose="${root}/docker-compose.yml"
 compose_macos="${root}/docker-compose.macos.yml"
 dockerfile="${root}/Dockerfile"
+release_guard="${root}/scripts/check-stable-release.py"
+
+release_inventory='[[
+  {"tag_name":"v2.0.0","draft":true,"prerelease":false,"published_at":null},
+  {"tag_name":"v2.1.0","draft":false,"prerelease":false,"published_at":"2026-08-17T00:00:00Z"},
+  {"tag_name":"v99.0.0","draft":true,"prerelease":false,"published_at":null},
+  {"tag_name":"v98.0.0","draft":false,"prerelease":true,"published_at":"2026-08-17T00:00:00Z"}
+]]'
+if printf '%s' "${release_inventory}" | python3 "${release_guard}" order v2.0.0 2>/dev/null; then
+  echo "an abandoned old draft could downgrade a newer public stable" >&2
+  exit 1
+fi
+printf '%s' "${release_inventory}" | python3 "${release_guard}" order v2.2.0
+if printf '{}' | python3 "${release_guard}" order v2.2.0 2>/dev/null; then
+  echo "malformed release inventory did not fail closed" >&2
+  exit 1
+fi
+
+required_asset_names=(
+  ftw-promotion-receipt.json os_list.json
+  ftw-linux-amd64.tar.gz ftw-linux-amd64.tar.gz.sha256
+  forty-two-watts-linux-amd64.tar.gz forty-two-watts-linux-amd64.tar.gz.sha256
+  ftw-linux-arm64.tar.gz ftw-linux-arm64.tar.gz.sha256
+  forty-two-watts-linux-arm64.tar.gz forty-two-watts-linux-arm64.tar.gz.sha256
+  ftw-windows-amd64.zip ftw-windows-amd64.zip.sha256
+  forty-two-watts-windows-amd64.zip forty-two-watts-windows-amd64.zip.sha256
+)
+release_assets_json="$(
+  printf '%s\n' "${required_asset_names[@]}" | jq -Rn --arg tag v2.2.0 '
+    {tagName: $tag, isDraft: true, isPrerelease: false, publishedAt: null,
+     assets: [inputs | {name: ., state: "uploaded", size: 1}]}
+  '
+)"
+printf '%s' "${release_assets_json}" | python3 "${release_guard}" assets v2.2.0
+unexpected_assets="$(jq '.assets += [{name: "stale-build.txt", state: "uploaded", size: 1}]' <<<"${release_assets_json}")"
+if printf '%s' "${unexpected_assets}" | python3 "${release_guard}" assets v2.2.0 2>/dev/null; then
+  echo "an unexpected stale release asset passed the exact allow-list" >&2
+  exit 1
+fi
+unnamed_assets="$(jq '.assets[-1].name = null' <<<"${release_assets_json}")"
+if printf '%s' "${unnamed_assets}" | python3 "${release_guard}" assets v2.2.0 2>/dev/null; then
+  echo "an unnamed release asset passed the exact allow-list" >&2
+  exit 1
+fi
+
+release_test_tmp="$(mktemp -d)"
+trap 'rm -rf "${release_test_tmp}"' EXIT
+expected_notes="${release_test_tmp}/release-notes.md"
+printf 'FTW 2.2.0\n\n<!-- ftw-state-schema:7 -->\n' > "${expected_notes}"
+fresh_draft="$(jq -n --arg tag v2.2.0 --rawfile body "${expected_notes}" \
+  '{tagName: $tag, name: $tag, body: $body, isDraft: true, isPrerelease: false, publishedAt: null}')"
+printf '%s' "${fresh_draft}" | python3 "${release_guard}" draft v2.2.0 7 "${expected_notes}"
+stale_draft="$(jq '.body = "old notes\n\n<!-- ftw-state-schema:6 -->\n"' <<<"${fresh_draft}")"
+if printf '%s' "${stale_draft}" | python3 "${release_guard}" draft v2.2.0 7 "${expected_notes}" 2>/dev/null; then
+  echo "a stale reused draft body or state-schema marker passed verification" >&2
+  exit 1
+fi
+dual_marker_notes="${release_test_tmp}/dual-marker-notes.md"
+printf '<!-- ftw-state-schema:6 -->\nFTW 2.2.0\n\n<!-- ftw-state-schema:7 -->\n' > "${dual_marker_notes}"
+dual_marker_draft="$(jq -n --arg tag v2.2.0 --rawfile body "${dual_marker_notes}" \
+  '{tagName: $tag, name: $tag, body: $body, isDraft: true, isPrerelease: false, publishedAt: null}')"
+if printf '%s' "${dual_marker_draft}" | \
+  python3 "${release_guard}" draft v2.2.0 7 "${dual_marker_notes}" 2>/dev/null; then
+  echo "a stale first schema marker passed beside the expected marker" >&2
+  exit 1
+fi
 
 grep -Fq 'VERSION=${{ needs.tag.outputs.runtime_version }}' "${beta}"
 grep -Fq 'CANDIDATE_TAG=${{ needs.tag.outputs.version }}' "${beta}"
@@ -37,7 +103,22 @@ grep -Fq 'BETA_TAG="${INPUT_BETA}"' "${release}"
 grep -Fq -- '--pattern ftw-image-digests.json' "${release}"
 grep -Fq 'current_digest="$(scripts/inspect-image-digest.sh "${image_ref}")"' "${release}"
 grep -Fq -- '-f source_beta="${BETA_TAG}"' "${release}"
-grep -Fq 'name: promote exact beta manifest' "${assets}"
+grep -Fq 'gh api --paginate --slurp' "${release}"
+grep -Fq '.draft == true' "${release}"
+grep -Fq 'Refreshed draft GitHub Release ${TAG}; release-assets will resume it.' "${release}"
+grep -Fq -- '--verify-tag' "${release}"
+grep -Fq -- '--draft' "${release}"
+grep -Fq 'name: Validate both exact candidate manifests' "${assets}"
+grep -Fq 'name: Preflight all exact stable aliases' "${assets}"
+grep -Fq 'name: Publish and verify exact stable aliases updater before Core' "${assets}"
+grep -Fq 'scripts/promote-paired-latest.sh' "${assets}"
+grep -Fq 'name: verify complete draft assets' "${assets}"
+grep -Fq 'python3 scripts/check-stable-release.py order "${TAG}"' "${assets}"
+grep -Fq 'python3 scripts/check-stable-release.py assets "${TAG}"' "${assets}"
+grep -Fq 'name: verify and publish complete stable release' "${assets}"
+grep -Fq 'needs: [meta, assets-ready, docker]' "${assets}"
+grep -Fq -- '--draft=false --prerelease=false --latest' "${root}/scripts/promote-paired-latest.sh"
+grep -Fq 'needs: [meta, publish]' "${assets}"
 grep -Fq 'group: release-assets-stable-latest' "${assets}"
 grep -Fq -- '--pattern ftw-image-digests.json' "${assets}"
 grep -Fq -- '--pattern ftw-promotion-receipt.json' "${assets}"
@@ -46,8 +127,11 @@ grep -Fq 'is already bound to ${BETA_TAG}, not requested ${INPUT_BETA}.' "${asse
 grep -Fq 'gh release upload "${TAG}" "${PROMOTION_RECORD}"' "${assets}"
 grep -Fq 'gh release download "${STABLE_TAG}"' "${assets}"
 grep -Fq 'current_digest="$(scripts/inspect-image-digest.sh "${source}")"' "${assets}"
-grep -Fq 'test "${source_digest}" = "${target_digest}"' "${assets}"
-grep -Fq '"${source}@${SOURCE_DIGEST}"' "${assets}"
+grep -Fq 'test "$(scripts/inspect-image-digest.sh "${canonical}:${tag}")" = "${expected}"' "${assets}"
+grep -Fq '"${source}@${source_digest}"' "${assets}"
+grep -Fq 'sha256sum -c "${checksum_name}"' "${assets}"
+grep -Fq 'and ((.imager.devices // []) | length) > 0' "${assets}"
+grep -Fq '[ "${STABLE_COMMIT}" != "${GITHUB_SHA}" ]' "${assets}"
 grep -Fq 'FTW_IMAGE_TAG: ${FTW_IMAGE_TAG:-}' "${compose}"
 grep -Fq 'FTW_IMAGE_TAG: ${FTW_IMAGE_TAG:-}' "${compose_macos}"
 
@@ -63,11 +147,46 @@ if [ "$(grep -Fc 'AUTH_HEADER_COUNT="' "${release}")" -ne 2 ]; then
 fi
 
 stable_guard="$(grep -n 'STABLE_COMMIT="$(git rev-list -n 1 "${TAG}")"' "${release}" | cut -d: -f1)"
-already_done="$(grep -n '# Already-done case:' "${release}" | cut -d: -f1)"
-if [ "${stable_guard}" -ge "${already_done}" ]; then
+release_inventory="$(grep -n 'RELEASE_PAGES="$(gh api --paginate --slurp' "${release}" | cut -d: -f1)"
+if [ "${stable_guard}" -ge "${release_inventory}" ]; then
   echo "existing stable tag guard runs too late" >&2
   exit 1
 fi
+
+draft_create="$(grep -n 'gh release create "${TAG}"' "${release}" | cut -d: -f1)"
+draft_refresh="$(grep -n 'gh release edit "${TAG}"' "${release}" | cut -d: -f1)"
+draft_reuse="$(grep -n 'Refreshed draft GitHub Release' "${release}" | cut -d: -f1)"
+draft_verify="$(grep -n 'DRAFT_JSON="$(gh release view' "${release}" | cut -d: -f1)"
+dispatch_output="$(grep -n 'echo "published=true"' "${release}" | cut -d: -f1)"
+if [ "${draft_create}" -ge "${draft_refresh}" ] || \
+   [ "${draft_refresh}" -ge "${draft_reuse}" ] || \
+   [ "${draft_reuse}" -ge "${draft_verify}" ] || \
+   [ "${draft_verify}" -ge "${dispatch_output}" ]; then
+  echo "an existing draft must resume through the asset dispatch output" >&2
+  exit 1
+fi
+draft_create_block="$(sed -n "${draft_create},$((draft_refresh - 1))p" "${release}")"
+if ! grep -Fq -- '--verify-tag' <<<"${draft_create_block}" || \
+   ! grep -Fq -- '--draft' <<<"${draft_create_block}"; then
+  echo "stable release creation must verify the tag and remain draft" >&2
+  exit 1
+fi
+draft_refresh_block="$(sed -n "${draft_refresh},$((draft_reuse - 1))p" "${release}")"
+for required in '--draft=true' '--prerelease=false' '--title "${TAG}"' '--notes-file release-notes.md'; do
+  if ! grep -Fq -- "${required}" <<<"${draft_refresh_block}"; then
+    echo "reused draft refresh is missing ${required}" >&2
+    exit 1
+  fi
+done
+draft_verify_block="$(sed -n "${draft_verify},$((dispatch_output - 1))p" "${release}")"
+for required in \
+  'python3 scripts/check-stable-release.py draft' \
+  '"${TAG}" "${STATE_SCHEMA}" release-notes.md'; do
+  if ! grep -Fq -- "${required}" <<<"${draft_verify_block}"; then
+    echo "refreshed draft verification is missing ${required}" >&2
+    exit 1
+  fi
+done
 
 candidate_guard="$(grep -n '^  candidate:$' "${beta}" | cut -d: -f1)"
 beta_docker="$(grep -n '^  docker:$' "${beta}" | cut -d: -f1)"
@@ -122,6 +241,13 @@ fi
 
 promotion_upload="$(grep -n 'gh release upload "${TAG}" "${PROMOTION_RECORD}"' "${assets}" | cut -d: -f1)"
 stable_docker="$(grep -n '^  docker:$' "${assets}" | cut -d: -f1)"
+asset_release_inventory="$(grep -n 'RELEASE_PAGES="$(gh api --paginate --slurp' "${assets}" | cut -d: -f1)"
+stable_order_guard="$(grep -n 'check-stable-release.py order "${TAG}"' "${assets}" | cut -d: -f1)"
+if [ "${asset_release_inventory}" -ge "${stable_order_guard}" ] || \
+   [ "${stable_order_guard}" -ge "${stable_docker}" ]; then
+  echo "newest-public-stable guard must run from fail-closed inventory before aliases" >&2
+  exit 1
+fi
 if [ "${promotion_upload}" -ge "${stable_docker}" ]; then
   echo "stable promotion receipt must be bound before alias writes" >&2
   exit 1
@@ -148,5 +274,122 @@ if sed -n "${docker_start},$((discord_start - 1))p" "${assets}" | grep -q 'docke
   echo "stable docker job still rebuilds an image" >&2
   exit 1
 fi
+
+stable_docker_block="$(sed -n "${docker_start},$((discord_start - 1))p" "${assets}")"
+if grep -qE '^[[:space:]]+(strategy:|matrix:)' <<<"${stable_docker_block}" || \
+   grep -Fq '${{ matrix.' <<<"${stable_docker_block}"; then
+  echo "Core and updater stable promotion must not run as independent matrix legs" >&2
+  exit 1
+fi
+
+paired_validation="$(grep -n 'name: Validate both exact candidate manifests' "${assets}" | cut -d: -f1)"
+exact_preflight="$(grep -n 'name: Preflight all exact stable aliases' "${assets}" | cut -d: -f1)"
+exact_publish="$(grep -n 'name: Publish and verify exact stable aliases updater before Core' "${assets}" | cut -d: -f1)"
+stable_publish_job="$(grep -n '^  publish:$' "${assets}" | cut -d: -f1)"
+latest_transaction="$(grep -n 'scripts/promote-paired-latest.sh' "${assets}" | cut -d: -f1)"
+if [ "${paired_validation}" -ge "${exact_preflight}" ] || \
+   [ "${exact_preflight}" -ge "${exact_publish}" ] || \
+   [ "${exact_publish}" -ge "${stable_publish_job}" ] || \
+   [ "${stable_publish_job}" -ge "${latest_transaction}" ]; then
+  echo "both candidates must validate before stable tags or latest aliases move" >&2
+  exit 1
+fi
+validation_block="$(sed -n "${paired_validation},$((exact_preflight - 1))p" "${assets}")"
+for required in \
+  '"core|ghcr.io/srcfl/ftw"' \
+  '"updater|ghcr.io/srcfl/ftw-updater"' \
+  'echo "${key}_digest=${source_digest}"'; do
+  if ! grep -Fq "${required}" <<<"${validation_block}"; then
+    echo "paired validation is missing ${required}" >&2
+    exit 1
+  fi
+done
+if grep -Fq 'imagetools create' <<<"${validation_block}"; then
+  echo "stable validation moved an alias before both candidates passed" >&2
+  exit 1
+fi
+
+preflight_block="$(sed -n "${exact_preflight},$((exact_publish - 1))p" "${assets}")"
+for required in \
+  '"${STABLE_TAG}" "${STABLE_VERSION}" "sha-${short_sha}"' \
+  '"updater|${UPDATER_DIGEST}|srcfl/ftw-updater|ghcr.io/srcfl/ftw-updater"' \
+  '"core|${CORE_DIGEST}|srcfl/ftw|ghcr.io/srcfl/ftw"' \
+  '404)' \
+  '200)' \
+  'Could not prove ${image}:${tag} absent or exact'; do
+  if ! grep -Fq "${required}" <<<"${preflight_block}"; then
+    echo "exact stable alias preflight is missing ${required}" >&2
+    exit 1
+  fi
+done
+if grep -Fq 'imagetools create' <<<"${preflight_block}"; then
+  echo "exact alias preflight mutated a registry tag" >&2
+  exit 1
+fi
+
+exact_publish_block="$(sed -n "${exact_publish},$((stable_publish_job - 1))p" "${assets}")"
+canonical_updater="$(grep -nF 'publish_canonical ghcr.io/srcfl/ftw-updater "${UPDATER_DIGEST}"' <<<"${exact_publish_block}" | cut -d: -f1)"
+compatibility_updater="$(grep -nF 'mirror_compatibility ghcr.io/srcfl/ftw-updater \' <<<"${exact_publish_block}" | cut -d: -f1)"
+canonical_core="$(grep -nF 'publish_canonical ghcr.io/srcfl/ftw "${CORE_DIGEST}"' <<<"${exact_publish_block}" | cut -d: -f1)"
+compatibility_core="$(grep -nF 'mirror_compatibility ghcr.io/srcfl/ftw \' <<<"${exact_publish_block}" | cut -d: -f1)"
+if [ -z "${canonical_updater}" ] || [ -z "${compatibility_updater}" ] || \
+   [ -z "${canonical_core}" ] || [ -z "${compatibility_core}" ] || \
+   [ "${canonical_updater}" -ge "${compatibility_updater}" ] || \
+   [ "${compatibility_updater}" -ge "${canonical_core}" ] || \
+   [ "${canonical_core}" -ge "${compatibility_core}" ]; then
+  echo "all updater stable aliases must write before any Core stable alias" >&2
+  exit 1
+fi
+for required in \
+  '"${UPDATER_DIGEST}|ghcr.io/srcfl/ftw-updater|ghcr.io/frahlg/forty-two-watts-updater"' \
+  '"${CORE_DIGEST}|ghcr.io/srcfl/ftw|ghcr.io/frahlg/forty-two-watts"' \
+  'inspect-image-digest.sh "${canonical}:${tag}"' \
+  'inspect-image-digest.sh "${compatibility}:${tag}"'; do
+  if ! grep -Fq "${required}" <<<"${exact_publish_block}"; then
+    echo "full exact stable alias verification is missing ${required}" >&2
+    exit 1
+  fi
+done
+
+# Immutable version/sha aliases may be left exact or absent on a failed run.
+# The moving latest channels must go through the tested rollback helper only.
+before_latest="$(sed -n "${exact_publish},$((latest_transaction - 1))p" "${assets}")"
+if grep -Eq 'for tag in .*latest' <<<"${before_latest}"; then
+  echo "latest moved outside the paired rollback transaction" >&2
+  exit 1
+fi
+
+asset_gate_job="$(grep -n '^  assets-ready:$' "${assets}" | cut -d: -f1)"
+asset_gate_block="$(sed -n "${asset_gate_job},$((docker_start - 1))p" "${assets}")"
+for required in \
+  'needs: [meta, binaries, imager-metadata]' \
+  'python3 scripts/check-stable-release.py assets "${TAG}"' \
+  'asset_name="${checksum_name%.sha256}"' \
+  '[ "${recorded_name}" != "${asset_name}" ]' \
+  'sha256sum -c "${checksum_name}"' \
+  'and ((.imager.devices // []) | length) > 0'; do
+  if ! grep -Fq -- "${required}" <<<"${asset_gate_block}"; then
+    echo "pre-Docker stable asset gate is missing ${required}" >&2
+    exit 1
+  fi
+done
+docker_header="$(sed -n "${docker_start},$((paired_validation - 1))p" "${assets}")"
+if ! grep -Fq 'needs: [meta, assets-ready]' <<<"${docker_header}"; then
+  echo "stable aliases must wait for the verified draft asset gate" >&2
+  exit 1
+fi
+
+final_publish_block="$(sed -n "${stable_publish_job},$((discord_start - 1))p" "${assets}")"
+for required in \
+  'needs: [meta, assets-ready, docker]' \
+  'packages: write' \
+  '.isDraft == true' \
+  'for alias in "${TAG}" "${VERSION}" "sha-${short_sha}"; do' \
+  'scripts/promote-paired-latest.sh'; do
+  if ! grep -Fq -- "${required}" <<<"${final_publish_block}"; then
+    echo "final stable publication gate is missing ${required}" >&2
+    exit 1
+  fi
+done
 
 echo "exact image promotion workflow checks passed"

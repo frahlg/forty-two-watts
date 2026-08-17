@@ -60,9 +60,23 @@ func mergeEnvFile(existing string, tags map[string]string) string {
 
 	var out []string
 	if existing != "" {
-		for _, line := range strings.Split(strings.TrimSuffix(existing, "\n"), "\n") {
+		lines := strings.Split(strings.TrimSuffix(existing, "\n"), "\n")
+		lastAssignment := make(map[string]int, len(tags))
+		for i, line := range lines {
+			if key, ok := envAssignmentKey(line); ok {
+				if _, wanted := tags[key]; wanted {
+					lastAssignment[key] = i
+				}
+			}
+		}
+		for i, line := range lines {
 			if key, ok := envAssignmentKey(line); ok {
 				if value, wanted := remaining[key]; wanted {
+					// Compose and dotenv readers use the last assignment. Remove
+					// older duplicates and replace the effective one in place.
+					if lastAssignment[key] != i {
+						continue
+					}
 					out = append(out, key+"="+value)
 					delete(remaining, key)
 					continue
@@ -82,6 +96,21 @@ func mergeEnvFile(existing string, tags map[string]string) string {
 	return strings.Join(out, "\n") + "\n"
 }
 
+// shellQuote returns one POSIX sh word. Project paths are operator-controlled
+// and may contain spaces or apostrophes, while the helper command runs via
+// `sh -c` inside a detached container.
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
+}
+
+func shellJoin(args []string) string {
+	quoted := make([]string, len(args))
+	for i, arg := range args {
+		quoted[i] = shellQuote(arg)
+	}
+	return strings.Join(quoted, " ")
+}
+
 // envPinScript returns a shell fragment that writes content to <dir>/.env
 // atomically. The payload is base64 so no quoting in it can break out of the
 // helper's `sh -c`, and the temp file is created in the same directory so the
@@ -90,8 +119,9 @@ func envPinScript(dir, content string) string {
 	envPath := filepath.Join(dir, ".env")
 	tmpPath := envPath + ".ftw-update-tmp"
 	return fmt.Sprintf(
-		"%s && mv '%s' '%s' || echo 'ftw: could not persist image tags to %s' >&2",
-		envTempWriteScript(envPath, tmpPath, content), tmpPath, envPath, envPath,
+		"%s && mv %s %s || printf '%%s\\n' %s >&2",
+		envTempWriteScript(envPath, tmpPath, content), shellQuote(tmpPath), shellQuote(envPath),
+		shellQuote("ftw: could not persist image tags to "+envPath),
 	)
 }
 
@@ -100,8 +130,9 @@ func envPinScript(dir, content string) string {
 // a new file starts private because .env can hold API tokens.
 func envTempWriteScript(envPath, tmpPath, content string) string {
 	return fmt.Sprintf(
-		"{ if [ -e '%s' ]; then cp -p '%s' '%s'; else rm -f '%s' && : > '%s' && chmod 600 '%s'; fi; } && printf %%s '%s' | base64 -d > '%s'",
-		envPath, envPath, tmpPath, tmpPath, tmpPath, tmpPath, base64Encode(content), tmpPath,
+		"{ if [ -e %s ]; then cp -p %s %s; else rm -f %s && : > %s && chmod 600 %s; fi; } && printf %%s %s | base64 -d > %s",
+		shellQuote(envPath), shellQuote(envPath), shellQuote(tmpPath), shellQuote(tmpPath),
+		shellQuote(tmpPath), shellQuote(tmpPath), shellQuote(base64Encode(content)), shellQuote(tmpPath),
 	)
 }
 
@@ -163,10 +194,11 @@ func newOverrideAndEnvPinScript(overridePath, overrideContent, envPath, envConte
 	overrideTmp := overridePath + ".ftw-update-tmp"
 	envTmp := envPath + ".ftw-update-tmp"
 	return fmt.Sprintf(
-		"{ printf %%s '%s' | base64 -d > '%s' && ln '%s' '%s' && rm -f '%s' && %s && mv '%s' '%s'; } || { rm -f '%s' '%s'; echo 'ftw: could not persist release identity beside %s' >&2; }",
-		base64Encode(overrideContent), overrideTmp, overrideTmp, overridePath, overrideTmp,
-		envTempWriteScript(envPath, envTmp, envContent), envTmp, envPath,
-		overrideTmp, envTmp, overridePath,
+		"{ printf %%s %s | base64 -d > %s && ln %s %s && rm -f %s && %s && mv %s %s; } || { rm -f %s %s; printf '%%s\\n' %s >&2; }",
+		shellQuote(base64Encode(overrideContent)), shellQuote(overrideTmp), shellQuote(overrideTmp),
+		shellQuote(overridePath), shellQuote(overrideTmp), envTempWriteScript(envPath, envTmp, envContent),
+		shellQuote(envTmp), shellQuote(envPath), shellQuote(overrideTmp), shellQuote(envTmp),
+		shellQuote("ftw: could not persist release identity beside "+overridePath),
 	)
 }
 
@@ -189,28 +221,94 @@ func serviceEnvironmentUsesVariable(files []string, service, key, variable strin
 			continue
 		}
 		var svc struct {
-			Environment map[string]string `yaml:"environment"`
+			Environment yaml.Node `yaml:"environment"`
 		}
 		if err := node.Decode(&svc); err != nil {
 			return false, fmt.Errorf("parse %s service %s: %w", path, service, err)
 		}
-		if entry, ok := svc.Environment[key]; ok {
+		entry, ok, err := composeEnvironmentValue(svc.Environment, key)
+		if err != nil {
+			return false, fmt.Errorf("parse %s service %s environment: %w", path, service, err)
+		}
+		if ok {
 			value, found = entry, true
 		}
 	}
 	return found && composeValueUsesVariable(value, variable), nil
 }
 
+// composeEnvironmentValue reads one Compose environment entry from either of
+// the two forms the Compose file format accepts:
+//
+//	KEY: value
+//	- KEY=value
+//
+// A bare list entry ("- KEY") asks Compose to copy a value from its own
+// process environment. It is still a found override, but it does not prove
+// that the variable is passed through by value, so callers receive an empty
+// value and fail closed.
+func composeEnvironmentValue(environment yaml.Node, key string) (string, bool, error) {
+	switch environment.Kind {
+	case 0:
+		return "", false, nil
+	case yaml.MappingNode:
+		for i := 0; i+1 < len(environment.Content); i += 2 {
+			name := environment.Content[i]
+			value := environment.Content[i+1]
+			if name.Value != key {
+				continue
+			}
+			if value.Kind != yaml.ScalarNode {
+				return "", false, fmt.Errorf("%s value must be a scalar", key)
+			}
+			return value.Value, true, nil
+		}
+		return "", false, nil
+	case yaml.SequenceNode:
+		value := ""
+		found := false
+		for _, item := range environment.Content {
+			if item.Kind != yaml.ScalarNode {
+				return "", false, fmt.Errorf("list entry must be a scalar")
+			}
+			name, candidate, assigned := strings.Cut(item.Value, "=")
+			if name != key {
+				continue
+			}
+			found = true
+			if !assigned {
+				value = ""
+				continue
+			}
+			value = candidate
+		}
+		return value, found, nil
+	default:
+		return "", false, fmt.Errorf("must be a mapping or list")
+	}
+}
+
 func composeValueUsesVariable(value, variable string) bool {
 	if value == "$"+variable || value == "${"+variable+"}" {
 		return true
 	}
-	for _, operator := range []string{":-", "-"} {
-		if strings.HasPrefix(value, "${"+variable+operator) && strings.HasSuffix(value, "}") {
-			return true
-		}
+	prefix := "${" + variable
+	if !strings.HasPrefix(value, prefix) || !strings.HasSuffix(value, "}") {
+		return false
 	}
-	return false
+	inner := value[len(prefix) : len(value)-1]
+	var fallback string
+	switch {
+	case strings.HasPrefix(inner, ":-"):
+		fallback = strings.TrimPrefix(inner, ":-")
+	case strings.HasPrefix(inner, "-"):
+		fallback = strings.TrimPrefix(inner, "-")
+	default:
+		return false
+	}
+	// The whole value must be one expansion. Nested or adjacent expansions
+	// could add text to the installed tag and are not an exact pass-through.
+	return !strings.ContainsAny(fallback, "${}")
 }
 
 // readEnvFile returns the current .env contents, or empty when there is none.
