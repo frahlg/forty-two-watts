@@ -1,7 +1,0 @@
----
-"ftw": patch
----
-
-The FTW app can charge the car. Two new command operations go through the session's door: `loadpoint.hold` pins a loadpoint to a fixed charging power — the same manual hold the operator UI installs over HTTP — and `loadpoint.boost` lets the house battery boost the car under the same bounded lease the HTTP route grants. `clear` releases a hold and `cancel` withdraws a boost, each a distinct signal rather than a zero setpoint, because 0 W is itself a valid hold that pauses the charger. Both ops sit behind every gate the door already holds — expiry, revision, guards, idempotency, scope — plus the dispatch block, since both move energy and stale meter data stops dispatch through this door like any other.
-
-One code path, not two. The ops call the very controller methods the HTTP routes call, validate the boost lease with the same function the HTTP route answers 400 from, and share the hold-duration cap through a single constant in the loadpoint package. The result reports what the box reads back — the power actually held, the boost actually running — never the echo of the request, and anything applied pushes a fresh plan so the app is not left showing the old intent beside the new state. A box with no loadpoint controller answers `E_UNAVAILABLE`, the session's word for the 503 the HTTP routes give, and `der.ev` stays unsaid so the app hides the buttons rather than drawing dead ones.
