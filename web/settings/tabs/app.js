@@ -374,7 +374,19 @@
       });
   }
 
+  function fleetPanel(ctx) {
+    var panel = S.fleetPing;
+    return panel && panel.render ? panel.render(ctx) : "";
+  }
+
   S.tabs.app = {
+    afterSave: function () {
+      // These two switches share a page, not a state. The app link has its
+      // own restart boundary; fleet sharing takes effect as soon as it saves.
+      var panel = S.fleetPing;
+      if (panel && panel.afterSave) panel.afterSave();
+    },
+
     render: function (ctx) {
       if (!ctx.config.app_link) ctx.config.app_link = { enabled: true };
       var enabled = !!ctx.config.app_link.enabled;
@@ -434,7 +446,8 @@
         "one code is live at a time, so asking for any of them stops the last " +
         "one.</p>" +
         '<div id="app-link-slot"></div>' +
-        "</fieldset>"
+        "</fieldset>" +
+        fleetPanel(ctx)
       );
     },
   };

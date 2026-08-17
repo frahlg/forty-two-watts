@@ -159,7 +159,11 @@
       });
   }
 
-  S.tabs.fleet = {
+  // The FTW app and fleet statistics share a settings page, but not a
+  // setting: a box can share its anonymous daily report without using the
+  // app relay. Keep this as a reusable panel instead of a tab so the payload
+  // and privacy wording stay in one place.
+  S.fleetPing = {
     _pure: { payloadRows: payloadRows, describe: describe, whereLine: whereLine },
 
     // The line under the payload is the box's answer, not the checkbox's, so

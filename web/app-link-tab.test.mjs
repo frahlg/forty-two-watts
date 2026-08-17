@@ -12,8 +12,10 @@ import vm from "node:vm";
 // drive the real render() and read the markup it produces.
 
 const source = readFileSync(new URL("./settings/tabs/app.js", import.meta.url), "utf8");
+const fleetSource = readFileSync(new URL("./settings/tabs/fleet.js", import.meta.url), "utf8");
+const index = readFileSync(new URL("./index.html", import.meta.url), "utf8");
 
-function loadTab() {
+function loadTab(withFleet = false) {
   const win = { FTWSettings: { tabs: {} } };
   const sandbox = {
     window: win,
@@ -27,6 +29,7 @@ function loadTab() {
   sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
   vm.runInContext(source, sandbox);
+  if (withFleet) vm.runInContext(fleetSource, sandbox);
   const tab = win.FTWSettings.tabs.app;
   assert.ok(tab && typeof tab.render === "function", "app.js registered no tab");
   return tab;
@@ -79,5 +82,41 @@ describe("the app tab", () => {
     // It is enabled once /api/app-link/status reports the uplink running.
     // Starting enabled means the first press of a fresh page fails.
     assert.match(render({}), /id="app-link-pair"[^>]*disabled/);
+  });
+
+  it("keeps fleet statistics with the app, but independent of its switch", () => {
+    const appWithFleet = loadTab(true);
+    const config = { app_link: { enabled: false } };
+    const html = appWithFleet.render({ config });
+
+    assert.match(html, /<legend>Fleet statistics<\/legend>/);
+    assert.match(html, /data-checkbox-path="fleet_ping\.enabled"/);
+    assert.equal(config.fleet_ping.enabled, true, "fleet sharing should still default on");
+    assert.doesNotMatch(html, /id="app-link-enabled"[^>]*checked/);
+    assert.match(html, /id="fleet-ping-enabled"[^>]*checked/);
+  });
+
+  it("refreshes the fleet payload after saving from the app page", () => {
+    const win = { FTWSettings: { tabs: {} } };
+    const asked = [];
+    const sandbox = {
+      window: win,
+      setTimeout: () => 0,
+      document: { getElementById: () => ({ textContent: "", appendChild() {} }) },
+      fetch: (path) => { asked.push(path); return new Promise(() => {}); },
+      console,
+    };
+    sandbox.globalThis = sandbox;
+    vm.createContext(sandbox);
+    vm.runInContext(source, sandbox);
+    vm.runInContext(fleetSource, sandbox);
+
+    win.FTWSettings.tabs.app.afterSave();
+    assert.deepEqual(asked, ["/api/fleet-ping"]);
+  });
+
+  it("does not leave a standalone Fleet ping destination behind", () => {
+    assert.doesNotMatch(index, /data-tab="fleet"/);
+    assert.match(index, /settings\/tabs\/fleet\.js/);
   });
 });

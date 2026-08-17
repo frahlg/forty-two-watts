@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import vm from "node:vm";
 
-// The fleet ping tab makes one claim: what you see is what the box sends.
+// The fleet statistics panel makes one claim: what you see is what the box sends.
 // These tests hold it to that. The rows must come from the payload rather
 // than from a list in the tab, and the checkbox must reflect the box's own
 // default rather than a friendlier one.
@@ -31,9 +31,10 @@ function loadTab() {
   sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
   vm.runInContext(source, sandbox);
-  const tab = win.FTWSettings.tabs.fleet;
-  assert.ok(tab && typeof tab.render === "function", "fleet.js registered no tab");
-  return tab;
+  const panel = win.FTWSettings.fleetPing;
+  assert.ok(panel && typeof panel.render === "function", "fleet.js registered no panel");
+  assert.equal(win.FTWSettings.tabs.fleet, undefined, "fleet.js registered a standalone tab");
+  return panel;
 }
 
 const tab = loadTab();
@@ -53,7 +54,7 @@ const payload = {
   install_age: "6-12m",
 };
 
-describe("the fleet ping tab", () => {
+describe("the fleet statistics panel", () => {
   it("offers a checkbox bound to fleet_ping.enabled", () => {
     const html = render({});
     assert.match(html, /data-checkbox-path="fleet_ping\.enabled"/);
@@ -220,7 +221,7 @@ describe("keeping the line true after a save", () => {
     sandbox.globalThis = sandbox;
     vm.createContext(sandbox);
     vm.runInContext(source, sandbox);
-    sandbox.window.FTWSettings.tabs.fleet.afterSave();
+    sandbox.window.FTWSettings.fleetPing.afterSave();
     assert.deepEqual(asked, ["/api/fleet-ping"]);
   });
 });
