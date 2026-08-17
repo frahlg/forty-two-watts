@@ -172,6 +172,15 @@ grep -Fq 'python3 scripts/check-stable-release.py order "${TAG}"' "${assets}"
 grep -Fq 'python3 scripts/check-stable-release.py assets "${TAG}"' "${assets}"
 grep -Fq 'name: verify and publish complete stable release' "${assets}"
 grep -Fq 'needs: [meta, assets-ready, docker]' "${assets}"
+if [ "$(grep -Fc 'GH_TOKEN: ${{ secrets.CI_TOKEN }}' "${assets}")" -ne 6 ]; then
+  echo "every draft release read/write must use the repo-scoped release token" >&2
+  exit 1
+fi
+if grep -Fq 'GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}' "${assets}" || \
+   grep -Fq 'GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}' "${assets}"; then
+  echo "release-assets must not use the per-run token for draft release access" >&2
+  exit 1
+fi
 grep -Fq -- '--draft=false --prerelease=false --latest' "${root}/scripts/promote-paired-latest.sh"
 grep -Fq 'needs: [meta, publish]' "${assets}"
 grep -Fq 'group: release-assets-stable-latest' "${assets}"

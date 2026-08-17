@@ -94,7 +94,10 @@ jobs:
       - name: Derive tag/version from ref
         id: meta
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # The per-run GITHUB_TOKEN cannot resolve this repository's draft
+          # releases by tag. CI_TOKEN is repo-scoped with Contents write and
+          # is already the release workflow's durable GitHub credential.
+          GH_TOKEN: ${{ secrets.CI_TOKEN }}
           INPUT_TAG: ${{ github.event.inputs.tag }}
           INPUT_BETA: ${{ github.event.inputs.source_beta }}
         run: |
@@ -331,7 +334,7 @@ jobs:
 
       - name: Upload to release
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.CI_TOKEN }}
           TAG: ${{ needs.meta.outputs.tag }}
           ASSET: release/ftw-${{ matrix.goos }}-${{ matrix.goarch }}.${{ matrix.archive }}
           LEGACY_ASSET: release/forty-two-watts-${{ matrix.goos }}-${{ matrix.goarch }}.${{ matrix.archive }}
@@ -348,7 +351,7 @@ jobs:
     steps:
       - name: Mirror permanent installer metadata onto the version release
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.CI_TOKEN }}
           TAG: ${{ needs.meta.outputs.tag }}
         run: |
           set -euo pipefail
@@ -389,7 +392,7 @@ jobs:
 
       - name: Verify receipt, binaries, checksums and Imager metadata
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.CI_TOKEN }}
           TAG: ${{ needs.meta.outputs.tag }}
           VERSION: ${{ needs.meta.outputs.version }}
           SOURCE_BETA: ${{ needs.meta.outputs.source_beta }}
@@ -477,7 +480,7 @@ jobs:
           SOURCE_TAG: ${{ needs.meta.outputs.source_beta }}
           STABLE_TAG: ${{ needs.meta.outputs.tag }}
           STABLE_VERSION: ${{ needs.meta.outputs.version }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.CI_TOKEN }}
         run: |
           set -euo pipefail
           digest_dir="${RUNNER_TEMP}/paired-stable-digests"
@@ -693,7 +696,7 @@ jobs:
 
       - name: Verify every stable output and publish
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.CI_TOKEN }}
           TAG: ${{ needs.meta.outputs.tag }}
           VERSION: ${{ needs.meta.outputs.version }}
           SOURCE_BETA: ${{ needs.meta.outputs.source_beta }}
