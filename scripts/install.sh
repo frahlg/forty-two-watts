@@ -175,7 +175,15 @@ fi
 echo ""
 echo "==[5/5]== Pulling image + starting container"
 cd "$INSTALL_DIR"
-run_docker compose pull
+# Pull the newest images, but don't let a GitHub/GHCR outage block the install:
+# GHCR is GitHub-hosted, so when GitHub is degraded `compose pull` fails, and
+# under `set -e` that would abort the whole install before anything starts.
+# Fall through to `up -d`, which starts from any locally-present image
+# (last-known-good) instead — only a genuinely fresh host with no local image
+# still needs GHCR reachable.
+if ! run_docker compose pull; then
+  echo "  ! image pull failed (GHCR/GitHub unreachable?) — starting with locally-present images if any"
+fi
 run_docker compose up -d
 
 # ---- Summary ----
@@ -200,7 +208,7 @@ cat <<EOF
 
   Manage the container (from ${INSTALL_DIR}):
      docker compose logs -f                      # tail logs
-     docker compose pull && docker compose up -d # upgrade
+     docker compose pull; docker compose up -d   # upgrade (a failed pull keeps the current image running)
      docker compose down                         # stop
 
 EOF

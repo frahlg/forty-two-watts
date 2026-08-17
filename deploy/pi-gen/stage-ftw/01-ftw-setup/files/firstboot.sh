@@ -21,21 +21,30 @@ echo "[$(date -Is)] ftw-firstboot starting"
 
 cd /opt/ftw
 
-# Retry loop: GHCR and general LAN DHCP can be flaky for the first
-# couple of minutes after boot, and slow connections may need many
-# minutes per attempt. Retry indefinitely — the sentinel is only
-# written on success, so a reboot will pick up where this left off.
-attempt=0
-while true; do
-    attempt=$((attempt + 1))
-    if docker compose pull; then
-        break
-    fi
-    echo "[$(date -Is)] pull attempt ${attempt} failed, retrying in 60 s"
-    sleep 60
-done
-
-docker compose up -d
+# Bring the stack up on whatever images are already present FIRST, so a box
+# that already has them (a reboot mid-provision, a re-run, or a future
+# pre-baked image) is never held hostage by GHCR: GHCR is GitHub-hosted, so a
+# GitHub outage makes `compose pull` fail. `docker compose up -d` only reaches
+# out to GHCR for an image that is genuinely missing locally.
+#
+# A truly fresh box has no local images, so `up -d` fails; it then retries the
+# pull indefinitely (GHCR and LAN DHCP can be flaky for the first couple of
+# minutes after boot, and slow connections may need many minutes per attempt).
+# The sentinel is only written on success, so a reboot picks up where this
+# left off.
+if ! docker compose up -d; then
+    echo "[$(date -Is)] up needs images not present locally — pulling from GHCR"
+    attempt=0
+    while true; do
+        attempt=$((attempt + 1))
+        if docker compose pull; then
+            break
+        fi
+        echo "[$(date -Is)] pull attempt ${attempt} failed, retrying in 60 s"
+        sleep 60
+    done
+    docker compose up -d
+fi
 
 touch "${SENTINEL}"
 echo "[$(date -Is)] ftw-firstboot done"
