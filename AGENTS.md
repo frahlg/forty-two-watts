@@ -134,10 +134,15 @@ the `srcfl/ftw` repository GitHub Actions write access. The compatibility
 for each release, or fall back to `GITHUB_TOKEN` for the personal namespace.
 
 Registry credentials and package access are repository setup, not release
-steps. The release workflows check both registry logins before creating a beta
-tag or starting stable publication. If that check fails, stop, repair package
-access or rotate the one dedicated secret, then rerun the same immutable
-version. Do not mint another beta tag to work around an access failure.
+steps. Before creating a beta tag or starting stable publication, the release
+workflows request a scoped `pull,push` bearer and start an empty GHCR blob
+upload in all four target packages. HTTP 202 proves write access without
+creating a blob, manifest, package version or tag. The workflow then tries to
+cancel the empty session. GHCR currently returns HTTP 405 for that optional
+cleanup, which is accepted; any other unexpected cleanup result fails the
+check. If the write check fails, stop, repair package access or rotate the one
+dedicated secret, then rerun the same immutable version. Do not mint another
+beta tag to work around an access failure.
 `CLAUDE.md` imports this file, so these rules apply to Claude and Codex alike.
 
 ## Useful source entry points

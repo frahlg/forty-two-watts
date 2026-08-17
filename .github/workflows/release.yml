@@ -56,6 +56,7 @@ permissions:
   issues: write
   pull-requests: write
   actions: write   # required by `gh workflow run release-assets.yml` at the end
+  packages: write  # stable package access is proved before tag/draft creation
 
 # Serialize release workflow runs. Two concurrent "push to master"
 # events otherwise race on the Version PR branch + tag creation.
@@ -153,6 +154,30 @@ jobs:
       - name: Set up Docker Buildx for stable promotion validation
         if: github.event_name == 'workflow_dispatch' && steps.changesets.outputs.hasChangesets == 'false'
         uses: docker/setup-buildx-action@v4
+
+      - name: Require the compatibility package credential
+        if: github.event_name == 'workflow_dispatch' && steps.changesets.outputs.hasChangesets == 'false'
+        env:
+          LEGACY_GHCR_TOKEN: ${{ secrets.LEGACY_GHCR_TOKEN }}
+        run: |
+          if [ -z "${LEGACY_GHCR_TOKEN}" ]; then
+            echo "LEGACY_GHCR_TOKEN is missing; rotate the package-only credential before releasing." >&2
+            exit 1
+          fi
+
+      - name: Verify canonical package writes before stable release state
+        if: github.event_name == 'workflow_dispatch' && steps.changesets.outputs.hasChangesets == 'false'
+        env:
+          GHCR_USERNAME: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash scripts/check-ghcr-write-access.sh srcfl/ftw srcfl/ftw-updater
+
+      - name: Verify compatibility package writes before stable release state
+        if: github.event_name == 'workflow_dispatch' && steps.changesets.outputs.hasChangesets == 'false'
+        env:
+          GHCR_USERNAME: frahlg
+          GHCR_TOKEN: ${{ secrets.LEGACY_GHCR_TOKEN }}
+        run: bash scripts/check-ghcr-write-access.sh frahlg/forty-two-watts frahlg/forty-two-watts-updater
 
       - name: Tag and prepare draft GitHub Release
         id: publish

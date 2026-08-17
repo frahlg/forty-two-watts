@@ -20,15 +20,13 @@ concurrency:
 
 jobs:
   registry:
-    name: verify release registry access
+    name: verify package write access
     runs-on: ubuntu-latest
     steps:
-      - name: Login to canonical GHCR namespace
-        uses: docker/login-action@v4.6.0
+      - name: Checkout release checks
+        uses: actions/checkout@v7
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          persist-credentials: false
 
       - name: Require the compatibility package credential
         env:
@@ -39,12 +37,17 @@ jobs:
             exit 1
           fi
 
-      - name: Login to compatibility GHCR namespace
-        uses: docker/login-action@v4.6.0
-        with:
-          registry: ghcr.io
-          username: frahlg
-          password: ${{ secrets.LEGACY_GHCR_TOKEN }}
+      - name: Verify canonical package writes
+        env:
+          GHCR_USERNAME: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash scripts/check-ghcr-write-access.sh srcfl/ftw srcfl/ftw-updater
+
+      - name: Verify compatibility package writes
+        env:
+          GHCR_USERNAME: frahlg
+          GHCR_TOKEN: ${{ secrets.LEGACY_GHCR_TOKEN }}
+        run: bash scripts/check-ghcr-write-access.sh frahlg/forty-two-watts frahlg/forty-two-watts-updater
 
   tag:
     name: validate and anchor beta tag

@@ -11,7 +11,7 @@ compose_macos="${root}/docker-compose.macos.yml"
 dockerfile="${root}/Dockerfile"
 release_guard="${root}/scripts/check-stable-release.py"
 
-for workflow in "${beta}" "${assets}" "${optimizer_release}"; do
+for workflow in "${beta}" "${release}" "${assets}" "${optimizer_release}"; do
   if grep -Eq 'SOURCEFUL_GHCR_(USER|TOKEN)' "${workflow}"; then
     echo "canonical GHCR writes must use the workflow GITHUB_TOKEN: ${workflow}" >&2
     exit 1
@@ -24,14 +24,22 @@ grep -Fq 'CANONICAL_GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}' "${assets}"
 grep -Fq 'username: ${{ github.actor }}' "${optimizer_release}"
 grep -Fq 'password: ${{ secrets.GITHUB_TOKEN }}' "${optimizer_release}"
 grep -Fq 'LEGACY_GHCR_TOKEN' "${beta}"
+grep -Fq 'LEGACY_GHCR_TOKEN' "${release}"
 grep -Fq 'LEGACY_GHCR_TOKEN' "${assets}"
 if grep -Fq 'LEGACY_GHCR_TOKEN || secrets.GITHUB_TOKEN' "${beta}" || \
+   grep -Fq 'LEGACY_GHCR_TOKEN || secrets.GITHUB_TOKEN' "${release}" || \
    grep -Fq 'LEGACY_GHCR_TOKEN || secrets.GITHUB_TOKEN' "${assets}"; then
   echo "compatibility GHCR must fail early instead of falling back to a token that cannot write the personal namespace" >&2
   exit 1
 fi
 grep -Fq 'password: ${{ secrets.LEGACY_GHCR_TOKEN }}' "${beta}"
 grep -Fq 'COMPATIBILITY_GHCR_TOKEN: ${{ secrets.LEGACY_GHCR_TOKEN }}' "${assets}"
+grep -Fq 'bash scripts/check-ghcr-write-access.sh srcfl/ftw srcfl/ftw-updater' "${beta}"
+grep -Fq 'bash scripts/check-ghcr-write-access.sh frahlg/forty-two-watts frahlg/forty-two-watts-updater' "${beta}"
+grep -Fq 'bash scripts/check-ghcr-write-access.sh srcfl/ftw srcfl/ftw-updater' "${release}"
+grep -Fq 'bash scripts/check-ghcr-write-access.sh frahlg/forty-two-watts frahlg/forty-two-watts-updater' "${release}"
+grep -Fq 'bash scripts/check-ghcr-write-access.sh srcfl/ftw srcfl/ftw-updater' "${assets}"
+grep -Fq 'bash scripts/check-ghcr-write-access.sh frahlg/forty-two-watts frahlg/forty-two-watts-updater' "${assets}"
 grep -A3 '^  tag:$' "${beta}" | grep -Fq 'needs: registry'
 grep -A3 '^  meta:$' "${assets}" | grep -Fq 'needs: registry'
 
@@ -39,6 +47,8 @@ beta_registry="$(grep -n '^  registry:$' "${beta}" | cut -d: -f1)"
 beta_tag="$(grep -n '^  tag:$' "${beta}" | cut -d: -f1)"
 stable_registry="$(grep -n '^  registry:$' "${assets}" | cut -d: -f1)"
 stable_meta="$(grep -n '^  meta:$' "${assets}" | cut -d: -f1)"
+stable_write_check="$(grep -n 'name: Verify compatibility package writes before stable release state' "${release}" | cut -d: -f1)"
+stable_tag="$(grep -n 'name: Tag and prepare draft GitHub Release' "${release}" | cut -d: -f1)"
 if [ -z "${beta_registry}" ] || [ -z "${beta_tag}" ] || \
    [ "${beta_registry}" -ge "${beta_tag}" ]; then
   echo "beta registry credentials must be checked before the immutable tag is created" >&2
@@ -47,6 +57,11 @@ fi
 if [ -z "${stable_registry}" ] || [ -z "${stable_meta}" ] || \
    [ "${stable_registry}" -ge "${stable_meta}" ]; then
   echo "stable registry credentials must be checked before release metadata is derived" >&2
+  exit 1
+fi
+if [ -z "${stable_write_check}" ] || [ -z "${stable_tag}" ] || \
+   [ "${stable_write_check}" -ge "${stable_tag}" ]; then
+  echo "stable package writes must be checked before tag or draft release creation" >&2
   exit 1
 fi
 
