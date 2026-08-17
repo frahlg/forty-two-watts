@@ -76,30 +76,6 @@ cat > "${tmp}/bin/gh" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'gh|%s\n' "$*" >> "${FTW_FAKE_LOG}"
-if [ "$1 $2" = "release edit" ]; then
-  if [ "${FTW_FAKE_FAIL_BEFORE_EDIT:-false}" = true ]; then
-    exit 1
-  fi
-  if [ "${FTW_FAKE_SUCCESS_WITH_STALE_DRAFT:-false}" = true ]; then
-    exit 0
-  fi
-  printf 'published\n' > "${FTW_FAKE_FINAL_STATE}"
-  if [ "${FTW_FAKE_FAIL_AFTER_EDIT:-false}" = true ]; then
-    exit 1
-  fi
-  exit 0
-fi
-if [ "$1 $2" = "release view" ]; then
-  if [ "${FTW_FAKE_FAIL_VIEW:-false}" = true ]; then
-    exit 1
-  fi
-  if [ -f "${FTW_FAKE_FINAL_STATE}" ]; then
-    printf '{"tagName":"%s","isDraft":false,"isPrerelease":false,"publishedAt":"2026-08-17T00:00:00Z"}\n' "${FTW_RELEASE_TAG}"
-  else
-    printf '{"tagName":"%s","isDraft":true,"isPrerelease":false,"publishedAt":null}\n' "${FTW_RELEASE_TAG}"
-  fi
-  exit 0
-fi
 if [ "$1" = api ]; then
   public_stable="${FTW_FAKE_PUBLIC_STABLE:-v1.0.0}"
   if [[ "$*" == *'releases?per_page=100'* ]]; then
@@ -121,8 +97,40 @@ fi
 echo "unexpected gh call: $*" >&2
 exit 2
 SH
+
+cat > "${tmp}/release" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'release|%s\n' "$*" >> "${FTW_FAKE_LOG}"
+if [ "$1" = publish ]; then
+  if [ "${FTW_FAKE_FAIL_BEFORE_EDIT:-false}" = true ]; then
+    exit 1
+  fi
+  if [ "${FTW_FAKE_SUCCESS_WITH_STALE_DRAFT:-false}" = true ]; then
+    exit 0
+  fi
+  printf 'published\n' > "${FTW_FAKE_FINAL_STATE}"
+  if [ "${FTW_FAKE_FAIL_AFTER_EDIT:-false}" = true ]; then
+    exit 1
+  fi
+  exit 0
+fi
+if [ "$1" = show ]; then
+  if [ "${FTW_FAKE_FAIL_VIEW:-false}" = true ]; then
+    exit 1
+  fi
+  if [ -f "${FTW_FAKE_FINAL_STATE}" ]; then
+    printf '{"tag_name":"%s","draft":false,"prerelease":false,"published_at":"2026-08-17T00:00:00Z"}\n' "${FTW_RELEASE_TAG}"
+  else
+    printf '{"tag_name":"%s","draft":true,"prerelease":false,"published_at":null}\n' "${FTW_RELEASE_TAG}"
+  fi
+  exit 0
+fi
+echo "unexpected release call: $*" >&2
+exit 2
+SH
 chmod +x "${tmp}/inspect" "${tmp}/bin/docker"
-chmod +x "${tmp}/bin/gh"
+chmod +x "${tmp}/bin/gh" "${tmp}/release"
 
 old_core="sha256:$(printf '1%.0s' {1..64})"
 old_updater="sha256:$(printf '2%.0s' {1..64})"
@@ -162,9 +170,11 @@ run_subject() {
     FTW_FAKE_FINAL_STATE="${final_state}" \
     FTW_INSPECT_IMAGE_DIGEST="${tmp}/inspect" \
     FTW_GH_COMMAND="${tmp}/bin/gh" \
+    FTW_RELEASE_COMMAND="${tmp}/release" \
     FTW_CORE_DIGEST="${new_core}" \
     FTW_UPDATER_DIGEST="${new_updater}" \
     FTW_RELEASE_TAG=v2.0.0 \
+    FTW_RELEASE_ID=123456 \
     GITHUB_REPOSITORY=srcfl/ftw \
     GH_TOKEN=test-token \
     FTW_CANONICAL_GHCR_USER=canonical \
@@ -221,7 +231,7 @@ fi
 grep -Fq "signal|TERM|ghcr.io/srcfl/ftw-updater:latest" "${log}"
 grep -Fq "signal|INT|ghcr.io/srcfl/ftw-updater:latest" "${log}"
 grep -Fq "tag|ghcr.io/srcfl/ftw-updater:latest|${old_updater}" "${log}"
-if grep -Fq 'gh|release edit' "${log}"; then
+if grep -Fq 'release|publish' "${log}"; then
   echo "TERM reached release publication after an alias move" >&2
   exit 1
 fi
@@ -251,7 +261,7 @@ grep -Fq "signal|INT|ghcr.io/srcfl/ftw:latest" "${log}"
 grep -Fq "signal|TERM|ghcr.io/srcfl/ftw:latest" "${log}"
 grep -Fq "tag|ghcr.io/srcfl/ftw:latest|${old_core}" "${log}"
 grep -Fq "tag|ghcr.io/srcfl/ftw-updater:latest|${old_updater}" "${log}"
-if grep -Fq 'gh|release edit' "${log}"; then
+if grep -Fq 'release|publish' "${log}"; then
   echo "INT reached release publication after alias moves" >&2
   exit 1
 fi
@@ -433,7 +443,7 @@ if [ "${downgrade_status}" -eq 0 ]; then
   echo "old failed publish rerun could downgrade newer public stable" >&2
   exit 1
 fi
-if grep -q '^tag|' "${log}" || grep -Fq 'gh|release edit' "${log}"; then
+if grep -q '^tag|' "${log}" || grep -Fq 'release|publish' "${log}"; then
   echo "old failed publish rerun mutated aliases or release" >&2
   cat "${log}" >&2
   exit 1

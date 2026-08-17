@@ -16,12 +16,14 @@ set -eEuo pipefail
 : "${FTW_COMPATIBILITY_GHCR_USER:?FTW_COMPATIBILITY_GHCR_USER is required}"
 : "${FTW_COMPATIBILITY_GHCR_TOKEN:?FTW_COMPATIBILITY_GHCR_TOKEN is required}"
 : "${FTW_RELEASE_TAG:?FTW_RELEASE_TAG is required}"
+: "${FTW_RELEASE_ID:?FTW_RELEASE_ID is required}"
 : "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}"
 : "${GH_TOKEN:?GH_TOKEN is required}"
 
 docker_command="${FTW_DOCKER_COMMAND:-docker}"
 inspect_command="${FTW_INSPECT_IMAGE_DIGEST:-scripts/inspect-image-digest.sh}"
 gh_command="${FTW_GH_COMMAND:-gh}"
+release_command="${FTW_RELEASE_COMMAND:-scripts/github-release-by-id.sh}"
 
 scopes=(canonical canonical compatibility compatibility)
 repositories=(
@@ -82,21 +84,19 @@ audit_publication() {
   latest_state=unknown
   local release_json latest_tag
 
-  if release_json="$("${gh_command}" release view "${FTW_RELEASE_TAG}" \
-    --repo "${GITHUB_REPOSITORY}" \
-    --json tagName,isDraft,isPrerelease,publishedAt)"; then
+  if release_json="$("${release_command}" show "${FTW_RELEASE_ID}")"; then
     if jq -e --arg tag "${FTW_RELEASE_TAG}" '
-      .tagName == $tag
-      and .isDraft == false
-      and .isPrerelease == false
-      and (.publishedAt | type == "string" and length > 0)
+      .tag_name == $tag
+      and .draft == false
+      and .prerelease == false
+      and (.published_at | type == "string" and length > 0)
     ' <<<"${release_json}" >/dev/null; then
       release_state=public
     elif jq -e --arg tag "${FTW_RELEASE_TAG}" '
-      .tagName == $tag
-      and .isDraft == true
-      and .isPrerelease == false
-      and .publishedAt == null
+      .tag_name == $tag
+      and .draft == true
+      and .prerelease == false
+      and .published_at == null
     ' <<<"${release_json}" >/dev/null; then
       release_state=draft
     fi
@@ -221,9 +221,7 @@ done
 # never move aliases back; an unclear public/latest result needs operator audit.
 edit_status=0
 publication_attempted=true
-if "${gh_command}" release edit "${FTW_RELEASE_TAG}" \
-  --repo "${GITHUB_REPOSITORY}" \
-  --draft=false --prerelease=false --latest; then
+if "${release_command}" publish "${FTW_RELEASE_ID}" >/dev/null; then
   edit_status=0
 else
   edit_status=$?

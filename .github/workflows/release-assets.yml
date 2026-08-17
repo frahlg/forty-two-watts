@@ -31,6 +31,10 @@ on:
         description: "Validated beta tag to promote without rebuilding"
         required: false
         type: string
+      release_id:
+        description: "Numeric id of the draft GitHub Release prepared by release.yml"
+        required: true
+        type: string
 
 permissions:
   contents: write   # upload release assets + read tag refs
@@ -85,6 +89,7 @@ jobs:
       tag:     ${{ steps.meta.outputs.tag }}
       version: ${{ steps.meta.outputs.version }}
       source_beta: ${{ steps.meta.outputs.source_beta }}
+      release_id: ${{ steps.meta.outputs.release_id }}
     steps:
       - name: Checkout release refs
         uses: actions/checkout@v7
@@ -100,6 +105,7 @@ jobs:
           GH_TOKEN: ${{ secrets.CI_TOKEN }}
           INPUT_TAG: ${{ github.event.inputs.tag }}
           INPUT_BETA: ${{ github.event.inputs.source_beta }}
+          INPUT_RELEASE_ID: ${{ github.event.inputs.release_id }}
         run: |
           set -euo pipefail
           # Priority order:
@@ -135,18 +141,20 @@ jobs:
             echo "Resuming ${TAG} with workflow code from master; release inputs remain at ${STABLE_COMMIT}."
           fi
 
-          # release.yml prepares the only safe upload target. The REST release
-          # collection omits drafts for some valid workflow tokens, while
-          # `gh release view` resolves a pending tag and then reads its numeric
-          # release id. Require that exact draft before any upload can start.
-          RELEASE_JSON="$(gh release view "${TAG}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --json tagName,isDraft,isPrerelease,publishedAt)"
+          if [[ ! "${INPUT_RELEASE_ID}" =~ ^[1-9][0-9]*$ ]]; then
+            echo "release_id must name the exact draft prepared by release.yml." >&2
+            exit 1
+          fi
+          RELEASE_ID="${INPUT_RELEASE_ID}"
+          # Draft lookup by tag uses a pending-tag GraphQL query that Actions
+          # tokens cannot use across runs. The numeric REST id is stable and
+          # binds every upload, check and final publish to the same draft.
+          RELEASE_JSON="$(scripts/github-release-by-id.sh show "${RELEASE_ID}")"
           jq -e --arg tag "${TAG}" '
-            .tagName == $tag
-            and .isDraft == true
-            and .isPrerelease == false
-            and .publishedAt == null
+            .tag_name == $tag
+            and .draft == true
+            and .prerelease == false
+            and .published_at == null
           ' <<<"${RELEASE_JSON}" >/dev/null
 
           # The public collection remains the fail-closed source for the
@@ -159,10 +167,8 @@ jobs:
 
           mkdir -p promotion
           PROMOTION_RECORD="promotion/ftw-promotion-receipt.json"
-          if gh release download "${TAG}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --pattern ftw-promotion-receipt.json \
-            --dir promotion >/dev/null 2>&1; then
+          if scripts/github-release-by-id.sh download \
+            "${RELEASE_ID}" promotion ftw-promotion-receipt.json >/dev/null 2>&1; then
             jq -e \
               --arg tag "${TAG}" \
               --arg commit "${STABLE_COMMIT}" \
@@ -227,12 +233,13 @@ jobs:
               --arg updater "${UPDATER_DIGEST}" \
               '{schema: 1, stable_tag: $stable_tag, commit: $commit, stable_version: $version, source_beta: $source_beta, images: {core: {digest: $core}, updater: {digest: $updater}}}' \
               > "${PROMOTION_RECORD}"
-            gh release upload "${TAG}" "${PROMOTION_RECORD}" \
-              --repo "${GITHUB_REPOSITORY}"
+            scripts/github-release-by-id.sh upload \
+              "${RELEASE_ID}" "${PROMOTION_RECORD}"
           fi
           echo "tag=${TAG}" >> "${GITHUB_OUTPUT}"
           echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
           echo "source_beta=${BETA_TAG}" >> "${GITHUB_OUTPUT}"
+          echo "release_id=${RELEASE_ID}" >> "${GITHUB_OUTPUT}"
           echo "Publishing assets for ${TAG} from exact candidate ${BETA_TAG}"
 
   binaries:
@@ -265,6 +272,12 @@ jobs:
         with:
           # Check out the tag so -X main.Version matches what users install.
           ref: ${{ needs.meta.outputs.tag }}
+
+      - name: Checkout release workflow helpers
+        uses: actions/checkout@v7
+        with:
+          path: .release-workflow
+          persist-credentials: false
 
       - name: Setup Go
         uses: actions/setup-go@v7
@@ -335,12 +348,12 @@ jobs:
       - name: Upload to release
         env:
           GH_TOKEN: ${{ secrets.CI_TOKEN }}
-          TAG: ${{ needs.meta.outputs.tag }}
+          RELEASE_ID: ${{ needs.meta.outputs.release_id }}
           ASSET: release/ftw-${{ matrix.goos }}-${{ matrix.goarch }}.${{ matrix.archive }}
           LEGACY_ASSET: release/forty-two-watts-${{ matrix.goos }}-${{ matrix.goarch }}.${{ matrix.archive }}
         # --clobber lets a workflow re-run replace a prior upload without
         # failing — useful when this workflow is re-dispatched manually.
-        run: gh release upload "${TAG}" "${ASSET}" "${ASSET}.sha256" "${LEGACY_ASSET}" "${LEGACY_ASSET}.sha256" --clobber
+        run: .release-workflow/scripts/github-release-by-id.sh upload "${RELEASE_ID}" --clobber "${ASSET}" "${ASSET}.sha256" "${LEGACY_ASSET}" "${LEGACY_ASSET}.sha256"
 
   imager-metadata:
     name: attach Raspberry Pi Imager metadata
@@ -349,10 +362,16 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Checkout release workflow helpers
+        uses: actions/checkout@v7
+        with:
+          path: .release-workflow
+          persist-credentials: false
+
       - name: Mirror permanent installer metadata onto the version release
         env:
           GH_TOKEN: ${{ secrets.CI_TOKEN }}
-          TAG: ${{ needs.meta.outputs.tag }}
+          RELEASE_ID: ${{ needs.meta.outputs.release_id }}
         run: |
           set -euo pipefail
           mkdir -p installer
@@ -373,8 +392,8 @@ jobs:
             (.imager.devices | length) > 0
             and (.os_list[0].devices | length) > 0
           ' installer/os_list.json >/dev/null
-          gh release upload "${TAG}" installer/os_list.json \
-            --repo "${GITHUB_REPOSITORY}" --clobber
+          .release-workflow/scripts/github-release-by-id.sh upload \
+            "${RELEASE_ID}" --clobber installer/os_list.json
 
   assets-ready:
     name: verify complete draft assets
@@ -390,10 +409,17 @@ jobs:
           ref: ${{ needs.meta.outputs.tag }}
           fetch-depth: 0
 
+      - name: Checkout release workflow helpers
+        uses: actions/checkout@v7
+        with:
+          path: .release-workflow
+          persist-credentials: false
+
       - name: Verify receipt, binaries, checksums and Imager metadata
         env:
           GH_TOKEN: ${{ secrets.CI_TOKEN }}
           TAG: ${{ needs.meta.outputs.tag }}
+          RELEASE_ID: ${{ needs.meta.outputs.release_id }}
           VERSION: ${{ needs.meta.outputs.version }}
           SOURCE_BETA: ${{ needs.meta.outputs.source_beta }}
         run: |
@@ -405,15 +431,19 @@ jobs:
             exit 1
           fi
 
-          release_json="$(gh release view "${TAG}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --json tagName,isDraft,isPrerelease,publishedAt,assets)"
-          printf '%s' "${release_json}" | \
+          release_json="$(.release-workflow/scripts/github-release-by-id.sh show "${RELEASE_ID}")"
+          printf '%s' "${release_json}" | jq '{
+            tagName: .tag_name,
+            isDraft: .draft,
+            isPrerelease: .prerelease,
+            publishedAt: .published_at,
+            assets: .assets
+          }' | \
             python3 scripts/check-stable-release.py assets "${TAG}"
 
           verify_dir="${RUNNER_TEMP}/stable-release-verification"
           mkdir -p "${verify_dir}"
-          gh release download "${TAG}" --repo "${GITHUB_REPOSITORY}" --dir "${verify_dir}"
+          .release-workflow/scripts/github-release-by-id.sh download "${RELEASE_ID}" "${verify_dir}"
           for checksum in "${verify_dir}"/*.sha256; do
             checksum_name="$(basename "${checksum}")"
             asset_name="${checksum_name%.sha256}"
@@ -468,6 +498,12 @@ jobs:
         with:
           ref: ${{ needs.meta.outputs.tag }}
 
+      - name: Checkout release workflow helpers
+        uses: actions/checkout@v7
+        with:
+          path: .release-workflow
+          persist-credentials: false
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
@@ -479,16 +515,15 @@ jobs:
         env:
           SOURCE_TAG: ${{ needs.meta.outputs.source_beta }}
           STABLE_TAG: ${{ needs.meta.outputs.tag }}
+          RELEASE_ID: ${{ needs.meta.outputs.release_id }}
           STABLE_VERSION: ${{ needs.meta.outputs.version }}
           GH_TOKEN: ${{ secrets.CI_TOKEN }}
         run: |
           set -euo pipefail
           digest_dir="${RUNNER_TEMP}/paired-stable-digests"
           mkdir -p "${digest_dir}"
-          gh release download "${STABLE_TAG}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --pattern ftw-promotion-receipt.json \
-            --dir "${digest_dir}"
+          .release-workflow/scripts/github-release-by-id.sh download \
+            "${RELEASE_ID}" "${digest_dir}" ftw-promotion-receipt.json
           digest_record="${digest_dir}/ftw-promotion-receipt.json"
           commit="$(git rev-parse HEAD)"
           jq -e \
@@ -691,6 +726,12 @@ jobs:
           ref: ${{ needs.meta.outputs.tag }}
           fetch-depth: 0
 
+      - name: Checkout release workflow helpers
+        uses: actions/checkout@v7
+        with:
+          path: .release-workflow
+          persist-credentials: false
+
       - name: Set up Docker Buildx for final digest verification
         uses: docker/setup-buildx-action@v4
 
@@ -698,6 +739,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.CI_TOKEN }}
           TAG: ${{ needs.meta.outputs.tag }}
+          RELEASE_ID: ${{ needs.meta.outputs.release_id }}
           VERSION: ${{ needs.meta.outputs.version }}
           SOURCE_BETA: ${{ needs.meta.outputs.source_beta }}
           CORE_DIGEST: ${{ needs.docker.outputs.core_digest }}
@@ -705,6 +747,8 @@ jobs:
           FTW_CORE_DIGEST: ${{ needs.docker.outputs.core_digest }}
           FTW_UPDATER_DIGEST: ${{ needs.docker.outputs.updater_digest }}
           FTW_RELEASE_TAG: ${{ needs.meta.outputs.tag }}
+          FTW_RELEASE_ID: ${{ needs.meta.outputs.release_id }}
+          FTW_RELEASE_COMMAND: .release-workflow/scripts/github-release-by-id.sh
           FTW_CANONICAL_GHCR_USER: ${{ github.actor }}
           FTW_CANONICAL_GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           FTW_COMPATIBILITY_GHCR_USER: frahlg
@@ -718,9 +762,12 @@ jobs:
             exit 1
           fi
 
-          release_json="$(gh release view "${TAG}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --json tagName,isDraft,isPrerelease,publishedAt)"
+          release_json="$(.release-workflow/scripts/github-release-by-id.sh show "${RELEASE_ID}" | jq '{
+            tagName: .tag_name,
+            isDraft: .draft,
+            isPrerelease: .prerelease,
+            publishedAt: .published_at
+          }')"
           jq -e --arg tag "${TAG}" '
             .tagName == $tag
             and .isPrerelease == false
@@ -745,8 +792,12 @@ jobs:
           release_is_draft="$(jq -r '.isDraft' <<<"${release_json}")"
           if [ "${release_is_draft}" = "true" ]; then
             # Recheck the draft immediately before the only public mutation.
-            draft_json="$(gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" \
-              --json tagName,isDraft,isPrerelease,publishedAt)"
+            draft_json="$(.release-workflow/scripts/github-release-by-id.sh show "${RELEASE_ID}" | jq '{
+              tagName: .tag_name,
+              isDraft: .draft,
+              isPrerelease: .prerelease,
+              publishedAt: .published_at
+            }')"
             jq -e --arg tag "${TAG}" '
               .tagName == $tag
               and .isDraft == true

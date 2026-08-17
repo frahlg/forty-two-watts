@@ -383,15 +383,18 @@ jobs:
           # body built from this candidate.
           DRAFT_JSON="$(gh release view "${TAG}" \
             --repo "${GITHUB_REPOSITORY}" \
-            --json tagName,name,body,isDraft,isPrerelease,publishedAt)"
+            --json databaseId,tagName,name,body,isDraft,isPrerelease,publishedAt)"
           printf '%s' "${DRAFT_JSON}" | \
             python3 scripts/check-stable-release.py draft \
               "${TAG}" "${STATE_SCHEMA}" release-notes.md
+          RELEASE_ID="$(jq -r '.databaseId' <<<"${DRAFT_JSON}")"
+          [[ "${RELEASE_ID}" =~ ^[1-9][0-9]*$ ]]
 
           {
             echo "published=true"
             echo "version=${VERSION}"
             echo "beta_tag=${BETA_TAG}"
+            echo "release_id=${RELEASE_ID}"
           } >> "${GITHUB_OUTPUT}"
           echo "Prepared draft ${TAG} for verified asset publication"
 
@@ -403,10 +406,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: v${{ steps.publish.outputs.version }}
           BETA_TAG: ${{ steps.publish.outputs.beta_tag }}
+          RELEASE_ID: ${{ steps.publish.outputs.release_id }}
         run: |
           set -euo pipefail
           echo "Dispatching release-assets.yml for ${TAG}"
           gh workflow run release-assets.yml \
             --repo "${GITHUB_REPOSITORY}" \
             --ref "${TAG}" \
-            -f source_beta="${BETA_TAG}"
+            -f source_beta="${BETA_TAG}" \
+            -f release_id="${RELEASE_ID}"
