@@ -666,6 +666,15 @@
     }
 
     _render() {
+      // A 503 from /api/version/check permanently disables this component.
+      // Component and driver requests start alongside that check, so their
+      // responses can arrive later. Never let one of those responses rebuild
+      // controls that open() will refuse to use.
+      if (this._disabled) {
+        this._shadow.innerHTML = "";
+        this.hidden = true;
+        return;
+      }
       const info = this._info || {};
       const optimizer = this._components && this._components.optimizer;
       const pending = this._pendingUpdates();

@@ -20,7 +20,7 @@ const styleCss = readFileSync(new URL("./style.css", import.meta.url), "utf8");
 const indexHtml = readFileSync(new URL("./index.html", import.meta.url), "utf8");
 const appJs = readFileSync(new URL("./app.js", import.meta.url), "utf8");
 
-function loadBadgeClass() {
+function loadBadgeClass(fetchImpl = () => new Promise(() => {})) {
   let Captured = null;
   const sandbox = {
     HTMLElement: class {
@@ -31,12 +31,19 @@ function loadBadgeClass() {
           querySelectorAll: () => [],
         };
       }
+      dispatchEvent() {}
     },
     customElements: { define: (_name, cls) => { Captured = cls; } },
-    // The component only reaches for these from methods the tests never
-    // drive (polling, the modal); stubbing keeps the load side-effect free.
-    fetch: () => new Promise(() => {}),
-    setTimeout, clearTimeout, setInterval, clearInterval,
+    CustomEvent: class {
+      constructor(type, options) {
+        this.type = type;
+        this.options = options;
+      }
+    },
+    // Poll cadence is not under test; stubbing keeps the process free of
+    // long-lived timers when connectedCallback starts the real fetch flow.
+    fetch: fetchImpl,
+    setTimeout, clearTimeout, setInterval: () => 1, clearInterval: () => {},
     URL, console, Date, JSON, Math,
   };
   vm.createContext(sandbox);
@@ -62,6 +69,41 @@ function renderBadge({ update = false, degraded = false, connected = true, lates
 }
 
 describe("header status marks", () => {
+  it("stays disabled when slower component requests finish after the 503 gate", async () => {
+    const delayed = new Map();
+    const fetchImpl = (url) => {
+      if (url === "/api/version/check") {
+        return Promise.resolve({ status: 503, ok: false });
+      }
+      if (url === "/api/version/update/status") {
+        return Promise.resolve({ status: 503, ok: false });
+      }
+      return new Promise((resolve) => delayed.set(url, resolve));
+    };
+    const Badge = loadBadgeClass(fetchImpl);
+    const badge = new Badge();
+
+    badge.connectedCallback();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(badge._disabled, true);
+    assert.equal(badge.hidden, true);
+    assert.equal(badge._shadow.innerHTML, "");
+
+    delayed.get("/api/components")({
+      ok: true,
+      json: async () => ({ optimizer: { configured: true, healthy: false } }),
+    });
+    delayed.get("/api/drivers/catalog")({ ok: true, json: async () => ({ entries: [] }) });
+    delayed.get("/api/config")({ ok: true, json: async () => ({ drivers: [] }) });
+    delayed.get("/api/device_repository/catalog?channel=beta")({ ok: true, json: async () => ({ entries: [] }) });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.ok(badge._components, "the delayed component response should reach its success handler");
+    assert.ok(badge._driverCatalog, "the delayed catalog response should reach its success handler");
+    assert.equal(badge._shadow.innerHTML, "");
+    assert.equal(badge.hidden, true);
+  });
+
   it("shows a lone green dot when connected with nothing pending", () => {
     const html = renderBadge();
     assert.match(html, /class="mark ok"/);
