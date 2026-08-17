@@ -75,6 +75,46 @@ delete_asset() {
   return 1
 }
 
+upload_asset() {
+  local release_id="$1"
+  local file="$2"
+  local name="$3"
+  local encoded="$4"
+  local attempt=1
+  local expected_size release_json upload_json
+  expected_size="$(wc -c <"${file}" | tr -d '[:space:]')"
+
+  while [ "${attempt}" -le 5 ]; do
+    if upload_json="$("${gh_command}" api --method POST \
+      --header 'Content-Type: application/octet-stream' \
+      --input "${file}" \
+      "https://uploads.github.com/repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?name=${encoded}")" &&
+       jq -e --arg name "${name}" --argjson size "${expected_size}" '
+         .name == $name and .state == "uploaded" and .size == $size
+       ' <<<"${upload_json}" >/dev/null; then
+      return 0
+    fi
+
+    # POST is not idempotent either. If GitHub stored the asset but the client
+    # lost the response, accept the exact uploaded name and byte count instead
+    # of retrying into a duplicate-name 422.
+    if release_json="$(show_release "${release_id}")" &&
+       jq -e --arg name "${name}" --argjson size "${expected_size}" '
+         [.assets[] | select(
+           .name == $name and .state == "uploaded" and .size == $size
+         )] | length == 1
+       ' <<<"${release_json}" >/dev/null; then
+      return 0
+    fi
+
+    if [ "${attempt}" -lt 5 ]; then
+      sleep $((attempt * retry_sleep_seconds))
+    fi
+    attempt=$((attempt + 1))
+  done
+  return 1
+}
+
 download_assets() {
   local release_id="$1"
   local destination="$2"
@@ -110,7 +150,7 @@ upload_assets() {
   local release_id="$1"
   local clobber="$2"
   shift 2
-  local file name encoded release_json existing upload_json
+  local file name encoded release_json existing
   valid_release_id "${release_id}"
   if [ "$#" -eq 0 ]; then
     echo "At least one asset path is required." >&2
@@ -134,13 +174,7 @@ upload_assets() {
       delete_asset "${release_id}" "${asset_id}"
     done <<<"${existing}"
     encoded="$(jq -rn --arg value "${name}" '$value | @uri')"
-    upload_json="$(retry_gh api --method POST \
-      --header 'Content-Type: application/octet-stream' \
-      --input "${file}" \
-      "https://uploads.github.com/repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?name=${encoded}")"
-    jq -e --arg name "${name}" '
-      .name == $name and .state == "uploaded" and .size > 0
-    ' <<<"${upload_json}" >/dev/null
+    upload_asset "${release_id}" "${file}" "${name}" "${encoded}"
   done
 }
 
