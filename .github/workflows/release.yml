@@ -205,27 +205,24 @@ jobs:
           fi
           RELEASE_EXISTS=false
           RELEASE_IS_DRAFT=false
-          # List raw release records so a network/auth/API error fails the
-          # step instead of being mistaken for an absent release. The REST
-          # collection includes drafts for this contents:write token.
-          RELEASE_PAGES="$(gh api --paginate --slurp \
-            "repos/${GITHUB_REPOSITORY}/releases?per_page=100")"
-          RELEASE_COUNT="$(jq --arg tag "${TAG}" '[.[][] | select(.tag_name == $tag)] | length' <<<"${RELEASE_PAGES}")"
-          if [ "${RELEASE_COUNT}" -gt 1 ]; then
-            echo "More than one GitHub Release uses ${TAG}; refusing to continue." >&2
-            exit 1
-          fi
-          RELEASE_JSON="$(jq -c --arg tag "${TAG}" '.[][] | select(.tag_name == $tag)' <<<"${RELEASE_PAGES}")"
-          if [ -n "${RELEASE_JSON}" ]; then
+          # GitHub's REST release collection can omit drafts even for a token
+          # that may update them. `gh release view` falls back to GitHub's
+          # pending-tag lookup and therefore resolves both public and draft
+          # releases by tag. A failed lookup is safe here: the later create
+          # either creates the missing draft or fails, and the exact draft is
+          # read back and checked before asset dispatch.
+          if RELEASE_JSON="$(gh release view "${TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --json tagName,isDraft,isPrerelease,publishedAt 2>/dev/null)"; then
             jq -e --arg tag "${TAG}" '
-              .tag_name == $tag
-              and .prerelease == false
-              and ((.draft == true and .published_at == null)
-                   or (.draft == false and (.published_at | type == "string")))
+              .tagName == $tag
+              and .isPrerelease == false
+              and ((.isDraft == true and .publishedAt == null)
+                   or (.isDraft == false and (.publishedAt | type == "string")))
             ' \
               <<<"${RELEASE_JSON}" >/dev/null
             RELEASE_EXISTS=true
-            RELEASE_IS_DRAFT="$(jq -r '.draft' <<<"${RELEASE_JSON}")"
+            RELEASE_IS_DRAFT="$(jq -r '.isDraft' <<<"${RELEASE_JSON}")"
           fi
 
           if [ "${RELEASE_EXISTS}" = "true" ] && [ "${TAG_EXISTS}" != "true" ]; then

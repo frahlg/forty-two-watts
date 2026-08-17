@@ -121,27 +121,36 @@ jobs:
             exit 1
           fi
           if [ "${STABLE_COMMIT}" != "${GITHUB_SHA}" ]; then
-            echo "Stable tag ${TAG} peels to ${STABLE_COMMIT}, not workflow commit ${GITHUB_SHA}." >&2
-            exit 1
+            # A failed tag-ref run can be resumed with fixed workflow code
+            # from master. Every build, validation and publish job below
+            # checks out needs.meta.outputs.tag, so workflow code may advance
+            # while all shipped bytes remain bound to the immutable tag.
+            if [ -z "${INPUT_TAG}" ] || [ "${GITHUB_REF}" != "refs/heads/master" ]; then
+              echo "Stable tag ${TAG} peels to ${STABLE_COMMIT}, not workflow commit ${GITHUB_SHA}." >&2
+              exit 1
+            fi
+            echo "Resuming ${TAG} with workflow code from master; release inputs remain at ${STABLE_COMMIT}."
           fi
 
-          # release.yml prepares the only safe upload target. Query the raw
-          # API so auth/network errors cannot look like an absent draft, and
-          # stop before any matrix job can clobber a public release's assets.
+          # release.yml prepares the only safe upload target. The REST release
+          # collection omits drafts for some valid workflow tokens, while
+          # `gh release view` resolves a pending tag and then reads its numeric
+          # release id. Require that exact draft before any upload can start.
+          RELEASE_JSON="$(gh release view "${TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --json tagName,isDraft,isPrerelease,publishedAt)"
+          jq -e --arg tag "${TAG}" '
+            .tagName == $tag
+            and .isDraft == true
+            and .isPrerelease == false
+            and .publishedAt == null
+          ' <<<"${RELEASE_JSON}" >/dev/null
+
+          # The public collection remains the fail-closed source for the
+          # numeric downgrade guard; that check neither needs nor expects the
+          # current draft to appear in the list.
           RELEASE_PAGES="$(gh api --paginate --slurp \
             "repos/${GITHUB_REPOSITORY}/releases?per_page=100")"
-          RELEASE_COUNT="$(jq --arg tag "${TAG}" '[.[][] | select(.tag_name == $tag)] | length' <<<"${RELEASE_PAGES}")"
-          if [ "${RELEASE_COUNT}" != "1" ]; then
-            echo "Expected one draft GitHub Release for ${TAG}; found ${RELEASE_COUNT}." >&2
-            exit 1
-          fi
-          RELEASE_JSON="$(jq -c --arg tag "${TAG}" '.[][] | select(.tag_name == $tag)' <<<"${RELEASE_PAGES}")"
-          jq -e --arg tag "${TAG}" '
-            .tag_name == $tag
-            and .draft == true
-            and .prerelease == false
-            and .published_at == null
-          ' <<<"${RELEASE_JSON}" >/dev/null
           printf '%s' "${RELEASE_PAGES}" | \
             python3 scripts/check-stable-release.py order "${TAG}"
 

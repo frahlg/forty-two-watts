@@ -158,8 +158,8 @@ grep -Fq 'BETA_TAG="${INPUT_BETA}"' "${release}"
 grep -Fq -- '--pattern ftw-image-digests.json' "${release}"
 grep -Fq 'current_digest="$(scripts/inspect-image-digest.sh "${image_ref}")"' "${release}"
 grep -Fq -- '-f source_beta="${BETA_TAG}"' "${release}"
-grep -Fq 'gh api --paginate --slurp' "${release}"
-grep -Fq '.draft == true' "${release}"
+grep -Fq 'if RELEASE_JSON="$(gh release view "${TAG}"' "${release}"
+grep -Fq '.isDraft == true' "${release}"
 grep -Fq 'Refreshed draft GitHub Release ${TAG}; release-assets will resume it.' "${release}"
 grep -Fq -- '--verify-tag' "${release}"
 grep -Fq -- '--draft' "${release}"
@@ -187,6 +187,12 @@ grep -Fq '"${source}@${source_digest}"' "${assets}"
 grep -Fq 'sha256sum -c "${checksum_name}"' "${assets}"
 grep -Fq 'and ((.imager.devices // []) | length) > 0' "${assets}"
 grep -Fq '[ "${STABLE_COMMIT}" != "${GITHUB_SHA}" ]' "${assets}"
+grep -Fq '[ "${GITHUB_REF}" != "refs/heads/master" ]' "${assets}"
+grep -Fq 'RELEASE_JSON="$(gh release view "${TAG}"' "${assets}"
+if grep -Fq 'Expected one draft GitHub Release for ${TAG}; found ${RELEASE_COUNT}.' "${assets}"; then
+  echo "release-assets must not look for drafts in the REST release collection" >&2
+  exit 1
+fi
 grep -Fq 'FTW_IMAGE_TAG: ${FTW_IMAGE_TAG:-}' "${compose}"
 grep -Fq 'FTW_IMAGE_TAG: ${FTW_IMAGE_TAG:-}' "${compose_macos}"
 
@@ -202,8 +208,8 @@ if [ "$(grep -Fc 'AUTH_HEADER_COUNT="' "${release}")" -ne 2 ]; then
 fi
 
 stable_guard="$(grep -n 'STABLE_COMMIT="$(git rev-list -n 1 "${TAG}")"' "${release}" | cut -d: -f1)"
-release_inventory="$(grep -n 'RELEASE_PAGES="$(gh api --paginate --slurp' "${release}" | cut -d: -f1)"
-if [ "${stable_guard}" -ge "${release_inventory}" ]; then
+release_lookup="$(grep -n 'if RELEASE_JSON="$(gh release view "${TAG}"' "${release}" | cut -d: -f1)"
+if [ "${stable_guard}" -ge "${release_lookup}" ]; then
   echo "existing stable tag guard runs too late" >&2
   exit 1
 fi
@@ -296,11 +302,13 @@ fi
 
 promotion_upload="$(grep -n 'gh release upload "${TAG}" "${PROMOTION_RECORD}"' "${assets}" | cut -d: -f1)"
 stable_docker="$(grep -n '^  docker:$' "${assets}" | cut -d: -f1)"
+asset_draft_lookup="$(grep -n 'RELEASE_JSON="$(gh release view "${TAG}"' "${assets}" | cut -d: -f1)"
 asset_release_inventory="$(grep -n 'RELEASE_PAGES="$(gh api --paginate --slurp' "${assets}" | cut -d: -f1)"
 stable_order_guard="$(grep -n 'check-stable-release.py order "${TAG}"' "${assets}" | cut -d: -f1)"
-if [ "${asset_release_inventory}" -ge "${stable_order_guard}" ] || \
+if [ "${asset_draft_lookup}" -ge "${asset_release_inventory}" ] || \
+   [ "${asset_release_inventory}" -ge "${stable_order_guard}" ] || \
    [ "${stable_order_guard}" -ge "${stable_docker}" ]; then
-  echo "newest-public-stable guard must run from fail-closed inventory before aliases" >&2
+  echo "draft lookup and newest-public-stable inventory must run before aliases" >&2
   exit 1
 fi
 if [ "${promotion_upload}" -ge "${stable_docker}" ]; then
