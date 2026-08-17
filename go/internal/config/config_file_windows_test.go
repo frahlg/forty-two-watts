@@ -26,12 +26,19 @@ func verifyConfigFileOwnerOnly(path string) error {
 	sd, err := windows.GetNamedSecurityInfo(
 		path,
 		windows.SE_FILE_OBJECT,
-		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		configSecurityQuery,
 	)
 	if err != nil {
 		return fmt.Errorf("read config security descriptor: %w", err)
 	}
 	return validateOwnerOnlyConfigSecurityDescriptor(sd, ownerSID)
+}
+
+func TestConfigSecurityQueryRequestsOnlyReadableParts(t *testing.T) {
+	want := windows.SECURITY_INFORMATION(windows.OWNER_SECURITY_INFORMATION | windows.DACL_SECURITY_INFORMATION)
+	if configSecurityQuery != want {
+		t.Fatalf("config security query = %#x, want owner and DACL only (%#x)", configSecurityQuery, want)
+	}
 }
 
 func TestCreateConfigTempUsesOwnerOnlyACLBeforeFirstWrite(t *testing.T) {

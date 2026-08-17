@@ -205,13 +205,15 @@ func verifyOwnerOnlyConfigHandle(h windows.Handle, ownerSID *windows.SID) error 
 	sd, err := windows.GetSecurityInfo(
 		h,
 		windows.SE_FILE_OBJECT,
-		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		configSecurityQuery,
 	)
 	if err != nil {
 		return fmt.Errorf("read created config security descriptor: %w", err)
 	}
 	return validateOwnerOnlyConfigSecurityDescriptor(sd, ownerSID)
 }
+
+const configSecurityQuery = windows.OWNER_SECURITY_INFORMATION | windows.DACL_SECURITY_INFORMATION
 
 const windowsFileAllAccess windows.ACCESS_MASK = windows.STANDARD_RIGHTS_REQUIRED | windows.SYNCHRONIZE | 0x1ff
 
