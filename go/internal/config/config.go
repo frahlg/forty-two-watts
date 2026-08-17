@@ -1301,16 +1301,26 @@ func topLevelYAMLNull(doc *yaml.Node, key string) bool {
 	if doc == nil || doc.Kind != yaml.DocumentNode || len(doc.Content) != 1 {
 		return false
 	}
-	root := doc.Content[0]
-	if root.Kind != yaml.MappingNode {
+	// Node values leave ignored subtrees opaque while yaml.v3 applies merge
+	// precedence to the root keys.
+	var values map[string]yaml.Node
+	if err := doc.Content[0].Decode(&values); err != nil {
+		return true
+	}
+	value, ok := values[key]
+	if !ok {
 		return false
 	}
-	for i := 0; i+1 < len(root.Content); i += 2 {
-		if root.Content[i].Value == key {
-			return root.Content[i+1].Tag == "!!null"
+	node := &value
+	seen := make(map[*yaml.Node]bool)
+	for node != nil && node.Kind == yaml.AliasNode {
+		if seen[node] {
+			return true
 		}
+		seen[node] = true
+		node = node.Alias
 	}
-	return false
+	return node == nil || node.ShortTag() == "!!null"
 }
 
 // DriversDirOverride redirects resolution of relative "drivers/<name>.lua"
