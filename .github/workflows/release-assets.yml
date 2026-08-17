@@ -44,9 +44,37 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  registry:
+    name: verify release registry access
+    runs-on: ubuntu-latest
+    steps:
+      - name: Login to canonical GHCR namespace
+        uses: docker/login-action@v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Require the compatibility package credential
+        env:
+          LEGACY_GHCR_TOKEN: ${{ secrets.LEGACY_GHCR_TOKEN }}
+        run: |
+          if [ -z "${LEGACY_GHCR_TOKEN}" ]; then
+            echo "LEGACY_GHCR_TOKEN is missing; rotate the package-only credential before releasing." >&2
+            exit 1
+          fi
+
+      - name: Login to compatibility GHCR namespace
+        uses: docker/login-action@v4.6.0
+        with:
+          registry: ghcr.io
+          username: frahlg
+          password: ${{ secrets.LEGACY_GHCR_TOKEN }}
+
   meta:
     name: derive tag + version
     runs-on: ubuntu-latest
+    needs: registry
     # Beta tags have their own lightweight channel workflow and must never
     # retag :latest or publish stable Discord announcements.
     if: ${{ github.event_name == 'workflow_dispatch' || !contains(github.ref_name, '-') }}
@@ -570,7 +598,7 @@ jobs:
           CANONICAL_GHCR_USER: ${{ github.actor }}
           CANONICAL_GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           COMPATIBILITY_GHCR_USER: frahlg
-          COMPATIBILITY_GHCR_TOKEN: ${{ secrets.LEGACY_GHCR_TOKEN || secrets.GITHUB_TOKEN }}
+          COMPATIBILITY_GHCR_TOKEN: ${{ secrets.LEGACY_GHCR_TOKEN }}
         run: |
           set -euo pipefail
           short_sha="$(git rev-parse --short=7 HEAD)"
@@ -665,7 +693,7 @@ jobs:
           FTW_CANONICAL_GHCR_USER: ${{ github.actor }}
           FTW_CANONICAL_GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           FTW_COMPATIBILITY_GHCR_USER: frahlg
-          FTW_COMPATIBILITY_GHCR_TOKEN: ${{ secrets.LEGACY_GHCR_TOKEN || secrets.GITHUB_TOKEN }}
+          FTW_COMPATIBILITY_GHCR_TOKEN: ${{ secrets.LEGACY_GHCR_TOKEN }}
         run: |
           set -euo pipefail
           commit="$(git rev-parse HEAD)"

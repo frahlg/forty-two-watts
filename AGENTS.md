@@ -126,6 +126,20 @@ There is no edge channel. Core and signed driver artifacts can release
 independently but follow the same beta-to-stable progression. See
 [docs/self-update.md](docs/self-update.md).
 
+A release is one workflow dispatch, not a manual list of registry commands.
+The `srcfl/*` images use the job-scoped `GITHUB_TOKEN`; each package must grant
+the `srcfl/ftw` repository GitHub Actions write access. The compatibility
+`frahlg/*` mirror uses the dedicated `LEGACY_GHCR_TOKEN`, with only
+`write:packages`. Never use a developer's local `gh` token, create a new token
+for each release, or fall back to `GITHUB_TOKEN` for the personal namespace.
+
+Registry credentials and package access are repository setup, not release
+steps. The release workflows check both registry logins before creating a beta
+tag or starting stable publication. If that check fails, stop, repair package
+access or rotate the one dedicated secret, then rerun the same immutable
+version. Do not mint another beta tag to work around an access failure.
+`CLAUDE.md` imports this file, so these rules apply to Claude and Codex alike.
+
 ## Useful source entry points
 
 | Concern | Source |

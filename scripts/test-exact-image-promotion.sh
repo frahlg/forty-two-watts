@@ -25,6 +25,30 @@ grep -Fq 'username: ${{ github.actor }}' "${optimizer_release}"
 grep -Fq 'password: ${{ secrets.GITHUB_TOKEN }}' "${optimizer_release}"
 grep -Fq 'LEGACY_GHCR_TOKEN' "${beta}"
 grep -Fq 'LEGACY_GHCR_TOKEN' "${assets}"
+if grep -Fq 'LEGACY_GHCR_TOKEN || secrets.GITHUB_TOKEN' "${beta}" || \
+   grep -Fq 'LEGACY_GHCR_TOKEN || secrets.GITHUB_TOKEN' "${assets}"; then
+  echo "compatibility GHCR must fail early instead of falling back to a token that cannot write the personal namespace" >&2
+  exit 1
+fi
+grep -Fq 'password: ${{ secrets.LEGACY_GHCR_TOKEN }}' "${beta}"
+grep -Fq 'COMPATIBILITY_GHCR_TOKEN: ${{ secrets.LEGACY_GHCR_TOKEN }}' "${assets}"
+grep -A3 '^  tag:$' "${beta}" | grep -Fq 'needs: registry'
+grep -A3 '^  meta:$' "${assets}" | grep -Fq 'needs: registry'
+
+beta_registry="$(grep -n '^  registry:$' "${beta}" | cut -d: -f1)"
+beta_tag="$(grep -n '^  tag:$' "${beta}" | cut -d: -f1)"
+stable_registry="$(grep -n '^  registry:$' "${assets}" | cut -d: -f1)"
+stable_meta="$(grep -n '^  meta:$' "${assets}" | cut -d: -f1)"
+if [ -z "${beta_registry}" ] || [ -z "${beta_tag}" ] || \
+   [ "${beta_registry}" -ge "${beta_tag}" ]; then
+  echo "beta registry credentials must be checked before the immutable tag is created" >&2
+  exit 1
+fi
+if [ -z "${stable_registry}" ] || [ -z "${stable_meta}" ] || \
+   [ "${stable_registry}" -ge "${stable_meta}" ]; then
+  echo "stable registry credentials must be checked before release metadata is derived" >&2
+  exit 1
+fi
 
 release_inventory='[[
   {"tag_name":"v2.0.0","draft":true,"prerelease":false,"published_at":null},
