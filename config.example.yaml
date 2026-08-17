@@ -185,7 +185,7 @@ app_link:
 # limits: those six fields still describe a household, so a rare mix may be
 # the only one of its kind, and the relay sees the address during the request.
 # It saves only daily totals, so the result counts reports, not unique boxes.
-# Settings → Fleet ping shows the exact message this box would send. On by
+# Settings → FTW app → Fleet statistics shows the exact message this box would send. On by
 # default; `enabled: false` turns it off without a restart.
 fleet_ping:
   enabled: true

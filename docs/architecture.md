@@ -444,7 +444,7 @@ also sees the source IP while the request is open, though neither the relay nor
 Caddy writes it. And with no id there is no way to dedupe, so the totals count
 reports, not unique boxes.
 
-A failed send is forgotten, never retried. Settings → Fleet ping renders the
+A failed send is forgotten, never retried. Settings → FTW app → Fleet statistics renders the
 exact payload from the same call the sender uses, so the claim is checkable
 rather than promised. It is on by default; saving `enabled: false` opts out
 without a restart. See [`go/internal/fleetping`](../go/internal/fleetping).
