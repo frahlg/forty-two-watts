@@ -5,10 +5,26 @@ root="${FTW_RELEASE_TEST_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}
 beta="${root}/.github/workflows/beta.yml"
 release="${root}/.github/workflows/release.yml"
 assets="${root}/.github/workflows/release-assets.yml"
+optimizer_release="${root}/.github/workflows/optimizer-release.yml"
 compose="${root}/docker-compose.yml"
 compose_macos="${root}/docker-compose.macos.yml"
 dockerfile="${root}/Dockerfile"
 release_guard="${root}/scripts/check-stable-release.py"
+
+for workflow in "${beta}" "${assets}" "${optimizer_release}"; do
+  if grep -Eq 'SOURCEFUL_GHCR_(USER|TOKEN)' "${workflow}"; then
+    echo "canonical GHCR writes must use the workflow GITHUB_TOKEN: ${workflow}" >&2
+    exit 1
+  fi
+done
+grep -Fq 'username: ${{ github.actor }}' "${beta}"
+grep -Fq 'password: ${{ secrets.GITHUB_TOKEN }}' "${beta}"
+grep -Fq 'CANONICAL_GHCR_USER: ${{ github.actor }}' "${assets}"
+grep -Fq 'CANONICAL_GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}' "${assets}"
+grep -Fq 'username: ${{ github.actor }}' "${optimizer_release}"
+grep -Fq 'password: ${{ secrets.GITHUB_TOKEN }}' "${optimizer_release}"
+grep -Fq 'LEGACY_GHCR_TOKEN' "${beta}"
+grep -Fq 'LEGACY_GHCR_TOKEN' "${assets}"
 
 release_inventory='[[
   {"tag_name":"v2.0.0","draft":true,"prerelease":false,"published_at":null},

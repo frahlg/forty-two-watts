@@ -567,8 +567,8 @@ jobs:
           STABLE_VERSION: ${{ needs.meta.outputs.version }}
           CORE_DIGEST: ${{ steps.source.outputs.core_digest }}
           UPDATER_DIGEST: ${{ steps.source.outputs.updater_digest }}
-          CANONICAL_GHCR_USER: ${{ vars.SOURCEFUL_GHCR_USER || github.actor }}
-          CANONICAL_GHCR_TOKEN: ${{ secrets.SOURCEFUL_GHCR_TOKEN || secrets.GITHUB_TOKEN }}
+          CANONICAL_GHCR_USER: ${{ github.actor }}
+          CANONICAL_GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           COMPATIBILITY_GHCR_USER: frahlg
           COMPATIBILITY_GHCR_TOKEN: ${{ secrets.LEGACY_GHCR_TOKEN || secrets.GITHUB_TOKEN }}
         run: |
@@ -662,8 +662,8 @@ jobs:
           FTW_CORE_DIGEST: ${{ needs.docker.outputs.core_digest }}
           FTW_UPDATER_DIGEST: ${{ needs.docker.outputs.updater_digest }}
           FTW_RELEASE_TAG: ${{ needs.meta.outputs.tag }}
-          FTW_CANONICAL_GHCR_USER: ${{ vars.SOURCEFUL_GHCR_USER || github.actor }}
-          FTW_CANONICAL_GHCR_TOKEN: ${{ secrets.SOURCEFUL_GHCR_TOKEN || secrets.GITHUB_TOKEN }}
+          FTW_CANONICAL_GHCR_USER: ${{ github.actor }}
+          FTW_CANONICAL_GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           FTW_COMPATIBILITY_GHCR_USER: frahlg
           FTW_COMPATIBILITY_GHCR_TOKEN: ${{ secrets.LEGACY_GHCR_TOKEN || secrets.GITHUB_TOKEN }}
         run: |

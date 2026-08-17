@@ -105,8 +105,8 @@ jobs:
         uses: docker/login-action@v4.6.0
         with:
           registry: ghcr.io
-          username: ${{ vars.SOURCEFUL_GHCR_USER || github.actor }}
-          password: ${{ secrets.SOURCEFUL_GHCR_TOKEN || secrets.GITHUB_TOKEN }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Refuse to move a published candidate
         id: guard
@@ -297,8 +297,8 @@ jobs:
         uses: docker/login-action@v4.6.0
         with:
           registry: ghcr.io
-          username: ${{ vars.SOURCEFUL_GHCR_USER || github.actor }}
-          password: ${{ secrets.SOURCEFUL_GHCR_TOKEN || secrets.GITHUB_TOKEN }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and publish beta image
         if: ${{ matrix.build_required == 'true' }}
@@ -466,8 +466,8 @@ jobs:
         uses: docker/login-action@v4.6.0
         with:
           registry: ghcr.io
-          username: ${{ vars.SOURCEFUL_GHCR_USER || github.actor }}
-          password: ${{ secrets.SOURCEFUL_GHCR_TOKEN || secrets.GITHUB_TOKEN }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Move canonical aliases after both exact manifests are recorded
         id: canonical_aliases
