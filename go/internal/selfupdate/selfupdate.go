@@ -349,7 +349,10 @@ func (c *Checker) Check(ctx context.Context, force bool) (Info, error) {
 	c.mu.RLock()
 	cached := c.info
 	c.mu.RUnlock()
-	if !force && !cached.CheckedAt.IsZero() && c.cfg.Now().Sub(cached.CheckedAt) < c.cfg.CheckInterval/2 {
+	// A recorded GitHub 5xx must not occupy the half-interval cache.
+	// That is the "restart seemed to fix it" bug: the UI reads this
+	// cache for hours, and only a force check or a process start retries.
+	if !force && cached.Err == "" && !cached.CheckedAt.IsZero() && c.cfg.Now().Sub(cached.CheckedAt) < c.cfg.CheckInterval/2 {
 		return cached, nil
 	}
 
@@ -443,7 +446,49 @@ func (c *Checker) recordErr(err error) (Info, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.info.Err = err.Error()
+	c.info.CheckedAt = c.cfg.Now()
 	return c.info, err
+}
+
+const githubRetryLimit = 5
+
+// githubRetryBackoff waits between GitHub 5xx/429 attempts. Tests replace it.
+var githubRetryBackoff = time.Sleep
+
+func githubTransientStatus(status int) bool {
+	return status == http.StatusTooManyRequests || status >= 500
+}
+
+func (c *Checker) getGitHub(ctx context.Context, rawURL string) (*http.Response, error) {
+	var last error
+	for attempt := 1; attempt <= githubRetryLimit; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Accept", "application/vnd.github+json")
+		req.Header.Set("User-Agent", "FTW-selfupdate")
+		resp, err := c.cfg.HTTPClient.Do(req)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, err
+			}
+			last = err
+		} else if !githubTransientStatus(resp.StatusCode) {
+			return resp, nil
+		} else {
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+			_ = resp.Body.Close()
+			last = fmt.Errorf("github releases %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		}
+		if attempt < githubRetryLimit {
+			githubRetryBackoff(time.Duration(attempt) * 200 * time.Millisecond)
+		}
+	}
+	if last == nil {
+		last = errors.New("github releases: retries exhausted")
+	}
+	return nil, last
 }
 
 // ghRelease mirrors the subset of fields we read from the GitHub
@@ -463,13 +508,7 @@ type ghRelease struct {
 // returns a zero ghRelease and nil error so Check can treat it as
 // "nothing to offer".
 func (c *Checker) fetchLatestRelease(ctx context.Context) (ghRelease, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", c.cfg.LatestReleaseURL, nil)
-	if err != nil {
-		return ghRelease{}, err
-	}
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("User-Agent", "FTW-selfupdate")
-	resp, err := c.cfg.HTTPClient.Do(req)
+	resp, err := c.getGitHub(ctx, c.cfg.LatestReleaseURL)
 	if err != nil {
 		return ghRelease{}, err
 	}
@@ -517,13 +556,7 @@ func (c *Checker) fetchPrefixedRelease(ctx context.Context, includeBeta bool) (g
 }
 
 func (c *Checker) fetchReleaseList(ctx context.Context, accept func(ghRelease) bool) (ghRelease, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", c.cfg.ReleasesURL, nil)
-	if err != nil {
-		return ghRelease{}, err
-	}
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("User-Agent", "FTW-selfupdate")
-	resp, err := c.cfg.HTTPClient.Do(req)
+	resp, err := c.getGitHub(ctx, c.cfg.ReleasesURL)
 	if err != nil {
 		return ghRelease{}, err
 	}

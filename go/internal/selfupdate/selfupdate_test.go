@@ -473,8 +473,18 @@ func TestCheck_CacheRespected(t *testing.T) {
 	}
 }
 
+func withoutGitHubBackoff(t *testing.T) {
+	t.Helper()
+	old := githubRetryBackoff
+	githubRetryBackoff = func(time.Duration) {}
+	t.Cleanup(func() { githubRetryBackoff = old })
+}
+
 func TestCheck_GHReleasesError(t *testing.T) {
+	withoutGitHubBackoff(t)
+	var calls int
 	rls := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
 		w.WriteHeader(503)
 		_, _ = w.Write([]byte("github down"))
 	}))
@@ -489,6 +499,89 @@ func TestCheck_GHReleasesError(t *testing.T) {
 	}
 	if c.Info().Err == "" {
 		t.Error("error should be recorded in Info.Err")
+	}
+	if calls != githubRetryLimit {
+		t.Fatalf("github 503 calls = %d, want %d retries", calls, githubRetryLimit)
+	}
+}
+
+func TestCheck_RetriesTransientGitHub504(t *testing.T) {
+	withoutGitHubBackoff(t)
+	const repo = "srcfl/ftw"
+	reg := newFakeRegistry(t, repo)
+	reg.addTag("v2.0.0")
+	rsrv := reg.server()
+	defer rsrv.Close()
+
+	var calls int
+	rls := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls < 3 {
+			w.WriteHeader(http.StatusGatewayTimeout)
+			_, _ = w.Write([]byte("gateway timeout"))
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"tag_name":     "v2.0.0",
+			"html_url":     "https://example/releases/v2.0.0",
+			"body":         "ok",
+			"published_at": time.Now().Format(time.RFC3339),
+		})
+	}))
+	defer rls.Close()
+
+	c := newCheckerOnFakes("v1.15.0", rsrv, rls, repo, newMemStore())
+	info, err := c.Check(context.Background(), false)
+	if err != nil {
+		t.Fatalf("Check after 504s: %v", err)
+	}
+	if info.Latest != "v2.0.0" || info.Err != "" {
+		t.Fatalf("info = %+v", info)
+	}
+	if calls != 3 {
+		t.Fatalf("github calls = %d, want 3", calls)
+	}
+}
+
+func TestCheck_DoesNotCacheGitHubError(t *testing.T) {
+	withoutGitHubBackoff(t)
+	const repo = "srcfl/ftw"
+	reg := newFakeRegistry(t, repo)
+	reg.addTag("v2.0.0")
+	rsrv := reg.server()
+	defer rsrv.Close()
+
+	var calls int
+	rls := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls <= githubRetryLimit {
+			w.WriteHeader(http.StatusGatewayTimeout)
+			_, _ = w.Write([]byte("gateway timeout"))
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"tag_name":     "v2.0.0",
+			"html_url":     "https://example/releases/v2.0.0",
+			"body":         "ok",
+			"published_at": time.Now().Format(time.RFC3339),
+		})
+	}))
+	defer rls.Close()
+
+	c := newCheckerOnFakes("v1.15.0", rsrv, rls, repo, newMemStore())
+	if _, err := c.Check(context.Background(), false); err == nil {
+		t.Fatal("first check should fail after exhausted 504s")
+	}
+	failedCalls := calls
+	info, err := c.Check(context.Background(), false)
+	if err != nil {
+		t.Fatalf("retry after recorded 504: %v", err)
+	}
+	if info.Latest != "v2.0.0" || info.Err != "" {
+		t.Fatalf("info after retry = %+v", info)
+	}
+	if calls <= failedCalls {
+		t.Fatal("second Check used the error cache instead of contacting GitHub")
 	}
 }
 

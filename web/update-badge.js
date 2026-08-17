@@ -32,6 +32,9 @@
   // hammering /api/version/check (which can hit GitHub each tick if
   // the local cache is stale).
   const CHECK_INTERVAL_MS = 3 * 60 * 60 * 1000; // /api/version/check cadence
+  // A transient GitHub 5xx is stored as last_error. Do not wait the full
+  // 3 h poll to try again — three bounded force checks, then stop.
+  const ERROR_RETRY_DELAYS_MS = [30 * 1000, 90 * 1000, 180 * 1000];
   const STATUS_INTERVAL_MS = 2000;               // during updates
   const UPDATE_SOFT_TIMEOUT_MS = 180 * 1000;     // after this we stop auto-reloading
   const SNAPSHOT_SOFT_TIMEOUT_MS = 15 * 60 * 1000; // large state.db snapshots can be slow
@@ -47,6 +50,8 @@
       this._updateOriginalVersion = null;
       this._expectedRun = null;
       this._checkTimer = null;
+      this._errorRetryTimer = null;
+      this._errorRetries = 0;
       this._statusTimer = null;
       this._elapsedTimer = null;
       this._disabled = false;         // set true on 503 (feature gated off)
@@ -102,6 +107,7 @@
 
     disconnectedCallback() {
       clearInterval(this._checkTimer);
+      clearTimeout(this._errorRetryTimer);
       clearInterval(this._statusTimer);
       clearInterval(this._elapsedTimer);
     }
@@ -414,9 +420,26 @@
           if (result.body && typeof result.body === "object") {
             this._info = result.body;
             this._render();
+            this._scheduleErrorRetry();
           }
         })
         .catch(() => { /* silent — periodic noise is not useful */ });
+    }
+
+    _scheduleErrorRetry() {
+      const err = this._info && this._info.err;
+      if (!err) {
+        this._errorRetries = 0;
+        clearTimeout(this._errorRetryTimer);
+        return;
+      }
+      if (this._errorRetries >= ERROR_RETRY_DELAYS_MS.length) return;
+      clearTimeout(this._errorRetryTimer);
+      const delay = ERROR_RETRY_DELAYS_MS[this._errorRetries];
+      this._errorRetryTimer = setTimeout(() => {
+        this._errorRetries += 1;
+        this._refresh(true);
+      }, delay);
     }
 
     _postJSON(url, body) {
@@ -805,7 +828,7 @@
             ${this._componentsSectionHTML()}
             ${this._channelSectionHTML()}
             ${this._storageSectionHTML()}
-            ${info.err ? `<p class="err">Last check failed: ${escapeHTML(info.err)}</p>` : ""}
+            ${info.err ? `<p class="err">Last check failed: ${escapeHTML(info.err)}${/github releases (429|5\d\d)|temporar|timeout/i.test(info.err) ? " Check for updates tries again." : ""}</p>` : ""}
           </div>
           <footer>${actions}</footer>
         </div>

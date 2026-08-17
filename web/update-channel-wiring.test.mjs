@@ -104,6 +104,14 @@ test("changing channel persists through the local API then forces a probe", () =
   assert.match(badge, /this\._refresh\(true\)/);
 });
 
+test("a failed GitHub check retries a few times instead of waiting three hours", () => {
+  assert.match(badge, /ERROR_RETRY_DELAYS_MS = \[30 \* 1000, 90 \* 1000, 180 \* 1000\]/);
+  assert.match(badge, /_scheduleErrorRetry\(\)/);
+  assert.match(badge, /this\._refresh\(true\)/);
+  assert.match(badge, /Check for updates tries again\./);
+  assert.match(badge, /github releases \(429\|5\\d\\d\)\|temporar\|timeout/);
+});
+
 test("Update dialog wires independent Optimizer and Driver history actions", () => {
   assert.match(badge, /<h3 id="ftw-upd-title">Updates<\/h3>/);
   assert.match(badge, /\/api\/components\/history\?limit=20/);

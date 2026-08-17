@@ -13,24 +13,28 @@ import (
 	"github.com/srcfl/ftw/go/internal/state"
 )
 
-// handleVersionCheck returns the cached self-update state. ?force=1 bypasses
-// the cache and contacts GitHub directly. All fields in selfupdate.Info are
-// passed through verbatim so the UI does the rendering.
+// handleVersionCheck returns self-update state. A normal GET still asks the
+// checker so a previous GitHub 5xx can be retried; the checker itself skips
+// the network when a successful result is younger than half the interval.
+// ?force=1 always contacts GitHub. All fields in selfupdate.Info are passed
+// through verbatim so the UI does the rendering.
 func (s *Server) handleVersionCheck(w http.ResponseWriter, r *http.Request) {
 	if s.deps.SelfUpdate == nil {
 		writeJSON(w, 503, map[string]string{"error": "self-update disabled"})
 		return
 	}
 	force := r.URL.Query().Get("force") == "1"
-	if force {
-		info, err := s.deps.SelfUpdate.Check(r.Context(), true)
-		if err != nil {
-			// Return the full Info schema with Err populated so the UI has
-			// one shape to handle (not a special error envelope).
-			info.Err = err.Error()
+	info, err := s.deps.SelfUpdate.Check(r.Context(), force)
+	if err != nil {
+		// Return the full Info schema with Err populated so the UI has
+		// one shape to handle (not a special error envelope).
+		info.Err = err.Error()
+		if force {
 			writeJSON(w, 502, info)
 			return
 		}
+		writeJSON(w, 200, info)
+		return
 	}
 	writeJSON(w, 200, s.deps.SelfUpdate.Info())
 }
