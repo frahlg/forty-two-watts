@@ -296,11 +296,25 @@ func (m Model) Predict(t time.Time, tempC float64) float64 {
 	prior := m.prior(idx)
 	base := trust*b.Mean + (1-trust)*prior
 	y := base + heatingGain(m.HeatingW_per_degC, tempC)
+	if math.IsNaN(y) || math.IsInf(y, 0) {
+		y = prior
+	}
+	// Same floor as restore repair: a bucket mean of 100 W overnight is
+	// below 25% of the typical prior and must not reach the planner.
+	if floor := prior * poisonFloor; y < floor {
+		y = floor
+	}
 	if y < 0 {
 		return 0
 	}
-	if m.PeakW > 0 && y > 3*m.PeakW {
-		y = 3 * m.PeakW
+	// Prefer the fuse-derived training ceiling; fall back to 3× typical
+	// peak only when no fuse is configured.
+	ceiling := m.MaxPlausibleW
+	if ceiling <= 0 && m.PeakW > 0 {
+		ceiling = 3 * m.PeakW
+	}
+	if ceiling > 0 && y > ceiling {
+		y = ceiling
 	}
 	return y
 }

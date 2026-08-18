@@ -499,12 +499,6 @@ func TestReplanRejectsInvalidPhysicsBeforeSolver(t *testing.T) {
 		{"negative pv uncertainty", func(s *Service) {
 			s.PVUncertaintyW = func() float64 { return -1 }
 		}},
-		{"negative load input", func(s *Service) {
-			s.Load = func(time.Time) float64 { return -1 }
-		}},
-		{"nan load input", func(s *Service) {
-			s.Load = func(time.Time) float64 { return math.NaN() }
-		}},
 		{"invalid plugged loadpoint", func(s *Service) {
 			s.Loadpoints = func(int) []*LoadpointSpec {
 				return []*LoadpointSpec{{ID: "garage", PluggedIn: true, CapacityWh: 0, Levels: 1}}
@@ -599,6 +593,46 @@ func TestReplanRejectsInvalidPhysicsBeforeSolver(t *testing.T) {
 			}
 			if d := svc.Diagnose(); d == nil || d.DecisionID != accepted.DecisionID {
 				t.Fatalf("diagnostic changed after rejected inputs: %+v", d)
+			}
+		})
+	}
+}
+
+func TestReplanSanitizesBadLoadInput(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		load float64
+	}{
+		{"negative", -1},
+		{"nan", math.NaN()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer st.Close()
+			now := time.Now().UTC().Truncate(time.Minute)
+			if err := st.SavePrices([]state.PricePoint{{
+				Zone: "SE3", SlotTsMs: now.Add(-5 * time.Minute).UnixMilli(), SlotLenMin: 60,
+				SpotOreKwh: 50, TotalOreKwh: 100, Source: "test", FetchedAtMs: now.UnixMilli(),
+			}}); err != nil {
+				t.Fatal(err)
+			}
+			svc := New(st, nil, "SE3", Params{
+				Mode: ModeSelfConsumption, SoCLevels: 11, ActionLevels: 5,
+				CapacityWh: 10000, SoCMinPct: 10, SoCMaxPct: 95, InitialSoCPct: 50,
+				MaxChargeW: 3000, MaxDischargeW: 3000,
+				ChargeEfficiency: 0.95, DischargeEfficiency: 0.95,
+			})
+			svc.LoadMaxW = 11000
+			svc.Load = func(time.Time) float64 { return tc.load }
+			plan := svc.Replan(context.Background())
+			if plan == nil || len(plan.Actions) == 0 {
+				t.Fatalf("sanitized load must still produce a plan, got %+v", plan)
+			}
+			if plan.Actions[0].LoadW != 0 {
+				t.Fatalf("bad load input must floor at 0 W, got %v", plan.Actions[0].LoadW)
 			}
 		})
 	}

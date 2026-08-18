@@ -90,6 +90,10 @@ type Service struct {
 	// cannot schedule megawatts. 0 disables the cut.
 	PVNameplateW float64
 	Load         LoadPredictor // optional — overrides flat BaseLoad
+	// LoadMaxW is the site fuse ceiling (W). Slot and published load
+	// forecasts are hard-cut to this so a wild twin cannot plan 50 kW
+	// of house load. 0 disables the upper cut.
+	LoadMaxW float64
 	// Optimizer is the primary mathematical planning engine. Nil selects the
 	// legacy in-process Go DP explicitly. When non-nil, any engine/process/
 	// validation failure falls back to the DP for this replan and is recorded
@@ -1118,6 +1122,10 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 
 	slots := buildSlots(prices, forecasts, s.BaseLoad, now.UnixMilli(), s.PV, s.PVResidualCorrect, s.Load)
 	slots = capSlotsPVToNameplate(slots, s.PVNameplateW)
+	slots = capSlotsLoad(slots, 0, s.LoadMaxW)
+	if recent := recentDailyLoadWh(s.Store, now, loadRainCheckDays); recent > 0 {
+		slots = rainCheckLoadSlots(slots, recent, s.LoadMaxW)
+	}
 	if len(slots) == 0 {
 		return nil
 	}
@@ -1485,6 +1493,7 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 		return s.Latest()
 	}
 	capPlanPVToNameplate(&plan, s.PVNameplateW)
+	capPlanLoad(&plan, 0, s.LoadMaxW)
 	plan.DecisionID = s.nextDecisionIDLocked()
 	if publishShadow {
 		if s.shadowEvaluator == nil {

@@ -41,6 +41,36 @@ func synthetic(t time.Time) float64 {
 	return base + morning + midday + evening
 }
 
+func TestPredictFloorsHundredWattOvernight(t *testing.T) {
+	// Operator report: overnight forecast sat at ~100 W on a lived-in
+	// house. 100 W is below 25% of the typical 650 W night prior and
+	// must not reach the planner, even when the bucket is fully trusted.
+	m := NewModel(5520)
+	night := time.Date(2026, 8, 18, 3, 0, 0, 0, time.UTC)
+	idx := HourOfWeek(night)
+	m.Bucket[idx].Mean = 100
+	m.Bucket[idx].Samples = 40
+	got := m.Predict(night, HeatingReferenceC)
+	floor := typicalPrior(idx) * poisonFloor
+	if got < floor {
+		t.Fatalf("100 W night must lift to prior×0.25 (%.0f W), got %.0f W", floor, got)
+	}
+}
+
+func TestPredictCapsHeatingAtFuse(t *testing.T) {
+	m := NewModel(5520)
+	m.MaxPlausibleW = 11000
+	m.HeatingW_per_degC = HeatingCoefMaxW
+	midday := time.Date(2026, 1, 5, 12, 0, 0, 0, time.UTC)
+	got := m.Predict(midday, -20)
+	if got > 11000 {
+		t.Fatalf("heating add-on must not exceed the fuse ceiling, got %.0f W", got)
+	}
+	if got < 1000 {
+		t.Fatalf("cold midday should still predict real load, got %.0f W", got)
+	}
+}
+
 func TestDayOnePriorIsUsefulEverywhere(t *testing.T) {
 	// Before any training: predictions at any hour should be within
 	// reasonable bounds (>0 overnight, elevated at peaks). The typical

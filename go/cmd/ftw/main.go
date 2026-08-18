@@ -1263,6 +1263,7 @@ func main() {
 		// the fuse from the start (instead of producing plans that
 		// dispatch later has to scale via the joint allocator).
 		mpcSvc.FuseMaxW = cfg.Fuse.MaxPowerW()
+		mpcSvc.LoadMaxW = cfg.Fuse.MaxPowerW()
 		if forecastSvc != nil {
 			mpcSvc.PVNameplateW = forecast.NameplateW(forecastSvc.RatedPVW, forecastSvc.Arrays)
 		} else if ratedPVW > 0 {

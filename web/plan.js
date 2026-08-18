@@ -45,6 +45,14 @@ import { setActiveCurrency, toDisplay, unitFor } from "./components/price-units.
     return pvW;
   }
 
+  function siteLoadWCapped(loadW, maxW) {
+    if (loadW == null) return loadW;
+    var w = Number(loadW);
+    if (!(w >= 0) || isNaN(w)) return 0;
+    if (maxW > 0 && w > maxW) return maxW;
+    return w;
+  }
+
   // Horizon controls the x-axis bounds; mirrors the price chart's
   // 3-position pill so operators have a consistent affordance across
   // both charts. Persisted in localStorage so a user who prefers
@@ -534,7 +542,7 @@ import { setActiveCurrency, toDisplay, unitFor } from "./components/price-units.
         if (a.slot_start_ms > tMax) break;
         if (a.load_w == null) continue;
         const x = xScale(a.slot_start_ms);
-        const y = powerY(a.load_w);
+        const y = powerY(siteLoadWCapped(a.load_w, plan.load_max_w));
         if (f2) { ctx.moveTo(x, y); f2 = false; }
         else ctx.lineTo(x, y);
       }
@@ -859,7 +867,10 @@ import { setActiveCurrency, toDisplay, unitFor } from "./components/price-units.
         const pvGen = Math.max(0, -pvW) / 1000;
         lines.push(`<div class="tip-row"><span title="Solar generation the plan assumes for this slot — cut at the site nameplate">PV forecast</span><b>${pvGen.toFixed(1)} kW</b></div>`);
       }
-      if (a.load_w != null) lines.push(`<div class="tip-row"><span title="Household consumption the plan assumes for this slot">Load forecast</span><b>${(a.load_w / 1000).toFixed(1)} kW</b></div>`);
+      if (a.load_w != null) {
+        const loadW = siteLoadWCapped(a.load_w, state.plan && state.plan.load_max_w);
+        lines.push(`<div class="tip-row"><span title="Household consumption the plan assumes for this slot — floored against recent days and cut at the fuse">Load forecast</span><b>${(loadW / 1000).toFixed(1)} kW</b></div>`);
+      }
       if (a.loadpoint_w != null && a.loadpoint_w > 0) {
         const evSoc = a.loadpoint_soc_pct != null ? ` → ${a.loadpoint_soc_pct.toFixed(0)}%` : '';
         lines.push(`<div class="tip-row"><span title="Planned EV charging power for this slot">EV charging</span><b>${(a.loadpoint_w / 1000).toFixed(1)} kW${evSoc}</b></div>`);
