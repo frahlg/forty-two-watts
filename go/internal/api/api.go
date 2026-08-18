@@ -137,7 +137,7 @@ type Deps struct {
 	Prices   *prices.Service
 	Forecast *forecast.Service
 
-	// Optional: MPC planner. Nil if disabled.
+	// Optional: MPC planner. Nil if disabled or a buildMPC gate skipped it.
 	MPC *mpc.Service
 
 	// Optional: PV digital-twin self-learner.
@@ -2289,9 +2289,50 @@ func (s *Server) handleForecast(w http.ResponseWriter, r *http.Request) {
 
 // ---- MPC planner ----
 
+func (s *Server) mpcDisabledPayload() map[string]any {
+	body := map[string]any{"enabled": false}
+	if reason := s.mpcUnavailableReason(); reason != "" {
+		body["reason"] = reason
+	}
+	return body
+}
+
+func (s *Server) mpcUnavailableReason() string {
+	if s.deps.MPC != nil {
+		return ""
+	}
+	var plannerOn bool
+	var priceProvider string
+	if s.deps.CfgMu != nil {
+		s.deps.CfgMu.RLock()
+	}
+	if s.deps.Cfg != nil {
+		plannerOn = s.deps.Cfg.Planner != nil && s.deps.Cfg.Planner.Enabled
+		if s.deps.Cfg.Price != nil {
+			priceProvider = s.deps.Cfg.Price.Provider
+		}
+	}
+	if s.deps.CfgMu != nil {
+		s.deps.CfgMu.RUnlock()
+	}
+	var totalCap float64
+	if s.deps.CapMu != nil {
+		s.deps.CapMu.RLock()
+	}
+	for _, capWh := range s.deps.Capacities {
+		if capWh > 0 {
+			totalCap += capWh
+		}
+	}
+	if s.deps.CapMu != nil {
+		s.deps.CapMu.RUnlock()
+	}
+	return mpc.UnavailableReason(plannerOn, priceProvider, totalCap)
+}
+
 func (s *Server) handleMPCPlan(w http.ResponseWriter, r *http.Request) {
 	if s.deps.MPC == nil {
-		writeJSON(w, 200, map[string]any{"enabled": false})
+		writeJSON(w, 200, s.mpcDisabledPayload())
 		return
 	}
 	plan := s.deps.MPC.Latest()
@@ -2323,7 +2364,7 @@ func (s *Server) handleMPCReplan(w http.ResponseWriter, r *http.Request) {
 // planner decide X at 21:00?" without shelling into the host.
 func (s *Server) handleMPCDiagnose(w http.ResponseWriter, r *http.Request) {
 	if s.deps.MPC == nil {
-		writeJSON(w, 200, map[string]any{"enabled": false})
+		writeJSON(w, 200, s.mpcDisabledPayload())
 		return
 	}
 	diag := s.deps.MPC.Diagnose()

@@ -1010,6 +1010,14 @@ body.ftw-app .mode-buttons button.active {
   border-color: var(--accent-e);
   color: var(--fg);
 }
+body.ftw-app .mode-buttons button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+body.ftw-app .mode-buttons button:disabled:hover {
+  background: var(--ink-sunken);
+  color: var(--fg-dim);
+}
 body.ftw-app .strategy-hint {
   margin-top: 10px;
   font-family: var(--mono);

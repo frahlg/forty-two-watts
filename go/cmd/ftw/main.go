@@ -3675,17 +3675,22 @@ func aggregateBatteryFleetLimits(cfg *config.Config, fleet []mpc.BatteryFleetMem
 
 // buildMPC constructs a planner from config. Returns nil if disabled,
 // if prices aren't configured, or if there are no batteries with capacity.
+// The skip reason is the same vocabulary /api/mpc/diagnose exposes.
 func buildMPC(cfg *config.Config, st *state.Store, tel *telemetry.Store, capacities map[string]float64) *mpc.Service {
-	if cfg.Planner == nil || !cfg.Planner.Enabled {
-		return nil
-	}
-	if cfg.Price == nil || cfg.Price.Provider == "" || cfg.Price.Provider == "none" {
-		slog.Warn("mpc requires price provider — skipping")
-		return nil
+	plannerOn := cfg.Planner != nil && cfg.Planner.Enabled
+	priceProvider := ""
+	if cfg.Price != nil {
+		priceProvider = cfg.Price.Provider
 	}
 	fleet := mpcBatteryFleetFromConfig(cfg, capacities)
 	totalCap, maxChg, maxDis := aggregateBatteryFleetLimits(cfg, fleet)
-	if totalCap <= 0 {
+	switch mpc.UnavailableReason(plannerOn, priceProvider, totalCap) {
+	case mpc.ReasonPlannerDisabled:
+		return nil
+	case mpc.ReasonNoPriceProvider:
+		slog.Warn("mpc requires price provider — skipping")
+		return nil
+	case mpc.ReasonNoBatteryCapacity:
 		slog.Warn("mpc: no battery capacity — skipping")
 		return nil
 	}
