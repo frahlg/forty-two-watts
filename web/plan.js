@@ -2,7 +2,7 @@
 // Renders a stacked canvas chart: price bars on top, battery+grid bars in
 // the middle, SoC + PV line on bottom. Refreshes every 30s.
 
-import { derivePlanBrief } from "./plan-brief.js";
+import { derivePlanBrief, unavailablePlannerCopy } from "./plan-brief.js";
 import { setActiveCurrency, toDisplay, unitFor } from "./components/price-units.js";
 
 (function () {
@@ -121,11 +121,13 @@ import { setActiveCurrency, toDisplay, unitFor } from "./components/price-units.
       prices: p && p.enabled,
       forecast: f && f.enabled,
       mpc: m && m.enabled,
+      mpcReason: (m && m.reason) || "",
     };
     state.lastUpdate = new Date();
     window.dispatchEvent(new CustomEvent("ftw-plan-data", {
       detail: { plan: state.plan },
     }));
+    applyPlannerModeAvailability();
     render();
   }
 
@@ -175,6 +177,7 @@ import { setActiveCurrency, toDisplay, unitFor } from "./components/price-units.
   function renderPlanBrief(plan) {
     const brief = derivePlanBrief({
       enabled: !!(state.enabled && state.enabled.mpc),
+      unavailableReason: (state.enabled && state.enabled.mpcReason) || "",
       plan,
       status: state.status || {},
     });
@@ -655,7 +658,7 @@ import { setActiveCurrency, toDisplay, unitFor } from "./components/price-units.
     const summary = document.getElementById('plan-summary');
     if (summary) {
       if (!state.enabled || !state.enabled.mpc) {
-        summary.textContent = 'MPC planner disabled';
+        summary.textContent = unavailablePlannerCopy(state.enabled && state.enabled.mpcReason).summary;
       } else if (!plan) {
         const visibleInputs = [];
         if (state.prices && state.prices.length) visibleInputs.push('prices');
@@ -966,12 +969,41 @@ import { setActiveCurrency, toDisplay, unitFor } from "./components/price-units.
     charge: 'Manual full charge — forces the battery to charge regardless of price.',
     idle: 'Stop batteries. Every battery is held at 0 W while this mode is on, so none drifts back to the inverter\'s own behaviour. Fuse protection still applies. EV charging and PV curtailment carry on.',
   };
+  function applyPlannerModeAvailability() {
+    const enabled = !!(state.enabled && state.enabled.mpc);
+    const copy = unavailablePlannerCopy(state.enabled && state.enabled.mpcReason);
+    const buttons = document.querySelectorAll('#mode-buttons-primary button, #mode-buttons button');
+    buttons.forEach(function (btn) {
+      const plannerMode = String(btn.dataset.mode || '').indexOf('planner_') === 0;
+      if (!btn.dataset.catalogTitle && btn.title) btn.dataset.catalogTitle = btn.title;
+      if (!plannerMode) {
+        btn.disabled = false;
+        return;
+      }
+      btn.disabled = !enabled;
+      btn.title = enabled ? (btn.dataset.catalogTitle || '') : copy.detail;
+    });
+    const replan = document.getElementById('plan-replan');
+    if (replan) {
+      replan.disabled = !enabled;
+      replan.title = enabled ? 'Force a fresh plan' : copy.summary;
+    }
+  }
+
   function renderStrategyHint() {
+    applyPlannerModeAvailability();
     apiFetch('/api/status')
       .then(function (r) { return r.json(); })
       .then(function (d) {
         const el = document.getElementById('strategy-hint');
         if (!el) return;
+        const enabled = !!(state.enabled && state.enabled.mpc);
+        const plannerMode = String(d.mode || '').indexOf('planner_') === 0;
+        if (!enabled && plannerMode) {
+          const copy = unavailablePlannerCopy(state.enabled && state.enabled.mpcReason);
+          el.textContent = copy.action + '. ' + copy.nextStep + '.';
+          return;
+        }
         el.textContent = STRATEGY_DESC[d.mode] || '';
       })
       .catch(function () {});

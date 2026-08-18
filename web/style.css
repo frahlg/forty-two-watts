@@ -786,6 +786,11 @@ body { padding-bottom: 28px; }
   color: #fff;
 }
 
+.mode-buttons button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 .slider-group {
   margin-top: 0.5rem;
 }
