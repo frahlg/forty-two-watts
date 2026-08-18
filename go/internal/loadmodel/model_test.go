@@ -204,10 +204,10 @@ func TestNightBucketNotPoisonedByHeatingSubtraction(t *testing.T) {
 			warmPred, priorW, priorW*poisonFloor)
 	}
 
-	// Feed 30 warm-weather samples at the real baseline (350 W, temp 20°C).
-	// The model should now learn the actual overnight load.
+	// Feed 30 warm-weather samples at the real baseline (350 W, temp 20°C),
+	// same hour-of-week as t0 so the bucket we predict actually moves.
 	for i := 0; i < 30; i++ {
-		m.Update(t0.Add(time.Duration(300+i*7)*24*time.Hour), 350, 20.0)
+		m.Update(t0.Add(time.Duration(i)*7*24*time.Hour), 350, 20.0)
 	}
 	trainedPred := m.Predict(t0, 20.0)
 	if math.Abs(trainedPred-350) > 100 {
