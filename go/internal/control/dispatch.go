@@ -2497,7 +2497,16 @@ func ComputeDispatch(
 		// inverter in one cycle, which the inverter then ramps at its own
 		// safe rate. Saves the windup-recovery delay we observed on
 		// 2026-05-25.
-		if !state.SlewEnabled {
+		//
+		// A non-positive rate is the same instruction. It cannot be a ramp
+		// limit: the anchor is the battery's measured power, so a 0 W/cycle
+		// budget snaps every target back to what the battery is already
+		// doing and the site holds that power for good. Settings → Control
+		// offers a bare "Slew rate (W/cycle)" number field with no
+		// slew_enabled toggle beside it, so 0 is the obvious way to ask for
+		// "no limit" — and POST /api/config does not run applyDefaults, so
+		// the 0 reaches the controller as written.
+		if !state.SlewEnabled || state.SlewRateW <= 0 {
 			slewPoints = append(slewPoints, point)
 			continue
 		}
