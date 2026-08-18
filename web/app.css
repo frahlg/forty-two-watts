@@ -1570,6 +1570,29 @@ body.ftw-app .more-action-icon {
   font-size: 18px;
 }
 
+body.ftw-app .more-advanced {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 8px;
+  padding-top: 20px;
+  border-top: 1px solid var(--line);
+}
+body.ftw-app .more-advanced-intro h2 {
+  margin: 0 0 6px;
+  font-size: 1.05rem;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  color: var(--fg);
+}
+body.ftw-app .more-advanced-intro p {
+  margin: 0;
+  color: var(--fg-dim);
+  font-size: 0.88rem;
+  line-height: 1.55;
+  max-width: 68ch;
+}
+
 /* ---- Plan "?" help button + explanation modal ---- */
 body.ftw-app .plan-title {
   display: flex;

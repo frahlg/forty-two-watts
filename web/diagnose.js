@@ -64,8 +64,9 @@
     append(energy, '.history-row');
     append(plan, '#plan-section');
     append(plan, '#plan-history-details');
+    const moreMount = document.getElementById('more-advanced-mount') || more;
     ['#ui-mode-row', '#twins-section', '#loadpoints-section', '#drivers-section', '#models-section']
-      .forEach(selector => append(more, selector));
+      .forEach(selector => append(moreMount, selector));
 
     const oldChartRow = document.getElementById('live-plan-row');
     if (oldChartRow && oldChartRow.children.length === 0) oldChartRow.remove();

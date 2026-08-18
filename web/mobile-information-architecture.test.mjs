@@ -41,6 +41,7 @@ describe("dashboard information architecture", () => {
     assert.doesNotMatch(router, /insertHistory\('\.savings-row'\)/);
     assert.match(router, /'#chart-section'/);
     assert.match(router, /'#drivers-section'/);
+    assert.match(router, /getElementById\('more-advanced-mount'\)/);
   });
 
   it("loads past planner decisions only when their Plan section is open", () => {
