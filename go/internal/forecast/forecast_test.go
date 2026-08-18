@@ -468,6 +468,10 @@ func TestSanitizeKWpTreatsPastedWattsAsKilowatts(t *testing.T) {
 	if !pasted || math.Abs(got-1) > 1e-9 {
 		t.Fatalf("SanitizeKWp(1000) = %v, %v; want 1, true", got, pasted)
 	}
+	got, pasted = SanitizeKWp(18960)
+	if !pasted || math.Abs(got-18.96) > 1e-9 {
+		t.Fatalf("SanitizeKWp(18960) = %v, %v; want 18.96, true", got, pasted)
+	}
 }
 
 func TestNameplateWPrefersRatedWhenArraysLookLikeWatts(t *testing.T) {
@@ -556,6 +560,54 @@ func TestFetchAndStoreCapsPastedWattsGHI(t *testing.T) {
 	}
 	if got <= 0 {
 		t.Fatalf("late-afternoon GHI should still produce some PV, got %.1f W", got)
+	}
+}
+
+// Björn, 2026-08-18: Settings → Weather "PV rated (W)" = 18960.
+// Plan tooltip Tue 19:45 showed "PV forecast 2046.2 kW" with house-scale
+// load 0.7 kW and 8.2 kW export. Changing weather provider did not help.
+//
+// The tooltip already does Math.max(0, -pv_w) / 1000, so 2046.2 kW is
+// |pv_w| ≈ 2 046 200 W — not watts labelled as kilowatts. 2046200 / 18960
+// ≈ 108 W/m², which is a late-evening POA if array kWp was pasted as 18960
+// (the watts field). A display-only /1000 miss would mean |pv_w| = 2046 W
+// and implied POA 0.11 W/m², which cannot export 8.2 kW or spike the
+// ±16 kW chart.
+func TestBjorn18960WTooltipIsPastedKWpNotDisplayScale(t *testing.T) {
+	t.Parallel()
+	const ratedW = 18960.0
+	const tooltipKW = 2046.2
+	storedW := tooltipKW * 1000
+	impliedPOA := storedW / ratedW
+	if impliedPOA < 90 || impliedPOA > 130 {
+		t.Fatalf("2046.2 kW / 18960 W = %.2f W/m²; want ~108 (evening POA on pasted kWp)", impliedPOA)
+	}
+	displayBugPOA := (tooltipKW) / ratedW
+	if displayBugPOA > 1 {
+		t.Fatalf("if tooltip forgot /1000, implied POA would be %.3f W/m², not evening sun", displayBugPOA)
+	}
+
+	got, pasted := SanitizeKWp(ratedW)
+	if !pasted || math.Abs(got-18.96) > 1e-9 {
+		t.Fatalf("18960 W pasted as kWp must become 18.96 kW, got %v pasted=%v", got, pasted)
+	}
+	if NameplateW(ratedW, []Array{{KWp: ratedW}}) != ratedW {
+		t.Fatalf("nameplate with pasted 18960 kWp must stay 18960 W, got %.0f", NameplateW(ratedW, []Array{{KWp: ratedW}}))
+	}
+
+	capped, ok := clampPVToNameplate(storedW, ratedW)
+	if !ok || capped > ratedW*nameplateHeadroom+1 {
+		t.Fatalf("stored %.0f W must clamp to 1.25×18960, got %.1f ok=%v", storedW, capped, ok)
+	}
+
+	tt := time.Date(2026, 8, 18, 17, 45, 0, 0, time.UTC) // 19:45 Swedish summer
+	house := poaPVWattsFromGHI(59.3293, 18.0686, tt, impliedPOA, []Array{{TiltDeg: 35, AzimuthDeg: 180, KWp: 18.96}})
+	pastedW := poaPVWattsFromGHI(59.3293, 18.0686, tt, impliedPOA, []Array{{TiltDeg: 35, AzimuthDeg: 180, KWp: 18960}})
+	if house <= 0 || house > ratedW*nameplateHeadroom {
+		t.Fatalf("18.96 kWp at ~108 W/m² must stay on a house scale, got %.1f W", house)
+	}
+	if math.Abs(pastedW-house) > 1 {
+		t.Fatalf("kWp=18960 (rated W pasted) must match 18.96 kWp, house=%.1f pasted=%.1f", house, pastedW)
 	}
 }
 

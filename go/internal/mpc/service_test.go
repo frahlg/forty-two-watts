@@ -1085,14 +1085,19 @@ func TestClampForecastPVHouseNameplate(t *testing.T) {
 	t.Parallel()
 	wild := 3544200.0
 	ok := 3200.0
+	bjorn := 2046200.0 // tooltip 2046.2 kW with rated 18960 W
 	rows := clampForecastPV([]state.ForecastPoint{
 		{PVWEstimated: &wild},
 		{PVWEstimated: &ok},
-	}, 10000)
-	if rows[0].PVWEstimated == nil || *rows[0].PVWEstimated > 12500 {
-		t.Fatalf("3544 kW row must clamp to 12.5 kW, got %+v", rows[0].PVWEstimated)
+		{PVWEstimated: &bjorn},
+	}, 18960)
+	if rows[0].PVWEstimated == nil || *rows[0].PVWEstimated > 18960*1.25 {
+		t.Fatalf("3544 kW row must clamp to 1.25×18960 W, got %+v", rows[0].PVWEstimated)
 	}
 	if rows[1].PVWEstimated == nil || *rows[1].PVWEstimated != 3200 {
 		t.Fatalf("in-range estimate must stay, got %+v", rows[1].PVWEstimated)
+	}
+	if rows[2].PVWEstimated == nil || *rows[2].PVWEstimated > 18960*1.25 {
+		t.Fatalf("2046.2 kW row must clamp to house nameplate, got %+v", rows[2].PVWEstimated)
 	}
 }

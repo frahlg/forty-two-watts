@@ -53,9 +53,16 @@
       host.innerHTML = '<p style="color:var(--text-dim);font-size:0.75rem;margin:4px 0 8px">No arrays defined — model will learn orientation from telemetry.</p>';
       return;
     }
-    var wattsAsKwp = arrays.some(function (a) { return Number(a.kwp) >= 1000; });
+    var ratedW = Number(config.weather && config.weather.pv_rated_w);
+    var wattsAsKwp = arrays.some(function (a) {
+      var kwp = Number(a.kwp);
+      if (!(kwp > 0)) return false;
+      if (kwp >= 1000) return true;
+      // Copied "PV rated (W)" into kWp (18960 W → 18960 kWp).
+      return ratedW >= 1000 && Math.abs(kwp - ratedW) / ratedW < 0.05;
+    });
     var kwpWarn = wattsAsKwp
-      ? '<p role="alert" style="color:#f59e0b;font-size:0.8rem;margin:4px 0 8px">kWp is kilowatts-peak, not watts. 10 kW is <b>10</b>, not 10000 — 10000 makes the PV forecast look like megawatts.</p>'
+      ? '<p role="alert" style="color:#f59e0b;font-size:0.8rem;margin:4px 0 8px">kWp is kilowatts-peak, not the watts from <b>PV rated (W)</b>. An 18.96 kW roof is <b>18.96</b>, not 18960 — pasting watts makes the PV forecast read as megawatts and provider changes will not fix it.</p>'
       : "";
     var previewHtml = '<div class="pv-arrays-3d-slot" ' +
       'style="margin:4px 0 10px"><ftw-pv-arrays-3d></ftw-pv-arrays-3d></div>';
