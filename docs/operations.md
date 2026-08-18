@@ -163,6 +163,9 @@ sets a session cookie (`ftw_lan`, 12 hours). Loopback (`127.0.0.1` / `::1`)
 never asks. Live status stays readable without the password; a viewer
 caller is minted for those reads.
 
+An owner pairing QR is minted only from loopback or with the house
+password. A viewer invite still works from the LAN.
+
 The FTW app and Home Assistant MQTT are unchanged.
 
 Recovery: `curl` to `127.0.0.1`, or set `api.lan_auth: false` in

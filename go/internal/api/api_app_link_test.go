@@ -93,8 +93,12 @@ func (s *stubEnroller) AuthorisedCount() int { return 2 }
 // none is refused now, because a default at this endpoint decides who owns a
 // house.
 func pairingRequest(host, remote string, headers map[string]string) *http.Request {
+	return pairingRequestRole(host, remote, headers, "owner")
+}
+
+func pairingRequestRole(host, remote string, headers map[string]string, role string) *http.Request {
 	r := httptest.NewRequest(http.MethodPost, "/api/app-link/pairing",
-		strings.NewReader(`{"role":"owner"}`))
+		strings.NewReader(`{"role":"`+role+`"}`))
 	r.Header.Set("Content-Type", "application/json")
 	r.Host = host
 	r.RemoteAddr = remote
@@ -141,12 +145,42 @@ func TestPairingIsLocalOnly(t *testing.T) {
 	}
 }
 
-func TestPairingFromTheLAN(t *testing.T) {
+func TestViewerPairingFromTheLAN(t *testing.T) {
+	enroll := &stubEnroller{}
+	s := New(&Deps{AppEnroll: enroll})
+
+	w := httptest.NewRecorder()
+	s.handleAppLinkPairing(w, pairingRequestRole("192.168.1.1", "192.168.1.5:1234", nil, "viewer"))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200: %s", w.Code, w.Body.String())
+	}
+	if enroll.minted != 1 {
+		t.Fatalf("minted %d codes, want 1", enroll.minted)
+	}
+}
+
+func TestOwnerPairingFromTheLANIsRefused(t *testing.T) {
 	enroll := &stubEnroller{}
 	s := New(&Deps{AppEnroll: enroll})
 
 	w := httptest.NewRecorder()
 	s.handleAppLinkPairing(w, pairingRequest("192.168.1.1", "192.168.1.5:1234", nil))
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("got %d, want 403: %s", w.Code, w.Body.String())
+	}
+	if enroll.minted != 0 {
+		t.Fatalf("minted %d owner codes from the open LAN", enroll.minted)
+	}
+}
+
+func TestOwnerPairingFromLoopback(t *testing.T) {
+	enroll := &stubEnroller{}
+	s := New(&Deps{AppEnroll: enroll})
+
+	w := httptest.NewRecorder()
+	s.handleAppLinkPairing(w, pairingRequest("127.0.0.1", "127.0.0.1:1234", nil))
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("got %d, want 200: %s", w.Code, w.Body.String())

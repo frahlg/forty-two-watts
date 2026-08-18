@@ -162,6 +162,9 @@ func (s *Server) handleAppLinkPairing(w http.ResponseWriter, r *http.Request) {
 	if !s.appLinkRoleAllowed(w, r, req.Role) {
 		return
 	}
+	if !s.appLinkOwnerMintAllowed(w, r, req.Role) {
+		return
+	}
 
 	// A spoken code is minted at the box and nowhere else.
 	//
@@ -446,6 +449,25 @@ func (s *Server) appLinkRoleAllowed(w http.ResponseWriter, r *http.Request, aske
 		return false
 	}
 	return true
+}
+
+// appLinkOwnerMintAllowed refuses an owner code on the open LAN.
+//
+// Presence on a private address is not enough. That is how a guest or a
+// ZeroTier peer turns "I can reach :8080" into a Noise owner that works
+// from anywhere. Loopback is the box itself. A house-password proof is
+// the other door, and it only exists when api.lan_auth is on.
+func (s *Server) appLinkOwnerMintAllowed(w http.ResponseWriter, r *http.Request, asked string) bool {
+	if asked != apiauth.RoleOwner || appLinkOverSession(r) || isLoopbackClient(r.RemoteAddr) {
+		return true
+	}
+	houseOK, checked := lanSecretFrom(r.Context())
+	if checked && houseOK {
+		return true
+	}
+	writeAppLinkError(w, http.StatusForbidden,
+		"making another owner is done on the box, or after the house password is on.")
+	return false
 }
 
 func writeAppLinkError(w http.ResponseWriter, code int, msg string) {
