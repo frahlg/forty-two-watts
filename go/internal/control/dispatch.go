@@ -1943,15 +1943,17 @@ func ComputeDispatch(
 		// Surplus-only EV reserve (energy path): cap battery aggregate
 		// charge to leave PV headroom for an EV that's under a
 		// surplus_only loadpoint. This is a live-PV sharing rule, not a
-		// grid-charge ban: the planner may still import to the home
-		// battery for house load or arbitrage. Discharge is unaffected —
-		// the reserve only matters when the battery is competing with
-		// the EV for the same surplus PV. Final cap — runs AFTER the PV
-		// surplus absorber so the absorber can't override an EV reserve.
+		// grid-charge ban: a slot the planner already committed to
+		// importing (PlannedGridW ≥ 100 W) keeps that charge. Discharge
+		// is unaffected. Final cap — runs AFTER the PV surplus absorber
+		// so the absorber can't override an EV reserve on a PV-soak slot.
 		if state.EVSurplusOnlyReserveW > 0 && targetTotalW > 0 {
-			ceiling := surplus.chargeCeilingAfterEVReserveW()
-			if targetTotalW > ceiling {
-				targetTotalW = ceiling
+			deliberateGridCharge := currentDirective.HasPlannedGridW && currentDirective.PlannedGridW >= 100
+			if !deliberateGridCharge {
+				ceiling := surplus.chargeCeilingAfterEVReserveW()
+				if targetTotalW > ceiling {
+					targetTotalW = ceiling
+				}
 			}
 		}
 

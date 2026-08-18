@@ -237,35 +237,53 @@ func TestSurplusOnlyForbidsBatteryFeedingEVEvenWhenCoverEVEnabled(t *testing.T) 
 		},
 	}
 
-	plan := Optimize(slots, Params{
-		Mode:                ModeArbitrage,
-		SoCLevels:           11,
-		CapacityWh:          20000,
-		SoCMinPct:           10,
-		SoCMaxPct:           95,
-		InitialSoCPct:       90,
-		ActionLevels:        11,
-		MaxChargeW:          5000,
-		MaxDischargeW:       5000,
-		ChargeEfficiency:    0.95,
-		DischargeEfficiency: 0.95,
-		TerminalSoCPrice:    400,
-		Loadpoint: &LoadpointSpec{
-			ID:               "garage",
-			CapacityWh:       10000,
-			Levels:           11,
-			InitialSoCPct:    20,
-			PluggedIn:        true,
-			TargetSoCPct:     70,
-			TargetSlotIdx:    1,
-			MaxChargeW:       5000,
-			AllowedStepsW:    []float64{0, 5000},
-			ChargeEfficiency: 1.0,
-			SurplusOnly:      true,
-			NoBatteryToEV:    false, // mirrors BatteryCoversEV=true.
-		},
-	})
+	mkParams := func(surplusOnly bool) Params {
+		return Params{
+			Mode:                ModeArbitrage,
+			SoCLevels:           11,
+			CapacityWh:          20000,
+			SoCMinPct:           10,
+			SoCMaxPct:           95,
+			InitialSoCPct:       90,
+			ActionLevels:        11,
+			MaxChargeW:          5000,
+			MaxDischargeW:       5000,
+			ChargeEfficiency:    0.95,
+			DischargeEfficiency: 0.95,
+			TerminalSoCPrice:    400,
+			Loadpoint: &LoadpointSpec{
+				ID:               "garage",
+				CapacityWh:       10000,
+				Levels:           11,
+				InitialSoCPct:    20,
+				PluggedIn:        true,
+				TargetSoCPct:     70,
+				TargetSlotIdx:    1,
+				MaxChargeW:       5000,
+				AllowedStepsW:    []float64{0, 5000},
+				ChargeEfficiency: 1.0,
+				SurplusOnly:      surplusOnly,
+				NoBatteryToEV:    false, // mirrors BatteryCoversEV=true.
+			},
+		}
+	}
 
+	// Prove the scenario exercises the prohibited path: without the
+	// surplus-only contract, the cost-optimal plan feeds the EV from the
+	// home battery rather than importing at the high retail price.
+	unprotected := Optimize(slots, mkParams(false))
+	var batteryFedEV bool
+	for _, a := range unprotected.Actions {
+		if a.LoadpointW > 100 && a.BatteryW < -100 {
+			batteryFedEV = true
+			break
+		}
+	}
+	if !batteryFedEV {
+		t.Fatalf("unprotected baseline did not feed EV from battery: %+v", unprotected.Actions)
+	}
+
+	plan := Optimize(slots, mkParams(true))
 	for i, a := range plan.Actions {
 		houseResidualW := slots[i].LoadW + slots[i].PVW
 		if houseResidualW < 0 {
@@ -329,6 +347,52 @@ func TestArbitrageGridChargesWhileSurplusOnlyEVIsConnected(t *testing.T) {
 	}
 	if plan.Actions[0].GridW < 500 {
 		t.Errorf("cheap slot should import for the battery, got gridW=%.0f", plan.Actions[0].GridW)
+	}
+}
+
+func TestPassiveArbitrageGridChargesWhileSurplusOnlyEVIsConnected(t *testing.T) {
+	slots := []Slot{
+		{StartMs: 0, LenMin: 60, PriceOre: 30, SpotOre: 10, LoadW: 500, Confidence: 1},
+		{StartMs: 3600_000, LenMin: 60, PriceOre: 300, SpotOre: 250, LoadW: 5000, Confidence: 1},
+	}
+	plan := Optimize(slots, Params{
+		Mode:                ModePassiveArbitrage,
+		SoCLevels:           18,
+		CapacityWh:          20000,
+		SoCMinPct:           10,
+		SoCMaxPct:           95,
+		InitialSoCPct:       10,
+		ActionLevels:        11,
+		MaxChargeW:          5000,
+		MaxDischargeW:       5000,
+		ChargeEfficiency:    0.95,
+		DischargeEfficiency: 0.95,
+		Loadpoint: &LoadpointSpec{
+			ID:               "garage",
+			CapacityWh:       60000,
+			Levels:           11,
+			InitialSoCPct:    80,
+			PluggedIn:        true,
+			TargetSoCPct:     80,
+			TargetSlotIdx:    1,
+			MaxChargeW:       3000,
+			AllowedStepsW:    []float64{0, 3000},
+			ChargeEfficiency: 1,
+			SurplusOnly:      true,
+			NoBatteryToEV:    true,
+		},
+	})
+	if len(plan.Actions) != 2 {
+		t.Fatalf("got %d actions, want 2", len(plan.Actions))
+	}
+	if got := plan.Actions[0].LoadpointW; got > 50 {
+		t.Errorf("surplus-only EV imported during cheap slot: %+v", plan.Actions[0])
+	}
+	if got := plan.Actions[0].BatteryW; got < 500 {
+		t.Errorf("defer-grid mode should charge home battery at cheap night price: %+v", plan.Actions[0])
+	}
+	if got := plan.Actions[0].GridW; got < 500 {
+		t.Errorf("cheap slot should import for home battery: %+v", plan.Actions[0])
 	}
 }
 

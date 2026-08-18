@@ -5579,6 +5579,36 @@ func TestEnergyDispatchAbsorbsSurplusBeyondEVReserveActualDraw(t *testing.T) {
 	}
 }
 
+func TestEnergyDispatchHonoursPlannedGridChargeWithIdleSurplusOnlyEV(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:         now,
+		SlotEnd:           now.Add(15 * time.Minute),
+		BatteryEnergyWh:   1250, // ~5 kW over 15 min
+		Strategy:          "arbitrage",
+		HasPlannedGridW:   true,
+		PlannedGridW:      5500,
+	}
+	store := seedStore(500, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	st := newStateWithEnergyDispatch(dir, "ferroamp")
+	st.EVSurplusOnlyReserveW = 2000
+	st.EVSurplusOnlyChargingW = 0
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	got := targets[0].TargetW
+	if got < 4000 {
+		t.Errorf("TargetW = %.0f W — idle surplus-only EV must not zero a planned night grid-charge (want ~5000)", got)
+	}
+}
+
 func TestEnergyDispatchDoesNotChargeBatteryFromV2XDischargeByDefault(t *testing.T) {
 	now := time.Now()
 	dir := SlotDirective{
