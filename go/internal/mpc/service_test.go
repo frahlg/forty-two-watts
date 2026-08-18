@@ -144,6 +144,41 @@ func TestSynthesizedPriceCarriesCreationProvenance(t *testing.T) {
 	}
 }
 
+func TestForecastPricePersistsLastKnownInsteadOfClimatologyCliff(t *testing.T) {
+	now := time.Date(2026, 8, 18, 10, 0, 0, 0, time.UTC)
+	last := state.PricePoint{
+		Zone: "SE3", SlotTsMs: now.UnixMilli(), SlotLenMin: 60,
+		SpotOreKwh: 200, TotalOreKwh: 280, Source: "entsoe",
+	}
+	prices := extendPricesWithForecast(
+		[]state.PricePoint{last},
+		"SE3",
+		func(string, time.Time) float64 { return 70 },
+		now.UnixMilli(),
+		now.Add(2*time.Hour).UnixMilli(),
+		0, 0,
+	)
+	if len(prices) < 2 {
+		t.Fatalf("got %d prices, want published + forecast", len(prices))
+	}
+	var forecast []state.PricePoint
+	for _, p := range prices {
+		if p.Source == "forecast" {
+			forecast = append(forecast, p)
+		}
+	}
+	if len(forecast) == 0 {
+		t.Fatal("no forecast rows")
+	}
+	first := forecast[0]
+	if first.SpotOreKwh < 150 {
+		t.Errorf("first unpublished hour jumped to climatology: got %.1f, want near last-known 200 (not 70)", first.SpotOreKwh)
+	}
+	if first.SpotOreKwh > 201 {
+		t.Errorf("first unpublished hour overshot last-known: got %.1f", first.SpotOreKwh)
+	}
+}
+
 func TestBuildSlotsWeatherProvenanceFollowsTwinCloudInput(t *testing.T) {
 	weatherStart := time.Date(2026, 4, 15, 10, 0, 0, 0, time.UTC)
 	priceStart := weatherStart.Add(75 * time.Minute)

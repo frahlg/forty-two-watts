@@ -273,6 +273,32 @@ func TestValidatePlanRejectsBatteryFedSurplusLoadpoint(t *testing.T) {
 	}
 }
 
+func TestValidatePlanAllowsGridChargeWithIdleSurplusOnlyEV(t *testing.T) {
+	slots := []Slot{{StartMs: 1, LenMin: 60, PriceOre: 30, SpotOre: 10, Confidence: 1, LoadW: 500}}
+	p := Params{
+		Mode: ModeArbitrage, CapacityWh: 10000,
+		SoCMinPct: 10, SoCMaxPct: 95, InitialSoCPct: 20,
+		MaxChargeW: 5000, MaxDischargeW: 5000,
+		ChargeEfficiency: 0.95, DischargeEfficiency: 0.95,
+		Loadpoint: &LoadpointSpec{
+			ID: "car", CapacityWh: 40000, Levels: 11, MinPct: 0, MaxPct: 100,
+			InitialSoCPct: 80, PluggedIn: true, MaxChargeW: 2000,
+			AllowedStepsW: []float64{0, 2000}, ChargeEfficiency: 1,
+			SurplusOnly: true,
+		},
+	}
+	// 4000 W charge for 1 h at 95% from 20% of 10 kWh → 20 + 38 = 58%.
+	plan := Plan{Mode: p.Mode, HorizonSlots: 1, CapacityWh: p.CapacityWh, InitialSoCPct: 20,
+		TotalCostOre: 135, Actions: []Action{{
+			SlotStartMs: 1, SlotLenMin: 60,
+			BatteryW: 4000, GridW: 4500, SoCPct: 58,
+			LoadpointW: 0, LoadpointSoCPct: 80, CostOre: 135,
+		}}}
+	if err := ValidatePlan(slots, p, &plan); err != nil {
+		t.Fatalf("ValidatePlan rejected idle surplus-only EV plus battery grid-charge: %v", err)
+	}
+}
+
 func TestExternalOptimizerEndToEnd(t *testing.T) {
 	python := os.Getenv("FTW_TEST_OPTIMIZER_PYTHON")
 	if python == "" {

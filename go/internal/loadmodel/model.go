@@ -8,7 +8,7 @@
 //     baseline) without having to fit non-linear basis functions.
 //
 //  2. Typical-home prior. Each bucket is seeded with a reasonable
-//     Swedish-home default (300W overnight, 2000W morning/evening
+//     Swedish-home default (650W overnight, 2000W morning/evening
 //     peaks, 600W midday). Day-one predictions are useful; the model
 //     refines from there.
 //
@@ -131,7 +131,7 @@ func typicalPrior(hourOfWeek int) float64 {
 	weekday := hourOfWeek / 24
 	hour := hourOfWeek % 24
 	isWeekend := weekday >= 5 // Saturday (5), Sunday (6)
-	base := 300.0             // overnight baseload
+	base := 650.0 // overnight baseload — typical Swedish house today, not 2010
 	morning := 2000.0 * math.Exp(-0.5*math.Pow(float64(hour-7)/1.2, 2))
 	midday := 600.0 * math.Exp(-0.5*math.Pow(float64(hour-13)/2.5, 2))
 	eveningH := 18.5
@@ -194,9 +194,9 @@ func (m Model) prior(hourOfWeek int) float64 {
 // repaired model quickly re-learns from warm-season observations.
 //
 // Floor is conservative (25% of prior) so we only touch buckets that are
-// clearly below any plausible real consumption — a house at 75 W overnight
+// clearly below any plausible real consumption — a house at 150 W overnight
 // would be unusual but possible, so we preserve those. A mean of 15 W for an
-// overnight bucket that has prior=300 W is unambiguously poisoned.
+// overnight bucket that has prior=650 W is unambiguously poisoned.
 const poisonFloor = 0.25
 
 func (m *Model) repairPoisonedBuckets() {

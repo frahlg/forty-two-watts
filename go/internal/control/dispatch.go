@@ -1942,12 +1942,11 @@ func ComputeDispatch(
 
 		// Surplus-only EV reserve (energy path): cap battery aggregate
 		// charge to leave PV headroom for an EV that's under a
-		// surplus_only loadpoint. The MPC's grid-charge ban handles the
-		// planning side; this enforces it on every tick (covers reactive
-		// drift, stale plan fallback, and the period before the next
-		// replan picks up the EV's needs). Discharge is unaffected — the
-		// reserve only matters when the battery is competing with the
-		// EV for the same surplus PV. Final cap — runs AFTER the PV
+		// surplus_only loadpoint. This is a live-PV sharing rule, not a
+		// grid-charge ban: the planner may still import to the home
+		// battery for house load or arbitrage. Discharge is unaffected —
+		// the reserve only matters when the battery is competing with
+		// the EV for the same surplus PV. Final cap — runs AFTER the PV
 		// surplus absorber so the absorber can't override an EV reserve.
 		if state.EVSurplusOnlyReserveW > 0 && targetTotalW > 0 {
 			ceiling := surplus.chargeCeilingAfterEVReserveW()

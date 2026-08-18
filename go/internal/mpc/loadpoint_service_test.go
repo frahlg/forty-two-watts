@@ -277,3 +277,57 @@ func TestSurplusOnlyForbidsBatteryFeedingEVEvenWhenCoverEVEnabled(t *testing.T) 
 		}
 	}
 }
+
+// TestArbitrageGridChargesWhileSurplusOnlyEVIsConnected is the active-
+// arbitrage + surplus-only EV contract: the car may not import, but the
+// home battery must still buy from the grid in a cheap slot. The old
+// feasibility rule forbade (battW > 0 AND gridW > 50) whenever the car
+// was plugged in, which silenced grid-charge for the whole connection.
+func TestArbitrageGridChargesWhileSurplusOnlyEVIsConnected(t *testing.T) {
+	slots := []Slot{
+		{StartMs: 0, LenMin: 60, PriceOre: 30, SpotOre: 10, LoadW: 500, PVW: 0, Confidence: 1},
+		{StartMs: 3600_000, LenMin: 60, PriceOre: 300, SpotOre: 250, LoadW: 500, PVW: 0, Confidence: 1},
+	}
+	plan := Optimize(slots, Params{
+		Mode:                ModeArbitrage,
+		SoCLevels:           11,
+		CapacityWh:          20000,
+		SoCMinPct:           10,
+		SoCMaxPct:           95,
+		InitialSoCPct:       20,
+		ActionLevels:        11,
+		MaxChargeW:          5000,
+		MaxDischargeW:       5000,
+		ChargeEfficiency:    0.95,
+		DischargeEfficiency: 0.95,
+		TerminalSoCPrice:    150,
+		Loadpoint: &LoadpointSpec{
+			ID:               "garage",
+			CapacityWh:       60000,
+			Levels:           11,
+			InitialSoCPct:    80,
+			PluggedIn:        true,
+			TargetSoCPct:     80, // already at target — EV should stay off
+			TargetSlotIdx:    1,
+			MaxChargeW:       3000,
+			AllowedStepsW:    []float64{0, 3000},
+			ChargeEfficiency: 1.0,
+			SurplusOnly:      true,
+			NoBatteryToEV:    true,
+		},
+	})
+	if len(plan.Actions) != 2 {
+		t.Fatalf("got %d actions, want 2", len(plan.Actions))
+	}
+	if plan.Actions[0].LoadpointW > 50 {
+		t.Errorf("surplus-only EV imported without PV: evW=%.0f gridW=%.0f",
+			plan.Actions[0].LoadpointW, plan.Actions[0].GridW)
+	}
+	if plan.Actions[0].BatteryW < 500 {
+		t.Errorf("cheap slot should grid-charge the home battery, got battW=%.0f gridW=%.0f evW=%.0f",
+			plan.Actions[0].BatteryW, plan.Actions[0].GridW, plan.Actions[0].LoadpointW)
+	}
+	if plan.Actions[0].GridW < 500 {
+		t.Errorf("cheap slot should import for the battery, got gridW=%.0f", plan.Actions[0].GridW)
+	}
+}

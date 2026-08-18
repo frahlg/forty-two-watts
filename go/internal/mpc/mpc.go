@@ -720,28 +720,15 @@ func Optimize(slots []Slot, p Params) Plan {
 							continue
 						}
 
-						// Surplus-only EV: the battery must not steal
-						// PV that the EV could use, and must not
-						// grid-charge for arbitrage while the EV is
-						// connected. Without this rule the planner
-						// "launders" cheap grid through the battery:
-						// import in slot N to charge battery, discharge
-						// to EV in slot N+1 — gridW in N+1 looks ~0,
-						// the EV-only constraint above doesn't catch
-						// it, and the EV ends up grid-fed at retail
-						// import price + roundtrip loss. Forbidding
-						// (battW > 0 AND gridW > 50) when a surplus-
-						// only LP is plugged in closes that loophole.
-						// Battery charging from genuine PV surplus
-						// (gridW ≤ 50) stays allowed — that just
-						// means PV exceeds load+EV+battery and the
-						// battery soaks up what would otherwise
-						// export. Discharge (battW < 0) is always
-						// allowed (peak shaving, fuse guard, self-
-						// consumption when EV not drawing).
-						if evActive && lp.SurplusOnly && battW > 0 && gridW > 50 {
-							continue
-						}
+						// Surplus-only must not also ban home-battery
+						// grid charge. The EV-import rule above keeps
+						// the car off grid, and blocksBatteryToEV()
+						// below already rejects battery→EV, so the
+						// "launder cheap grid through the battery into
+						// the car" path is closed without forbidding
+						// Pixii/house-battery arbitrage while the car
+						// is plugged in. Active arbitrage with a
+						// surplus-only EV is a real operator setup.
 
 						// Don't simultaneously discharge the home battery
 						// for grid export AND charge the EV. Either the

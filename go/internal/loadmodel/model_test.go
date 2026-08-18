@@ -52,8 +52,8 @@ func TestDayOnePriorIsUsefulEverywhere(t *testing.T) {
 	o := m.PredictNoTemp(overnight)
 	mo := m.PredictNoTemp(morning)
 	e := m.PredictNoTemp(evening)
-	if o < 100 || o > 800 {
-		t.Errorf("overnight should be in [100, 800], got %f", o)
+	if o < 400 || o > 1000 {
+		t.Errorf("overnight should be in [400, 1000], got %f", o)
 	}
 	if mo < 1500 {
 		t.Errorf("morning peak should be >= 1500, got %f", mo)

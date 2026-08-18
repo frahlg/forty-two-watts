@@ -3476,13 +3476,12 @@ func (s *Server) handleLoadpointTarget(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// Disabling surplus_only is a planner regime change: the
-		// terminal SoC credit flips from self-consumption back to the
-		// arbitrage default (much higher), the grid-charge ban lifts,
-		// and the LP may now be eligible for grid-arbitrage scheduling
-		// (when target_soc_pct > 0). Force a synchronous replan with a
-		// tagged reason so the new schedule is in place by the time
-		// this HTTP response returns and the diagnose snapshot records
-		// "why" the plan changed at this timestamp.
+		// loadpoint may now import from the grid (and the home
+		// battery may feed it if BatteryCoversEV is on). Force a
+		// synchronous replan with a tagged reason so the new
+		// schedule is in place by the time this HTTP response
+		// returns and the diagnose snapshot records "why" the
+		// plan changed at this timestamp.
 		if prev && !*req.SurplusOnly {
 			surplusDisabled = true
 		}

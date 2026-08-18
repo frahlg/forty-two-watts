@@ -2048,16 +2048,16 @@ func main() {
 			// surplus-only mode, battery charging power is NOT
 			// available for the EV. The original formula assumed
 			// "if I told the battery to stop, that surplus would
-			// free up for the EV" — but the MPC, even with the
-			// grid-charge ban now in place, may still legitimately
-			// charge the battery from PV surplus. If we hand that
-			// power back to the EV, the controller commands the EV
-			// on, the battery loses its share, the planner re-budgets
-			// the EV down → flap. The truthful surplus for an EV
-			// under surplus-only is what's left AFTER the battery
-			// has taken its share: -gridW + max(0, -batW) (battery
-			// counts only if it's discharging, contributing to
-			// site supply).
+			// free up for the EV" — but the MPC may still
+			// legitimately charge the battery from PV surplus
+			// (and, in active arbitrage, from the grid). If we
+			// hand that power back to the EV, the controller
+			// commands the EV on, the battery loses its share,
+			// the planner re-budgets the EV down → flap. The
+			// truthful surplus for an EV under surplus-only is
+			// what's left AFTER the battery has taken its share:
+			// -gridW + max(0, -batW) (battery counts only if
+			// it's discharging, contributing to site supply).
 			// A bat-SoC-armed loadpoint is just as much a "PV-priority"
 			// claimant as a configured surplus_only LP — both want PV
 			// routed to the EV ahead of the home battery. Counting

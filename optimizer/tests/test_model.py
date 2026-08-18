@@ -2056,7 +2056,14 @@ def test_clarabel_solves_continuous_formulation() -> None:
     assert response["solver"]["formulation"] == "convex"
 
 
-def test_surplus_only_connection_blocks_grid_funded_battery_charge() -> None:
+def test_surplus_only_ev_does_not_block_home_battery_grid_charge() -> None:
+    """A plugged-in surplus-only EV must not import, but the home battery may.
+
+    Forbidding grid-funded battery charge while the car sat on the charger
+    made active arbitrage idle for the whole connection. Battery→EV is
+    already blocked by no_storage_to_load / surplus_only on the flex load.
+    """
+
     request = base_request()
     request["flex_loads"] = [
         {
@@ -2069,11 +2076,39 @@ def test_surplus_only_connection_blocks_grid_funded_battery_charge() -> None:
             "charge_efficiency": 0.9,
             "allowed_steps_w": [0, 3000],
             "surplus_only": True,
+            "no_storage_to_load": True,
         }
     ]
     response = handle(request)
     assert response["ok"], response
-    assert all(a["battery_w"] <= 1e-5 for a in response["plan"]["actions"])
+    actions = response["plan"]["actions"]
+    assert all(a["flex_power_w"]["surplus-car"] <= 1e-5 for a in actions)
+    assert actions[0]["battery_w"] > 100
+    assert actions[0]["grid_w"] > 100
+
+
+def test_surplus_only_ev_still_cannot_import() -> None:
+    request = base_request()
+    request["slots"] = [request["slots"][1]]  # expensive slot only
+    request["storages"][0]["initial_energy_wh"] = 2000
+    request["flex_loads"] = [
+        {
+            "id": "surplus-car",
+            "capacity_wh": 40000,
+            "initial_energy_wh": 10000,
+            "max_energy_wh": 40000,
+            "target_energy_wh": 20000,
+            "target_slot": 0,
+            "charge_efficiency": 1,
+            "allowed_steps_w": [0, 2000],
+            "surplus_only": True,
+        }
+    ]
+    response = handle(request)
+    assert response["ok"], response
+    action = response["plan"]["actions"][0]
+    if action["flex_power_w"]["surplus-car"] > 1e-5:
+        assert action["grid_w"] <= 50 + 1e-5
 
 
 def test_ev_charge_never_coincides_with_battery_export() -> None:

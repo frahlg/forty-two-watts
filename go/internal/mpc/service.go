@@ -1188,9 +1188,7 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 	// "idle, import to cover load" over "discharge now, refill from PV
 	// tomorrow" (because discharging loses η_rt while the extra retail-
 	// priced terminal credit is never realised).
-	terminalDefaulted := false
 	if p.TerminalSoCPrice <= 0 {
-		terminalDefaulted = true
 		switch p.Mode {
 		case ModeSelfConsumption, ModeCheapCharge, ModePassiveArbitrage:
 			p.TerminalSoCPrice = selfConsumptionTerminalPrice(prices,
@@ -1246,23 +1244,6 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 		}
 	}
 
-	// Surplus-only LP override: when an EV is connected to a surplus-
-	// only loadpoint, the battery is forbidden from grid-charging
-	// (mpc.go feasibility). The default arbitrage terminal credit
-	// (mean retail import price across the horizon) then becomes
-	// misleading — it tells the DP "stored energy is worth full
-	// retail" while the only realistic discharge path is local
-	// self-consumption (battery → house, battery → EV via the still-
-	// allowed PV-only charge). Re-evaluate the terminal credit using
-	// the self-consumption formula so the planner stops chasing a
-	// reward it can no longer earn through grid arbitrage. Only
-	// applies when we just defaulted above; an explicit caller-
-	// supplied TerminalSoCPrice is respected.
-	if terminalDefaulted && p.Loadpoint != nil && p.Loadpoint.SurplusOnly &&
-		p.Mode != ModeSelfConsumption && p.Mode != ModeCheapCharge && p.Mode != ModePassiveArbitrage {
-		p.TerminalSoCPrice = selfConsumptionTerminalPrice(prices,
-			s.ExportBonusOreKwh, s.ExportFeeOreKwh)
-	}
 	if err := validatePlanningSlots(slots); err != nil {
 		slog.Error("mpc: invalid optimization inputs; keeping previous plan", "basis", "primary", "err", err)
 		return s.Latest()
@@ -1673,12 +1654,22 @@ func (s *Service) LastReplanInfo() (time.Time, string) {
 }
 
 // extendPricesWithForecast appends synthesized price rows for slots between
-// the last published price and `untilMs`, using the learned predictor.
-// Synthesized rows are tagged `source="forecast"` so the UI can distinguish
-// them visually.
+// the last published price and `untilMs`.
+//
+// The hour-of-week climatology is a typical day, not tomorrow. Jumping
+// straight to it at the day-ahead cut-off produces a fake overnight
+// crash (200+ öre at 23:00 → 60–80 öre after midnight) that tells
+// active arbitrage to wait and skip charging. Blend from the last
+// published spot toward climatology with a 6 h e-folding so the first
+// unpublished hours follow the curve the operator just saw. Synthesized
+// rows are tagged `source="forecast"` so the UI can distinguish them.
+const forecastPersistTauH = 6.0
+
 func extendPricesWithForecast(prices []state.PricePoint, zone string, pricer PricePredictor, nowMs, untilMs int64, gridTariff, vatPct float64) []state.PricePoint {
-	// Find the latest published slot end.
+	// Find the latest published slot end and its spot.
 	var latestEndMs int64
+	var lastSpot float64
+	haveLast := false
 	slotLen := 60
 	for _, p := range prices {
 		sl := p.SlotLenMin
@@ -1688,6 +1679,8 @@ func extendPricesWithForecast(prices []state.PricePoint, zone string, pricer Pri
 		end := p.SlotTsMs + int64(sl)*60*1000
 		if end > latestEndMs {
 			latestEndMs = end
+			lastSpot = p.SpotOreKwh
+			haveLast = true
 		}
 		if sl > 0 {
 			slotLen = sl
@@ -1707,7 +1700,16 @@ func extendPricesWithForecast(prices []state.PricePoint, zone string, pricer Pri
 	start -= mod
 	for ts := start; ts < untilMs; ts += int64(slotLen) * 60 * 1000 {
 		t := time.UnixMilli(ts).UTC()
-		spot := pricer(zone, t)
+		climatology := pricer(zone, t)
+		spot := climatology
+		if haveLast {
+			hoursAhead := float64(ts-latestEndMs) / float64(time.Hour.Milliseconds())
+			if hoursAhead < 0 {
+				hoursAhead = 0
+			}
+			w := math.Exp(-hoursAhead / forecastPersistTauH)
+			spot = w*lastSpot + (1-w)*climatology
+		}
 		total := (spot + gridTariff) * (1 + vatPct/100.0)
 		prices = append(prices, state.PricePoint{
 			Zone:        zone,

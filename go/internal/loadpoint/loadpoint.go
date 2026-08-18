@@ -693,9 +693,8 @@ func (m *Manager) SetTarget(id string, socPct float64, targetTime time.Time) boo
 // new value (both the MPC LoadpointSpec builder in main.go and the
 // dispatch controller read from there). Returns (previous, ok) so a
 // caller can detect the transition direction — disabling surplus_only
-// is a regime change for the planner (terminal credit flips back to
-// the arbitrage default, the grid-charge ban lifts) and the API
-// handler forces a tagged replan in that case.
+// is a regime change for the planner (the EV may now import from the
+// grid) and the API handler forces a tagged replan in that case.
 func (m *Manager) SetSurplusOnly(id string, v bool) (prev bool, ok bool) {
 	m.mu.Lock()
 	lp, ok := m.byID[id]

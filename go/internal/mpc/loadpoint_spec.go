@@ -55,10 +55,12 @@ type LoadpointSpec struct {
 	ChargeEfficiency float64
 
 	// SurplusOnly forbids EV actions that need grid import or home-battery
-	// discharge. The loadpoint may use real site surplus only: PV already
-	// covering house load, or PV left after the battery's own planned charge.
-	// It must not treat battery discharge as synthetic PV surplus, even when
-	// the global BatteryCoversEV opt-in is enabled.
+	// discharge into the car. The loadpoint may use real site surplus only:
+	// PV already covering house load, or PV left after the battery's own
+	// planned charge. It must not treat battery discharge as synthetic PV
+	// surplus, even when the global BatteryCoversEV opt-in is enabled.
+	// The home battery itself may still grid-charge for house load or
+	// arbitrage — surplus-only is an EV policy, not a site import ban.
 	SurplusOnly bool
 
 	// NoBatteryToEV mirrors ctrl.State.BatteryCoversEV inverted: when
