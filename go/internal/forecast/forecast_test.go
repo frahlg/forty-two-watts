@@ -449,3 +449,146 @@ func TestServicePOAPathDiffersFromFlat(t *testing.T) {
 	}
 	t.Logf("POA-per-array estimate %.0fW vs flat %.0fW", got, flat)
 }
+
+func TestSanitizeKWpTreatsPastedWattsAsKilowatts(t *testing.T) {
+	t.Parallel()
+	got, pasted := SanitizeKWp(10000)
+	if !pasted || math.Abs(got-10) > 1e-9 {
+		t.Fatalf("SanitizeKWp(10000) = %v, %v; want 10, true", got, pasted)
+	}
+	got, pasted = SanitizeKWp(10)
+	if pasted || got != 10 {
+		t.Fatalf("SanitizeKWp(10) = %v, %v; want 10, false", got, pasted)
+	}
+	got, pasted = SanitizeKWp(999)
+	if pasted || got != 999 {
+		t.Fatalf("SanitizeKWp(999) = %v, %v; want 999, false", got, pasted)
+	}
+	got, pasted = SanitizeKWp(1000)
+	if !pasted || math.Abs(got-1) > 1e-9 {
+		t.Fatalf("SanitizeKWp(1000) = %v, %v; want 1, true", got, pasted)
+	}
+}
+
+func TestNameplateWPrefersRatedWhenArraysLookLikeWatts(t *testing.T) {
+	t.Parallel()
+	// Arrays still holding pasted watts (bypassing FromConfig) must not
+	// raise the site ceiling to 10 MW when weather.pv_rated_w is 10 kW.
+	got := NameplateW(10000, []Array{{KWp: 10000}})
+	if got != 10000 {
+		t.Fatalf("NameplateW(10000 W, 10000 kWp pasted) = %.0f; want 10000", got)
+	}
+	got = NameplateW(10000, []Array{{KWp: 10}})
+	if got != 10000 {
+		t.Fatalf("NameplateW(10000 W, 10 kWp) = %.0f; want 10000", got)
+	}
+	got = NameplateW(0, []Array{{KWp: 10000}})
+	if got != 10000 {
+		t.Fatalf("sanitized 10000 kWp with no rated W must become 10 kW, got %.0f", got)
+	}
+}
+
+func TestFromConfigSanitizesKWpPastedAsWatts(t *testing.T) {
+	st, err := state.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	s := FromConfig(&config.Weather{
+		Provider: "open_meteo", Latitude: 59.3293, Longitude: 18.0686,
+		PVRatedW: 10000,
+		PVArrays: []config.PVArray{testPVArray("south", 10000, 35, 180)},
+	}, 10000, st, "ua")
+	if s == nil {
+		t.Fatal("expected service")
+	}
+	if len(s.Arrays) != 1 || s.Arrays[0].KWp != 10 {
+		t.Fatalf("kWp 10000 W must become 10 kWp, got %+v", s.Arrays)
+	}
+}
+
+func TestPOAPVWattsDoesNotTreatWattsAsKWp(t *testing.T) {
+	tt := time.Date(2026, 8, 18, 16, 45, 0, 0, time.UTC) // 18:45 Swedish summer
+	ghi := 354.0
+	house := poaPVWattsFromGHI(59.3293, 18.0686, tt, ghi, []Array{{TiltDeg: 35, AzimuthDeg: 180, KWp: 10}})
+	pasted := poaPVWattsFromGHI(59.3293, 18.0686, tt, ghi, []Array{{TiltDeg: 35, AzimuthDeg: 180, KWp: 10000}})
+	if house <= 0 {
+		t.Fatalf("expected late-afternoon production, got %.1f W", house)
+	}
+	if house > 15000 {
+		t.Fatalf("10 kWp at 354 W/m² GHI should stay on a house scale, got %.1f W", house)
+	}
+	if math.Abs(pasted-house) > 1 {
+		t.Fatalf("kWp=10000 (watts pasted) must match kWp=10, house=%.1f pasted=%.1f", house, pasted)
+	}
+}
+
+// Screenshot case: Stockholm 18:45, GHI ~354 W/m², kWp pasted as 10000
+// (the Watts field). Before the sanitizer this stored ~3.5 MW and the
+// Plan tooltip showed "PV Forecast: 3544.2 kW".
+func TestFetchAndStoreCapsPastedWattsGHI(t *testing.T) {
+	tt := time.Date(2026, 8, 18, 16, 45, 0, 0, time.UTC)
+	ghi := 354.0
+	st, err := state.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	s := &Service{
+		Provider: staticForecastProvider{rows: []RawForecast{{HourStart: tt, SolarWm2: &ghi}}},
+		Store:    st,
+		Lat:      59.3293,
+		Lon:      18.0686,
+		RatedPVW: 10000,
+		Arrays:   []Array{{TiltDeg: 35, AzimuthDeg: 180, KWp: 10000}},
+	}
+	s.fetchAndStore(context.Background())
+	rows, err := st.LoadForecasts(tt.UnixMilli(), tt.Add(time.Hour).UnixMilli())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].PVWEstimated == nil {
+		t.Fatalf("expected one stored row, got %+v", rows)
+	}
+	got := *rows[0].PVWEstimated
+	if got > 10000*nameplateHeadroom+1 {
+		t.Fatalf("pasted 10000 kWp at 354 W/m² must not store megawatts, got %.1f W", got)
+	}
+	if got <= 0 {
+		t.Fatalf("late-afternoon GHI should still produce some PV, got %.1f W", got)
+	}
+}
+
+func TestLoadClampsStoredMegawattForecast(t *testing.T) {
+	st, err := state.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	wild := 3544200.0
+	ts := time.Date(2026, 8, 18, 16, 45, 0, 0, time.UTC).UnixMilli()
+	if err := st.SaveForecasts([]state.ForecastPoint{{
+		SlotTsMs: ts, SlotLenMin: 60, PVWEstimated: &wild, Source: "open_meteo",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	s := &Service{
+		Store:    st,
+		RatedPVW: 10000,
+		Arrays:   []Array{{TiltDeg: 35, AzimuthDeg: 180, KWp: 10}},
+	}
+	rows, err := s.Load(ts, ts+3600*1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].PVWEstimated == nil {
+		t.Fatalf("expected one clamped row, got %+v", rows)
+	}
+	got := *rows[0].PVWEstimated
+	if got > 10000*nameplateHeadroom+1 {
+		t.Fatalf("stored 3544 kW forecast must clamp to nameplate, got %.1f W", got)
+	}
+	if got < 10000 {
+		t.Fatalf("clamp should sit on the nameplate ceiling, got %.1f W", got)
+	}
+}

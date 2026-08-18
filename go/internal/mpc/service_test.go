@@ -1080,3 +1080,19 @@ func TestSlotDirectiveAtNilService(t *testing.T) {
 		t.Error("nil Service returned ok=true")
 	}
 }
+
+func TestClampForecastPVHouseNameplate(t *testing.T) {
+	t.Parallel()
+	wild := 3544200.0
+	ok := 3200.0
+	rows := clampForecastPV([]state.ForecastPoint{
+		{PVWEstimated: &wild},
+		{PVWEstimated: &ok},
+	}, 10000)
+	if rows[0].PVWEstimated == nil || *rows[0].PVWEstimated > 12500 {
+		t.Fatalf("3544 kW row must clamp to 12.5 kW, got %+v", rows[0].PVWEstimated)
+	}
+	if rows[1].PVWEstimated == nil || *rows[1].PVWEstimated != 3200 {
+		t.Fatalf("in-range estimate must stay, got %+v", rows[1].PVWEstimated)
+	}
+}

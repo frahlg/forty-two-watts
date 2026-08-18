@@ -53,6 +53,10 @@
       host.innerHTML = '<p style="color:var(--text-dim);font-size:0.75rem;margin:4px 0 8px">No arrays defined — model will learn orientation from telemetry.</p>';
       return;
     }
+    var wattsAsKwp = arrays.some(function (a) { return Number(a.kwp) >= 1000; });
+    var kwpWarn = wattsAsKwp
+      ? '<p role="alert" style="color:#f59e0b;font-size:0.8rem;margin:4px 0 8px">kWp is kilowatts-peak, not watts. 10 kW is <b>10</b>, not 10000 — 10000 makes the PV forecast look like megawatts.</p>'
+      : "";
     var previewHtml = '<div class="pv-arrays-3d-slot" ' +
       'style="margin:4px 0 10px"><ftw-pv-arrays-3d></ftw-pv-arrays-3d></div>';
     var rows = arrays.map(function (a, i) {
@@ -73,7 +77,7 @@
           '<button class="btn-remove" data-pv-arr-remove="' + i + '" type="button" title="Remove">✕</button>' +
         '</div></fieldset>';
     });
-    host.innerHTML = previewHtml + rows.join("");
+    host.innerHTML = kwpWarn + previewHtml + rows.join("");
     var pushArraysToPreview = function () {
       var el = host.querySelector("ftw-pv-arrays-3d");
       if (el && typeof el.setArrays === "function") {
@@ -182,7 +186,8 @@
         '<div id="pv-arrays-list"></div>' +
         '<button class="btn-add" id="pv-array-add" type="button">+ Add array</button>' +
         '<p style="color:var(--text-dim);font-size:0.75rem;margin:8px 0 0">' +
-        'Tilt: 0° = flat roof, 35° = typical pitched roof, 90° = wall. Azimuth: 0 = N, 90 = E, 180 = S, 270 = W.' +
+        'Tilt: 0° = flat roof, 35° = typical pitched roof, 90° = wall. Azimuth: 0 = N, 90 = E, 180 = S, 270 = W. ' +
+        'kWp is kilowatts-peak — a 10 kW roof is 10, not 10000 (that field is watts).' +
         '</p>' +
         '</fieldset>';
     },

@@ -388,6 +388,14 @@ func (s *Service) fetchAndStore(ctx context.Context) {
 		if pvW < 0 {
 			pvW = 0
 		}
+		if capW := s.nameplateW(); capW > 0 {
+			if capped, ok := clampPVToNameplate(pvW, capW); ok {
+				slog.Warn("forecast PV capped to nameplate",
+					"provider", s.Provider.Name(), "slot", r.HourStart,
+					"raw_w", pvW, "capped_w", capped, "nameplate_w", capW)
+				pvW = capped
+			}
+		}
 		pvPtr := &pvW
 		points = append(points, state.ForecastPoint{
 			SlotTsMs:      r.HourStart.UnixMilli(),
@@ -412,7 +420,67 @@ func arrayFromConfig(a config.PVArray) (Array, bool) {
 	if !ok {
 		return Array{}, false
 	}
+	if sanitized, pastedWatts := SanitizeKWp(kWp); pastedWatts {
+		slog.Warn("pv array kwp looks like watts; using kW",
+			"name", a.Name, "entered", kWp, "kwp", sanitized)
+		kWp = sanitized
+	}
 	return Array{TiltDeg: tiltDeg, AzimuthDeg: azimuthDeg, KWp: kWp}, true
+}
+
+// kwpLooksLikeWatts is the threshold where an array's "kWp" value is
+// almost certainly nameplate watts pasted from weather.pv_rated_w.
+// 200 kWp is already a large C&I roof; 1000 kWp = 1 MW is past what
+// this field is used for on FTW sites. A 10 kW home that entered
+// 10000 (the Watts field) must not be sent to forecast.solar as 10 MW
+// or projected as 10 MW from GHI.
+const kwpLooksLikeWatts = 1000
+
+// SanitizeKWp returns kW-peak. If the operator pasted watts into the
+// kWp field (10000 for a 10 kW roof), divide by 1000. Real arrays
+// below the threshold are unchanged.
+func SanitizeKWp(kWp float64) (sanitized float64, pastedWatts bool) {
+	if kWp >= kwpLooksLikeWatts {
+		return kWp / 1000.0, true
+	}
+	return kWp, false
+}
+
+func (s *Service) nameplateW() float64 {
+	return NameplateW(s.RatedPVW, s.Arrays)
+}
+
+// NameplateW is the site PV ceiling used to clamp wild forecasts.
+// Prefer the sanitized array sum; if that is >10× the explicit
+// pv_rated_w, the arrays still look like watts and we keep the
+// smaller explicit rating.
+func NameplateW(ratedPVW float64, arrays []Array) float64 {
+	var sumW float64
+	for _, a := range arrays {
+		kWp, _ := SanitizeKWp(a.KWp)
+		if kWp > 0 {
+			sumW += kWp * 1000.0
+		}
+	}
+	switch {
+	case sumW > 0 && ratedPVW > 0 && sumW > ratedPVW*10:
+		return ratedPVW
+	case sumW > 0:
+		return sumW
+	case ratedPVW > 0:
+		return ratedPVW
+	default:
+		return 0
+	}
+}
+
+const nameplateHeadroom = 1.25
+
+func clampPVToNameplate(pvW, nameplateW float64) (float64, bool) {
+	if nameplateW <= 0 || pvW <= nameplateW*nameplateHeadroom {
+		return pvW, false
+	}
+	return nameplateW * nameplateHeadroom, true
 }
 
 func normalizeIrradiance(ghiWm2 float64) (float64, bool) {
@@ -456,13 +524,40 @@ func poaPVWattsFromGHI(lat, lon float64, t time.Time, ghiWm2 float64, arrays []A
 			continue
 		}
 		poa := sunpos.POAFromGHI(t, lat, lon, ghiWm2, a.TiltDeg, a.AzimuthDeg)
+		kWp, _ := SanitizeKWp(a.KWp)
 		// kWp×1000 = nameplate W at STC (1000 W/m²); scale by POA/1000.
-		total += a.KWp * 1000.0 * (poa / 1000.0)
+		total += kWp * 1000.0 * (poa / 1000.0)
 	}
 	return total
 }
 
-// Load returns forecasts in [sinceMs, untilMs].
+// Load returns forecasts in [sinceMs, untilMs]. Estimates stored
+// before kWp-as-watts was sanitized are clamped to nameplate so a
+// 3-hour-old 10 MW row cannot keep driving the plan chart.
 func (s *Service) Load(sinceMs, untilMs int64) ([]state.ForecastPoint, error) {
-	return s.Store.LoadForecasts(sinceMs, untilMs)
+	rows, err := s.Store.LoadForecasts(sinceMs, untilMs)
+	if err != nil {
+		return rows, err
+	}
+	return ClampForecasts(rows, s.nameplateW()), nil
+}
+
+// ClampForecasts copies any estimate above 1.25× nameplate down onto
+// that ceiling. The planner and /api/forecast both read through this
+// so a row saved before kWp-as-watts was sanitized cannot keep
+// showing 3544 kW on a 10 kW roof.
+func ClampForecasts(rows []state.ForecastPoint, nameplateW float64) []state.ForecastPoint {
+	if nameplateW <= 0 {
+		return rows
+	}
+	for i := range rows {
+		if rows[i].PVWEstimated == nil {
+			continue
+		}
+		if capped, ok := clampPVToNameplate(*rows[i].PVWEstimated, nameplateW); ok {
+			v := capped
+			rows[i].PVWEstimated = &v
+		}
+	}
+	return rows
 }

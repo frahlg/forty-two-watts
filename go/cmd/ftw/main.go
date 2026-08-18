@@ -1059,6 +1059,13 @@ func main() {
 				if forecastSvc != nil {
 					forecastSvc.RatedPVW = newRated
 				}
+				if mpcSvc != nil {
+					if forecastSvc != nil {
+						mpcSvc.PVNameplateW = forecast.NameplateW(forecastSvc.RatedPVW, forecastSvc.Arrays)
+					} else {
+						mpcSvc.PVNameplateW = newRated
+					}
+				}
 			}
 			newLat := newCfg.Weather.Latitude
 			newLon := newCfg.Weather.Longitude
@@ -1256,6 +1263,11 @@ func main() {
 		// the fuse from the start (instead of producing plans that
 		// dispatch later has to scale via the joint allocator).
 		mpcSvc.FuseMaxW = cfg.Fuse.MaxPowerW()
+		if forecastSvc != nil {
+			mpcSvc.PVNameplateW = forecast.NameplateW(forecastSvc.RatedPVW, forecastSvc.Arrays)
+		} else if ratedPVW > 0 {
+			mpcSvc.PVNameplateW = ratedPVW
+		}
 		// Cap planned export below the fuse when the operator set a site
 		// export ceiling, so the DP never schedules a discharge that would
 		// over-export and trip an inverter (the Ferroamp 0x8030 fault).
