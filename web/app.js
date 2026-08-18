@@ -2368,24 +2368,29 @@
     setupBannerShown = false;
   }
 
-  // ---- "Add a device" prompt when drivers object is empty ----
+  // ---- First-run empty state when no drivers are configured ----
+  // The prompt used to be injected after .summary-cards, which now lives
+  // inside the hidden Values panel. First-time users on Flow never saw it.
   function updateNoDevicesPrompt(drivers) {
-    var existing = document.getElementById("no-devices-prompt");
     var hasDrivers = drivers && typeof drivers === "object" && Object.keys(drivers).length > 0;
+    document.body.classList.toggle("no-devices", !hasDrivers);
+    var empty = document.getElementById("overview-empty");
+    if (empty) empty.hidden = hasDrivers;
+    var sub = document.getElementById("overview-heading-sub");
+    if (sub) {
+      sub.textContent = hasDrivers
+        ? "Live power, today’s price and the next safe action."
+        : "Connect a device to see live power and the next safe action.";
+    }
     if (hasDrivers) {
-      if (existing) existing.remove();
+      if (overviewHealth) overviewHealth.classList.remove("is-empty");
       return;
     }
-    if (existing) return; // already showing
-    var prompt = document.createElement("div");
-    prompt.id = "no-devices-prompt";
-    prompt.className = "no-devices-prompt";
-    // The wizard's Save replaces config (it doesn't merge yet), so the copy
-    // says "Run setup wizard" rather than "Add a device". ?step=3 is honored
-    // by setup.js init (deep-link → scan step).
-    prompt.innerHTML = 'No devices connected. <a href="/setup?step=3">Run setup wizard &rarr;</a>';
-    var cards = document.querySelector(".summary-cards");
-    if (cards) cards.parentNode.insertBefore(prompt, cards.nextSibling);
+    if (overviewHealth) {
+      overviewHealth.classList.remove("is-connected");
+      overviewHealth.classList.add("is-empty");
+    }
+    if (overviewHealthLabel) overviewHealthLabel.textContent = "No devices";
   }
 
   function setMode(mode) {

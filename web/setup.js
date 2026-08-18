@@ -6,6 +6,18 @@
 
   var TOTAL_STEPS = 8;
   var currentStep = 1;
+  var scanAttempted = false;
+
+  var STEP_LABELS = {
+    1: 'Welcome',
+    2: 'Your home',
+    3: 'Find devices',
+    4: 'Choose device',
+    5: 'Connection',
+    6: 'Devices',
+    7: 'Extras',
+    8: 'Review'
+  };
 
   // Collected state
   var configuredDrivers = [];    // array of driver objects ready for config.drivers
@@ -25,9 +37,20 @@
     for (var i = 1; i <= TOTAL_STEPS; i++) {
       var dot = document.createElement('div');
       dot.className = 'step-dot';
-      if (i === currentStep) dot.className += ' active';
-      else if (i < currentStep) dot.className += ' done';
+      dot.setAttribute('role', 'listitem');
+      dot.setAttribute('aria-label', 'Step ' + i + ': ' + STEP_LABELS[i]);
+      if (i === currentStep) {
+        dot.className += ' active';
+        dot.setAttribute('aria-current', 'step');
+      } else if (i < currentStep) {
+        dot.className += ' done';
+      }
       container.appendChild(dot);
+    }
+    var caption = document.getElementById('step-caption');
+    if (caption) {
+      caption.textContent = 'Step ' + currentStep + ' of ' + TOTAL_STEPS +
+        ' · ' + STEP_LABELS[currentStep];
     }
   }
 
@@ -35,6 +58,10 @@
     if (n < 1 || n > TOTAL_STEPS) return;
 
     // Pre-step hooks
+    if (n === 3 && !scanAttempted) {
+      scanAttempted = true;
+      window.startScan();
+    }
     if (n === 4) loadCatalog();
     if (n === 6) renderDriversSummary();
     if (n === 7) prepareIntegrations();
@@ -77,7 +104,7 @@
         // API returns a raw array, not {devices: [...]}
         var devices = Array.isArray(data) ? data : (data.devices || []);
         if (devices.length === 0) {
-          statusEl.innerHTML = 'No devices found. Try entering the IP manually.';
+          statusEl.innerHTML = 'No devices found. Enter an address, or continue without devices.';
           return;
         }
         statusEl.style.display = 'none';
@@ -114,7 +141,7 @@
       })
       .catch(function (err) {
         statusEl.innerHTML = 'Scan failed: ' + esc(err.message) +
-          '. Try entering the IP manually.';
+          '. Enter an address, or continue without devices.';
       });
   };
 
@@ -572,6 +599,7 @@
   window.addAnotherDevice = function () {
     selectedDevice = null;
     selectedCatalog = null;
+    scanAttempted = false;
     goStep(3);
   };
 

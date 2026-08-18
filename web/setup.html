@@ -56,6 +56,15 @@
     }
 
     /* ---- Step indicator ---- */
+    .step-caption {
+      text-align: center;
+      margin: 0 0 10px;
+      color: var(--fg-muted);
+      font-family: var(--mono);
+      font-size: 0.72rem;
+      letter-spacing: 0.08em;
+    }
+
     .step-dots {
       display: flex;
       justify-content: center;
@@ -119,6 +128,13 @@
       text-transform: uppercase;
       color: var(--fg-muted);
       margin-bottom: 6px;
+    }
+
+    .form-hint {
+      margin: 6px 0 0;
+      color: var(--fg-muted);
+      font-size: 0.78rem;
+      line-height: 1.45;
     }
 
     .form-group input[type="text"],
@@ -494,6 +510,27 @@
       .wizard { padding: 2rem 0.9rem; }
       .form-row, .form-row-3 { grid-template-columns: 1fr; }
       .wizard-logo { height: 44px; }
+      /* Phone: keep the recognised name + Use button. Address/port/protocol
+         are noise once the scan has already identified the device. */
+      .scan-table thead { display: none; }
+      .scan-table, .scan-table tbody, .scan-table tr, .scan-table td {
+        display: block;
+        width: 100%;
+      }
+      .scan-table tr {
+        margin-bottom: 8px;
+        padding: 10px 12px;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+      }
+      .scan-table td {
+        padding: 2px 0;
+        border-bottom: 0;
+      }
+      .scan-table td:nth-child(1),
+      .scan-table td:nth-child(2),
+      .scan-table td:nth-child(3) { display: none; }
+      .scan-table .btn-use { width: 100%; margin-top: 8px; }
     }
   </style>
 </head>
@@ -508,8 +545,9 @@
     </div>
   </div>
 
-  <!-- Step dots -->
-  <div class="step-dots" id="step-dots"></div>
+  <!-- Step progress -->
+  <p class="step-caption" id="step-caption"></p>
+  <div class="step-dots" id="step-dots" role="list" aria-label="Setup progress"></div>
 
   <!-- Step 1: Welcome -->
   <div class="step" id="step-1" data-step="1">
@@ -521,15 +559,15 @@
       <ftw-update-check></ftw-update-check>
 
       <h2>Welcome to FTW</h2>
-      <p>Let's set up your home energy system in a few steps.</p>
+      <p>A few short steps: your home, your devices, then start.</p>
       <button class="btn-primary" onclick="goStep(2)">Get started</button>
     </div>
   </div>
 
   <!-- Step 2: Site basics -->
   <div class="step" id="step-2" data-step="2">
-    <h2>Site basics</h2>
-    <p>Tell us about your electrical installation.</p>
+    <h2>Your home</h2>
+    <p>These numbers are on the fuse box. They keep FTW from drawing more than the house can take.</p>
 
     <div class="form-group">
       <label for="site-name">Site name</label>
@@ -540,6 +578,7 @@
       <div class="form-group">
         <label for="fuse-amps">Fuse rating (A)</label>
         <input type="number" id="fuse-amps" value="16" min="1" max="100">
+        <p class="form-hint">Usually 16, 20 or 25 A.</p>
       </div>
       <div class="form-group">
         <label for="fuse-phases">Phases</label>
@@ -581,8 +620,8 @@
 
   <!-- Step 3: Find devices -->
   <div class="step" id="step-3" data-step="3">
-    <h2>Find devices</h2>
-    <p>Scan your network for inverters, batteries, and meters.</p>
+    <h2>Find your devices</h2>
+    <p>Scan the network for inverters, batteries and meters. You can also type an address.</p>
 
     <div id="scan-controls">
       <button class="btn-primary" id="scan-btn" onclick="startScan()">Scan network</button>
@@ -616,14 +655,14 @@
 
     <div class="wizard-actions">
       <button class="btn-secondary" onclick="goStep(2)">Back</button>
-      <button class="btn-skip" onclick="goStep(7)">Skip (no devices)</button>
+      <button class="btn-secondary" onclick="goStep(7)">Continue without devices</button>
     </div>
   </div>
 
   <!-- Step 4: Pick driver -->
   <div class="step" id="step-4" data-step="4">
-    <h2>Pick driver</h2>
-    <p>Select the driver that matches your device.</p>
+    <h2>Choose your device</h2>
+    <p>Pick the model that matches what we found.</p>
 
     <div class="form-group">
       <label for="driver-select">Driver</label>
@@ -654,8 +693,8 @@
 
   <!-- Step 5: Configure driver -->
   <div class="step" id="step-5" data-step="5">
-    <h2>Configure driver</h2>
-    <p>Fine-tune the connection settings.</p>
+    <h2>Connection details</h2>
+    <p>Check the address, then say whether this device measures the whole house.</p>
 
     <div class="form-group">
       <label for="drv-name">Name</label>
@@ -682,7 +721,7 @@
 
     <div class="form-check">
       <input type="checkbox" id="drv-site-meter" checked>
-      <label for="drv-site-meter">This is my site meter</label>
+      <label for="drv-site-meter">This device measures the whole house</label>
     </div>
 
     <div class="form-group" id="drv-battery-group" style="display:none">
@@ -702,8 +741,8 @@
 
   <!-- Step 6: Add more? -->
   <div class="step" id="step-6" data-step="6">
-    <h2>Configured devices</h2>
-    <p>Review your devices or add more.</p>
+    <h2>Your devices</h2>
+    <p>Add another device, or continue.</p>
 
     <div class="drivers-summary" id="drivers-summary"></div>
 
@@ -715,8 +754,8 @@
 
   <!-- Step 7: Optional integrations -->
   <div class="step" id="step-7" data-step="7">
-    <h2>Optional integrations</h2>
-    <p>Connect additional services. All fields are optional.</p>
+    <h2>Optional extras</h2>
+    <p>EV charger, Home Assistant and price source — all optional.</p>
 
     <div class="integration-section">
       <h3>EV Charger</h3>
@@ -819,8 +858,8 @@
 
   <!-- Step 8: Review + Save -->
   <div class="step" id="step-8" data-step="8">
-    <h2>Review and save</h2>
-    <p>Confirm your configuration before starting.</p>
+    <h2>Review and start</h2>
+    <p>Check this once, then start FTW.</p>
 
     <div id="review-content"></div>
     <div id="save-error" style="display:none"></div>
@@ -832,8 +871,8 @@
 
     <div id="save-success" class="success-screen" style="display:none">
       <div class="checkmark">&#10003;</div>
-      <h2>Configuration saved!</h2>
-      <p>Restarting... you will be redirected to the dashboard.</p>
+      <h2>You’re set</h2>
+      <p>Restarting… you will land on the dashboard.</p>
     </div>
   </div>
 
@@ -846,6 +885,6 @@
      the first setup paint. -->
 <script type="module" src="/components/ftw-update-check.js"></script>
 <script src="/lan-auth.js?v=lan1"></script>
-<script src="/setup.js?v=zones1"></script>
+<script src="/setup.js?v=empty1"></script>
 </body>
 </html>

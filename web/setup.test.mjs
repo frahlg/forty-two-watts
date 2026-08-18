@@ -182,6 +182,37 @@ describe("setup wizard driver picker — not-listed escape hatch (#757)", () => 
   });
 });
 
+describe("setup wizard — first-run progress and household copy", () => {
+  it("names the current step instead of only painting unlabeled dots", () => {
+    assert.match(HTML, /id=["']step-caption["']/);
+    assert.match(JS, /STEP_LABELS\s*=/);
+    assert.match(JS, /Step '\s*\+\s*currentStep\s*\+\s*' of '/);
+    assert.match(JS, /aria-current['"],\s*['"]step['"]/);
+  });
+
+  it("starts a network scan when the user first reaches Find devices", () => {
+    assert.match(JS, /scanAttempted/);
+    assert.match(JS, /n === 3 && !scanAttempted[\s\S]*window\.startScan\(\)/);
+    assert.match(JS, /addAnotherDevice[\s\S]*scanAttempted = false/);
+  });
+
+  it("uses household words on the first screens", () => {
+    assert.match(HTML, /<h2>Your home<\/h2>/);
+    assert.match(HTML, /Usually 16, 20 or 25 A/);
+    assert.match(HTML, /<h2>Find your devices<\/h2>/);
+    assert.match(HTML, /<h2>Choose your device<\/h2>/);
+    assert.match(HTML, /This device measures the whole house/);
+    assert.match(HTML, /Continue without devices/);
+    assert.doesNotMatch(HTML, /Skip \(no devices\)/);
+    assert.doesNotMatch(HTML, /<h2>Pick driver<\/h2>/);
+  });
+
+  it("stacks scan results on a phone instead of a five-column table", () => {
+    assert.match(HTML, /@media \(max-width: 480px\)[\s\S]*\.scan-table td:nth-child\(1\)/);
+    assert.match(HTML, /\.scan-table \.btn-use \{ width: 100%/);
+  });
+});
+
 describe("setup wizard — mDNS-first device addressing", () => {
   it("carries the discovered hostname into the selected device", () => {
     assert.match(JS, /hostname:\s*dev\.hostname/,

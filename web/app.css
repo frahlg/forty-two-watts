@@ -283,6 +283,67 @@ body.ftw-app .overview-health.is-connected .overview-health-dot {
   background: var(--green-e);
   box-shadow: 0 0 0 3px color-mix(in oklch, var(--green-e) 14%, transparent);
 }
+body.ftw-app .overview-health.is-empty {
+  color: var(--fg-dim);
+}
+body.ftw-app .overview-health.is-empty .overview-health-dot {
+  background: var(--yellow);
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--yellow) 18%, transparent);
+}
+
+/* First-run: hide live instruments that only show dashes / zeros.
+   Price stays — a zone can exist before any device is added. */
+body.ftw-app.no-devices #power-now,
+body.ftw-app.no-devices #overview-plan-summary,
+body.ftw-app.no-devices #overview-today,
+body.ftw-app.no-devices .fuse-row {
+  display: none;
+}
+body.ftw-app.no-devices .overview-outlook {
+  grid-template-columns: 1fr;
+}
+body.ftw-app .overview-empty {
+  grid-column: 1 / -1;
+  background: var(--ink-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  padding: 28px 24px;
+  text-align: center;
+}
+body.ftw-app .overview-empty h2 {
+  margin: 0 0 8px;
+  color: var(--fg);
+  font-family: var(--sans);
+  font-size: clamp(20px, 2.4vw, 26px);
+  letter-spacing: -0.02em;
+}
+body.ftw-app .overview-empty > p:not(.section-kicker):not(.overview-empty-note) {
+  margin: 0 auto 18px;
+  max-width: 44ch;
+  color: var(--fg-dim);
+}
+body.ftw-app .overview-empty-cta {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  padding: 0 18px;
+  border-radius: 8px;
+  background: var(--accent-e);
+  color: var(--on-accent);
+  font-family: var(--sans);
+  font-size: 14px;
+  font-weight: 500;
+  text-decoration: none;
+}
+body.ftw-app .overview-empty-cta:hover {
+  opacity: 0.92;
+}
+body.ftw-app .overview-empty-note {
+  margin: 12px 0 0;
+  color: var(--fg-muted);
+  font-size: 0.78rem;
+}
 body.ftw-app .section-kicker {
   margin: 0 0 3px;
   color: var(--accent-e);
@@ -2236,6 +2297,10 @@ body.ftw-app .diagnose-detail {
   body.ftw-app .overview-heading {
     grid-column: 1;
     align-items: start;
+  }
+  body.ftw-app .overview-empty {
+    grid-column: 1;
+    padding: 22px 16px;
   }
   body.ftw-app .overview-heading > div:first-child > p:last-child {
     display: none;

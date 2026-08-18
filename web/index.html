@@ -32,7 +32,7 @@
   <link rel="stylesheet" href="/components/theme.css">
   <link rel="stylesheet" href="/style.css?v=history3">
   <!-- Dashboard layout is layered on the shared base styles. -->
-  <link rel="stylesheet" href="/app.css?v=ia1">
+  <link rel="stylesheet" href="/app.css?v=empty1">
   <!-- Three.js bare-specifier resolution. Three is vendored under
        /vendor/three/ (pinned 0.160.0) rather than pulled from a CDN
        so the dashboard has no runtime CDN dependency. The modules
@@ -148,12 +148,24 @@
       <div>
         <p class="view-kicker">Overview</p>
         <h2>Your home, right now</h2>
-        <p>Live power, today’s price and the next safe action.</p>
+        <p id="overview-heading-sub">Live power, today’s price and the next safe action.</p>
       </div>
       <div class="overview-health" id="overview-health" aria-live="polite">
         <span class="overview-health-dot" aria-hidden="true"></span>
         <span id="overview-health-label">Connecting…</span>
       </div>
+    </section>
+
+    <!-- First-run empty state. Hidden until /api/status reports no
+         drivers. Must live here — not inside #power-now-values — so it
+         stays visible on the default Flow view. The wizard still
+         replaces config on save, so the CTA says "Run setup wizard". -->
+    <section id="overview-empty" class="overview-empty" hidden>
+      <p class="section-kicker">Get started</p>
+      <h2>No devices yet</h2>
+      <p>Connect an inverter, battery or meter to see live power and what FTW does next.</p>
+      <a class="overview-empty-cta" href="/setup?step=3">Run setup wizard</a>
+      <p class="overview-empty-note">The wizard replaces the current setup.</p>
     </section>
 
     <section class="power-now" id="power-now" aria-labelledby="power-now-title">
@@ -931,7 +943,7 @@
   </ftw-modal>
 
   <script src="/lan-auth.js?v=lan1"></script>
-  <script src="/app.js?v=zones1"></script>
+  <script src="/app.js?v=empty1"></script>
   <script src="/settings.js?v=diag3"></script>
   <script src="/settings/tabs/control.js?v=tabsplit1"></script>
   <script src="/settings/driver-editor.js?v=aceedit1"></script>
