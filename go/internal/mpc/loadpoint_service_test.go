@@ -331,3 +331,43 @@ func TestArbitrageGridChargesWhileSurplusOnlyEVIsConnected(t *testing.T) {
 		t.Errorf("cheap slot should import for the battery, got gridW=%.0f", plan.Actions[0].GridW)
 	}
 }
+
+func TestSurplusOnlyEVCannotImportEvenWithDeadline(t *testing.T) {
+	slots := []Slot{
+		{StartMs: 0, LenMin: 60, PriceOre: 40, SpotOre: 10, LoadW: 500, PVW: 0, Confidence: 1},
+	}
+	plan := Optimize(slots, Params{
+		Mode:                ModeArbitrage,
+		SoCLevels:           11,
+		CapacityWh:          10000,
+		SoCMinPct:           10,
+		SoCMaxPct:           95,
+		InitialSoCPct:       50,
+		ActionLevels:        11,
+		MaxChargeW:          5000,
+		MaxDischargeW:       5000,
+		ChargeEfficiency:    0.95,
+		DischargeEfficiency: 0.95,
+		TerminalSoCPrice:    40,
+		Loadpoint: &LoadpointSpec{
+			ID:               "garage",
+			CapacityWh:       40000,
+			Levels:           11,
+			InitialSoCPct:    20,
+			PluggedIn:        true,
+			TargetSoCPct:     80,
+			TargetSlotIdx:    0,
+			MaxChargeW:       7000,
+			AllowedStepsW:    []float64{0, 7000},
+			ChargeEfficiency: 1.0,
+			SurplusOnly:      true,
+		},
+	})
+	if len(plan.Actions) != 1 {
+		t.Fatalf("got %d actions, want 1", len(plan.Actions))
+	}
+	if plan.Actions[0].LoadpointW > 50 && plan.Actions[0].GridW > 50 {
+		t.Errorf("surplus-only EV imported from grid: evW=%.0f gridW=%.0f",
+			plan.Actions[0].LoadpointW, plan.Actions[0].GridW)
+	}
+}
