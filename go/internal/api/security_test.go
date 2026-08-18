@@ -143,6 +143,21 @@ func TestAuthenticateGuardsProtectedReads(t *testing.T) {
 		{name: "notification history via HEAD", method: http.MethodHead, path: "/api/notifications/history"},
 		{name: "version snapshots", method: http.MethodGet, path: "/api/version/snapshots"},
 		{name: "version snapshots via HEAD", method: http.MethodHead, path: "/api/version/snapshots"},
+		{name: "driver list", method: http.MethodGet, path: "/api/drivers"},
+		{name: "driver list via HEAD", method: http.MethodHead, path: "/api/drivers"},
+		{name: "driver draft", method: http.MethodGet, path: "/api/drivers/sonnen/draft"},
+		{name: "EV status", method: http.MethodGet, path: "/api/ev/status"},
+		{name: "EV status via HEAD", method: http.MethodHead, path: "/api/ev/status"},
+		{name: "series", method: http.MethodGet, path: "/api/series"},
+		{name: "series catalog", method: http.MethodGet, path: "/api/series/catalog"},
+		{name: "planner diagnose", method: http.MethodGet, path: "/api/mpc/diagnose"},
+		{name: "planner diagnose history", method: http.MethodGet, path: "/api/mpc/diagnose/history"},
+		{name: "planner diagnose at", method: http.MethodGet, path: "/api/mpc/diagnose/at"},
+		{name: "fleet ping", method: http.MethodGet, path: "/api/fleet-ping"},
+		{name: "notification rules", method: http.MethodGet, path: "/api/notifications/rules"},
+		{name: "device repository catalog", method: http.MethodGet, path: "/api/device_repository/catalog"},
+		{name: "device repository versions", method: http.MethodGet, path: "/api/device_repository/drivers/sonnen/versions"},
+		{name: "app-link status", method: http.MethodGet, path: "/api/app-link/status"},
 	}
 
 	for _, tc := range guarded {
@@ -188,6 +203,10 @@ func TestAuthenticateLeavesOrdinaryReadsAndOAuthCallbackCompatible(t *testing.T)
 		{method: http.MethodGet, path: "/api/energy/history"},
 		{method: http.MethodGet, path: "/api/prices"},
 		{method: http.MethodGet, path: "/api/mpc/plan"},
+		// Dashboard poll — must stay open so lan_auth does not pop a login
+		// on every 2s status tick.
+		{method: http.MethodGet, path: "/api/loadpoints"},
+		{method: http.MethodGet, path: "/api/history"},
 	} {
 		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
 			req := httptest.NewRequest(tc.method, "http://ftw.local:8080"+tc.path, nil)
@@ -230,7 +249,19 @@ func TestAuthenticateRequiresRemoteTokenForProtectedReads(t *testing.T) {
 		"/api/caldav/status",
 		"/api/notifications/status",
 		"/api/notifications/history",
+		"/api/notifications/rules",
 		"/api/version/snapshots",
+		"/api/drivers",
+		"/api/drivers/sonnen/draft",
+		"/api/ev/status",
+		"/api/series",
+		"/api/series/catalog",
+		"/api/mpc/diagnose",
+		"/api/mpc/diagnose/history",
+		"/api/fleet-ping",
+		"/api/device_repository/catalog",
+		"/api/device_repository/drivers/sonnen/versions",
+		"/api/app-link/status",
 	} {
 		t.Run(path, func(t *testing.T) {
 			request := func(auth string) *httptest.ResponseRecorder {

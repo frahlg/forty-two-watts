@@ -94,9 +94,10 @@ Local non-browser clients such as `curl` and Home Assistant may omit browser
 fetch headers, but JSON bodies must use `Content-Type: application/json`.
 Active reads that start discovery, begin an authorization flow, or force an
 external update check pass through the same boundary. So do reads of config,
-logs, support dump and report, driver source, system info, research dump, and
-the app-link device list. Live dashboard reads such as status, energy, prices
-and plan stay compatible.
+logs, support dump and report, driver source, system info, research dump, the
+app-link device list, driver health, EV charger detail, planner diagnose,
+time series, and the fleet-ping payload. Live dashboard reads such as status,
+energy, prices, plan, loadpoints and history stay compatible.
 
 Mutation requests addressed through any other hostname or a public IP fail
 closed. To expose that API intentionally, generate a random token of at least
@@ -122,10 +123,12 @@ deployment, put FTW behind an operator-managed HTTPS reverse proxy with login
 or session authentication and have that trusted proxy inject the Bearer header
 upstream. The token, and the same-origin / local-address checks, now also
 cover config, logs, support dump and report, driver source and identity,
-integration status, notification history, system and storage info, local
-repository and snapshot paths, research dump, and the app-link device list.
-Live dashboard reads (status, energy, prices, plan) stay open if someone
-publishes the port. Still do not publish the box directly to the internet.
+integration status, notification history and rules, system and storage info,
+local repository and snapshot paths, research dump, the app-link device list,
+driver health, EV charger detail, planner diagnose, time series, and the
+fleet-ping payload. Live dashboard reads (status, energy, prices, plan,
+loadpoints, history) stay open if someone publishes the port. Still do not
+publish the box directly to the internet.
 
 Recovery cannot be disabled by a bad token: connect through `localhost`, the
 host's private IP, or its `.local` name, correct/remove `FTW_API_TOKEN`, and
