@@ -85,10 +85,9 @@ type Service struct {
 	Interval          time.Duration
 	PV                PVPredictor         // optional — overrides stored pv_w_estimated
 	PVResidualCorrect PVResidualCorrector // optional — additive short-horizon bias on top of PV
-	// PVNameplateW is the site PV ceiling (W). Forecast rows saved
-	// when an array's kWp was pasted as watts (10000 instead of 10)
-	// are clamped to 1.25× this so the plan cannot show megawatts
-	// on a house roof. 0 disables the clamp.
+	// PVNameplateW is the site PV ceiling (W). Forecast and plan PV
+	// above this are cut to the nameplate so a kWp-as-watts paste
+	// cannot schedule megawatts. 0 disables the cut.
 	PVNameplateW float64
 	Load         LoadPredictor // optional — overrides flat BaseLoad
 	// Optimizer is the primary mathematical planning engine. Nil selects the
@@ -1118,6 +1117,7 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 	forecasts = clampForecastPV(forecasts, s.PVNameplateW)
 
 	slots := buildSlots(prices, forecasts, s.BaseLoad, now.UnixMilli(), s.PV, s.PVResidualCorrect, s.Load)
+	slots = capSlotsPVToNameplate(slots, s.PVNameplateW)
 	if len(slots) == 0 {
 		return nil
 	}
@@ -1484,6 +1484,7 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 			"reason", request.reason)
 		return s.Latest()
 	}
+	capPlanPVToNameplate(&plan, s.PVNameplateW)
 	plan.DecisionID = s.nextDecisionIDLocked()
 	if publishShadow {
 		if s.shadowEvaluator == nil {
@@ -2221,21 +2222,47 @@ func (s *Service) onlineFleetParams(p Params, fleet []BatteryFleetMember) (Param
 	return p, true
 }
 
-// clampForecastPV copies estimates above 1.25× nameplate down onto
-// that ceiling. Same rule as forecast.ClampForecasts: a kWp field that
-// was filled with watts (10000 instead of 10) used to persist 3–4 MW
-// rows that the Plan tooltip then showed as 3544 kW.
+// clampForecastPV copies estimates above nameplate down onto that
+// ceiling. Same hard cut as forecast.ClampForecasts and
+// capSlotsPVToNameplate: the plan must not see more PV than the roof
+// can make.
 func clampForecastPV(rows []state.ForecastPoint, nameplateW float64) []state.ForecastPoint {
 	if nameplateW <= 0 {
 		return rows
 	}
-	cap := nameplateW * 1.25
 	for i := range rows {
-		if rows[i].PVWEstimated == nil || *rows[i].PVWEstimated <= cap {
+		if rows[i].PVWEstimated == nil || *rows[i].PVWEstimated <= nameplateW {
 			continue
 		}
-		v := cap
+		v := nameplateW
 		rows[i].PVWEstimated = &v
 	}
 	return rows
+}
+
+// capSlotsPVToNameplate is the last cut before the optimizer: slot PV
+// (site-signed, generation negative) cannot exceed the nameplate,
+// even if the twin or a 3× forecast blend still overshoots.
+func capSlotsPVToNameplate(slots []Slot, nameplateW float64) []Slot {
+	if nameplateW <= 0 {
+		return slots
+	}
+	for i := range slots {
+		if math.Abs(slots[i].PVW) > nameplateW {
+			slots[i].PVW = -nameplateW
+		}
+	}
+	return slots
+}
+
+func capPlanPVToNameplate(plan *Plan, nameplateW float64) {
+	if plan == nil || nameplateW <= 0 {
+		return
+	}
+	plan.PVNameplateW = nameplateW
+	for i := range plan.Actions {
+		if math.Abs(plan.Actions[i].PVW) > nameplateW {
+			plan.Actions[i].PVW = -nameplateW
+		}
+	}
 }

@@ -354,6 +354,10 @@ type Plan struct {
 	InitialSoCPct      float64           `json:"initial_soc_pct"`
 	TotalCostOre       float64           `json:"total_cost_ore"`
 	Actions            []Action          `json:"actions"`
+	// PVNameplateW is the hard generation ceiling (W) applied to
+	// every slot. The UI uses it so a stale megawatt pv_w cannot
+	// paint the chart; 0 means no cut was configured.
+	PVNameplateW       float64           `json:"pv_nameplate_w,omitempty"`
 	Baselines          *Baselines        `json:"baselines,omitempty"`
 	Solver             *SolverInfo       `json:"solver,omitempty"`
 	DPShadow           *ShadowPlan       `json:"dp_shadow,omitempty"`

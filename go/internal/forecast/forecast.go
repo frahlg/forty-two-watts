@@ -474,7 +474,11 @@ func NameplateW(ratedPVW float64, arrays []Array) float64 {
 	}
 }
 
-const nameplateHeadroom = 1.25
+// nameplateHeadroom is 1: a forecast must not exceed the site
+// nameplate. STC/POA can theoretically overshoot a little on a cold
+// clear day; that is sacrificed so a kWp-as-watts paste cannot plan
+// on megawatts. 0 nameplate disables the cut.
+const nameplateHeadroom = 1.0
 
 func clampPVToNameplate(pvW, nameplateW float64) (float64, bool) {
 	if nameplateW <= 0 || pvW <= nameplateW*nameplateHeadroom {
@@ -542,10 +546,10 @@ func (s *Service) Load(sinceMs, untilMs int64) ([]state.ForecastPoint, error) {
 	return ClampForecasts(rows, s.nameplateW()), nil
 }
 
-// ClampForecasts copies any estimate above 1.25× nameplate down onto
-// that ceiling. The planner and /api/forecast both read through this
-// so a row saved before kWp-as-watts was sanitized cannot keep
-// showing 3544 kW on a 10 kW roof.
+// ClampForecasts copies any estimate above nameplate down onto that
+// ceiling. The planner and /api/forecast both read through this so a
+// row saved before kWp-as-watts was sanitized cannot keep showing
+// 2046 kW on an 18.96 kW roof.
 func ClampForecasts(rows []state.ForecastPoint, nameplateW float64) []state.ForecastPoint {
 	if nameplateW <= 0 {
 		return rows

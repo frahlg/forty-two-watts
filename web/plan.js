@@ -36,6 +36,15 @@ import { setActiveCurrency, toDisplay, unitFor } from "./components/price-units.
       .replace(/'/g, '&#39;');
   }
 
+  // Hard cut: the roof cannot make more than its nameplate. A stale
+  // megawatt pv_w (kWp pasted as watts) must not paint the chart.
+  function sitePVWCapped(pvW, nameplateW) {
+    if (pvW == null || !(nameplateW > 0)) return pvW;
+    var gen = Math.max(0, -Number(pvW));
+    if (gen > nameplateW) return -nameplateW;
+    return pvW;
+  }
+
   // Horizon controls the x-axis bounds; mirrors the price chart's
   // 3-position pill so operators have a consistent affordance across
   // both charts. Persisted in localStorage so a user who prefers
@@ -497,7 +506,7 @@ import { setActiveCurrency, toDisplay, unitFor } from "./components/price-units.
         if (a.slot_start_ms > tMax) break;
         if (a.pv_w == null) continue;
         const x = xScale(a.slot_start_ms);
-        const y = powerY(a.pv_w); // plan.pv_w is already site-signed
+        const y = powerY(sitePVWCapped(a.pv_w, plan.pv_nameplate_w)); // site-signed, cut at nameplate
         if (first) { ctx.moveTo(x, y); first = false; }
         else ctx.lineTo(x, y);
       }
@@ -505,7 +514,7 @@ import { setActiveCurrency, toDisplay, unitFor } from "./components/price-units.
       for (const f of state.forecast || []) {
         if (f.slot_ts_ms > tMax || !f.pv_w_estimated) continue;
         const x = xScale(f.slot_ts_ms);
-        const y = powerY(-f.pv_w_estimated); // flip forecast → site sign
+        const y = powerY(sitePVWCapped(-f.pv_w_estimated, plan && plan.pv_nameplate_w)); // flip + nameplate cut
         if (first) { ctx.moveTo(x, y); first = false; }
         else ctx.lineTo(x, y);
       }
@@ -846,8 +855,9 @@ import { setActiveCurrency, toDisplay, unitFor } from "./components/price-units.
         );
       }
       if (a.pv_w != null) {
-        const pvGen = Math.max(0, -a.pv_w) / 1000;
-        lines.push(`<div class="tip-row"><span title="Solar generation the plan assumes for this slot">PV forecast</span><b>${pvGen.toFixed(1)} kW</b></div>`);
+        const pvW = sitePVWCapped(a.pv_w, state.plan && state.plan.pv_nameplate_w);
+        const pvGen = Math.max(0, -pvW) / 1000;
+        lines.push(`<div class="tip-row"><span title="Solar generation the plan assumes for this slot — cut at the site nameplate">PV forecast</span><b>${pvGen.toFixed(1)} kW</b></div>`);
       }
       if (a.load_w != null) lines.push(`<div class="tip-row"><span title="Household consumption the plan assumes for this slot">Load forecast</span><b>${(a.load_w / 1000).toFixed(1)} kW</b></div>`);
       if (a.loadpoint_w != null && a.loadpoint_w > 0) {
