@@ -218,6 +218,9 @@ func normalizeFingerprintHost(raw string) (string, error) {
 		host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
 	}
 	if ip := net.ParseIP(host); ip != nil {
+		if err := rejectUnsafeProbeHost(host); err != nil {
+			return "", err
+		}
 		return host, nil
 	}
 	if len(host) > 253 || strings.ContainsAny(host, "/\\@?#:") {

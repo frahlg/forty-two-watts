@@ -84,7 +84,7 @@ changing them. When unsure, inspect the restart classification in
 
 FTW accepts state-changing requests without credentials only when they are
 addressed through a local name or address: loopback, private/link-local IP,
-an unqualified hostname, `.local`, `.localhost`, or `.home.arpa`. The setup
+`.local`, `.localhost`, or `.home.arpa`. The setup
 wizard follows the same rule, and the actual client address must also be local.
 Browser writes must also be same-origin; FTW checks `Origin`, `Host`, and
 `Sec-Fetch-Site` and does not advertise CORS.

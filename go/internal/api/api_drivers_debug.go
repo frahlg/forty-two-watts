@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -238,6 +239,10 @@ func (s *Server) handleDriverTest(w http.ResponseWriter, r *http.Request) {
 		if mq.Port == 0 {
 			mq.Port = 1883
 		}
+		if err := rejectUnsafeProbeHost(mq.Host); err != nil {
+			writeJSON(w, 400, map[string]string{"error": "mqtt host: " + err.Error()})
+			return
+		}
 		if s.deps.DriverMQTTFactory == nil {
 			writeJSON(w, 503, map[string]string{"error": "mqtt probe unavailable"})
 			return
@@ -249,6 +254,10 @@ func (s *Server) handleDriverTest(w http.ResponseWriter, r *http.Request) {
 		}
 		if mb.UnitID == 0 {
 			mb.UnitID = 1
+		}
+		if err := rejectUnsafeProbeHost(mb.Host); err != nil {
+			writeJSON(w, 400, map[string]string{"error": "modbus host: " + err.Error()})
+			return
 		}
 		if s.deps.DriverModbusFactory == nil {
 			writeJSON(w, 503, map[string]string{"error": "modbus probe unavailable"})
@@ -312,6 +321,24 @@ func (s *Server) handleDriverTest(w http.ResponseWriter, r *http.Request) {
 		case <-ticker.C:
 		}
 	}
+}
+
+// rejectUnsafeProbeHost stops a driver test or fingerprint from dialing
+// the box itself or link-local/metadata addresses. Hostnames stay
+// allowed so zap.local still probes.
+func rejectUnsafeProbeHost(host string) error {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return fmt.Errorf("missing host")
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return nil
+	}
+	if ip.IsLoopback() || ip.IsUnspecified() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() {
+		return fmt.Errorf("loopback, link-local and unspecified addresses are not permitted")
+	}
+	return nil
 }
 
 func collectDriverProbe(displayName, runtimeName string, tel *telemetry.Store, reg *drivers.Registry, started time.Time) driverProbeResp {

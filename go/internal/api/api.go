@@ -1325,8 +1325,9 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 // driverSecretKeys returns a map[lua-path]→[]secret-key built from the
 // drivers/ catalog. Used by handleGetConfig + handlePostConfig to scope
 // which `Driver.Config[*]` keys participate in the mask/restore cycle.
-// On catalog read errors returns nil — handlers then skip the secrets
-// pass entirely (fail-open: they still mask the structured fields).
+// On catalog read errors returns nil. maskDriverConfigSecrets then
+// blanks every string in Driver.Config (fail-closed) instead of
+// leaving undeclared tokens in the GET body.
 func (s *Server) driverSecretKeys() map[string][]string {
 	dir := s.deps.DriverDir
 	if dir == "" {
@@ -1360,7 +1361,14 @@ func (s *Server) driverSecretKeys() map[string][]string {
 // MaskSecrets for fields the config package can't know about (the
 // catalog isn't a config-package dependency on purpose).
 func maskDriverConfigSecrets(cfg *config.Config, secretsByLua map[string][]string) {
-	if cfg == nil || len(secretsByLua) == 0 {
+	if cfg == nil {
+		return
+	}
+	if secretsByLua == nil {
+		maskAllDriverConfigStrings(cfg)
+		return
+	}
+	if len(secretsByLua) == 0 {
 		return
 	}
 	for i := range cfg.Drivers {
@@ -1386,13 +1394,66 @@ func maskDriverConfigSecrets(cfg *config.Config, secretsByLua map[string][]strin
 	}
 }
 
+func maskAllDriverConfigStrings(cfg *config.Config) {
+	for i := range cfg.Drivers {
+		if cfg.Drivers[i].Config == nil {
+			continue
+		}
+		cp := make(map[string]any, len(cfg.Drivers[i].Config))
+		for k, v := range cfg.Drivers[i].Config {
+			if s, ok := v.(string); ok && s != "" {
+				cp[k] = maskedPlaceholder
+			} else {
+				cp[k] = v
+			}
+		}
+		cfg.Drivers[i].Config = cp
+	}
+}
+
+func restoreAllBlankDriverConfigStrings(incoming, existing *config.Config) {
+	for i := range incoming.Drivers {
+		var ed *config.Driver
+		for j := range existing.Drivers {
+			if existing.Drivers[j].Name == incoming.Drivers[i].Name {
+				ed = &existing.Drivers[j]
+				break
+			}
+		}
+		if ed == nil || ed.Config == nil {
+			continue
+		}
+		if incoming.Drivers[i].Config == nil {
+			incoming.Drivers[i].Config = map[string]any{}
+		}
+		for k, existingV := range ed.Config {
+			existingS, ok := existingV.(string)
+			if !ok || existingS == "" {
+				continue
+			}
+			incomingV, hasI := incoming.Drivers[i].Config[k]
+			incomingS, _ := incomingV.(string)
+			if !hasI || incomingS == "" || incomingS == maskedPlaceholder {
+				incoming.Drivers[i].Config[k] = existingS
+			}
+		}
+	}
+}
+
 // restoreDriverConfigSecrets is the symmetric POST-side step: for each
 // driver, any catalog-declared secret value the UI sent back as the
 // masked placeholder OR as an empty string (with a non-empty existing
 // value) gets restored from `existing`. Without this, blanking the
 // password input in the Settings tab would clobber the saved token.
 func restoreDriverConfigSecrets(incoming, existing *config.Config, secretsByLua map[string][]string) {
-	if incoming == nil || existing == nil || len(secretsByLua) == 0 {
+	if incoming == nil || existing == nil {
+		return
+	}
+	if secretsByLua == nil {
+		restoreAllBlankDriverConfigStrings(incoming, existing)
+		return
+	}
+	if len(secretsByLua) == 0 {
 		return
 	}
 	for i := range incoming.Drivers {
