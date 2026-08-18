@@ -1504,6 +1504,9 @@ func (s *Server) handlePostConfig(w http.ResponseWriter, r *http.Request) {
 	s.deps.CfgMu.RLock()
 	oldCfg := *s.deps.Cfg
 	s.deps.CfgMu.RUnlock()
+	// The house-password flag only moves through POST /api/auth/password.
+	// A whole-document save must not turn the lock on (or off) by itself.
+	newCfg.API.LANAuth = oldCfg.API.LANAuth
 	restartReasons := config.RestartRequiredFor(&oldCfg, &newCfg)
 
 	// Persist atomically (Password has yaml:"-" so it won't appear in YAML)

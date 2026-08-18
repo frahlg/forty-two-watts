@@ -139,9 +139,12 @@ mutations remain locked.
 tunnel credential for future remote access. That expansion point is described in
 [architecture.md](architecture.md#future-remote-access-boundary).
 
-`api.lan_auth` is off by default. Turn it on from Settings → System (LAN
-password). When on, protected LAN routes need the house password. `curl`
-sends `Authorization: Bearer <house-password>`. The browser login form
+`api.lan_auth` is off by default. Turn it on from the box itself
+(`http://127.0.0.1:8080` Settings → System, or `curl` to `127.0.0.1`).
+A first enable from another LAN address is refused, so a visitor cannot
+set the password. `POST /api/config` cannot flip the flag. When on,
+protected LAN routes need the house password. `curl` sends
+`Authorization: Bearer <house-password>`. The browser login form
 sets a session cookie (`ftw_lan`, 12 hours). Loopback (`127.0.0.1` / `::1`)
 never asks. Live status stays readable without the password; a viewer
 caller is minted for those reads.
