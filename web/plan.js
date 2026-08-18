@@ -755,7 +755,7 @@ import { setActiveCurrency, toDisplay, unitFor } from "./components/price-units.
         );
         if (state.planMeta && state.planMeta.last_replan_ms) {
           const age = Math.round((Date.now() - state.planMeta.last_replan_ms) / 1000);
-          const reason = state.planMeta.last_replan_reason || '';
+          const reason = escapeHTML(state.planMeta.last_replan_reason || '');
           const ageTxt = age < 60 ? `${age}s` : `${Math.round(age/60)}m`;
           parts.push(
             `<span title="Time since the last optimisation pass. Reason: ${reason}. Click Replan to force a fresh pass.">` +
@@ -890,9 +890,9 @@ import { setActiveCurrency, toDisplay, unitFor } from "./components/price-units.
         else if (a.battery_w < -100) { action = 'Discharging'; actionHint = 'battery covers load (and may export)'; }
         else { action = 'Idle'; actionHint = 'battery neither charges nor discharges'; }
         lines.push(`<div class="tip-row"><span title="Battery action this slot">Plan</span><b>${action}</b></div>`);
-        lines.push(`<div class="tip-reason">${a.reason ? a.reason : `${action.toLowerCase()} — ${actionHint}${predicted ? ' (predicted)' : ''}`}</div>`);
+        lines.push(`<div class="tip-reason">${a.reason ? escapeHTML(a.reason) : `${action.toLowerCase()} — ${actionHint}${predicted ? ' (predicted)' : ''}`}</div>`);
       } else if (a.reason) {
-        lines.push(`<div class="tip-reason">${a.reason}</div>`);
+        lines.push(`<div class="tip-reason">${escapeHTML(a.reason)}</div>`);
       }
       tip.innerHTML = lines.join('');
       // Touch scrub on a phone has no cursor, so the tooltip is positioned

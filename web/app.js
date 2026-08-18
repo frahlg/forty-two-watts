@@ -1062,7 +1062,7 @@
         var d = data.drivers[n];
         var dot = d.status === "ok" ? "\u25cf" : d.status === "degraded" ? "\u25cb" : "\u2715";
         var cls = d.status === "ok" ? "sb-ok" : d.status === "degraded" ? "sb-warn" : "sb-err";
-        return '<span class="' + cls + '">' + dot + " " + n + "</span>";
+        return '<span class="' + cls + '">' + dot + " " + escHtml(n) + "</span>";
       });
       sbDrivers.innerHTML = parts.join("  ");
     }
