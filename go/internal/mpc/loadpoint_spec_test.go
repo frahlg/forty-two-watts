@@ -2,6 +2,24 @@ package mpc
 
 import "testing"
 
+func TestPVLeftoverAfterHouse(t *testing.T) {
+	if got := pvLeftoverAfterHouseW(500, -6500); got != 6000 {
+		t.Errorf("got %.0f, want 6000", got)
+	}
+	if got := pvLeftoverAfterHouseW(2000, -500); got != 0 {
+		t.Errorf("got %.0f, want 0 (house exceeds PV)", got)
+	}
+	if surplusOnlyExceedsHousePV(4140, 500, -6500) {
+		t.Fatal("4140 W EV fits in 6000 W leftover")
+	}
+	if !surplusOnlyExceedsHousePV(4140, 500, 0) {
+		t.Fatal("4140 W EV with no PV must exceed leftover")
+	}
+	if surplusOnlyExceedsHousePV(50, 500, 0) {
+		t.Fatal("idle/noise EV must not trip leftover")
+	}
+}
+
 func TestNormalizedStepsDefaults(t *testing.T) {
 	cases := []struct {
 		name string
@@ -98,10 +116,10 @@ func TestOptimizePrefersCheapSlotsForEV(t *testing.T) {
 			ID:              "garage",
 			CapacityWh:      60000, // 60 kWh
 			Levels:          11,
-			InitialSoC: 0.2,
+			InitialSoC:      0.2,
 			PluggedIn:       true,
-			TargetSoC: 0.3,   // need 10 % → 6 kWh
-			TargetSlotIdx:   3,    // deadline at end of horizon
+			TargetSoC:       0.3, // need 10 % → 6 kWh
+			TargetSlotIdx:   3,   // deadline at end of horizon
 			MaxChargeW:      11000,
 			AllowedStepsW:   []float64{0, 11000},
 			ChargeEfficiency: 0.9,

@@ -712,29 +712,32 @@ func Optimize(slots []Slot, p Params) Plan {
 						// GridW = load + PV + battery + EV.
 						gridW := slot.LoadW + slot.PVW + battW + evW
 
-						// Surplus-only EV: forbid any non-zero EV
-						// action that turns the site into a net
-						// importer. evW = 0 is always feasible (the
-						// constraint short-circuits), so the DP
-						// degrades gracefully on low-PV days — the
-						// deadline shortfall penalty then makes the
-						// "miss target" outcome expensive but legal.
-						// 50 W epsilon absorbs floating-point dither
-						// from the discretized PV/load grid so the
-						// constraint isn't artificially tight against
-						// an action that's effectively zero net.
-						if evActive && lp.SurplusOnly && evW > 0 && gridW > 50 {
+						// Surplus-only EV: take at most leftover PV
+						// after house load. Site import caused by a
+						// simultaneous home-battery grid-charge is not
+						// the car importing — forbidding gridW > 0
+						// whenever evW > 0 forced the DP to idle the
+						// car on every cheap slot the battery wanted
+						// to buy, which is how "EV takes the PV, Pixii
+						// never grid-charges" and the reverse
+						// "battery buys, car sits in the sun" both
+						// appear on the same site. evW = 0 is always
+						// feasible, so a no-PV day degrades to "miss
+						// the deadline" rather than an infeasible
+						// plan. 50 W epsilon matches the neighbouring
+						// EV feasibility rules.
+						if evActive && lp.SurplusOnly && surplusOnlyExceedsHousePV(evW, slot.LoadW, slot.PVW) {
 							continue
 						}
 
 						// Surplus-only must not also ban home-battery
-						// grid charge. The EV-import rule above keeps
-						// the car off grid, and blocksBatteryToEV()
+						// grid charge. The leftover-PV rule above
+						// keeps the car off grid, and blocksBatteryToEV()
 						// below already rejects battery→EV, so the
 						// "launder cheap grid through the battery into
 						// the car" path is closed without forbidding
 						// Pixii/house-battery arbitrage while the car
-						// is plugged in. Active arbitrage with a
+						// is taking real PV. Active arbitrage with a
 						// surplus-only EV is a real operator setup.
 
 						// Don't simultaneously discharge the home battery
