@@ -21,8 +21,13 @@ from .protocol import ProtocolError, require_dict
 
 PREFERENCE_TIME_SHARE = 0.2
 MIN_PREFERENCE_TIME_S = 0.05
-COST_BOUND_SLACK_ORE = 0.1
-COST_BOUND_TOLERANCE_ORE = 0.1
+# Slack is numerical only. 0.1 öre is real money: at 50 öre/kWh it buys
+# 2 W of peak reduction, which is enough to nibble a unique export or
+# sneak a spread-blocked discharge. Relative term covers reconstructed
+# cost on large objectives without becoming a watt budget.
+COST_BOUND_SLACK_ORE = 1e-8
+COST_BOUND_RELATIVE = 1e-12
+COST_BOUND_TOLERANCE_ORE = 1e-6
 INTEGRALITY_TOLERANCE = 1e-5
 SHORTFALL_WH_REPORT = 1.0
 THERMAL_SLACK_REPORT_C = 0.01
@@ -31,6 +36,7 @@ STAGE_DISABLED = "disabled"
 STAGE_FLAT = "flattened"
 STAGE_KEPT = "kept_economic"
 STAGE_NO_TIME = "no_time"
+STAGE_SINGLE_SLOT = "single_slot"
 
 
 @dataclass(frozen=True)
@@ -57,7 +63,12 @@ def preference_time_limit_s(
 
 
 def cost_bound_slack_ore(cost_value: float) -> float:
-    return max(COST_BOUND_SLACK_ORE, abs(cost_value) * 1e-6)
+    return max(COST_BOUND_SLACK_ORE, abs(cost_value) * COST_BOUND_RELATIVE)
+
+
+def flatten_horizon_has_choice(n_slots: int) -> bool:
+    """Peak flattening is a tie-break across time. One slot has no tie."""
+    return n_slots > 1
 
 
 def peaks_from_grid(grid_import: np.ndarray, grid_export: np.ndarray) -> tuple[float, float]:
@@ -179,6 +190,9 @@ def apply_cvxpy_flatten(
 
     snapshot = snapshot_variable_values(cost_problem)
     before = current_peaks()
+    n_slots = int(grid_import.shape[0]) if grid_import.shape else 1
+    if not flatten_horizon_has_choice(n_slots):
+        return FlattenResult(STAGE_SINGLE_SLOT, *before)
     cost_value = float(cost_objective.value)
     try:
         time_limit = preference_time_limit_s(settings, deadline)

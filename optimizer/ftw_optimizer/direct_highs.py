@@ -23,7 +23,9 @@ from .preference import (
     STAGE_FLAT,
     STAGE_KEPT,
     STAGE_NO_TIME,
+    STAGE_SINGLE_SLOT,
     cost_bound_slack_ore,
+    flatten_horizon_has_choice,
     flatten_peaks_enabled,
     peaks_from_grid,
     preference_time_limit_s,
@@ -968,6 +970,8 @@ def _apply_direct_flatten(
     peaks = _direct_peaks(scenario_vars, solution, prepared)
     if not shared or not flatten_peaks_enabled(prepared.settings):
         return STAGE_DISABLED, solution, peaks[0], peaks[1]
+    if not flatten_horizon_has_choice(prepared.n):
+        return STAGE_SINGLE_SLOT, solution, peaks[0], peaks[1]
     if not isinstance(deadline, SolveDeadline):
         return STAGE_DISABLED, solution, peaks[0], peaks[1]
     try:

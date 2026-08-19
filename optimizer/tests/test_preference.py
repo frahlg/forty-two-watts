@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from ftw_optimizer.protocol import ProtocolError
-from ftw_optimizer.preference import flatten_peaks_enabled
+from ftw_optimizer.preference import cost_bound_slack_ore, flatten_peaks_enabled
 from ftw_optimizer.worker import handshake, handle
 
 
@@ -23,6 +23,12 @@ def test_handshake_advertises_peak_flattening() -> None:
 def test_flatten_peaks_rejects_a_non_boolean() -> None:
     with pytest.raises(ProtocolError, match="boolean"):
         flatten_peaks_enabled({"flatten_peaks": 1})
+
+
+def test_cost_bound_slack_is_numerical_noise() -> None:
+    assert cost_bound_slack_ore(0.0) <= 1e-7
+    assert cost_bound_slack_ore(100.0) < 1e-6
+    assert cost_bound_slack_ore(1_000_000.0) < 1e-5
 
 
 def flatten_request(*, enabled: bool, backend: str) -> dict:
@@ -54,7 +60,7 @@ def test_flatten_does_not_spend_money(backend: str) -> None:
     assert math.isclose(
         flat["solver"]["objective_ore"],
         spiked["solver"]["objective_ore"],
-        abs_tol=0.2,
+        abs_tol=1e-3,
     )
     assert flat["solver"]["import_peak_w"] <= spiked["solver"]["import_peak_w"] + 1.0
 
@@ -65,6 +71,74 @@ def test_golden_flatten_case_caps_the_import_peak() -> None:
     assert response["ok"] is case["expect"]["ok"], response
     assert response["solver"]["preference_stage"] == case["expect"]["preference_stage"]
     assert response["solver"]["import_peak_w"] <= case["expect"]["max_import_peak_w"]
+
+
+@pytest.mark.parametrize("backend", ["highs", "cvxpy"])
+def test_single_slot_skips_the_preference_solve(backend: str) -> None:
+    request = flatten_request(enabled=True, backend=backend)
+    request["slots"] = request["slots"][:1]
+    request["request_id"] = f"flatten-single-slot-{backend}"
+    response = handle(request)
+    assert response["ok"], response
+    assert response["solver"]["preference_stage"] == "single_slot"
+
+
+@pytest.mark.parametrize("backend", ["highs", "cvxpy"])
+def test_flatten_does_not_cut_profitable_fuse_export(backend: str) -> None:
+    request = {
+        "schema_version": 1,
+        "request_id": f"flatten-keep-export-{backend}",
+        "settings": {
+            "mode": "passive_arbitrage",
+            "solver": "HIGHS",
+            "formulation": "relaxed",
+            "time_limit_s": 2,
+            "mip_rel_gap": 0.001,
+            "shared_backend": backend,
+            "flatten_peaks": True,
+            "export_bonus_ore_kwh": 0,
+            "export_fee_ore_kwh": 0,
+        },
+        "slots": [
+            {
+                "start_ms": 1 + index * 3_600_000,
+                "len_min": 60,
+                "price_ore": 100,
+                "spot_ore": 50,
+                "confidence": 1,
+                "pv_w": -4000,
+                "load_w": 500,
+                "max_import_w": 8000,
+                "max_export_w": 100,
+            }
+            for index in range(2)
+        ],
+        "storages": [
+            {
+                "id": "home",
+                "capacity_wh": 10000,
+                "initial_energy_wh": 9500,
+                "min_energy_wh": 1000,
+                "max_energy_wh": 9500,
+                "max_charge_w": 0,
+                "max_discharge_w": 0,
+                "charge_efficiency": 1,
+                "discharge_efficiency": 1,
+                "terminal_price_ore_kwh": 0,
+                "cycle_cost_ore_kwh": 0,
+            }
+        ],
+        "flex_loads": [],
+        "thermal_loads": [],
+        "commercial_constraints": {},
+    }
+    response = handle(request)
+    assert response["ok"], response
+    assert response["solver"]["preference_stage"] == "flattened"
+    assert math.isclose(response["solver"]["export_peak_w"], 100, abs_tol=1e-3)
+    for action in response["plan"]["actions"]:
+        assert math.isclose(action["grid_w"], -100, abs_tol=1e-3)
+        assert math.isclose(action["battery_w"], 0, abs_tol=1e-3)
 
 
 def test_service_report_names_an_unmet_ev_deadline() -> None:
