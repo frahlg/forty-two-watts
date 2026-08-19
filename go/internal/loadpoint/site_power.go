@@ -55,8 +55,9 @@ func BatteryDischargeFeedsEV(batteryW, evW, loadW, pvW float64) bool {
 }
 
 // PlannedSurplusForEVW is the near-term 3Φ-gate quantity: leftover PV
-// after house load, minus planned PV-soak battery charge. Grid-funded
-// battery charge does not consume leftover the car can take.
+// after house load, minus planned PV-soak battery charge. gridW is the
+// grid flow attributed to house+battery (planned GridW minus EV).
+// Grid-funded battery charge does not consume leftover the car can take.
 func PlannedSurplusForEVW(loadW, pvW, batteryW, gridW float64) float64 {
 	return -pvW - loadW - PlannedPVSoakW(batteryW, gridW)
 }

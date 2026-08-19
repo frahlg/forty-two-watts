@@ -48,3 +48,19 @@ func TestPeakPlannedSurplusForEVSkipsGridFundedCharge(t *testing.T) {
 		t.Errorf("grid-funded slot must still offer leftover PV %.0f, got %.0f", 7500.0, peak)
 	}
 }
+
+func TestPeakPlannedSurplusForEVHidesSoakWhenEVMakesMeterImport(t *testing.T) {
+	start := time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)
+	actions := []Action{{
+		SlotStartMs: start.UnixMilli(), SlotLenMin: 15,
+		LoadW: 500, PVW: -8000, BatteryW: 4000, LoadpointW: 6900,
+		GridW: loadpoint.GridW(500, -8000, 4000, 6900),
+	}}
+	peak, ok := PeakPlannedSurplusForEV(actions, start.Add(time.Second), 30*time.Minute)
+	if !ok {
+		t.Fatal("expected a peak")
+	}
+	if peak != 3500 {
+		t.Errorf("soak+EV peak = %.0f, want 3500 (leftover minus soak, not full leftover)", peak)
+	}
+}

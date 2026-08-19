@@ -232,11 +232,16 @@ func TestSurplusAvailableForEVWHidesPVSoakButNotGridCharge(t *testing.T) {
 	if got := SurplusAvailableForEVW(0, 4000, 0, true); got != 0 {
 		t.Errorf("PV-soak: got %.0f, want 0 (battery charge is not yet EV-available)", got)
 	}
-	// Grid-funded battery charge: leftover PV is the car's. Without this
-	// the meter import zeros the surplus clamp and a surplus-only EV sits
-	// in the sun while Pixii buys.
-	if got := SurplusAvailableForEVW(1500, 5000, 4140, true); got != 7640 {
-		t.Errorf("grid-charge combo: got %.0f, want 7640 (-1500+5000+4140)", got)
+	// Soak + EV that together import: leftover 7640, battery 5000 < leftover
+	// so this is still soak. Meter import is the leak, not Pixii buying.
+	// Offering 7640 would keep the 4140 W setpoint that caused the import.
+	if got := SurplusAvailableForEVW(1500, 5000, 4140, true); got != 2640 {
+		t.Errorf("soak+EV import: got %.0f, want 2640 (leftover minus soak)", got)
+	}
+	// Grid-funded battery charge: leftover 7500, battery 10 kW, EV 4140,
+	// grid 6640. Import beyond the car is the battery buying.
+	if got := SurplusAvailableForEVW(6640, 10000, 4140, true); got != 7500 {
+		t.Errorf("grid-charge combo: got %.0f, want 7500", got)
 	}
 	if got := SurplusAvailableForEVW(-6500, 0, 0, true); got != 6500 {
 		t.Errorf("exporting idle: got %.0f, want 6500", got)

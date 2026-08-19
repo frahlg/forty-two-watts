@@ -180,6 +180,31 @@ func TestEVSiteScheduledEVMayImportOnCheapNight(t *testing.T) {
 	}
 }
 
+func TestEVSiteSurplusOnlyDoesNotClaimPVSoakWhenTogetherTheyWouldImport(t *testing.T) {
+	// Battery plan 4 kW of 7.5 kW leftover — soak, not Pixii buying.
+	// The old live reader treated any meter import as grid-charge and
+	// offered the full leftover, so a 3Φ snap held while soak+EV imported.
+	start := evComboSiteStart()
+	site := newSiteClock(t, evSiteConfig{
+		Start: start,
+		Plan:  injectedChargePlan(evComboSlotStart(), 15, 4000, 0, evComboLoadW, evComboPVW),
+		LP:    surplusOnlyGarage(),
+		LoadW: evComboLoadW,
+		PVW:   evComboPVW,
+	})
+	site.run(12)
+	const soakHeadroom = 3500.0 // leftover 7500 − soak 4000
+	for _, rec := range site.ticks {
+		if rec.N < 4 {
+			continue
+		}
+		if rec.EVW > soakHeadroom+loadpoint.SitePowerEpsW {
+			t.Fatalf("tick %d: surplus-only EV %.0f W claimed PV-soak (headroom %.0f); ticks=%s",
+				rec.N, rec.EVW, soakHeadroom, site.dumpTicks())
+		}
+	}
+}
+
 func TestEVSiteBatteryDoesNotDischargeIntoSurplusOnlyEV(t *testing.T) {
 	start := evComboSiteStart()
 	site := newSiteClock(t, evSiteConfig{

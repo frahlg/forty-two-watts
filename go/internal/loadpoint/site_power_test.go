@@ -59,4 +59,9 @@ func TestPlannedSurplusForEVWSkipsGridFundedCharge(t *testing.T) {
 	if got := PlannedSurplusForEVW(500, -8000, 10000, 2500); got != 7500 {
 		t.Errorf("grid-funded: got %.0f, want 7500 (soak does not apply)", got)
 	}
+	// Soak + EV that together import: pass grid minus EV so soak is
+	// still detected (meter import 640 is the leak, not battery buying).
+	if got := PlannedSurplusForEVW(500, -8000, 4000, 640-6900); got != 3500 {
+		t.Errorf("soak+EV: got %.0f, want 3500", got)
+	}
 }

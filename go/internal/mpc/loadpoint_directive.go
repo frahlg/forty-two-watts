@@ -19,8 +19,8 @@ func (d SlotDirective) LoadpointDirective() loadpoint.Directive {
 
 // PeakPlannedSurplusForEV is the near-term 3Φ-gate scan: peak leftover
 // PV after house load, minus planned PV-soak battery charge, over
-// slots that overlap [now, now+window]. Grid-funded battery charge
-// does not consume leftover the car can take.
+// slots that overlap [now, now+window]. Soak uses GridW minus EV so
+// soak+EV import is not treated as the battery buying.
 func PeakPlannedSurplusForEV(actions []Action, now time.Time, window time.Duration) (float64, bool) {
 	if len(actions) == 0 {
 		return 0, false
@@ -36,7 +36,7 @@ func PeakPlannedSurplusForEV(actions []Action, now time.Time, window time.Durati
 		if time.UnixMilli(a.SlotStartMs).After(horizon) {
 			break
 		}
-		surplus := loadpoint.PlannedSurplusForEVW(a.LoadW, a.PVW, a.BatteryW, a.GridW)
+		surplus := loadpoint.PlannedSurplusForEVW(a.LoadW, a.PVW, a.BatteryW, a.GridW-a.LoadpointW)
 		if !any || surplus > peak {
 			peak = surplus
 			any = true

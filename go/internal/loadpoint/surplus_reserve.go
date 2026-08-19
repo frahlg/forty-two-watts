@@ -236,15 +236,16 @@ func PlannerTreatsLoadpointAsSurplusOnly(operatorSurplusOnly, deferGridPlan bool
 // Site identity: -gridW + batW + evW = -pvW - loadW (house leftover).
 //
 // The EV controller runs before battery dispatch on the same tick. If the
-// home battery is soaking PV (charging while the site is not importing),
-// counting that charge as EV-available would command the charger on
-// before the battery has yielded and leak into import. Grid-funded
-// battery charge is different: the battery is already importing, so the
-// leftover PV is the car's to take without waiting for a yield.
+// home battery is soaking PV, counting that charge as EV-available would
+// command the charger on before the battery has yielded and leak into
+// import. Meter import is not enough to call the charge grid-funded:
+// soak plus EV can import together while the battery is still taking
+// leftover PV. Import beyond the car (gridW − evW) is the battery
+// buying; that leftover is the car's without waiting for a yield.
 func SurplusAvailableForEVW(gridW, batW, evW float64, surplusOnlyActive bool) float64 {
 	leftover := -gridW + batW + evW
-	if surplusOnlyActive && batW > 0 && gridW <= GridChargeImportW {
-		leftover = -gridW + evW
+	if surplusOnlyActive {
+		leftover -= PlannedPVSoakW(batW, gridW-evW)
 	}
 	if leftover < 0 {
 		return 0
@@ -252,11 +253,11 @@ func SurplusAvailableForEVW(gridW, batW, evW float64, surplusOnlyActive bool) fl
 	return leftover
 }
 
-// PlannedPVSoakW is the portion of a planned battery charge that is
-// soaking leftover PV rather than buying from the grid. The near-term
-// 3Φ gate subtracts this from forecast surplus so the EV does not wait
-// for a 3Φ window the battery is about to eat. A grid-charge slot
-// (PlannedGridW above the import band) does not consume that leftover.
+// PlannedPVSoakW is the portion of a battery charge that is soaking
+// leftover PV rather than buying from the grid. gridW is the grid
+// flow attributed to house+battery (live meter minus EV, or planned
+// GridW minus LoadpointW). A reading above the import band means the
+// battery is buying, so soak is zero and leftover PV stays with the car.
 func PlannedPVSoakW(batteryW, gridW float64) float64 {
 	if batteryW <= 0 || gridW > GridChargeImportW {
 		return 0

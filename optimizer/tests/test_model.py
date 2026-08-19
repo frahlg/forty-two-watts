@@ -2125,6 +2125,7 @@ def test_surplus_only_ev_takes_pv_while_battery_grid_charges() -> None:
 def test_surplus_only_ev_still_cannot_import() -> None:
     request = base_request()
     request["slots"] = [request["slots"][1]]  # expensive slot only
+    request["slots"][0]["pv_w"] = -3000  # leftover 500 W, below the 2 kW step
     request["storages"][0]["initial_energy_wh"] = 2000
     request["flex_loads"] = [
         {
@@ -2142,8 +2143,9 @@ def test_surplus_only_ev_still_cannot_import() -> None:
     response = handle(request)
     assert response["ok"], response
     action = response["plan"]["actions"][0]
-    if action["flex_power_w"]["surplus-car"] > 1e-5:
-        assert action["grid_w"] <= 50 + 1e-5
+    leftover = max(0.0, 3000 - 2500)
+    assert action["flex_power_w"]["surplus-car"] <= leftover + 50 + 1e-5
+    assert action["flex_power_w"]["surplus-car"] <= 1e-5
 
 
 def test_ev_charge_never_coincides_with_battery_export() -> None:

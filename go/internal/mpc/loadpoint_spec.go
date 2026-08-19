@@ -39,11 +39,11 @@ type LoadpointSpec struct {
 
 	// Plan-start conditions.
 	InitialSoC float64 // EV SoC at the first slot
-	PluggedIn     bool    // when false, Optimize treats the loadpoint as absent
+	PluggedIn  bool    // when false, Optimize treats the loadpoint as absent
 
 	// User intent. A zero target means no deadline — charge
 	// opportunistically based on price/PV surplus only.
-	TargetSoC  float64
+	TargetSoC     float64
 	TargetSlotIdx int // zero-based slot by whose end the target must be met; ignored when target is zero
 
 	// Electrical constraints. AllowedStepsW MUST include 0 (off) and
@@ -67,9 +67,10 @@ type LoadpointSpec struct {
 	// NoBatteryToEV mirrors ctrl.State.BatteryCoversEV inverted: when
 	// true (operator's default), the home battery's discharge MUST NOT
 	// end up at the EV. Enforced by loadpoint.BatteryDischargeFeedsEV
-	// in the DP and in ValidatePlan; the runtime clamp in
+	// in the DP and in ValidatePlan. The runtime clamp in
 	// control/dispatch.go (search CANONICAL "battery may not feed EV")
-	// is the same conservation check.
+	// is the same conservation rule, not this helper — dispatch.go is
+	// owned by a separate PV-export PR.
 	NoBatteryToEV bool
 }
 
