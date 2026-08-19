@@ -1,5 +1,21 @@
 # Changelog
 
+## 2.2.0
+
+### Minor Changes
+
+- f258a4d: Core stores power in watts, energy in watt-hours, SoC as 0–1, and PV arrays as rated watts. kWp and 0–100 percents remain only at UI, Home Assistant, appproto, calendar titles, and the forecast.solar URL. Loadpoint, calendar, vehicle telemetry, and V2X envelopes use 0–1 without `_pct` names. Pasting watts into the old kWp field is converted on config load. Heat-pump diagnostics emit W/Wh.
+
+### Patch Changes
+
+- 19f9264: An MQTT driver that stops draining its subscription no longer grows the inbound queue without limit. The buffer is bounded at 1024 messages, dropping the oldest half on overflow — the same rule the websocket and TCP capabilities already follow — so a stalled driver on a busy broker can no longer exhaust memory on the box.
+- 810fef9: The dashboard escapes driver names and planner reasons before putting them in HTML, so a crafted name cannot run script in the browser.
+- 1642fe3: Load forecast slots are hard-cut to the site fuse and cannot sit far below recent days. A 100 W overnight prediction on a lived-in house is lifted to the existing 25% prior floor before it reaches the planner.
+- 762e135: When planning cannot start, the Plan view now says why — a missing battery, no prices, or the planner being off — instead of asking you to pick a strategy you already picked.
+- f65007e: Public hosts now need the API token for diagnose, series, EV detail, driver list, fleet ping, and similar reads. The live dashboard (status, energy, prices, plan, loadpoints) stays open.
+- 1642fe3: A PV forecast can no longer exceed the site nameplate. Pasting watts into array kWp (18960 W → 18960 kWp) is treated as 18.96 kW, and both the stored forecast and the plan are hard-cut at rated watts.
+- b8cd2b6: A slew rate of 0 W/cycle no longer freezes battery dispatch. The limiter anchors on the battery's measured power, so a zero budget snapped every target back to whatever the battery was already doing and the site held that power until restart. Non-positive now means "no external ramp limit", the same as `slew_enabled: false`.
+
 ## 2.1.0
 
 ### Minor Changes
