@@ -303,24 +303,24 @@ func TestValidatePlanAllowsEVPVWithBatteryGridCharge(t *testing.T) {
 	slots := []Slot{{StartMs: 1, LenMin: 60, PriceOre: 20, SpotOre: 10, Confidence: 1, LoadW: 500, PVW: -6500}}
 	p := Params{
 		Mode: ModeArbitrage, CapacityWh: 10000,
-		SoCMinPct: 10, SoCMaxPct: 95, InitialSoCPct: 20,
+		SoCMin: 0.10, SoCMax: 0.95, InitialSoC: 0.20,
 		MaxChargeW: 5000, MaxDischargeW: 5000,
 		ChargeEfficiency: 0.95, DischargeEfficiency: 0.95,
 		Loadpoint: &LoadpointSpec{
-			ID: "car", CapacityWh: 40000, Levels: 11, MinPct: 0, MaxPct: 100,
-			InitialSoCPct: 25, PluggedIn: true, MaxChargeW: 4140,
+			ID: "car", CapacityWh: 40000, Levels: 11, SoCMin: 0, SoCMax: 1,
+			InitialSoC: 0.25, PluggedIn: true, MaxChargeW: 4140,
 			AllowedStepsW: []float64{0, 4140}, ChargeEfficiency: 1,
 			SurplusOnly: true, NoBatteryToEV: true,
 		},
 	}
 	// leftover PV after house = 6000 W. EV 4140 + battery 5000 →
-	// grid = 500-6500+5000+4140 = 3140 import. Battery SoC: 20 + 47.5 = 67.5.
-	// EV SoC: 25 + 4140/40000*100 = 35.35.
-	plan := Plan{Mode: p.Mode, HorizonSlots: 1, CapacityWh: p.CapacityWh, InitialSoCPct: 20,
+	// grid = 500-6500+5000+4140 = 3140 import. Battery SoC: 0.20 + 0.475 = 0.675.
+	// EV SoC: 0.25 + 4140/40000 = 0.3535.
+	plan := Plan{Mode: p.Mode, HorizonSlots: 1, CapacityWh: p.CapacityWh, InitialSoC: 0.20,
 		TotalCostOre: 62.8, Actions: []Action{{
 			SlotStartMs: 1, SlotLenMin: 60,
-			BatteryW: 5000, GridW: 3140, SoCPct: 67.5,
-			LoadpointW: 4140, LoadpointSoCPct: 35.35, CostOre: 62.8,
+			BatteryW: 5000, GridW: 3140, SoC: 0.675,
+			LoadpointW: 4140, LoadpointSoC: 0.3535, CostOre: 62.8,
 		}}}
 	if err := ValidatePlan(slots, p, &plan); err != nil {
 		t.Fatalf("ValidatePlan rejected leftover-PV EV beside battery grid-charge: %v", err)
