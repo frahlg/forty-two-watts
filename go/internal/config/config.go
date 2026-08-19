@@ -369,9 +369,10 @@ type Vehicle struct {
 	// PV-surplus-only flag to exactly this value — charge this car from
 	// surplus PV alone (true) or allow grid charging (false).
 	SurplusOnly bool `yaml:"surplus_only,omitempty" json:"surplus_only,omitempty"`
-	// TargetSoCPct > 0 sets a charge target for the session, which is what
-	// hands the loadpoint to the planner: it fills toward the target in
-	// the cheapest tariff slots. 0 = no target, loadpoint keeps its own.
+	// TargetSoC > 0 sets a charge target for the session (0–1), which is
+	// what hands the loadpoint to the planner: it fills toward the target
+	// in the cheapest tariff slots. 0 = no target, loadpoint keeps its own.
+	TargetSoC    float64 `yaml:"target_soc,omitempty" json:"target_soc,omitempty"`
 	TargetSoCPct float64 `yaml:"target_soc_pct,omitempty" json:"target_soc_pct,omitempty"`
 }
 
@@ -410,8 +411,8 @@ func (c *Config) validateVehicles() error {
 		if v.CapacityWh < 0 {
 			return fmt.Errorf("vehicle %q: capacity_wh must be >= 0", v.ID)
 		}
-		if v.TargetSoCPct < 0 || v.TargetSoCPct > 100 {
-			return fmt.Errorf("vehicle %q: target_soc_pct must be within 0..100", v.ID)
+		if v.TargetSoC < 0 || v.TargetSoC > 1 {
+			return fmt.Errorf("vehicle %q: target_soc must be within 0..1", v.ID)
 		}
 		for _, ident := range v.Identifiers {
 			key := strings.ToLower(strings.TrimSpace(ident))

@@ -268,7 +268,7 @@ vehicles:
   - id: model3
     capacity_wh: 75000
     identifiers: ["aa:bb:cc:dd:ee:ff"]
-    target_soc_pct: 80                # planner fills to 80 % in the cheapest hours
+    target_soc: 0.80                  # planner fills to 80 % in the cheapest hours
 ```
 
 When a charging session identifies the car, FTW switches the charger to that

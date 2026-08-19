@@ -235,6 +235,10 @@
       '</p>';
 
     vehicles.forEach(function (v, idx) {
+      if (v.target_soc == null && v.target_soc_pct != null) {
+        v.target_soc = v.target_soc_pct / 100;
+      }
+      delete v.target_soc_pct;
       var prefix = "vehicles." + idx;
       html +=
         '<fieldset class="device-card" data-vehicle-idx="' + idx + '">' +
@@ -265,8 +269,8 @@
         help("When this car is identified, the charger goes PV-surplus-only: it never imports grid power for this car. Unchecked = grid charging allowed.") + '</label>' +
         '</div>' +
         '<div>' +
-        '<label>Target SoC (%) ' + help("Above 0, identifying this car sets a charge target, which hands the session to the planner: it fills toward the target in the cheapest tariff hours. 0 = no target.") + '</label>' +
-        '<input type="number" min="0" max="100" step="5" data-path="' + prefix + '.target_soc_pct" value="' + (v.target_soc_pct || 0) + '">' +
+        '<label>Target SoC (0–1) ' + help("Above 0, identifying this car sets a charge target, which hands the session to the planner: it fills toward the target in the cheapest tariff hours. 0 = no target. 0.80 is 80 %.") + '</label>' +
+        '<input type="number" min="0" max="1" step="0.05" data-path="' + prefix + '.target_soc" value="' + (v.target_soc || 0) + '">' +
         '</div>' +
         '</div>' +
         '<div style="margin-top:12px">' +
@@ -535,7 +539,7 @@
             capacity_wh: 60000,
             identifiers: [],
             surplus_only: false,
-            target_soc_pct: 0,
+            target_soc: 0,
           });
           ctx.renderTab('loadpoints');
         });

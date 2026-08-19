@@ -1351,14 +1351,14 @@ func main() {
 				}
 				lpMgr.ApplyVehicleProfile(lpID, name, vehicle.CapacityWh)
 				lpMgr.SetSurplusOnly(lpID, vehicle.SurplusOnly)
-				if vehicle.TargetSoCPct > 0 {
-					lpMgr.SetTarget(lpID, vehicle.TargetSoCPct, time.Time{})
+				if vehicle.TargetSoC > 0 {
+					lpMgr.SetTarget(lpID, vehicle.TargetSoC, time.Time{})
 				}
 				slog.Info("ocpp: vehicle profile applied",
 					"charger", chargerID, "lp", lpID, "vehicle", vehicle.ID,
 					"source", source, "capacity_wh", vehicle.CapacityWh,
 					"surplus_only", vehicle.SurplusOnly,
-					"target_soc_pct", vehicle.TargetSoCPct)
+					"target_soc", vehicle.TargetSoC)
 			})
 			slog.Info("ocpp: central system started",
 				"port", ocppSrv.Port(),

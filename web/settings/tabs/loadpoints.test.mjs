@@ -105,12 +105,12 @@ describe("vehicle profiles", () => {
     const html = vehiclesSection({
       vehicles: [{
         id: "leaf", name: "Nissan Leaf", capacity_wh: 40000,
-        identifiers: ["04A2B3C4"], surplus_only: true, target_soc_pct: 80,
+        identifiers: ["04A2B3C4"], surplus_only: true, target_soc: 0.80,
       }],
     }, escHtml, () => "");
     assert.match(html, /Nissan Leaf/);
     assert.match(html, /data-checkbox-path="vehicles\.0\.surplus_only" checked/);
-    assert.match(html, /vehicles\.0\.target_soc_pct/);
+    assert.match(html, /vehicles\.0\.target_soc/);
     assert.match(html, /04A2B3C4/);
     assert.match(html, /new-vehicle-add/);
   });
