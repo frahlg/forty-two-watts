@@ -692,10 +692,13 @@ func (h *HostEnv) emitTelemetry(rawJSON []byte) error {
 // Driver authors call this for anything beyond the standard pv/battery/meter
 // shape — temperatures, voltages, frequencies, MPPT currents, etc. unit is an
 // optional display unit (e.g. "°C", "Hz") used by the UI to group + label.
+// Vendor kW/kWh are folded to W/Wh here so a pinned Lua driver that still
+// speaks kilo-units cannot store the wrong scale.
 func (h *HostEnv) emitMetric(name string, value float64, unit, register, title string) error {
 	if math.IsNaN(value) || math.IsInf(value, 0) {
 		return fmt.Errorf("emit_metric: %s is non-finite: %v", name, value)
 	}
+	value, unit = units.CanonicalPowerEnergy(value, unit)
 	if h.bufferPollMetric(pollMetric{name: name, value: value, unit: unit, register: register, title: title}) {
 		return nil
 	}

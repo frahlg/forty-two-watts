@@ -326,6 +326,12 @@
   function energyDeltas(points) {
     if (!points || points.length < 2) return {};
     var last = points[points.length - 1].v;
+    // Pre-upgrade samples under these metric names are kWh; new ones are Wh.
+    function asWh(v) {
+      if (last >= 1e6 && v < last / 100) return v * 1000;
+      return v;
+    }
+    last = asWh(last);
     var earliest = points[0].ts;
     var now = new Date();
     var startToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
@@ -335,8 +341,8 @@
     var startYear = new Date(now.getFullYear(), 0, 1).getTime();
     function delta(b) {
       if (earliest > b) return null;
-      var base = points[0].v;
-      for (var i = 0; i < points.length; i++) { if (points[i].ts <= b) base = points[i].v; else break; }
+      var base = asWh(points[0].v);
+      for (var i = 0; i < points.length; i++) { if (points[i].ts <= b) base = asWh(points[i].v); else break; }
       return Math.max(0, last - base);
     }
     return { today: delta(startToday), week: delta(startWeek), month: delta(startMonth), year: delta(startYear) };

@@ -39,6 +39,20 @@ func KWpFromWatts(w float64) float64 {
 	return w / 1000.0
 }
 
+// CanonicalPowerEnergy is the emit_metric door for vendor kilo-units.
+// kW/kWh become W/Wh. Other units pass through, including W and Wh
+// already converted in a Lua driver.
+func CanonicalPowerEnergy(value float64, unit string) (float64, string) {
+	switch unit {
+	case "kW":
+		return value * 1000.0, "W"
+	case "kWh":
+		return value * 1000.0, "Wh"
+	default:
+		return value, unit
+	}
+}
+
 // PVFromIrradiance is the STC scale: rated watts at 1000 W/m².
 func PVFromIrradiance(ratedW, irradianceWm2 float64) float64 {
 	if ratedW <= 0 || irradianceWm2 <= 0 {

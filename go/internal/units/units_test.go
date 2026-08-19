@@ -21,6 +21,29 @@ func TestPVFromIrradianceEveningIsKilowattsNotMegawatts(t *testing.T) {
 	}
 }
 
+func TestCanonicalPowerEnergy(t *testing.T) {
+	w, u := CanonicalPowerEnergy(2.5, "kW")
+	if w != 2500 || u != "W" {
+		t.Fatalf("2.5 kW → %v %q, want 2500 W", w, u)
+	}
+	wh, u := CanonicalPowerEnergy(12.5, "kWh")
+	if wh != 12500 || u != "Wh" {
+		t.Fatalf("12.5 kWh → %v %q, want 12500 Wh", wh, u)
+	}
+	w, u = CanonicalPowerEnergy(1500, "W")
+	if w != 1500 || u != "W" {
+		t.Fatalf("already watts: %v %q", w, u)
+	}
+	wh, u = CanonicalPowerEnergy(5399.9, "Wh")
+	if wh != 5399.9 || u != "Wh" {
+		t.Fatalf("already watt-hours: %v %q", wh, u)
+	}
+	c, u := CanonicalPowerEnergy(22.6, "°C")
+	if c != 22.6 || u != "°C" {
+		t.Fatalf("other units pass through: %v %q", c, u)
+	}
+}
+
 func TestKWpRoundTrip(t *testing.T) {
 	if got := WattsFromKWp(12.96); got != 12960 {
 		t.Fatalf("WattsFromKWp(12.96) = %v", got)
