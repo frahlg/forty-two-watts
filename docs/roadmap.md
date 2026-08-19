@@ -204,6 +204,8 @@ be promoted first once its gate is met.
 | OCPP forwarding | The gateway is proven. A tap can forward session and meter frames to one upstream CPO and block remote start, stop and profile so core stays the only commander. Upstream loss does not stop local charging. |
 | Passive battery awareness | An EV-only site can read house-battery SoC without owning the inverter, and still refuse to pull the pack below the house reserve. |
 | Native widgets and richer multi-site views | The app protocol's read schema, per-site pairing and privacy budget are stable in production. |
+| [Dashboard render budget](https://github.com/srcfl/ftw/issues/881) | A reference Raspberry Pi trace proves zero chart and particle work while hidden, measures visible-frame cost on the agreed fixture, and shows no visual or control regression in automated checks and human browser review. |
+| [Energy-ledger write batching](https://github.com/srcfl/ftw/issues/882) | Exact ledger and cursor parity and rollback tests pass; Pi arm64 shows at least 2x speed on tmpfs, 20% on deployment SD, and 35% fewer allocations at 12 observations, with no case slower by more than 5%. |
 | V2X automation | Bidirectional capability, metering, lease ownership, interlocks and fallback are proven for the complete local actuation path. |
 | General vehicle snapshot adapter | A minimal vendor-neutral snapshot has stable vehicle identity, freshness and consent semantics without becoming a second control path. Offline and guest vehicles remain the default path. A sleeping OEM API must not block surplus charging. |
 | What-if and tariff compare | An offline tool can replay the ledger under another tariff. It never sits in the control loop. The tariff contract from issue #866 is accepted. |
