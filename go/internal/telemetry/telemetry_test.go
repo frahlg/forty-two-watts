@@ -438,6 +438,22 @@ func TestSumOnlineEVWSumsAllOnline(t *testing.T) {
 	}
 }
 
+// A charger that cannot take a command is still drawing. DeviceFault must
+// not drop that watts from the house-vs-car split — that is how the phone
+// app showed EV at 0 W while the LAN dashboard showed 11 kW.
+func TestSumOnlineEVWCountsAFaultedDriver(t *testing.T) {
+	s := NewStore()
+	s.Update("easee", DerEV, 11400, nil, nil)
+	s.DriverHealthMut("easee").RecordSuccess()
+	s.SetDriverDeviceFault("easee", true, "setpoint refused")
+	if s.DriverHealth("easee").IsOnline() {
+		t.Fatal("precondition: a faulted charger is not online for control")
+	}
+	if got := s.SumOnlineEVW(); got != 11400 {
+		t.Errorf("faulted charger draw = %f, want 11400", got)
+	}
+}
+
 // Offline drivers are excluded. Without this, a driver whose watchdog
 // tripped would leak a stale last-known reading into load / grid math
 // indefinitely after it stopped actually reporting.

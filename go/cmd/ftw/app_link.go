@@ -141,20 +141,26 @@ func (a *appSite) Snapshot() appproto.Snapshot {
 	// EV chargers. Known means the site has one at all — an idle charger
 	// is a real 0 W reading, a site without one sends no field 10 and the
 	// app draws no EV node. Positive while charging: a charger consumes
-	// like any other load.
+	// like any other load. The watts come from SumOnlineEVW so a charger
+	// that cannot take a command but is still drawing is counted here the
+	// same way the LAN dashboard counts it — IsOnline() would hide that
+	// draw in the house node.
 	for _, reading := range a.tel.ReadingsByType(telemetry.DerEV) {
 		addSource(reading.Driver)
 		snap.EVWKnown = true
-		if health := a.tel.DriverHealth(reading.Driver); health != nil && health.IsOnline() {
-			snap.EVW += reading.SmoothedW
-		}
 	}
+	snap.EVW = a.tel.SumOnlineEVW()
 
-	// grid = load + battery + pv, all site-signed. Rearranged, not
-	// re-derived: a second formula here would be a second thing to keep in
-	// step with docs/site-convention.md.
+	// grid = load + battery + pv + ev + v2x, all site-signed. Rearranged,
+	// not re-derived: a second formula here would be a second thing to
+	// keep in step with docs/site-convention.md. House load is never
+	// negative; metering noise that would push it below zero is the car
+	// or the battery, not the house consuming in reverse.
 	snap.LoadW = snap.GridW - snap.BatteryW - snap.PVW -
-		a.tel.SumOnlineEVW() - a.tel.SumOnlineV2XW()
+		snap.EVW - a.tel.SumOnlineV2XW()
+	if snap.LoadW < 0 {
+		snap.LoadW = 0
+	}
 
 	return snap
 }
