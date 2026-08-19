@@ -2,12 +2,20 @@ from __future__ import annotations
 
 import json
 import math
+import time
 from pathlib import Path
 
+import cvxpy as cp
 import pytest
 
+from ftw_optimizer.deadline import SolveDeadline
 from ftw_optimizer.protocol import ProtocolError
-from ftw_optimizer.preference import cost_bound_slack_ore, flatten_peaks_enabled
+from ftw_optimizer.preference import (
+    apply_cvxpy_flatten,
+    cost_bound_slack_ore,
+    flatten_peaks_enabled,
+    named_shortfalls,
+)
 from ftw_optimizer.worker import handshake, handle
 
 
@@ -29,6 +37,10 @@ def test_cost_bound_slack_is_numerical_noise() -> None:
     assert cost_bound_slack_ore(0.0) <= 1e-7
     assert cost_bound_slack_ore(100.0) < 1e-6
     assert cost_bound_slack_ore(1_000_000.0) < 1e-5
+
+
+def test_named_shortfalls_ignore_noise() -> None:
+    assert named_shortfalls({"home": 0.4, "car": 1200}) == {"car": 1200}
 
 
 def flatten_request(*, enabled: bool, backend: str) -> dict:
@@ -139,6 +151,45 @@ def test_flatten_does_not_cut_profitable_fuse_export(backend: str) -> None:
     for action in response["plan"]["actions"]:
         assert math.isclose(action["grid_w"], -100, abs_tol=1e-3)
         assert math.isclose(action["battery_w"], 0, abs_tol=1e-3)
+
+
+def test_expired_deadline_skips_flatten_and_keeps_peaks() -> None:
+    grid_import = cp.Variable(2, nonneg=True)
+    grid_export = cp.Variable(2, nonneg=True)
+    cost_objective = cp.sum(grid_import)
+    constraints = [grid_import == [4000, 0], grid_export == [0, 0]]
+    problem = cp.Problem(cp.Minimize(cost_objective), constraints)
+    problem.solve(solver=cp.HIGHS)
+
+    def boom(_problem: cp.Problem) -> None:
+        raise AssertionError("preference solve must not run when the deadline is gone")
+
+    result = apply_cvxpy_flatten(
+        cost_problem=problem,
+        cost_objective=cost_objective,
+        constraints=constraints,
+        grid_import=grid_import,
+        grid_export=grid_export,
+        settings={"flatten_peaks": True, "time_limit_s": 2.0},
+        deadline=SolveDeadline(time.perf_counter() - 1.0),
+        discrete=False,
+        solve_problem=boom,
+    )
+    assert result.stage == "no_time"
+    assert result.import_peak_w == pytest.approx(4000)
+    assert result.export_peak_w == pytest.approx(0)
+
+
+@pytest.mark.parametrize("backend", ["highs", "cvxpy"])
+def test_service_report_names_an_unmet_storage_target(backend: str) -> None:
+    request = flatten_request(enabled=True, backend=backend)
+    request["request_id"] = f"storage-shortfall-{backend}"
+    request["storages"][0]["target_energy_wh"] = 20_000
+    request["storages"][0]["target_slot"] = 2
+    response = handle(request)
+    assert response["ok"], response
+    report = response["solver"].get("service_report") or {}
+    assert report["storage_shortfall_wh"]["home"] >= 10_000
 
 
 def test_service_report_names_an_unmet_ev_deadline() -> None:

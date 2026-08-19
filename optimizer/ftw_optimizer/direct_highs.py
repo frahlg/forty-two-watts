@@ -27,6 +27,7 @@ from .preference import (
     cost_bound_slack_ore,
     flatten_horizon_has_choice,
     flatten_peaks_enabled,
+    named_shortfalls,
     peaks_from_grid,
     preference_time_limit_s,
 )
@@ -74,6 +75,7 @@ class DirectSharedStorageVars:
     total_discharge: list[list[int]]
     service: dict[int, float]
     economic: dict[int, float]
+    shortfalls: dict[str, int]
 
 
 class SparseModel:
@@ -240,6 +242,9 @@ def solve_direct_highs(
         )
         service = dict(shared_storage.service) if shared_storage is not None else {}
         economic = dict(shared_storage.economic) if shared_storage is not None else {}
+        shortfalls = (
+            dict(shared_storage.shortfalls) if shared_storage is not None else {}
+        )
         # Shared charge and discharge make storage state deterministic across
         # scenarios. Reuse its variables and rows; only meter flow varies.
         storages_to_build = () if shared_storage is not None else prepared.storages
@@ -319,6 +324,7 @@ def solve_direct_highs(
                     target,
                 )
                 _add(service, shortfall, 1.0 / capacity)
+                shortfalls[str(spec.get("id", f"storage-{storage_index}"))] = shortfall
 
             cycle_coefficient = spread + max(0.0, float(spec.get("cycle_cost_ore_kwh", 0)))
             throughput_coefficient = (
@@ -357,6 +363,7 @@ def solve_direct_highs(
                 total_discharge,
                 dict(service),
                 dict(economic),
+                dict(shortfalls),
             )
         scenario_grid_cost: dict[int, float] = {}
 
@@ -699,6 +706,7 @@ def solve_direct_highs(
         flatten_stage,
         import_peak_w,
         export_peak_w,
+        _direct_storage_service_report(shared_storage, solution),
     )
 
 
@@ -721,6 +729,7 @@ def _response(
     preference_stage: str = "",
     import_peak_w: float = 0.0,
     export_peak_w: float = 0.0,
+    service_report: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     scenarios = prepared.scenario_set.scenarios
     base_index = next((i for i, scenario in enumerate(scenarios) if scenario.id == "base"), 0)
@@ -809,6 +818,8 @@ def _response(
         "import_peak_w": import_peak_w,
         "export_peak_w": export_peak_w,
     }
+    if service_report:
+        solver["service_report"] = service_report
     if shared:
         probabilities = np.asarray([scenario.probability for scenario in scenarios])
         energy_cost = 0.0
@@ -896,6 +907,22 @@ def _response(
             "actions": actions,
         },
     }
+
+
+def _direct_storage_service_report(
+    shared_storage: DirectSharedStorageVars | None,
+    solution: np.ndarray,
+) -> dict[str, Any]:
+    if shared_storage is None:
+        return {}
+    values: dict[str, float] = {}
+    for asset_id, index in shared_storage.shortfalls.items():
+        if 0 <= index < len(solution):
+            values[str(asset_id)] = float(solution[index])
+    named = named_shortfalls(values)
+    if not named:
+        return {}
+    return {"storage_shortfall_wh": named}
 
 
 def _direct_peaks(

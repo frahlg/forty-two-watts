@@ -111,6 +111,14 @@ def boolean_solution_is_integral(problem: cp.Problem) -> bool:
     return True
 
 
+def named_shortfalls(values: dict[str, float]) -> dict[str, float]:
+    return {
+        str(asset_id): float(value)
+        for asset_id, value in values.items()
+        if float(value) >= SHORTFALL_WH_REPORT
+    }
+
+
 def build_service_report(
     *,
     flex_loads: list[Any],
@@ -129,15 +137,14 @@ def build_service_report(
     if flex_shortfall:
         report["flex_shortfall_wh"] = flex_shortfall
 
-    storage_shortfall: dict[str, float] = {}
+    storage_values: dict[str, float] = {}
     for storage in storages:
         spec = storage.spec if hasattr(storage, "spec") else storage
         shortfall = spec.get("_shortfall") if isinstance(spec, dict) else None
         if shortfall is None or getattr(shortfall, "value", None) is None:
             continue
-        value = float(shortfall.value)
-        if value >= SHORTFALL_WH_REPORT:
-            storage_shortfall[str(spec["id"])] = value
+        storage_values[str(spec["id"])] = float(shortfall.value)
+    storage_shortfall = named_shortfalls(storage_values)
     if storage_shortfall:
         report["storage_shortfall_wh"] = storage_shortfall
 
