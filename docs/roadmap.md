@@ -7,7 +7,12 @@ promotion gate before it can move forward.
 
 The permanent rules do not move between lanes: core owns safety and dispatch,
 the site sign convention is unchanged, and local operation never depends on an
-optional service.
+optional service. Planner output remains untrusted input. A failed or stale
+driver still receives its autonomous default. Home Assistant stays optional.
+
+Feature work after NOW is ordered by return: the first track is the one that
+changes what a household can do this week without a new tariff model, a new
+protocol, or a second safety authority.
 
 ## NOW — close the P0 control and product loop
 
@@ -18,13 +23,57 @@ and understandable from the local UI:
 |---|---|---|
 | Access boundary | One admission policy covers state-changing requests during setup, boot, normal API operation and local development. Trusted local access remains recoverable; non-local mutation fails closed. The separate site-controller identity remains read-only. | Positive and negative tests cover every lifecycle phase, origin/host handling, credential enforcement and local recovery. |
 | Energy ledger and history | One durable ledger records import and export separately, with interval, source and quality/freshness attached. Daily and settlement-period views are derived from that record across hot, warm and cold history; control never offsets earlier import with later export. | Tier-boundary, restart, rolloff and reconciliation tests agree with the site sign convention and retain provenance. |
-| Battery-to-EV lease | Battery support for EV charging is an explicit local lease with a bounded site/loadpoint scope, start, expiry and observable state. Expiry, stale required telemetry or loss of the controlled session releases it; all normal SoC, fuse, power and slew limits still apply. | Tests cover grant, replacement, expiry, restart policy, stale-data release, optimizer interpretation and local operator priority. |
+| Battery-to-EV lease | Battery support for EV charging is an explicit local lease with a bounded site/loadpoint scope, start, expiry and observable state. The local UI treats a lease as a session: remaining energy, floor SoC, and a stop that the operator can see. Expiry, stale required telemetry or loss of the controlled session releases it; all normal SoC, fuse, power and slew limits still apply. | Tests cover grant, replacement, expiry, restart policy, stale-data release, optimizer interpretation and local operator priority. The UI shows remaining lease energy and the floor without a diagnostic page. |
 | Mobile and optimizer UX | The local experience works at narrow widths and explains current action, next planned action, fallback state, freshness and active battery-to-EV lease without requiring diagnostic knowledge. | Viewport checks and UI tests cover normal planning, optimizer unavailable/invalid, stale telemetry and lease expiry. |
+
+The ledger track is also the session receipt. A finished ledger must be able
+to answer how much energy a charge session used, from which source, and at
+what recorded price when a tariff is present. Missing price hides the money
+column. It does not invent a saving.
 
 The active access-boundary and read-only site-controller work are inputs to
 this lane, not parallel remote products. Their contracts must converge on one
 rule: identity can establish who or what is speaking, but only core can admit a
 mutation and validate its effect.
+
+## NEXT — household charging policy
+
+Entry gate: NOW is complete. These tracks run in the listed order. A later
+track may start only when the earlier track has exit evidence, or when it
+does not share control or UI state with an unfinished predecessor.
+
+Each track is a core policy or an optimizer-contract field. None of them
+puts Home Assistant, a cloud optimizer, or a vehicle OEM API on the control
+path. Drivers remain the only hardware dialect. The optimizer may propose;
+core still validates and dispatches.
+
+| Order | Track | Outcome | Exit evidence |
+|---|---|---|---|
+| 1 | Charge modes | A loadpoint has four named modes the operator can lock: Surplus, Min+surplus, Fast, Off. Surplus starts only when measured site surplus covers the charger minimum for the active phase count, with enable and disable thresholds in watts and minutes. Min+surplus holds the charger minimum and adds surplus on top. Fast may buy grid. Stale site-meter data turns Surplus into Off. It does not hold the last surplus. | Tests cover start/stop hysteresis, the 1-phase and 3-phase minima, stale-meter fail-closed, and mode lock vs optimizer suggestion. The UI names the modes without diagnostic copy. |
+| 2 | House reserve and discharge lock | Two SoC bands are first-class: the house reserve (surplus charges the battery first) and the car buffer (the EV may drain only above that band). When Fast or a grid-buy plan is active, core holds the battery so night energy hits the car instead of emptying the house. A lease from NOW may override the bands for one session. The optimizer consumes the bands. It does not invent them. | Tests cover reserve hold, buffer discharge, lock during grid-buy, lease override, and optimizer-unavailable fallback that still honours the reserve. |
+| 3 | Freeze and hold | Core can command freeze-charge, freeze-export and hold as named intents. A driver that declares the capability executes the vendor hold. A driver that cannot freeze degrades to a quantified 0 W charge or discharge clamp, never a pretend hold. Idle 0 W is not freeze. | Driver capability tests for at least one hybrid that implements hold and one that degrades. Restart and stale-driver paths return to autonomous default, not a stuck freeze. |
+| 4 | Fuse tree and phase scaling | Site limits are a tree: a child circuit has a parent, optional meter, and max current and/or max power. Before pausing a charge, core scales 3-phase to 1-phase when the charger can switch and the child still has headroom. New and live sessions share the tree; leftover-headroom-only is not enough. A stale circuit meter is over-limit, not a sum of children. | Tests cover nested circuits, metered vs summed children, 1p/3p before pause, live rebalance, and stale-meter fail-closed. The UI shows the tree and the active clip. |
+| 5 | Solar gate fallback | When the optimizer is unavailable, invalid or stale, core still allocates surplus. Below the house reserve, solar goes to the battery. The battery assists an EV only when live surplus clears a gate. This is the Go fallback, not a second planner. | Tests cover optimizer-down, optimizer-invalid, and surplus below/above the gate without emptying the house battery into the car. |
+| 6 | Charge as energy and deadline | A loadpoint goal is remaining energy or SoC, a ready-by time, optional weekday mask, and a strategy: cheapest slots or one continuous block. An optional late window moves the last minutes to just before leave. If the vehicle SoC is stale, the goal is kWh, never an invented percent. A session already drawing power pins the first planner slot to the measured watts so a replan does not cancel a human start. | Tests cover deadline, weekday mask, cheapest vs continuous, late window, stale SoC, and the t=0 pin. CalDAV and the local UI write the same intent object. |
+
+Tracks 1–5 are dispatcher policy. They keep working if the optimizer is down.
+Track 6 is an intent the optimizer may fill; the Go fallback must still produce
+a continuous block when the sidecar is absent.
+
+## NEXT — forecasts and plan quality
+
+Entry gate: household charging policy tracks 1–3 have exit evidence, so a
+better forecast cannot empty the house into the car.
+
+| Order | Track | Outcome | Exit evidence |
+|---|---|---|---|
+| 7 | Forecast beliefs | Load, PV and price forecasts stored for planning carry who produced them, when they were issued, and an uncertainty band. A six-hour-old PV curve is not treated as a meter. | Replay tests refuse to plan from a forecast missing issuer, issue time or freshness. The UI can say the plan used yesterday's weather. |
+| 8 | PV prior and percentiles | The optimizer request includes a physics or vendor PV prior plus p10/p50/p90 (or equivalent bands) and a bounded on-site residual only after that residual beats the prior on held-out days. Curtailment disables residual learning so the chop is not learned as low yield. | Contract tests for the new request fields. A site with no residual keeps the prior. A curtailed site does not shrink the prior. |
+| 9 | Wear and improvement floor | Cycle cost, end-of-horizon battery value, and a minimum improvement to export or to swap slots are optimizer-contract fields. Displayed savings never include virtual wear. | Fixtures where a 0.1-unit spread no longer thrashes the battery, and the UI savings figure matches the tariff ledger, not the virtual cost. |
+
+These tracks extend the versioned optimizer handshake with features. They do
+not bump the contract version unless the request shape itself changes. They
+do not write `config.yaml` from a learned model.
 
 ## NEXT — review the tariff and demand contract
 
@@ -42,6 +91,15 @@ cases.
 No tariff, demand, optimizer, control or tariff-UI implementation PR starts
 until that written contract is accepted. The accepted result will be split
 into small issues and one focused PR at a time.
+
+After that contract, these follow in the same ROI order. They stay behind
+the written tariff model because each one prices or clips against it:
+
+| Track | Outcome |
+|---|---|
+| Peak and capacity | The planner sees a billing peak or capacity window. Live control still uses the fuse tree. Effective limit is at least the higher of the configured target and the peak already set this cycle. |
+| Feed-in and curtail | Economic export pause and physical `max_export_w` are separate constraints. Stale price never curtails on economics. A DSO cap still binds. Drivers that can curtail report percent, not a boolean. |
+| External events | A tariff plugin may emit a windowed event (saving session, free power, VPP stand-aside) as `{window, price, stand_aside, load_scale}`. Core only knows that object. Brand names stay in the plugin. |
 
 ## NEXT — the FTW app
 
@@ -133,16 +191,22 @@ for the platform boundary.
 
 ## LATER — promote only from evidence
 
-These are bounded follow-on directions, not scheduled commitments:
+These are bounded follow-on directions, not scheduled commitments. Order
+inside this table is still return: the first row is the one that should
+be promoted first once its gate is met.
 
 | Direction | Promotion gate |
 |---|---|
+| External grid constraints | A versioned constraint record has provenance, effective window, expiry, conflict handling and an audit trail; it can never weaken physical site limits. The record caps the root of the fuse tree. Household charging policy track 4 (fuse tree) has exit evidence. |
+| Active heat | Neutral thermal capabilities, comfort bounds, a legionella or equivalent hygiene constraint, and a safe autonomous default are demonstrated before dispatch is enabled. The heat pump remains the thermodynamic owner. Core may request boost, dim or continuous run; it never writes a compressor setpoint. Household charging policy tracks 1–3 have exit evidence so heat cannot empty the house battery. |
+| Excess-PV sinks | A priority list after the house battery (EV surplus loop, water, then other dump loads) is defined as eligible slots plus a measured-surplus dispatcher. The optimizer does not open-loop a sink. Active heat or a dump-load driver exists with a default-off fail. |
 | OCPP gateway | The EV lease/action model and stable charger identity are proven locally, including disconnect and autonomous-default behavior. |
-| External grid constraints | A versioned constraint record has provenance, effective window, expiry, conflict handling and an audit trail; it can never weaken physical site limits. |
-| Active heat | Neutral thermal capabilities, comfort bounds and a safe autonomous default are demonstrated before dispatch is enabled. |
+| OCPP forwarding | The gateway is proven. A tap can forward session and meter frames to one upstream CPO and block remote start, stop and profile so core stays the only commander. Upstream loss does not stop local charging. |
+| Passive battery awareness | An EV-only site can read house-battery SoC without owning the inverter, and still refuse to pull the pack below the house reserve. |
 | Native widgets and richer multi-site views | The app protocol's read schema, per-site pairing and privacy budget are stable in production. |
 | V2X automation | Bidirectional capability, metering, lease ownership, interlocks and fallback are proven for the complete local actuation path. |
-| General vehicle snapshot adapter | A minimal vendor-neutral snapshot has stable vehicle identity, freshness and consent semantics without becoming a second control path. |
+| General vehicle snapshot adapter | A minimal vendor-neutral snapshot has stable vehicle identity, freshness and consent semantics without becoming a second control path. Offline and guest vehicles remain the default path. A sleeping OEM API must not block surplus charging. |
+| What-if and tariff compare | An offline tool can replay the ledger under another tariff. It never sits in the control loop. The tariff contract from issue #866 is accepted. |
 
 ## Later — Device Support package promotion
 
@@ -152,5 +216,5 @@ editable source or replace FTW's public default channel. Core will consume only
 packages that pass its host contract, signature, compatibility, activation and
 rollback checks.
 
-The architectural decision for NEXT is recorded in
+The architectural decision for the FTW app lane is recorded in
 [ADR 0005](adr/0005-outbound-site-link.md).
