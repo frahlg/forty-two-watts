@@ -103,12 +103,49 @@ func TestMaskDriverConfigSecretsFailsClosedWhenCatalogMissing(t *testing.T) {
 	}
 }
 
+func TestMaskDriverConfigSecretsFailsClosedWhenCatalogSkipsDriver(t *testing.T) {
+	cfg := &config.Config{Drivers: []config.Driver{{
+		Name: "sonnen",
+		Lua:  "drivers/sonnen.lua",
+		Config: map[string]any{
+			"api_token": "secret-token",
+		},
+	}}}
+	// Another driver loaded; this lua file was skipped.
+	maskDriverConfigSecrets(cfg, map[string][]string{"drivers/other.lua": {"api_token"}})
+	if got := cfg.Drivers[0].Config["api_token"]; got != maskedPlaceholder {
+		t.Fatalf("api_token = %q, want masked when the catalog skipped this driver", got)
+	}
+
+	emptyCatalog := &config.Config{Drivers: []config.Driver{{
+		Name:   "sonnen",
+		Lua:    "drivers/sonnen.lua",
+		Config: map[string]any{"api_token": "secret-token"},
+	}}}
+	maskDriverConfigSecrets(emptyCatalog, map[string][]string{})
+	if got := emptyCatalog.Drivers[0].Config["api_token"]; got != maskedPlaceholder {
+		t.Fatalf("api_token = %q, want masked when the catalog loaded nothing", got)
+	}
+}
+
 func TestRejectUnsafeProbeHost(t *testing.T) {
 	if err := rejectUnsafeProbeHost("127.0.0.1"); err == nil {
 		t.Fatal("loopback should be refused")
 	}
+	if err := rejectUnsafeProbeHost("::1"); err == nil {
+		t.Fatal("IPv6 loopback should be refused")
+	}
+	if err := rejectUnsafeProbeHost("[::1]"); err == nil {
+		t.Fatal("bracketed IPv6 loopback should be refused")
+	}
+	if err := rejectUnsafeProbeHost("localhost"); err == nil {
+		t.Fatal("localhost should be refused")
+	}
 	if err := rejectUnsafeProbeHost("169.254.1.1"); err == nil {
 		t.Fatal("link-local should be refused")
+	}
+	if err := rejectUnsafeProbeHost("fe80::1"); err == nil {
+		t.Fatal("IPv6 link-local should be refused")
 	}
 	if err := rejectUnsafeProbeHost("0.0.0.0"); err == nil {
 		t.Fatal("unspecified should be refused")
@@ -118,5 +155,22 @@ func TestRejectUnsafeProbeHost(t *testing.T) {
 	}
 	if err := rejectUnsafeProbeHost("zap.local"); err != nil {
 		t.Fatalf("hostname refused: %v", err)
+	}
+}
+
+func TestRejectUnsafeProbeTargetsCoversHTTP(t *testing.T) {
+	cfg := config.Driver{
+		Config: map[string]any{"host": "127.0.0.1"},
+		Capabilities: config.Capabilities{
+			HTTP: &config.HTTPCapability{AllowedHosts: []string{"127.0.0.1"}},
+		},
+	}
+	if err := rejectUnsafeProbeTargets(cfg); err == nil {
+		t.Fatal("HTTP loopback probe should be refused")
+	}
+	cfg.Config["host"] = "192.168.1.10"
+	cfg.Capabilities.HTTP.AllowedHosts = []string{"inverter.local"}
+	if err := rejectUnsafeProbeTargets(cfg); err != nil {
+		t.Fatalf("LAN HTTP probe refused: %v", err)
 	}
 }

@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -235,13 +236,13 @@ func (s *Server) handleDriverTest(w http.ResponseWriter, r *http.Request) {
 	resolved.ResolveDriverPaths(baseDir)
 	cfg = resolved.Drivers[0]
 
+	if err := rejectUnsafeProbeTargets(cfg); err != nil {
+		writeJSON(w, 400, map[string]string{"error": err.Error()})
+		return
+	}
 	if mq := cfg.EffectiveMQTT(); mq != nil {
 		if mq.Port == 0 {
 			mq.Port = 1883
-		}
-		if err := rejectUnsafeProbeHost(mq.Host); err != nil {
-			writeJSON(w, 400, map[string]string{"error": "mqtt host: " + err.Error()})
-			return
 		}
 		if s.deps.DriverMQTTFactory == nil {
 			writeJSON(w, 503, map[string]string{"error": "mqtt probe unavailable"})
@@ -254,10 +255,6 @@ func (s *Server) handleDriverTest(w http.ResponseWriter, r *http.Request) {
 		}
 		if mb.UnitID == 0 {
 			mb.UnitID = 1
-		}
-		if err := rejectUnsafeProbeHost(mb.Host); err != nil {
-			writeJSON(w, 400, map[string]string{"error": "modbus host: " + err.Error()})
-			return
 		}
 		if s.deps.DriverModbusFactory == nil {
 			writeJSON(w, 503, map[string]string{"error": "modbus probe unavailable"})
@@ -323,18 +320,116 @@ func (s *Server) handleDriverTest(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// rejectUnsafeProbeTargets checks every host a driver test might dial:
+// MQTT, Modbus, config.host / config.url, and HTTP/WS/TCP allowlists.
+func rejectUnsafeProbeTargets(cfg config.Driver) error {
+	if mq := cfg.EffectiveMQTT(); mq != nil {
+		if err := rejectUnsafeProbeHost(mq.Host); err != nil {
+			return fmt.Errorf("mqtt host: %w", err)
+		}
+	}
+	if mb := cfg.EffectiveModbus(); mb != nil {
+		if err := rejectUnsafeProbeHost(mb.Host); err != nil {
+			return fmt.Errorf("modbus host: %w", err)
+		}
+	}
+	if cfg.Config != nil {
+		if h, ok := cfg.Config["host"].(string); ok && strings.TrimSpace(h) != "" {
+			if err := rejectUnsafeProbeHost(h); err != nil {
+				return fmt.Errorf("config.host: %w", err)
+			}
+		}
+		if u, ok := cfg.Config["url"].(string); ok && strings.TrimSpace(u) != "" {
+			if host := hostFromProbeURL(u); host != "" {
+				if err := rejectUnsafeProbeHost(host); err != nil {
+					return fmt.Errorf("config.url: %w", err)
+				}
+			}
+		}
+	}
+	if httpCap := cfg.Capabilities.HTTP; httpCap != nil {
+		for _, h := range httpCap.AllowedHosts {
+			if strings.TrimSpace(h) == "" {
+				continue
+			}
+			if err := rejectUnsafeProbeHost(hostFromAllowlistEntry(h)); err != nil {
+				return fmt.Errorf("http allowlist: %w", err)
+			}
+		}
+	}
+	if ws := cfg.Capabilities.WebSocket; ws != nil {
+		for _, h := range ws.AllowedHosts {
+			if strings.TrimSpace(h) == "" {
+				continue
+			}
+			if err := rejectUnsafeProbeHost(hostFromAllowlistEntry(h)); err != nil {
+				return fmt.Errorf("websocket allowlist: %w", err)
+			}
+		}
+	}
+	if tcp := cfg.Capabilities.TCP; tcp != nil {
+		for _, h := range tcp.AllowedHosts {
+			if strings.TrimSpace(h) == "" {
+				continue
+			}
+			if err := rejectUnsafeProbeHost(hostFromAllowlistEntry(h)); err != nil {
+				return fmt.Errorf("tcp allowlist: %w", err)
+			}
+		}
+	}
+	return nil
+}
+
+func hostFromProbeURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return strings.TrimSpace(raw)
+	}
+	return u.Hostname()
+}
+
+func hostFromAllowlistEntry(entry string) string {
+	entry = strings.TrimSpace(entry)
+	if host, _, err := net.SplitHostPort(entry); err == nil {
+		return host
+	}
+	return entry
+}
+
 // rejectUnsafeProbeHost stops a driver test or fingerprint from dialing
-// the box itself or link-local/metadata addresses. Hostnames stay
-// allowed so zap.local still probes.
+// the box itself or link-local/metadata addresses. Hostnames such as
+// zap.local still probe unless they resolve to a forbidden address.
 func rejectUnsafeProbeHost(host string) error {
 	host = strings.TrimSpace(host)
+	if i := strings.Index(host, "%"); i >= 0 {
+		host = host[:i]
+	}
+	host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
 	if host == "" {
 		return fmt.Errorf("missing host")
 	}
-	ip := net.ParseIP(host)
-	if ip == nil {
+	lower := strings.ToLower(host)
+	if lower == "localhost" || strings.HasSuffix(lower, ".localhost") {
+		return fmt.Errorf("loopback, link-local and unspecified addresses are not permitted")
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return rejectUnsafeProbeIP(ip)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
 		return nil
 	}
+	for _, a := range addrs {
+		if err := rejectUnsafeProbeIP(a.IP); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func rejectUnsafeProbeIP(ip net.IP) error {
 	if ip.IsLoopback() || ip.IsUnspecified() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() {
 		return fmt.Errorf("loopback, link-local and unspecified addresses are not permitted")
 	}

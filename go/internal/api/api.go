@@ -1339,17 +1339,18 @@ func (s *Server) driverSecretKeys() map[string][]string {
 	}
 	out := make(map[string][]string, len(entries))
 	for _, e := range entries {
-		if len(e.ConfigSecrets) == 0 {
-			continue
+		keys := e.ConfigSecrets
+		if keys == nil {
+			keys = []string{}
 		}
 		path := filepath.ToSlash(e.Path)
-		out[path] = e.ConfigSecrets
+		out[path] = keys
 		base := filepath.ToSlash(filepath.Base(dir))
 		if rel, ok := strings.CutPrefix(path, base+"/"); ok {
 			// Config round-trips paths resolved via -drivers as
 			// "drivers/<rel>" regardless of the actual directory name.
 			// Keep catalog secret matching on that portable alias too.
-			out[filepath.ToSlash(filepath.Join("drivers", rel))] = e.ConfigSecrets
+			out[filepath.ToSlash(filepath.Join("drivers", rel))] = keys
 		}
 	}
 	return out
@@ -1368,11 +1369,12 @@ func maskDriverConfigSecrets(cfg *config.Config, secretsByLua map[string][]strin
 		maskAllDriverConfigStrings(cfg)
 		return
 	}
-	if len(secretsByLua) == 0 {
-		return
-	}
 	for i := range cfg.Drivers {
-		keys := secretsByLua[cfg.Drivers[i].Lua]
+		keys, known := secretsByLua[cfg.Drivers[i].Lua]
+		if !known {
+			maskOneDriverConfigStrings(&cfg.Drivers[i])
+			continue
+		}
 		if len(keys) == 0 || cfg.Drivers[i].Config == nil {
 			continue
 		}
@@ -1396,46 +1398,60 @@ func maskDriverConfigSecrets(cfg *config.Config, secretsByLua map[string][]strin
 
 func maskAllDriverConfigStrings(cfg *config.Config) {
 	for i := range cfg.Drivers {
-		if cfg.Drivers[i].Config == nil {
-			continue
-		}
-		cp := make(map[string]any, len(cfg.Drivers[i].Config))
-		for k, v := range cfg.Drivers[i].Config {
-			if s, ok := v.(string); ok && s != "" {
-				cp[k] = maskedPlaceholder
-			} else {
-				cp[k] = v
-			}
-		}
-		cfg.Drivers[i].Config = cp
+		maskOneDriverConfigStrings(&cfg.Drivers[i])
 	}
 }
 
-func restoreAllBlankDriverConfigStrings(incoming, existing *config.Config) {
-	for i := range incoming.Drivers {
-		var ed *config.Driver
-		for j := range existing.Drivers {
-			if existing.Drivers[j].Name == incoming.Drivers[i].Name {
-				ed = &existing.Drivers[j]
-				break
-			}
+func maskOneDriverConfigStrings(d *config.Driver) {
+	if d == nil || d.Config == nil {
+		return
+	}
+	cp := make(map[string]any, len(d.Config))
+	for k, v := range d.Config {
+		if s, ok := v.(string); ok && s != "" {
+			cp[k] = maskedPlaceholder
+		} else {
+			cp[k] = v
 		}
-		if ed == nil || ed.Config == nil {
+	}
+	d.Config = cp
+}
+
+func restoreAllBlankDriverConfigStrings(incoming, existing *config.Config) {
+	if incoming == nil || existing == nil {
+		return
+	}
+	for i := range incoming.Drivers {
+		restoreOneDriverBlankStrings(&incoming.Drivers[i], existing)
+	}
+}
+
+func restoreOneDriverBlankStrings(incoming *config.Driver, existing *config.Config) {
+	if incoming == nil || existing == nil {
+		return
+	}
+	var ed *config.Driver
+	for j := range existing.Drivers {
+		if existing.Drivers[j].Name == incoming.Name {
+			ed = &existing.Drivers[j]
+			break
+		}
+	}
+	if ed == nil || ed.Config == nil {
+		return
+	}
+	if incoming.Config == nil {
+		incoming.Config = map[string]any{}
+	}
+	for k, existingV := range ed.Config {
+		existingS, ok := existingV.(string)
+		if !ok || existingS == "" {
 			continue
 		}
-		if incoming.Drivers[i].Config == nil {
-			incoming.Drivers[i].Config = map[string]any{}
-		}
-		for k, existingV := range ed.Config {
-			existingS, ok := existingV.(string)
-			if !ok || existingS == "" {
-				continue
-			}
-			incomingV, hasI := incoming.Drivers[i].Config[k]
-			incomingS, _ := incomingV.(string)
-			if !hasI || incomingS == "" || incomingS == maskedPlaceholder {
-				incoming.Drivers[i].Config[k] = existingS
-			}
+		incomingV, hasI := incoming.Config[k]
+		incomingS, _ := incomingV.(string)
+		if !hasI || incomingS == "" || incomingS == maskedPlaceholder {
+			incoming.Config[k] = existingS
 		}
 	}
 }
@@ -1453,11 +1469,12 @@ func restoreDriverConfigSecrets(incoming, existing *config.Config, secretsByLua 
 		restoreAllBlankDriverConfigStrings(incoming, existing)
 		return
 	}
-	if len(secretsByLua) == 0 {
-		return
-	}
 	for i := range incoming.Drivers {
-		keys := secretsByLua[incoming.Drivers[i].Lua]
+		keys, known := secretsByLua[incoming.Drivers[i].Lua]
+		if !known {
+			restoreOneDriverBlankStrings(&incoming.Drivers[i], existing)
+			continue
+		}
 		if len(keys) == 0 {
 			continue
 		}

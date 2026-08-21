@@ -223,6 +223,9 @@ func normalizeFingerprintHost(raw string) (string, error) {
 		}
 		return host, nil
 	}
+	if err := rejectUnsafeProbeHost(host); err != nil {
+		return "", err
+	}
 	if len(host) > 253 || strings.ContainsAny(host, "/\\@?#:") {
 		return "", fmt.Errorf("invalid host")
 	}
