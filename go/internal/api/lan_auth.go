@@ -340,7 +340,7 @@ func (s *Server) handleAuthPassword(w http.ResponseWriter, r *http.Request) {
 		// that may turn the lock on.
 		if !currentlyOn && !isLoopbackClient(r.RemoteAddr) {
 			writeJSON(w, http.StatusForbidden, map[string]string{
-				"error": "enable the house password from the box (http://127.0.0.1:8080)",
+				"error": "enable the house password from loopback inside the process. A published Docker port is not loopback — on Docker Desktop use docker compose -f docker-compose.macos.yml exec ftw, then curl http://127.0.0.1:8080",
 			})
 			return
 		}

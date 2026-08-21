@@ -422,6 +422,20 @@ func TestAuthPasswordEnableAndStatus(t *testing.T) {
 		t.Fatalf("first LAN enable status = %d, want 403 (body=%s)", rr.Code, rr.Body.String())
 	}
 
+	// Docker Desktop published ports SNAT to the bridge gateway, not
+	// loopback. That peer is RFC1918, same as a LAN visitor.
+	bridge := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/api/auth/password", strings.NewReader(body))
+	bridge.RemoteAddr = "172.17.0.1:43210"
+	bridge.Header.Set("Content-Type", "application/json")
+	rr = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, bridge)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("docker-bridge enable status = %d, want 403 (body=%s)", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "docker compose") {
+		t.Fatalf("403 body should name the Docker Desktop exec path, got %s", rr.Body.String())
+	}
+
 	post := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/api/auth/password", strings.NewReader(body))
 	post.RemoteAddr = "127.0.0.1:43210"
 	post.Header.Set("Content-Type", "application/json")
