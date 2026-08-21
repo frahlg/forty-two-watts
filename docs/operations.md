@@ -164,7 +164,10 @@ never asks. Live status stays readable without the password; a viewer
 caller is minted for those reads.
 
 An owner pairing QR is minted only from loopback or with the house
-password. A viewer invite still works from the LAN.
+password. Promoting a paired phone to owner uses the same gate. The
+first pairing on an empty box is an owner whatever the code said, so
+that mint also stays at the box. A viewer invite still works from the
+LAN once an owner exists.
 
 The FTW app and Home Assistant MQTT are unchanged.
 
