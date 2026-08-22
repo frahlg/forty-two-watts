@@ -2,6 +2,7 @@ package loadpoint
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 )
@@ -257,5 +258,43 @@ func TestActiveBatteryBoostTotalsArePerLoadpointAndUseStrictestReserve(t *testin
 	power, reserve := ctrl.ActiveBatteryBoostTotals(mgr.States(), now)
 	if power != 5000 || reserve != 0.35 {
 		t.Fatalf("totals = %.0f W, %.2f reserve; want 5000 W, 0.35", power, reserve)
+	}
+}
+
+func TestBatteryBoostLeaseJSONRoundTripIsFraction(t *testing.T) {
+	now := time.Date(2026, 8, 22, 12, 0, 0, 0, time.UTC)
+	lease := BatteryBoostLease{
+		StartedAt: now, ExpiresAt: now.Add(time.Hour),
+		MinBatterySoC: 0.30, EVTargetSoC: 0.80,
+	}
+	raw, err := json.Marshal(lease)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := m["min_battery_soc_pct"]; ok {
+		t.Fatalf("lease JSON still emits percent key: %s", raw)
+	}
+	if m["min_battery_soc"] != 0.30 {
+		t.Fatalf("min_battery_soc = %v, want 0.30", m["min_battery_soc"])
+	}
+
+	var back BatteryBoostLease
+	if err := json.Unmarshal([]byte(`{"started_at":"2026-08-22T12:00:00Z","expires_at":"2026-08-22T13:00:00Z","min_battery_soc_pct":30,"ev_target_soc_pct":80}`), &back); err != nil {
+		t.Fatal(err)
+	}
+	if back.MinBatterySoC != 0.30 || back.EVTargetSoC != 0.80 {
+		t.Fatalf("legacy percent hydrate = %+v", back)
+	}
+
+	var overflow BatteryBoostLease
+	if err := json.Unmarshal([]byte(`{"started_at":"2026-08-22T12:00:00Z","expires_at":"2026-08-22T13:00:00Z","min_battery_soc":1.02}`), &overflow); err != nil {
+		t.Fatal(err)
+	}
+	if overflow.MinBatterySoC != 1 {
+		t.Fatalf("1.02 overflow = %v, want 1 (not 0.0102)", overflow.MinBatterySoC)
 	}
 }

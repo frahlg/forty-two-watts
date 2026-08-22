@@ -231,3 +231,50 @@ func TestStopAfterFailedConnectDoesNotDeadlock(t *testing.T) {
 		t.Fatal("Stop blocked after a failed Connect — teardown is stuck on <-doneCh; the connectAndStart rollback regressed")
 	}
 }
+
+func TestMQTTObjectIDSlugsIllegalDriverNames(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"easee", "easee"},
+		{"Laddare, Garage", "laddare_garage"},
+		{"Värmepump, källaren", "v_rmepump_k_llaren"},
+		{"  foo   bar  ", "foo_bar"},
+		{"???", "driver"},
+		{"", "driver"},
+		{"Ev-Charger_1", "ev-charger_1"},
+	}
+	for _, c := range cases {
+		if got := mqttObjectID(c.in); got != c.want {
+			t.Errorf("mqttObjectID(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestDiscoveryTopicsRejectIllegalCharacters(t *testing.T) {
+	b := &Bridge{deviceID: "forty_two_watts", discoPrefix: "homeassistant", topicPrefix: "ftw"}
+	topic := b.driverDiscoveryTopic("sensor", "Laddare, Garage", "ev_current_a")
+	want := "homeassistant/sensor/forty_two_watts/laddare_garage_ev_current_a/config"
+	if topic != want {
+		t.Fatalf("discovery topic = %q, want %q", topic, want)
+	}
+	for _, r := range topic {
+		if r == ',' || r == ' ' {
+			t.Fatalf("discovery topic still has illegal %q: %s", r, topic)
+		}
+	}
+	if got := b.driverTopic("Laddare, Garage", "ev_current_a"); got != "ftw/driver/laddare_garage/ev_current_a" {
+		t.Fatalf("state topic = %q", got)
+	}
+	if got := b.driverUniqueID("easee", "_ev_w"); got != "forty_two_watts_easee_ev_w" {
+		t.Fatalf("legal-name unique_id changed: %q", got)
+	}
+}
+
+func TestPercentFromFractionUsedForSoCDoor(t *testing.T) {
+	// Guards the HA *100 door against a NaN/overflow regression in units.
+	if unit, class := metricUnitAndClass("bat_soc_pct", ""); unit != "%" || class != "battery" {
+		t.Fatalf("bat_soc_pct class = (%q, %q)", unit, class)
+	}
+	if unit, class := metricUnitAndClass("pack_soc", ""); unit != "%" || class != "battery" {
+		t.Fatalf("_soc suffix class = (%q, %q)", unit, class)
+	}
+}

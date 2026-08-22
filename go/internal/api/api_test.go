@@ -459,7 +459,7 @@ func TestLoadResearchDumpExportsHouseLoadWithEVSplit(t *testing.T) {
 		PVW:    -500,
 		BatW:   0,
 		LoadW:  1800, // legacy whole-site load: grid - bat - pv
-		BatSoC: 55,
+		BatSoC: 0.55,
 		JSON:   js,
 	}); err != nil {
 		t.Fatalf("record history: %v", err)

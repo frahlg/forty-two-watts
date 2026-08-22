@@ -240,8 +240,8 @@ func (h *Handler) loadpointBoost(cmd Cmd, uptimeMs int64) error {
 	lease := loadpoint.BatteryBoostLease{
 		StartedAt:     now,
 		ExpiresAt:     expires,
-		MinBatterySoC: units.FractionFromLegacyPercent(minSoC),
-		EVTargetSoC:   units.FractionFromLegacyPercent(evTarget),
+		MinBatterySoC: units.ClampFraction(units.FractionFromLegacyPercent(minSoC)),
+		EVTargetSoC:   units.ClampFraction(units.FractionFromLegacyPercent(evTarget)),
 	}
 	if departureAtMs, ok := argInt(cmd.Args, "departure_at_ms"); ok && departureAtMs > 0 {
 		lease.DepartureAt = time.UnixMilli(departureAtMs)

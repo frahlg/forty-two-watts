@@ -64,8 +64,8 @@ func (l *BatteryBoostLease) UnmarshalJSON(b []byte) error {
 	if l.EVTargetSoC == 0 && aux.EVTargetSoCPct != nil {
 		l.EVTargetSoC = *aux.EVTargetSoCPct
 	}
-	l.MinBatterySoC = units.FractionFromLegacyPercent(l.MinBatterySoC)
-	l.EVTargetSoC = units.FractionFromLegacyPercent(l.EVTargetSoC)
+	l.MinBatterySoC = units.ClampFraction(units.FractionFromLegacyPercent(l.MinBatterySoC))
+	l.EVTargetSoC = units.ClampFraction(units.FractionFromLegacyPercent(l.EVTargetSoC))
 	return nil
 }
 
