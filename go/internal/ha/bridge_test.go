@@ -250,9 +250,9 @@ func TestMQTTObjectIDSlugsIllegalDriverNames(t *testing.T) {
 }
 
 func TestDiscoveryTopicsRejectIllegalCharacters(t *testing.T) {
-	b := &Bridge{deviceID: "forty_two_watts", discoPrefix: "homeassistant", topicPrefix: "ftw"}
+	b := &Bridge{deviceID: "site_box", discoPrefix: "homeassistant", topicPrefix: "ftw"}
 	topic := b.driverDiscoveryTopic("sensor", "Laddare, Garage", "ev_current_a")
-	want := "homeassistant/sensor/forty_two_watts/laddare_garage_ev_current_a/config"
+	want := "homeassistant/sensor/site_box/laddare_garage_ev_current_a/config"
 	if topic != want {
 		t.Fatalf("discovery topic = %q, want %q", topic, want)
 	}
@@ -264,7 +264,7 @@ func TestDiscoveryTopicsRejectIllegalCharacters(t *testing.T) {
 	if got := b.driverTopic("Laddare, Garage", "ev_current_a"); got != "ftw/driver/laddare_garage/ev_current_a" {
 		t.Fatalf("state topic = %q", got)
 	}
-	if got := b.driverUniqueID("easee", "_ev_w"); got != "forty_two_watts_easee_ev_w" {
+	if got := b.driverUniqueID("easee", "_ev_w"); got != "site_box_easee_ev_w" {
 		t.Fatalf("legal-name unique_id changed: %q", got)
 	}
 }
