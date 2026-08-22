@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"log/slog"
 	"net"
 	"net/url"
@@ -369,15 +370,22 @@ func (b *Bridge) driverTopic(driver, field string) string {
 	return fmt.Sprintf("%s/driver/%s/%s", b.topicPrefix, mqttObjectID(driver), mqttObjectID(field))
 }
 
-// mqttObjectID slugs a free-form YAML driver name into the character set
-// Home Assistant allows in discovery object ids: [a-zA-Z0-9_-].
-// "Laddare, Garage" becomes laddare_garage so EV sensors are not silently
-// dropped. The human-readable name stays in the discovery `name` field.
+// mqttObjectID maps a free-form YAML driver name onto Home Assistant's
+// discovery object-id alphabet: [A-Za-z0-9_-].
+//
+// Names that are already legal are returned unchanged, including case, so an
+// existing Ev-Charger_1 entity is not duplicated as ev-charger_1 on upgrade.
+// Names that need slugging keep a readable stem and append an FNV-1a tag of
+// the original string so "Laddare, Garage" and "Laddare Garage" do not share
+// a topic. The discovery `name` field still uses the human YAML name.
 func mqttObjectID(name string) string {
+	if mqttIDLegal(name) {
+		return name
+	}
 	var b strings.Builder
 	lastSep := true
-	for _, r := range strings.ToLower(name) {
-		ok := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' || r == '_'
+	for _, r := range name {
+		ok := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_'
 		if ok {
 			b.WriteRune(r)
 			lastSep = r == '_' || r == '-'
@@ -390,9 +398,28 @@ func mqttObjectID(name string) string {
 	}
 	s := strings.Trim(b.String(), "_-")
 	if s == "" {
-		return "driver"
+		s = "driver"
 	}
-	return s
+	return s + "_" + mqttNameTag(name)
+}
+
+func mqttIDLegal(name string) bool {
+	if name == "" {
+		return false
+	}
+	for _, r := range name {
+		ok := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_'
+		if !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func mqttNameTag(name string) string {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(name))
+	return fmt.Sprintf("%08x", h.Sum32())
 }
 
 func (b *Bridge) driverUniqueID(driver, suffix string) string {
