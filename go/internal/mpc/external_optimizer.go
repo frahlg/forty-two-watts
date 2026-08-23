@@ -564,6 +564,11 @@ func (o *ExternalOptimizer) Health(ctx context.Context) (OptimizerRuntimeInfo, e
 	return o.transport.Health(ctx)
 }
 
+// solverGridLimitToleranceW admits only sub-watt feasibility residue from the
+// mathematical optimizer. The Go planner still observes the exact slot limits,
+// and dispatch keeps its separate fuse guard.
+const solverGridLimitToleranceW = 0.1
+
 // ValidatePlan independently replays a candidate plan against the canonical
 // site sign convention and current constraints. Solver output is untrusted at
 // this boundary: NaN, stale slot alignment, energy drift, illegal EV steps, or
@@ -730,7 +735,8 @@ func ValidatePlan(slots []Slot, p Params, plan *Plan) error {
 			return fmt.Errorf("slot %d violates mode %s: baseline_grid_w=%.9f grid_w=%.9f battery_w=%.9f",
 				i, p.Mode, baseGridW, a.GridW, a.BatteryW)
 		}
-		if !slot.Limits.allowsImport(a.GridW) || !slot.Limits.allowsExport(a.GridW) {
+		if (slot.Limits.MaxImportW > 0 && a.GridW > slot.Limits.MaxImportW+solverGridLimitToleranceW) ||
+			(slot.Limits.MaxExportW > 0 && a.GridW < -slot.Limits.MaxExportW-solverGridLimitToleranceW) {
 			return fmt.Errorf("slot %d grid_w %.3f violates grid limits", i, a.GridW)
 		}
 		gridKWh := a.GridW * dtH / 1000
