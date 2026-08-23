@@ -120,9 +120,13 @@
     if (window._weatherMap) { try { window._weatherMap.remove(); } catch (e) {} window._weatherMap = null; }
     var map = L.map(container, { zoomControl: true }).setView([lat, lon], 11);
     window._weatherMap = map;
+    // OSM volunteer tiles 403 when the page sends no Referer. The box
+    // sends Referrer-Policy: no-referrer on every response, so Leaflet
+    // must opt these images back in. Origin only; the path stays private.
     L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
       maxZoom: 18,
       attribution: "© OpenStreetMap",
+      referrerPolicy: "strict-origin-when-cross-origin",
     }).addTo(map);
     var marker = L.marker([lat, lon], { draggable: true }).addTo(map);
     function setCoord(la, lo) {
