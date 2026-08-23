@@ -491,6 +491,32 @@ func operatingBoundWorsens(from, to, min, max float64) bool {
 		math.Max(0, to-max) > math.Max(0, from-max)+eps
 }
 
+// clipBatteryPowerToBand reduces a DP action so continuous SoC does not
+// worsen operating-bound recovery. Policy is looked up on the grid; energy
+// is not, so a charge that lands on max from the nearest grid point can
+// overshoot from the real SoC.
+func clipBatteryPowerToBand(soc, powerW, dtH, capacityWh, etaC, etaD, min, max float64) float64 {
+	if capacityWh <= 0 || dtH <= 0 {
+		return 0
+	}
+	delta := loadpoint.BatteryEnergyDeltaWh(powerW, dtH, etaC, etaD) / capacityWh
+	if !operatingBoundWorsens(soc, soc+delta, min, max) {
+		return powerW
+	}
+	if powerW > 0 {
+		headroom := max - soc
+		if headroom <= 0 || etaC <= 0 {
+			return 0
+		}
+		return headroom * capacityWh / (dtH * etaC)
+	}
+	headroom := soc - min
+	if headroom <= 0 || etaD <= 0 {
+		return 0
+	}
+	return -headroom * capacityWh * etaD / dtH
+}
+
 func sanitizeOptimizeSlots(slots []Slot) []Slot {
 	out := make([]Slot, 0, len(slots))
 	for _, s := range slots {
@@ -1006,10 +1032,10 @@ func Optimize(slots []Slot, p Params) Plan {
 		pol := Policy[t][si][ei]
 		ba := pol / EA
 		ea := pol % EA
-		actW := actionAt(ba)
+		actW := clipBatteryPowerToBand(soc, actionAt(ba), dtH, p.CapacityWh,
+			p.ChargeEfficiency, p.DischargeEfficiency, p.SoCMin, p.SoCMax)
 		evW := evActionW(ea)
-		dSoCWh := loadpoint.BatteryEnergyDeltaWh(actW, dtH, p.ChargeEfficiency, p.DischargeEfficiency)
-		soc2 := soc + dSoCWh/p.CapacityWh
+		soc2 := soc + loadpoint.BatteryEnergyDeltaWh(actW, dtH, p.ChargeEfficiency, p.DischargeEfficiency)/p.CapacityWh
 		if operatingBoundWorsens(soc, soc2, p.SoCMin, p.SoCMax) {
 			actW = 0
 			soc2 = soc

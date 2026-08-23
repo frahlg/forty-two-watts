@@ -155,7 +155,7 @@ func TestValidatePlanGridLimitAllowsOnlySubWattSolverResidue(t *testing.T) {
 	const limitW = 11040.0
 	p := Params{
 		Mode: ModeArbitrage, CapacityWh: 10000,
-		SoCMinPct: 10, SoCMaxPct: 95, InitialSoCPct: 50,
+		SoCMin: 0.1, SoCMax: 0.95, InitialSoC: 0.5,
 		MaxChargeW: 5000, MaxDischargeW: 5000,
 		ChargeEfficiency: 1, DischargeEfficiency: 1,
 	}
@@ -183,7 +183,7 @@ func TestValidatePlanGridLimitAllowsOnlySubWattSolverResidue(t *testing.T) {
 			costOre := SlotGridCostOre(slot, tc.gridW*0.25/1000, p)
 			plan := Plan{TotalCostOre: costOre, Actions: []Action{{
 				SlotStartMs: 1, SlotLenMin: 15, GridW: tc.gridW,
-				SoCPct: 50, CostOre: costOre,
+				SoC: 0.5, CostOre: costOre,
 			}}}
 			err := ValidatePlan([]Slot{slot}, p, &plan)
 			if (err != nil) != tc.wantErr {
