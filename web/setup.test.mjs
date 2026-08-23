@@ -133,11 +133,19 @@ describe("setup wizard — read-only battery gateways", () => {
     assert.match(DEVICES_JS, /prevents Combined from counting its power twice/);
   });
 
-  it("tells the operator that Zap is the P1/HAN meter only", () => {
-    assert.match(JS, /P1\/HAN site meter/,
-      "setup must say Zap is the meter, not a proxy for other devices");
+  it("tells the operator that Zap is the P1/HAN meter by default", () => {
+    assert.match(JS, /P1\/HAN site meter by default/,
+      "setup must say Zap is the meter unless the operator opts in");
     assert.match(DEVICES_JS, /class="zap-p1-note"/);
-    assert.match(DEVICES_JS, /Do not use Zap as a proxy/);
+    assert.match(DEVICES_JS, /Zap never writes/);
+  });
+
+  it("offers opt-in Zap PV and battery reads in Devices", () => {
+    assert.match(DEVICES_JS, /class="drv-read-pv"/);
+    assert.match(DEVICES_JS, /drivers\.' \+ idx \+ '\.config\.read_pv/);
+    assert.match(DEVICES_JS, /class="drv-read-battery"/);
+    assert.match(DEVICES_JS, /drivers\.' \+ idx \+ '\.config\.read_battery/);
+    assert.match(DEVICES_JS, /Read PV from devices on this Zap/);
   });
 });
 
