@@ -582,11 +582,13 @@
   // Known EV charger providers, keyed by the `provider` string the Go
   // config (EVCharger.Provider) accepts. `transport` selects which field
   // block (#ev-fields-http vs #ev-fields-modbus) the wizard reveals:
-  //   - easee: cloud HTTP, needs username/password + serial lookup.
-  //   - ctek:  local Modbus/TCP, needs host/port/unit, no auth.
+  //   - easee:  cloud HTTP, needs username/password + serial lookup.
+  //   - zaptec: cloud HTTP, needs username/password + serial lookup.
+  //   - ctek:   local Modbus/TCP, needs host/port/unit, no auth.
   // Mirrors go/internal/config/config.go EVCharger.Validate.
   var EV_PROVIDERS = [
     { value: 'easee', label: 'Easee', transport: 'http' },
+    { value: 'zaptec', label: 'Zaptec', transport: 'http' },
     { value: 'ctek', label: 'CTEK', transport: 'modbus' }
   ];
 
@@ -854,8 +856,8 @@
 
     // EV Charger — shape the block to match the provider's transport
     // (see go/internal/config/config.go EVCharger). Cloud HTTP providers
-    // (easee) carry username/password/serial; local Modbus providers
-    // (ctek) carry a modbus{host,port,unit_id} block and reject auth.
+    // (easee, zaptec) carry username/password/serial; local Modbus
+    // providers (ctek) carry a modbus{host,port,unit_id} block and reject auth.
     var evProvider = document.getElementById('ev-provider').value;
     if (evProvider) {
       var ev = { provider: evProvider };

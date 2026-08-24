@@ -43,6 +43,8 @@ describe("setup wizard EV charger — provider options (Job 1)", () => {
       "a provider table must drive the #ev-provider options");
     assert.match(JS, /value:\s*['"]easee['"]/,
       "Easee (the cloud HTTP provider) must be selectable");
+    assert.match(JS, /value:\s*['"]zaptec['"]/,
+      "Zaptec (the cloud HTTP provider) must be selectable");
     assert.match(JS, /value:\s*['"]ctek['"]/,
       "CTEK (the local Modbus provider) must be selectable");
     assert.match(JS, /populateEVProviders/,
