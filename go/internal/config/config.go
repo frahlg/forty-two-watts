@@ -323,14 +323,14 @@ type V2XPolicy struct {
 // handler on POST /api/config. Providers that don't need auth (e.g. local
 // Modbus) leave Username + Password empty.
 type EVCharger struct {
-	Provider string `yaml:"provider" json:"provider"` // "easee" | "zaptec" | "ctek"
+	Provider string `yaml:"provider" json:"provider"` // "easee" | "zaptec" | "tesla-wc" | "ctek"
 
 	// Connection — populate the block matching the provider's transport.
 	HTTP   *EVChargerHTTP   `yaml:"http,omitempty" json:"http,omitempty"`
 	Modbus *EVChargerModbus `yaml:"modbus,omitempty" json:"modbus,omitempty"`
 
 	// Optional auth — required by cloud HTTP providers like Easee and
-	// Zaptec, unused by local Modbus providers like CTEK.
+	// Zaptec, unused by local providers (CTEK Modbus, Tesla Wall Connector).
 	Username string `yaml:"username,omitempty" json:"username,omitempty"`
 	Password string `yaml:"-" json:"password,omitempty"` // persisted in state.db, not YAML
 
@@ -532,6 +532,16 @@ func (e *EVCharger) Validate() error {
 		if e.Modbus != nil {
 			return fmt.Errorf("ev_charger.modbus: not valid for provider %s (HTTP transport)", e.Provider)
 		}
+	case "tesla-wc":
+		// Local HTTP: LAN origin in http.base_url, no cloud account.
+		// Empty base_url is allowed so the wizard can write provider
+		// intent before the host is filled in.
+		if e.Modbus != nil {
+			return errors.New("ev_charger.modbus: not valid for provider tesla-wc (HTTP transport)")
+		}
+		if e.Username != "" || e.Password != "" {
+			return errors.New("ev_charger: username/password not valid for provider tesla-wc")
+		}
 	case "ctek":
 		if e.Modbus == nil || e.Modbus.Host == "" {
 			return errors.New("ev_charger.modbus.host: required for provider ctek")
@@ -549,7 +559,7 @@ func (e *EVCharger) Validate() error {
 			return errors.New("ev_charger: username/password not valid for provider ctek")
 		}
 	default:
-		return fmt.Errorf("ev_charger.provider %q: not supported (valid: easee, zaptec, ctek)", e.Provider)
+		return fmt.Errorf("ev_charger.provider %q: not supported (valid: easee, zaptec, tesla-wc, ctek)", e.Provider)
 	}
 	return nil
 }

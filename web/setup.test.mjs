@@ -45,6 +45,8 @@ describe("setup wizard EV charger — provider options (Job 1)", () => {
       "Easee (the cloud HTTP provider) must be selectable");
     assert.match(JS, /value:\s*['"]zaptec['"]/,
       "Zaptec (the cloud HTTP provider) must be selectable");
+    assert.match(JS, /value:\s*['"]tesla-wc['"]/,
+      "Tesla Wall Connector (local HTTP) must be selectable");
     assert.match(JS, /value:\s*['"]ctek['"]/,
       "CTEK (the local Modbus provider) must be selectable");
     assert.match(JS, /populateEVProviders/,
@@ -56,6 +58,10 @@ describe("setup wizard EV charger — provider options (Job 1)", () => {
       "the HTTP credentials block must be revealed for cloud providers");
     assert.match(JS, /ev-fields-modbus/,
       "the Modbus block must be revealed for local providers");
+    assert.match(JS, /ev-fields-http-local/,
+      "the LAN HTTP block must be revealed for Tesla Wall Connector");
+    assert.match(HTML, /id=["']ev-http-host["']/,
+      "the Tesla Wall Connector host field must exist in the wizard");
   });
 });
 
@@ -70,6 +76,13 @@ describe("setup wizard EV charger — buildConfig shapes the block per provider"
   it("emits username/password/serial for HTTP providers", () => {
     assert.match(JS, /ev\.username\s*=/, "easee carries a username");
     assert.match(JS, /ev\.serial\s*=/, "easee carries the looked-up charger serial");
+  });
+
+  it("emits http.base_url for local HTTP providers", () => {
+    assert.match(JS, /http-local/,
+      "Tesla Wall Connector uses the http-local transport");
+    assert.match(JS, /ev\.http\s*=\s*\{\s*base_url:/,
+      "tesla-wc must serialise as ev_charger.http.base_url");
   });
 
   it("does not regress to hard-coded 'Easee' in the review summary", () => {
@@ -126,6 +139,11 @@ describe("setup wizard — read-only battery gateways", () => {
     assert.match(DEVICES_JS, /driver\.battery_telemetry_only\s*=\s*true/);
     assert.match(DEVICES_JS, /telemetry only/,
       "operators should see why Zap has no battery-capacity control field");
+  });
+
+  it("treats an EV-only local HTTP driver as a host field, not a cloud account", () => {
+    assert.match(DEVICES_JS, /entryCaps\.indexOf\("ev"\) >= 0 && hosts\.length === 0/,
+      "Tesla Wall Connector has ev + no catalog http_hosts and must get config.host");
   });
 
   it("lets a gateway battery source be disabled when a native driver owns the same battery", () => {

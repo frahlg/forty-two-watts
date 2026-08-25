@@ -114,6 +114,36 @@ func TestEVChargerValidateZaptec(t *testing.T) {
 	}
 }
 
+func TestEVChargerValidateTeslaWC(t *testing.T) {
+	cases := []struct {
+		name    string
+		e       EVCharger
+		wantErr string
+	}{
+		{"happy", EVCharger{Provider: "tesla-wc", HTTP: &EVChargerHTTP{BaseURL: "http://192.168.1.50"}}, ""},
+		{"empty host allowed (wizard placeholder)", EVCharger{Provider: "tesla-wc"}, ""},
+		{"modbus block rejected", EVCharger{Provider: "tesla-wc", Modbus: &EVChargerModbus{Host: "h"}}, "modbus"},
+		{"auth rejected", EVCharger{Provider: "tesla-wc", HTTP: &EVChargerHTTP{BaseURL: "http://10.0.0.8"}, Username: "u"}, "username/password"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.e.Validate()
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Errorf("unexpected error: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("expected error containing %q, got nil", tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("error %q does not contain %q", err.Error(), tc.wantErr)
+			}
+		})
+	}
+}
+
 func TestEVChargerValidateCTek(t *testing.T) {
 	cases := []struct {
 		name    string
