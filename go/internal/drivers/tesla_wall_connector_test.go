@@ -170,7 +170,7 @@ func TestTeslaWallConnectorHostConfig(t *testing.T) {
 	}
 }
 
-func teslaWCPoll(t *testing.T, fake *teslaWCFake, config map[string]any) *telemetry.Reading {
+func teslaWCPoll(t *testing.T, fake *teslaWCFake, config map[string]any) *telemetry.DerReading {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(fake.handler))
 	t.Cleanup(srv.Close)
@@ -202,7 +202,7 @@ func teslaWCPoll(t *testing.T, fake *teslaWCFake, config map[string]any) *teleme
 	return reading
 }
 
-func teslaWCExtra(t *testing.T, reading *telemetry.Reading) map[string]any {
+func teslaWCExtra(t *testing.T, reading *telemetry.DerReading) map[string]any {
 	t.Helper()
 	var extra map[string]any
 	if err := json.Unmarshal(reading.Data, &extra); err != nil {
