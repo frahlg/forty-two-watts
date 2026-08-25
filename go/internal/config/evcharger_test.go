@@ -123,7 +123,8 @@ func TestEVChargerValidateTeslaWC(t *testing.T) {
 		{"happy", EVCharger{Provider: "tesla-wc", HTTP: &EVChargerHTTP{BaseURL: "http://192.168.1.50"}}, ""},
 		{"empty host allowed (wizard placeholder)", EVCharger{Provider: "tesla-wc"}, ""},
 		{"modbus block rejected", EVCharger{Provider: "tesla-wc", Modbus: &EVChargerModbus{Host: "h"}}, "modbus"},
-		{"auth rejected", EVCharger{Provider: "tesla-wc", HTTP: &EVChargerHTTP{BaseURL: "http://10.0.0.8"}, Username: "u"}, "username/password"},
+		{"leftover username stripped", EVCharger{Provider: "tesla-wc", HTTP: &EVChargerHTTP{BaseURL: "http://10.0.0.8"}, Username: "u"}, ""},
+		{"leftover password stripped", EVCharger{Provider: "tesla-wc", HTTP: &EVChargerHTTP{BaseURL: "http://10.0.0.8"}, Password: "p"}, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -141,6 +142,22 @@ func TestEVChargerValidateTeslaWC(t *testing.T) {
 				t.Errorf("error %q does not contain %q", err.Error(), tc.wantErr)
 			}
 		})
+	}
+}
+
+func TestEVChargerValidateTeslaWCStripsCloudCreds(t *testing.T) {
+	e := EVCharger{
+		Provider:    "tesla-wc",
+		Username:    "old@example.com",
+		Password:    "easee-secret",
+		EmailLegacy: "old@example.com",
+		HTTP:        &EVChargerHTTP{BaseURL: "http://192.168.1.50"},
+	}
+	if err := e.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if e.Username != "" || e.Password != "" || e.EmailLegacy != "" {
+		t.Fatalf("leftover cloud creds after tesla-wc validate: %+v", e)
 	}
 }
 

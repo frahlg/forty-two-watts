@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -123,10 +124,22 @@ func (t *TeslaWC) getJSON(url string) (map[string]any, error) {
 		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 	var out map[string]any
-	if err := json.Unmarshal(raw, &out); err != nil {
+	if err := json.Unmarshal(teslaWCRepairJSON(raw), &out); err != nil {
 		return nil, fmt.Errorf("decode: %w", err)
 	}
 	return out, nil
+}
+
+// teslaWCRepairJSON matches the Lua driver's repair_json: some Gen 3
+// firmware emits a bare `nan` that encoding/json rejects. The wizard
+// probe and the runtime driver have to accept the same body.
+var teslaWCNaN = regexp.MustCompile(`(?i)\bnan\b`)
+
+func teslaWCRepairJSON(raw []byte) []byte {
+	if !teslaWCNaN.Match(raw) {
+		return raw
+	}
+	return teslaWCNaN.ReplaceAll(raw, []byte("null"))
 }
 
 func teslaWCNormalizeBase(s string) string {

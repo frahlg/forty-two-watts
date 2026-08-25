@@ -139,3 +139,86 @@ func TestTeslaWCDescribe(t *testing.T) {
 		t.Errorf("lua: %q", d.LuaDriver)
 	}
 }
+
+func TestTeslaWCListChargersVitalsNaNFallback(t *testing.T) {
+	// Version missing + vitals with the documented bare-nan quirk must
+	// still list the box. The Lua driver already repairs this; the
+	// wizard probe used to fail on the same body.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/1/version" {
+			http.Error(w, "no version", http.StatusNotFound)
+			return
+		}
+		if r.URL.Path == "/api/1/vitals" {
+			_, _ = w.Write([]byte(`{"vehicle_connected":false,"evse_state":1,"grid_v":nan}`))
+			return
+		}
+		http.Error(w, "unknown", http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	p := NewTeslaWC().WithHTTPClient(srv.Client()).WithBaseURL(srv.URL)
+	got, err := p.ListChargers(&config.EVCharger{Provider: "tesla-wc"})
+	if err != nil {
+		t.Fatalf("ListChargers: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "tesla-wc" {
+		t.Fatalf("got %+v, want fallback id tesla-wc", got)
+	}
+}
+
+func TestTeslaWCListChargersCamelCaseSerial(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/1/version" {
+			http.Error(w, "unknown", http.StatusNotFound)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"serialNumber": "TWCcamel",
+			"partNumber":   "1529455-02-J",
+		})
+	}))
+	defer srv.Close()
+
+	got, err := NewTeslaWC().WithHTTPClient(srv.Client()).ListChargers(&config.EVCharger{
+		Provider: "tesla-wc",
+		HTTP:     &config.EVChargerHTTP{BaseURL: srv.URL},
+	})
+	if err != nil {
+		t.Fatalf("ListChargers: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "TWCcamel" {
+		t.Fatalf("got %+v, want TWCcamel", got)
+	}
+	if !strings.Contains(got[0].Name, "1529455-02-J") {
+		t.Errorf("name: %q", got[0].Name)
+	}
+}
+
+func TestTeslaWCListChargersBothEndpointsFail(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "down", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	_, err := NewTeslaWC().WithHTTPClient(srv.Client()).ListChargers(&config.EVCharger{
+		Provider: "tesla-wc",
+		HTTP:     &config.EVChargerHTTP{BaseURL: srv.URL},
+	})
+	if err == nil {
+		t.Fatal("expected error when version and vitals both fail")
+	}
+	if !strings.Contains(err.Error(), "version") {
+		t.Errorf("error should mention version: %v", err)
+	}
+}
+
+func TestTeslaWCRegistered(t *testing.T) {
+	p, err := Get("tesla-wc")
+	if err != nil {
+		t.Fatalf("Get tesla-wc: %v", err)
+	}
+	if p.Describe().NeedsAuth {
+		t.Error("registered tesla-wc must not require auth")
+	}
+}

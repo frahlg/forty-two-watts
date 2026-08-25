@@ -539,9 +539,12 @@ func (e *EVCharger) Validate() error {
 		if e.Modbus != nil {
 			return errors.New("ev_charger.modbus: not valid for provider tesla-wc (HTTP transport)")
 		}
-		if e.Username != "" || e.Password != "" {
-			return errors.New("ev_charger: username/password not valid for provider tesla-wc")
-		}
+		// Switching from Easee/Zaptec leaves username/password on the
+		// posted document, and POST /api/config restores ev_charger_password
+		// from state.db. Drop them so the provider switch can save.
+		e.Username = ""
+		e.Password = ""
+		e.EmailLegacy = ""
 	case "ctek":
 		if e.Modbus == nil || e.Modbus.Host == "" {
 			return errors.New("ev_charger.modbus.host: required for provider ctek")

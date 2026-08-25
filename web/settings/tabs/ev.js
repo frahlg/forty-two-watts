@@ -66,6 +66,14 @@
       if (providerSel) {
         providerSel.addEventListener("change", function () {
           ctx.captureCurrentTab();
+          if (providerSel.value === "tesla-wc") {
+            var ev = ctx.config.ev_charger;
+            if (ev) {
+              ev.username = "";
+              ev.email = "";
+              ev.password = "";
+            }
+          }
           ctx.renderTab("ev");
         });
       }
