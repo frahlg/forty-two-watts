@@ -349,6 +349,18 @@ func TestAuthenticateRequiresBearerTokenForRemoteHost(t *testing.T) {
 	}
 }
 
+func TestAuthenticateNoDotHostIsNotLocal(t *testing.T) {
+	req := mutationRequest(sensitiveMutations[4], "http://intranet:8080")
+	req.RemoteAddr = "192.168.1.10:43210"
+	req.Header.Set("Origin", "http://intranet:8080")
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	rr := httptest.NewRecorder()
+	Authenticate(statusHandler(http.StatusNoContent), MutationPolicy{RequireTokenForRemote: true}).ServeHTTP(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("no-dot host status = %d, want 403 (body=%s)", rr.Code, rr.Body.String())
+	}
+}
+
 func TestAuthenticateRemoteClientCannotSpoofLocalHost(t *testing.T) {
 	req := mutationRequest(sensitiveMutations[4], "http://192.168.1.42:8080")
 	req.RemoteAddr = "203.0.113.10:43210"

@@ -1082,6 +1082,36 @@ func TestPlannerSelfBatteryCoversEVOffExcludesEVFromGrid(t *testing.T) {
 	}
 }
 
+func TestPlannerDoesNotDischargeIntoAFaultedChargersDraw(t *testing.T) {
+	// Site importing 9.9 kW because the car is drawing 11.4 kW against
+	// 1.5 kW of solar-minus-house. The charger is emitting that 11.4 kW
+	// but DeviceFault so it cannot take a command. BatteryCoversEV is
+	// off. Before the TelemetryLive split, IsOnline() hid the car and
+	// the planner discharged the battery into it as if it were house
+	// load.
+	store := seedStore(9900, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	store.Update("easee", telemetry.DerEV, 11400, nil, nil)
+	store.DriverHealthMut("easee").RecordSuccess()
+	store.SetDriverDeviceFault("easee", true, "setpoint refused")
+
+	st := NewState(0, 50, "ferroamp")
+	st.Mode = ModePlannerSelf
+	st.BatteryCoversEV = false
+	st.SlewRateW = 100000
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if st.EVChargingW < 11000 {
+		t.Fatalf("EVChargingW = %f; a faulted charger still drawing was ignored", st.EVChargingW)
+	}
+	if len(targets) > 0 && targets[0].TargetW < -2000 {
+		t.Errorf("battery discharged %.0f W into a car that cover-EV is off for", targets[0].TargetW)
+	}
+}
+
 func TestEVChargingSignalOverriddenByDerEVReading(t *testing.T) {
 	// A DerEV driver reports 4000W. EVChargingW was 0 (no manual slider).
 	// After ComputeDispatch, EVChargingW must reflect the live reading

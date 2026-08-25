@@ -438,6 +438,22 @@ func TestSumOnlineEVWSumsAllOnline(t *testing.T) {
 	}
 }
 
+// A charger that cannot take a command is still drawing. DeviceFault must
+// not drop that watts from the house-vs-car split — that is how the phone
+// app showed EV at 0 W while the LAN dashboard showed 11 kW.
+func TestSumOnlineEVWCountsAFaultedDriver(t *testing.T) {
+	s := NewStore()
+	s.Update("easee", DerEV, 11400, nil, nil)
+	s.DriverHealthMut("easee").RecordSuccess()
+	s.SetDriverDeviceFault("easee", true, "setpoint refused")
+	if s.DriverHealth("easee").IsOnline() {
+		t.Fatal("precondition: a faulted charger is not online for control")
+	}
+	if got := s.SumOnlineEVW(); got != 11400 {
+		t.Errorf("faulted charger draw = %f, want 11400", got)
+	}
+}
+
 // Offline drivers are excluded. Without this, a driver whose watchdog
 // tripped would leak a stale last-known reading into load / grid math
 // indefinitely after it stopped actually reporting.
@@ -580,5 +596,47 @@ func TestWatchdogPerDriverOverride(t *testing.T) {
 	}
 	if !flipped["tesla"] {
 		t.Errorf("tesla should flip stale at 6 min under 5-min override; transitions=%+v", transitions)
+	}
+}
+
+func TestValidateReadingSiteConventionAndFractions(t *testing.T) {
+	soc := 0.55
+	if err := ValidateReading(DerPV, -1200, nil); err != nil {
+		t.Fatalf("valid PV: %v", err)
+	}
+	if err := ValidateReading(DerPV, 50, nil); err == nil {
+		t.Fatal("positive PV must be rejected")
+	}
+	if err := ValidateReading(DerEV, -10, nil); err == nil {
+		t.Fatal("negative EV must be rejected")
+	}
+	if err := ValidateReading(DerEV, 4140, nil); err != nil {
+		t.Fatalf("charging EV: %v", err)
+	}
+	if err := ValidateReading(DerBattery, 2000, &soc); err != nil {
+		t.Fatalf("battery charge + fraction SoC: %v", err)
+	}
+	pct := 55.0
+	if err := ValidateReading(DerBattery, 0, &pct); err == nil {
+		t.Fatal("percent SoC must be rejected at the telemetry boundary")
+	}
+	neg := -0.01
+	if err := ValidateReading(DerBattery, 0, &neg); err == nil {
+		t.Fatal("negative SoC must be rejected")
+	}
+	over := 1.02
+	if err := ValidateReading(DerBattery, 0, &over); err == nil {
+		t.Fatal("SoC 1.02 must be rejected (not silently folded to 1%)")
+	}
+	nan := math.NaN()
+	if err := ValidateReading(DerMeter, nan, nil); err == nil {
+		t.Fatal("NaN power must be rejected")
+	}
+	if err := ValidateReading(DerBattery, 0, &nan); err == nil {
+		t.Fatal("NaN SoC must be rejected")
+	}
+	inf := math.Inf(1)
+	if err := ValidateReading(DerMeter, inf, nil); err == nil {
+		t.Fatal("+Inf power must be rejected")
 	}
 }

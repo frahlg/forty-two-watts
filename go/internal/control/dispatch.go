@@ -208,7 +208,7 @@ func onlineVehiclePowerFlow(store *telemetry.Store) vehiclePowerFlow {
 	var out vehiclePowerFlow
 	for _, r := range store.ReadingsByType(telemetry.DerEV) {
 		h := store.DriverHealth(r.Driver)
-		if h == nil || !h.IsOnline() {
+		if h == nil || !h.TelemetryLive() {
 			continue
 		}
 		out.Live = true
@@ -218,7 +218,7 @@ func onlineVehiclePowerFlow(store *telemetry.Store) vehiclePowerFlow {
 	}
 	for _, r := range store.ReadingsByType(telemetry.DerV2X) {
 		h := store.DriverHealth(r.Driver)
-		if h == nil || !h.IsOnline() {
+		if h == nil || !h.TelemetryLive() {
 			continue
 		}
 		out.Live = true

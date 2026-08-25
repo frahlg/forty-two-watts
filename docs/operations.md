@@ -84,7 +84,7 @@ changing them. When unsure, inspect the restart classification in
 
 FTW accepts state-changing requests without credentials only when they are
 addressed through a local name or address: loopback, private/link-local IP,
-an unqualified hostname, `.local`, `.localhost`, or `.home.arpa`. The setup
+`.local`, `.localhost`, or `.home.arpa`. The setup
 wizard follows the same rule, and the actual client address must also be local.
 Browser writes must also be same-origin; FTW checks `Origin`, `Host`, and
 `Sec-Fetch-Site` and does not advertise CORS.
@@ -139,12 +139,35 @@ mutations remain locked.
 tunnel credential for future remote access. That expansion point is described in
 [architecture.md](architecture.md#future-remote-access-boundary).
 
-`api.lan_auth` is off by default. Turn it on from Settings → System (LAN
-password). When on, protected LAN routes need the house password. `curl`
-sends `Authorization: Bearer <house-password>`. The browser login form
+`api.lan_auth` is off by default. Turn it on from loopback inside the
+process. On a Pi with host networking that is
+`http://127.0.0.1:8080` Settings → System, or `curl` to `127.0.0.1`.
+On Docker Desktop (`docker-compose.macos.yml`) a host curl to localhost
+arrives as the bridge gateway, not loopback, so Settings and host curl
+get 403. Enable from inside the container:
+
+```bash
+docker compose -f docker-compose.macos.yml exec ftw \
+  wget -qO- --header='Content-Type: application/json' \
+  --post-data='{"enabled":true,"password":"ETT-LANGT-LOSEN"}' \
+  http://127.0.0.1:8080/api/auth/password
+```
+
+Do not treat that gateway as loopback: Desktop SNAT uses the same peer
+for every published-port client, including LAN visitors. A first enable
+from another LAN address is refused, so a visitor cannot set the
+password. `POST /api/config` cannot flip the flag. When on,
+protected LAN routes need the house password. `curl` sends
+`Authorization: Bearer <house-password>`. The browser login form
 sets a session cookie (`ftw_lan`, 12 hours). Loopback (`127.0.0.1` / `::1`)
 never asks. Live status stays readable without the password; a viewer
 caller is minted for those reads.
+
+An owner pairing QR is minted only from loopback or with the house
+password. Promoting a paired phone to owner uses the same gate. The
+first pairing on an empty box is an owner whatever the code said, so
+that mint also stays at the box. A viewer invite still works from the
+LAN once an owner exists.
 
 The FTW app and Home Assistant MQTT are unchanged.
 

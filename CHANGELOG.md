@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.2.1
+
+### Patch Changes
+
+- 77c9514: The phone app now shows EV charging as its own number, the same way the local page does. A charger that is drawing but cannot take a command no longer hides that draw inside "house", and the battery no longer discharges into the car when cover-EV is off.
+- 9fdc46d: The house password can only be turned on from loopback inside the process. Saving Settings can no longer flip that lock through the whole config document. On Docker Desktop that means `compose exec`, not a host curl to localhost.
+- e2187f4: An owner pairing code can only be minted on the box itself, or after the house password is on. The same gate covers promoting a phone to owner and the first pairing on an empty box, which would otherwise become an owner. A viewer invite still works from the LAN once an owner exists.
+- 60fbf35: FTW now rejects corrupt, non-finite, and non-positive exchange rates before they can enter price data.
+- 5adda2f: A hostname with no dot is no longer treated as local. If the driver catalog cannot be read, or a configured driver is missing from it, config secrets stay hidden. Driver test and fingerprint refuse loopback, localhost, and link-local targets on MQTT, Modbus, HTTP, WebSocket and TCP.
+
 ## 2.2.0
 
 ### Minor Changes

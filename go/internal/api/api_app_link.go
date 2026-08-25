@@ -162,6 +162,9 @@ func (s *Server) handleAppLinkPairing(w http.ResponseWriter, r *http.Request) {
 	if !s.appLinkRoleAllowed(w, r, req.Role) {
 		return
 	}
+	if !s.appLinkOwnerMintAllowed(w, r, req.Role) {
+		return
+	}
 
 	// A spoken code is minted at the box and nowhere else.
 	//
@@ -302,6 +305,9 @@ func (s *Server) handleAppLinkDeviceRole(w http.ResponseWriter, r *http.Request)
 	// The same rule as minting, for the same reason: a promotion to owner is
 	// a bigger power than an invitation, so it stays at the box.
 	if !s.appLinkRoleAllowed(w, r, req.Role) {
+		return
+	}
+	if !s.appLinkOwnerMintAllowed(w, r, req.Role) {
 		return
 	}
 
@@ -446,6 +452,37 @@ func (s *Server) appLinkRoleAllowed(w http.ResponseWriter, r *http.Request, aske
 		return false
 	}
 	return true
+}
+
+// appLinkOwnerMintAllowed refuses an owner-making action on the open LAN.
+//
+// Presence on a private address is not enough. That is how a guest or a
+// ZeroTier peer turns "I can reach :8080" into a Noise owner that works
+// from anywhere. Loopback is the box itself. A house-password proof is
+// the other door, and it only exists when api.lan_auth is on.
+//
+// The first enrollee is an owner whatever the code said (appenroll.Authorise),
+// so a viewer mint on an empty box is the same power and uses the same gate.
+// A session request is built to look like loopback; it is not the box.
+func (s *Server) appLinkOwnerMintAllowed(w http.ResponseWriter, r *http.Request, asked string) bool {
+	needsProof := asked == apiauth.RoleOwner || s.appLinkHasNoPairedDevice()
+	if !needsProof {
+		return true
+	}
+	if isLoopbackClient(r.RemoteAddr) && !appLinkOverSession(r) {
+		return true
+	}
+	houseOK, checked := lanSecretFrom(r.Context())
+	if checked && houseOK {
+		return true
+	}
+	writeAppLinkError(w, http.StatusForbidden,
+		"making another owner is done on the box, or after the house password is on.")
+	return false
+}
+
+func (s *Server) appLinkHasNoPairedDevice() bool {
+	return s.deps != nil && s.deps.AppEnroll != nil && s.deps.AppEnroll.AuthorisedCount() == 0
 }
 
 func writeAppLinkError(w http.ResponseWriter, code int, msg string) {

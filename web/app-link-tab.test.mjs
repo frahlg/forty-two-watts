@@ -78,6 +78,13 @@ describe("the app tab", () => {
     assert.match(html, /cannot read/);
   });
 
+  it("says this is not the Sourceful app, and LAN use needs no pairing", () => {
+    const html = render({});
+    assert.match(html, /not the Sourceful/);
+    assert.match(html, /app\.ftw\.energy/);
+    assert.match(html, /no pairing needed/);
+  });
+
   it("starts with the pairing button disabled", () => {
     // It is enabled once /api/app-link/status reports the uplink running.
     // Starting enabled means the first press of a fresh page fails.

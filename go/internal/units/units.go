@@ -16,7 +16,10 @@
 // a substitute for storing the right unit.
 package units
 
-import "math"
+import (
+	"math"
+	"strings"
+)
 
 // STCIrradianceWm2 is standard-test-condition irradiance. PV power at STC
 // equals the array's rated watts; at other irradiance
@@ -41,12 +44,17 @@ func KWpFromWatts(w float64) float64 {
 
 // CanonicalPowerEnergy is the emit_metric door for vendor kilo-units.
 // kW/kWh become W/Wh. Other units pass through, including W and Wh
-// already converted in a Lua driver.
+// already converted in a Lua driver. Unit matching is case-insensitive so
+// a driver that emits "kw" cannot store kilowatts as watts. Non-finite
+// values become 0 rather than propagating NaN into history or HA.
 func CanonicalPowerEnergy(value float64, unit string) (float64, string) {
-	switch unit {
-	case "kW":
+	if math.IsNaN(value) || math.IsInf(value, 0) {
+		value = 0
+	}
+	switch strings.ToLower(strings.TrimSpace(unit)) {
+	case "kw":
 		return value * 1000.0, "W"
-	case "kWh":
+	case "kwh":
 		return value * 1000.0, "Wh"
 	default:
 		return value, unit
@@ -64,15 +72,23 @@ func PVFromIrradiance(ratedW, irradianceWm2 float64) float64 {
 // FractionFromLegacyPercent maps a value that may still be 0–100 into 0–1.
 // Values already in (0, 1] pass through. 0 stays 0. Call only when loading
 // old YAML/JSON; new code writes 0–1.
+//
+// Values in (1, 2) are treated as 0–1 overflow (BMS 102%, a 1.5 typo on a
+// fraction field), not as 1.02%/1.5%. Real percents start at 2. The result
+// is not clamped to [0, 1] after /100: 150 stays 1.5 so ValidFraction can
+// still reject it rather than silently storing 100%.
 func FractionFromLegacyPercent(v float64) float64 {
 	if math.IsNaN(v) || math.IsInf(v, 0) {
 		return 0
 	}
-	if v > 1 {
-		return v / 100.0
-	}
 	if v < 0 {
 		return 0
+	}
+	if v > 1 && v < 2 {
+		return 1
+	}
+	if v > 1 {
+		return v / 100.0
 	}
 	return v
 }
@@ -92,21 +108,20 @@ func DecodeJSONFraction(canonical, legacyPercent float64) float64 {
 const DefaultPluginSoC = 0.20
 
 // PercentFromFraction is the UI/HA door. Core must not store the result.
+// Non-finite and out-of-range fractions fold onto [0, 100] so a NaN SoC
+// cannot become "NaN%" on a chart or in a support dump.
 func PercentFromFraction(f float64) float64 {
-	return f * 100.0
+	return ClampFraction(f) * 100.0
 }
 
 // PermilleFromFraction is the appproto door (field battery_soc).
 func PermilleFromFraction(f float64) int64 {
-	if math.IsNaN(f) || math.IsInf(f, 0) {
-		return 0
-	}
-	return int64(math.Round(f * 1000.0))
+	return int64(math.Round(ClampFraction(f) * 1000.0))
 }
 
 // FractionFromPermille is the appproto inbound door.
 func FractionFromPermille(p int64) float64 {
-	return float64(p) / 1000.0
+	return ClampFraction(float64(p) / 1000.0)
 }
 
 // ValidFraction reports whether f is a finite value in [0, 1].

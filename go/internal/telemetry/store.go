@@ -258,6 +258,16 @@ func (h *DriverHealth) IsOnline() bool {
 	return h.Status != StatusOffline && !h.DeviceFault
 }
 
+// TelemetryLive reports whether this driver's last reading is still a
+// measurement of now. DeviceFault does not fail it: that flag means the
+// device cannot take a command, not that its meter went quiet. A charger
+// that refuses setpoints while still drawing 11 kW is live load, and the
+// house-vs-car split, the app's EV node, and BatteryCoversEV all have to
+// see it. StatusOffline is the watchdog's word that the reading is stale.
+func (h *DriverHealth) TelemetryLive() bool {
+	return h != nil && h.Status != StatusOffline
+}
+
 // MetricSample is one (driver, metric, ts, value) tuple buffered for the
 // long-format TS database. State.Store consumes these via FlushSamples.
 type MetricSample struct {
@@ -550,15 +560,16 @@ func (s *Store) ReadingsByType(t DerType) []*DerReading {
 	return out
 }
 
-// SumOnlineEVW returns the summed SmoothedW across every online EV
-// driver. Used by the status endpoint, the loadmodel sampler, the MPC
-// divergence check, and the control loop's grid bias — all four need
-// the same "what is the EV charger drawing right now (and it's
-// trustworthy)" signal, derived the same way.
+// SumOnlineEVW returns the summed SmoothedW across every EV driver that
+// is still reporting. Used by the status endpoint, the loadmodel sampler,
+// the MPC divergence check, the app snapshot, and the control loop's
+// grid bias — all of them need the same "what is the EV charger drawing
+// right now (and it's trustworthy)" signal, derived the same way.
 //
-// Offline drivers (stale telemetry, watchdog tripped) are skipped so a
-// dangling 3.6 kW last-known reading can't sneak into load or grid
-// accounting after the driver has actually stopped reporting.
+// Watchdog-offline drivers are skipped so a dangling 3.6 kW last-known
+// reading can't sneak into load or grid accounting after the driver has
+// actually stopped reporting. A DeviceFault does not skip: that flag
+// means the charger cannot take a command, not that it stopped drawing.
 //
 // Sub-watt floor: when the Kalman residual decays toward zero (driver
 // reports a real 0 W), the smoothed value asymptotes to denormals like
@@ -578,7 +589,7 @@ func (s *Store) SumOnlineEVW() float64 {
 			continue
 		}
 		h, ok := s.health[r.Driver]
-		if !ok || !h.IsOnline() {
+		if !ok || !h.TelemetryLive() {
 			continue
 		}
 		sum += r.SmoothedW
@@ -589,9 +600,12 @@ func (s *Store) SumOnlineEVW() float64 {
 	return sum
 }
 
-// SumOnlineV2XW returns the summed SmoothedW across online bidirectional
-// V2X chargers. Positive values mean vehicle charging; negative values
-// mean the vehicle is discharging into the site/grid.
+// SumOnlineV2XW returns the summed SmoothedW across bidirectional V2X
+// chargers that are still reporting. Positive values mean vehicle
+// charging; negative values mean the vehicle is discharging into the
+// site/grid. DeviceFault is not a skip, for the same reason as
+// SumOnlineEVW: a charger that cannot take a command can still move
+// power.
 func (s *Store) SumOnlineV2XW() float64 {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -601,7 +615,7 @@ func (s *Store) SumOnlineV2XW() float64 {
 			continue
 		}
 		h, ok := s.health[r.Driver]
-		if !ok || !h.IsOnline() {
+		if !ok || !h.TelemetryLive() {
 			continue
 		}
 		sum += r.SmoothedW

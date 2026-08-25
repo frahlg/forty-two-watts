@@ -390,11 +390,13 @@ func isLocalAuthority(a authority) bool {
 	if ip := net.ParseIP(host); ip != nil {
 		return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast()
 	}
+	// A name with no dot is not local. `http://intranet` rebound onto
+	// this box would otherwise skip the remote token. Keep `.local` —
+	// that is the documented LAN name (ftw.local).
 	return host == "localhost" ||
 		strings.HasSuffix(host, ".localhost") ||
 		strings.HasSuffix(host, ".local") ||
-		strings.HasSuffix(host, ".home.arpa") ||
-		!strings.Contains(host, ".")
+		strings.HasSuffix(host, ".home.arpa")
 }
 
 func isLocalClient(remoteAddr string) bool {
