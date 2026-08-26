@@ -620,12 +620,15 @@
     var pvConfigured = Object.keys(data.drivers || {}).some(function (name) {
       return (data.drivers[name] || {}).pv_w != null;
     });
+    var pvDir = document.getElementById("pv-dir");
     if (pvConfigured && !pvLive) {
       pvW.textContent = "—";
       pvW.className = "card-value val-neutral";
+      if (pvDir) pvDir.textContent = "no data";
     } else {
       pvW.textContent = formatW(-(data.pv_w || 0));
       pvW.className = "card-value val-generation";
+      if (pvDir) pvDir.textContent = "generating";
     }
 
     // Load
@@ -674,9 +677,9 @@
       }
     }
     if (batSoc) {
-      batSoc.textContent = Number.isFinite(data.bat_soc)
-        ? Math.round(data.bat_soc * 100) + "% SoC"
-        : "—";
+      batSoc.textContent = (batConfigured && !batLive) || !Number.isFinite(data.bat_soc)
+        ? "—"
+        : Math.round(data.bat_soc * 100) + "% SoC";
     }
     var batTargetDisp = document.getElementById("bat-target-display");
     if (batTargetDisp) {
