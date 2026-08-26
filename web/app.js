@@ -633,6 +633,10 @@
 
     // Load
     loadW.textContent = formatW(data.load_w);
+    var loadDir = document.getElementById("load-dir");
+    if (loadDir) {
+      loadDir.textContent = data.load_w == null || !isFinite(data.load_w) ? "no data" : "using now";
+    }
 
     // EV tile (tile-mode parity with the energy-flow's EV planet).
     // Reads ev_charging_w (post sub-watt floor in /api/status); the
