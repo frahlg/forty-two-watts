@@ -109,6 +109,19 @@ describe("flowReadingsFromStatus", () => {
     assert.ok(Math.abs(r.selfPoweredPctToday - (1 - 5.2 / 14) * 100) < 1e-6);
   });
 
+  it("keeps today's self-powered share when the meter is currently quiet", () => {
+    const r = flowReadingsFromStatus({
+      grid_w: null,
+      load_w: null,
+      energy: LIVE.energy,
+      drivers: {
+        ferroamp: { status: "offline", pv_w: -3400, bat_w: 900, bat_soc: 0.62 },
+      },
+    });
+    assert.equal(r.load, null);
+    assert.ok(Math.abs(r.selfPoweredPctToday - (1 - 5.2 / 14) * 100) < 1e-6);
+  });
+
   it("keeps battery sign so two discharging packs do not look like charging", () => {
     const r = flowReadingsFromStatus({
       grid_w: 0,

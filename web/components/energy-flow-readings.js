@@ -210,8 +210,11 @@ export function flowReadingsFromStatus(status, opts) {
   }
 
   const loadW = num(status && status.load_w);
+  // Today's share is kWh already in the box, not the live meter. A
+  // quiet meter blanks % SELF-POWERED NOW (unknown instantaneous load)
+  // but must not hide a day that already happened.
   let selfPoweredPctToday = null;
-  if (loadKwhTotal > 0.001 && loadW !== null) {
+  if (loadKwhTotal > 0.001) {
     selfPoweredPctToday = Math.max(0, Math.min(100, (1 - importKwh / loadKwhTotal) * 100));
   }
 
@@ -225,4 +228,8 @@ export function flowReadingsFromStatus(status, opts) {
 if (typeof window !== "undefined") {
   window.ftwFlowReadingsFromStatus = flowReadingsFromStatus;
   window.ftwDriverOnline = driverOnline;
+  // The dashboard script starts before this module. If a status payload
+  // arrived in that window, tell it the mapper exists so the hero can
+  // paint without waiting for the next poll.
+  if (typeof window.ftwOnFlowMapperReady === "function") window.ftwOnFlowMapperReady();
 }

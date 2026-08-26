@@ -497,10 +497,73 @@
   // The component registry loads as a deferred module while this classic
   // dashboard script starts immediately at the end of the document. A fast
   // first /api/status response can therefore arrive before <ftw-energy-flow>
-  // has upgraded. Cache the derived payload and replay it when the element is
-  // ready so switching to Flow never reveals placeholders for one poll cycle.
+  // has upgraded, and before energy-flow-readings.js has assigned the
+  // mapper. Cache the raw payload (not only the derived readings) and
+  // replay when either the mapper or the element is ready, so the hero
+  // does not sit in its loading skeleton until the next two-second poll.
+  var lastFlowStatus = null;
   var lastFlowReadings = null;
   var flowUpgradeReplayQueued = false;
+
+  window.ftwOnFlowMapperReady = function () {
+    if (lastFlowStatus) paintEnergyFlow(lastFlowStatus);
+  };
+
+  function energyFlowOpts(data) {
+    var byDriver = {};
+    (data.dispatch || []).forEach(function (d) {
+      if (d && d.driver) byDriver[d.driver] = Number(d.target_w) || 0;
+    });
+    return {
+      idleW: (typeof window.FTW_FLOW_IDLE_W === "number" && window.FTW_FLOW_IDLE_W) || 42,
+      batterySub: function (name, d) {
+        if (d.observe_only) return "observe only";
+        return batteryTargetLine(byDriver[name]);
+      },
+    };
+  }
+
+  function queueFlowReplay() {
+    if (flowUpgradeReplayQueued) return;
+    flowUpgradeReplayQueued = true;
+    if (window.customElements && typeof window.customElements.whenDefined === "function") {
+      window.customElements.whenDefined("ftw-energy-flow").then(function () {
+        if (lastFlowStatus) paintEnergyFlow(lastFlowStatus);
+      });
+    }
+  }
+
+  function paintEnergyFlow(data) {
+    lastFlowStatus = data;
+    var flowEl = document.getElementById("energy-flow");
+    if (!flowEl) return;
+    if (typeof window.ftwFlowReadingsFromStatus !== "function") {
+      queueFlowReplay();
+      return;
+    }
+    lastFlowReadings = window.ftwFlowReadingsFromStatus(data, energyFlowOpts(data));
+    (lastFlowReadings.planets || []).forEach(function (p) {
+      if (p.role !== "ev" || p.placeholder || !p.name) return;
+      var lpEv = loadpointsByDriver && loadpointsByDriver[p.name];
+      if (!lpEv) return;
+      if (lpEv.vehicle_soc > 0) {
+        p.soc = lpEv.vehicle_soc * 100;
+        p.socSource = "vehicle";
+      } else if (lpEv.current_soc > 0) {
+        p.soc = lpEv.current_soc * 100;
+        p.socSource = lpEv.soc_source || "inferred";
+      }
+      if (lpEv.vehicle_charge_limit > 0) {
+        p.chargeLimit = lpEv.vehicle_charge_limit * 100;
+      }
+      p.socStale = !!lpEv.vehicle_stale;
+    });
+    if (typeof flowEl.setReadings === "function") {
+      flowEl.setReadings(lastFlowReadings);
+    } else {
+      queueFlowReplay();
+    }
+  }
 
   // ---- Render ----
   function render(data) {
@@ -695,57 +758,24 @@
     // the Plan card's information density. Each cell colours by sign
     // / direction so an operator scans the row and immediately sees
     // who's importing, exporting, charging, or idle.
+    // Same honesty as the Values tiles: site-level pv_w / bat_w / bat_soc
+    // become 0 when every reporter of that role is offline. 0 W here would
+    // undo the "—" those tiles just drew.
+    var pvStat = pvConfigured && !pvLive ? null : -(data.pv_w || 0);
+    var batStat = batConfigured && !batLive ? null : data.bat_w;
+    var socStat = batConfigured && !batLive ? null : data.bat_soc;
     updateLiveStat("grid", data.grid_w, signClass("grid", data.grid_w));
-    updateLiveStat("pv", -data.pv_w, "is-export"); // PV is site-signed negative; show as positive generation
+    updateLiveStat("pv", pvStat, pvStat == null ? "is-neutral" : "is-export");
     updateLiveStat("load", data.load_w, "is-neutral");
-    updateLiveStat("bat", data.bat_w, signClass("bat", data.bat_w));
-    updateLiveSocStat(data.bat_soc);
+    updateLiveStat("bat", batStat, batStat == null ? "is-neutral" : signClass("bat", batStat));
+    updateLiveSocStat(socStat);
 
     // Hero energy-flow diagram. Mapping lives in energy-flow-readings.js
     // so a stale meter cannot be drawn as 0 W "balanced" and a quiet
-    // hybrid inverter cannot vanish from the X. EV SoC is overlayed here
-    // because it comes from the loadpoint table, not /api/status.
-    var flowEl = document.getElementById("energy-flow");
-    if (flowEl && typeof window.ftwFlowReadingsFromStatus === "function") {
-      lastFlowReadings = window.ftwFlowReadingsFromStatus(data, {
-        idleW: (typeof window.FTW_FLOW_IDLE_W === "number" && window.FTW_FLOW_IDLE_W) || 42,
-        batterySub: function (name, d) {
-          if (d.observe_only) return "observe only";
-          return batteryTargetLine(batteryTargetsByDriver[name]);
-        },
-      });
-      (lastFlowReadings.planets || []).forEach(function (p) {
-        if (p.role !== "ev" || p.placeholder || !p.name) return;
-        var lpEv = loadpointsByDriver && loadpointsByDriver[p.name];
-        if (!lpEv) return;
-        if (lpEv.vehicle_soc > 0) {
-          p.soc = lpEv.vehicle_soc * 100;
-          p.socSource = "vehicle";
-        } else if (lpEv.current_soc > 0) {
-          p.soc = lpEv.current_soc * 100;
-          p.socSource = lpEv.soc_source || "inferred";
-        }
-        if (lpEv.vehicle_charge_limit > 0) {
-          p.chargeLimit = lpEv.vehicle_charge_limit * 100;
-        }
-        p.socStale = !!lpEv.vehicle_stale;
-      });
-      if (typeof flowEl.setReadings === "function") {
-        flowEl.setReadings(lastFlowReadings);
-      } else if (!flowUpgradeReplayQueued &&
-                 window.customElements &&
-                 typeof window.customElements.whenDefined === "function") {
-        flowUpgradeReplayQueued = true;
-        window.customElements.whenDefined("ftw-energy-flow").then(function () {
-          var readyFlow = document.getElementById("energy-flow");
-          if (readyFlow &&
-              typeof readyFlow.setReadings === "function" &&
-              lastFlowReadings) {
-            readyFlow.setReadings(lastFlowReadings);
-          }
-        });
-      }
-    }
+    // hybrid inverter cannot vanish from the X. EV SoC is overlayed in
+    // paintEnergyFlow because it comes from the loadpoint table, not
+    // /api/status.
+    paintEnergyFlow(data);
 
     // Mode buttons — primary (strategy) + advanced (manual)
     currentMode = data.mode;
