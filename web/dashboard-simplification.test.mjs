@@ -90,6 +90,11 @@ describe("simplified dashboard overview", () => {
     );
   });
 
+  it("builds the hero from the shared status mapper, not inline 0 W defaults", () => {
+    assert.match(app, /ftwFlowReadingsFromStatus/);
+    assert.doesNotMatch(app, /var gkw = \(data\.grid_w \|\| 0\) \/ 1000/);
+  });
+
   it("keeps each live telemetry rendering target singular", () => {
     for (const id of [
       "grid-w",
