@@ -81,11 +81,15 @@ type LuaDriver struct {
 	mu sync.Mutex
 	L  *lua.LState
 
-	restricted    bool
-	initConfig    map[string]any
+	restricted bool
+	initConfig map[string]any
+	// sawModbusRead is true only after a poll that successfully read a
+	// register. Failed attempts do not count: a device that never answered
+	// is not reloaded every time its give-up tables go quiet.
 	sawModbusRead bool
-	// skipReprobe latches after a reload that still produced no reads, so a
-	// driver that legitimately stops probing is not reloaded on every poll.
+	// skipReprobe latches after a failed reload, or after a reload whose
+	// immediate retry still made zero reads, so a missing file or a driver
+	// that legitimately stops probing is not reloaded on every poll.
 	skipReprobe  bool
 	reprobeCount int
 }
@@ -235,6 +239,7 @@ func (d *LuaDriver) Poll(ctx context.Context) (time.Duration, error) {
 	// retry, not a shutdown.
 	d.Env.Logger.Info("modbus driver stopped probing registers; reloading to retry")
 	if rerr := d.reprobeLocked(ctx); rerr != nil {
+		d.skipReprobe = true
 		return 0, fmt.Errorf("reprobe: %w", rerr)
 	}
 	d.reprobeCount++
@@ -291,7 +296,7 @@ func (d *LuaDriver) notePollModbusActivity() {
 	if !d.Env.requiresFreshModbusRead {
 		return
 	}
-	if d.Env.lastPollEvidence.Attempts > 0 {
+	if d.Env.lastPollEvidence.Successes > 0 {
 		d.sawModbusRead = true
 		d.skipReprobe = false
 	}
@@ -300,6 +305,12 @@ func (d *LuaDriver) notePollModbusActivity() {
 // reprobeLocked re-executes the driver file in a new VM and re-runs
 // driver_init. Caller holds d.mu. The previous VM is closed without
 // driver_cleanup so a live setpoint is not cleared.
+//
+// The file is read from disk so a hot-edited driver is what we retry
+// with; catalog drivers are already hot-editable, and this path is a
+// probe retry rather than a process restart. The new VM is initialized
+// before the swap: a failed driver_init keeps the previous state so
+// default-mode still has its locals.
 func (d *LuaDriver) reprobeLocked(ctx context.Context) error {
 	src, err := os.ReadFile(d.Path)
 	if err != nil {
@@ -327,12 +338,17 @@ func (d *LuaDriver) reprobeLocked(ctx context.Context) error {
 	}
 	old := d.L
 	d.L = L
+	if err := d.callInitLocked(ctx); err != nil {
+		d.L = old
+		L.Close()
+		return err
+	}
 	old.Close()
 	d.Env.requiresFreshModbusRead = driverRequiresFreshModbusRead(L, d.Env.Modbus != nil)
 	if driverDeclaresReadOnlyBattery(L) {
 		d.Env.BatteryTelemetryOnly = true
 	}
-	return d.callInitLocked(ctx)
+	return nil
 }
 
 func (d *LuaDriver) reprobes() int {
