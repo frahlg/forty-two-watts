@@ -34,8 +34,8 @@ function legacyPercentToFrac(pct) {
 function integrateBatteryWh(batteryW, slotLenMin, chargeEff, dischargeEff) {
   if (!finiteNumber(batteryW) || !finiteNumber(slotLenMin) || slotLenMin <= 0) return 0;
   const hours = slotLenMin / 60;
-  const charge = finiteNumber(chargeEff) && chargeEff > 0 ? chargeEff : 1;
-  const discharge = finiteNumber(dischargeEff) && dischargeEff > 0 ? dischargeEff : 1;
+  const charge = finiteNumber(chargeEff) && chargeEff > 0 ? chargeEff : 0.95;
+  const discharge = finiteNumber(dischargeEff) && dischargeEff > 0 ? dischargeEff : 0.95;
   // Site sign: +W charges the battery. Efficiency matches mpc.Optimize.
   if (batteryW >= 0) return batteryW * hours * charge;
   return batteryW * hours / discharge;
@@ -44,8 +44,8 @@ function integrateBatteryWh(batteryW, slotLenMin, chargeEff, dischargeEff) {
 export function actionSoC(action, {
   capacityWh = null,
   prevSoC = null,
-  chargeEff = 1,
-  dischargeEff = 1,
+  chargeEff = 0.95,
+  dischargeEff = 0.95,
 } = {}) {
   if (finiteNumber(action && action.soc)) return action.soc;
   const legacy = legacyPercentToFrac(action && action.soc_pct);

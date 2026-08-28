@@ -57,6 +57,33 @@ describe("plan SoC reconstruction", () => {
     assert.ok(Math.abs(soc - 0.527) < 0.0005, `got ${soc}, want ~0.527`);
   });
 
+  it("defaults missing efficiencies to 0.95 like mpc.Optimize", () => {
+    const omitted = actionSoC(
+      { battery_w: BJORN.batteryW, slot_len_min: BJORN.slotLenMin },
+      { capacityWh: BJORN.capacityWh, prevSoC: BJORN.initialSoC },
+    );
+    const explicit = actionSoC(
+      { battery_w: BJORN.batteryW, slot_len_min: BJORN.slotLenMin },
+      {
+        capacityWh: BJORN.capacityWh,
+        prevSoC: BJORN.initialSoC,
+        chargeEff: 0.95,
+        dischargeEff: 0.95,
+      },
+    );
+    const lossless = actionSoC(
+      { battery_w: BJORN.batteryW, slot_len_min: BJORN.slotLenMin },
+      {
+        capacityWh: BJORN.capacityWh,
+        prevSoC: BJORN.initialSoC,
+        chargeEff: 1,
+        dischargeEff: 1,
+      },
+    );
+    assert.equal(omitted, explicit);
+    assert.notEqual(omitted, lossless);
+  });
+
   it("does not treat a missing soc as 0", () => {
     assert.equal(actionSoC({ battery_w: 7300 }, {}), null);
     assert.equal(finiteNumber(null), false);
