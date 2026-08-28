@@ -1,5 +1,23 @@
 # Changelog
 
+## 2.3.0
+
+### Minor Changes
+
+- 7ac7be9: The phone app can now notify you when a device goes quiet or the house draws more than the fuse allows. Same thresholds as before (ten minutes of silence, thirty seconds over the rating) so a blip is not a lock-screen.
+- 54f0163: Sourceful Zap can again read PV and battery from devices it already talks to, as an opt-in under Settings → Devices. The default stays P1/HAN only. The driver never writes.
+- 53ca4ae: Zaptec Go, Go 2 and Pro can be added as a cloud EV charger. The setup wizard and Settings → EV offer Zaptec next to Easee; the same email and password list chargers on the account and drive current, pause and resume through Zaptec Cloud. The integration is experimental until a live charger has been exercised.
+
+### Patch Changes
+
+- 31742d7: Harden SI units and charging identities: SoC doors fold NaN/overflow instead of leaking percent or Inf, HA discovery slugs illegal driver names with a collision tag while leaving already-legal mixed-case ids unchanged, and synthetic history stores 0–1 SoC.
+- bab685a: Modbus give-up recovery no longer reload-loops a missing driver file or a device that never answered, and a failed `driver_init` during that reload keeps the previous VM so default-mode still works.
+- 33bd6ca: The weather location map loads again. OpenStreetMap's volunteer tiles now require a Referer, and the box was sending none.
+- 983c7ab: A short Modbus network blip no longer leaves a battery or meter offline until the box is restarted. Drivers that skip a register after a few failed reads used to skip every register after a "no route to host" moment; the host now reloads that driver and resumes polling once the link is back.
+- 5caddc1: The Plan chart reconstructs battery SoC from stored energy or battery power when a slot omits soc, instead of drawing a flat 0% line.
+- db39491: The live stats strip and today's self-powered share stay honest when a meter or inverter is offline: no fake 0 W, and a day that already happened still shows its percentage.
+- b1384b3: A meter that has stopped reporting no longer shows as 0 W balanced. Grid and house load go blank, and solar or battery that went quiet with it stay on the diagram as no data instead of vanishing.
+
 ## 2.2.1
 
 ### Patch Changes
