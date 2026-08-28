@@ -38,7 +38,7 @@ type DiagnosticSlot struct {
 	// Outputs
 	BatteryW float64 `json:"battery_w"`
 	GridW    float64 `json:"grid_w"`
-	SoCPct   float64 `json:"soc_pct"`  // SoC at END of slot
+	SoC   float64 `json:"soc"`  // SoC at END of slot
 	CostOre  float64 `json:"cost_ore"` // raw (un-blended) slot cost
 	Reason   string  `json:"reason"`
 	EMSMode  string  `json:"ems_mode"`
@@ -54,9 +54,9 @@ type DiagnosticSlot struct {
 	// exporting — reality was `LOAD 1.6 + EV 4.0 = 5.6 kW covered`,
 	// grid ≈ 0. See issue #174.
 	LoadpointW          float64            `json:"loadpoint_w,omitempty"`
-	LoadpointSoCPct     float64            `json:"loadpoint_soc_pct,omitempty"`
+	LoadpointSoC     float64            `json:"loadpoint_soc,omitempty"`
 	LoadpointPowerW     map[string]float64 `json:"loadpoint_power_w,omitempty"`
-	LoadpointSoCPctByID map[string]float64 `json:"loadpoint_soc_pct_by_id,omitempty"`
+	LoadpointSoCByID map[string]float64 `json:"loadpoint_soc_by_id,omitempty"`
 	StoragePowerW       map[string]float64 `json:"storage_power_w,omitempty"`
 	StorageEnergyWh     map[string]float64 `json:"storage_energy_wh,omitempty"`
 }
@@ -66,9 +66,9 @@ type DiagnosticSlot struct {
 // without pulling the whole internal struct.
 type DiagnosticParams struct {
 	Mode                Mode     `json:"mode"`
-	InitialSoCPct       float64  `json:"initial_soc_pct"`
-	SoCMinPct           float64  `json:"soc_min_pct"`
-	SoCMaxPct           float64  `json:"soc_max_pct"`
+	InitialSoC       float64  `json:"initial_soc"`
+	SoCMin           float64  `json:"soc_min"`
+	SoCMax           float64  `json:"soc_max"`
 	PVChargeBonusOreKwh float64  `json:"pv_charge_bonus_ore_kwh,omitempty"`
 	SoCLevels           int      `json:"soc_levels"`
 	ActionLevels        int      `json:"action_levels"`
@@ -170,15 +170,15 @@ func buildDiagnostic(plan *Plan, slots []Slot, p Params, zone string,
 			WeatherRowAvailableAtMs: slot.WeatherRowAvailableAtMs,
 			BatteryW:                action.BatteryW,
 			GridW:                   action.GridW,
-			SoCPct:                  action.SoCPct,
+			SoC:                  action.SoC,
 			CostOre:                 action.CostOre,
 			Reason:                  action.Reason,
 			EMSMode:                 action.EMSMode,
 			PVLimitW:                action.PVLimitW,
 			LoadpointW:              action.LoadpointW,
-			LoadpointSoCPct:         action.LoadpointSoCPct,
+			LoadpointSoC:         action.LoadpointSoC,
 			LoadpointPowerW:         action.LoadpointPowerW,
-			LoadpointSoCPctByID:     action.LoadpointSoCPctByID,
+			LoadpointSoCByID:     action.LoadpointSoCByID,
 			StoragePowerW:           action.StoragePowerW,
 			StorageEnergyWh:         action.StorageEnergyWh,
 		}
@@ -202,9 +202,9 @@ func buildDiagnostic(plan *Plan, slots []Slot, p Params, zone string,
 		OptimizerInput:        append(json.RawMessage(nil), plan.OptimizerInput...),
 		Params: DiagnosticParams{
 			Mode:                       p.Mode,
-			InitialSoCPct:              p.InitialSoCPct,
-			SoCMinPct:                  p.SoCMinPct,
-			SoCMaxPct:                  p.SoCMaxPct,
+			InitialSoC:              p.InitialSoC,
+			SoCMin:                  p.SoCMin,
+			SoCMax:                  p.SoCMax,
 			PVChargeBonusOreKwh:        p.PVChargeBonusOreKwh,
 			SoCLevels:                  p.SoCLevels,
 			ActionLevels:               p.ActionLevels,
@@ -324,9 +324,9 @@ func planFromDiagnostic(d *Diagnostic) (*Plan, []Slot, Params, time.Time, bool) 
 	}
 	params := Params{
 		Mode:                d.Params.Mode,
-		InitialSoCPct:       d.Params.InitialSoCPct,
-		SoCMinPct:           d.Params.SoCMinPct,
-		SoCMaxPct:           d.Params.SoCMaxPct,
+		InitialSoC:       d.Params.InitialSoC,
+		SoCMin:           d.Params.SoCMin,
+		SoCMax:           d.Params.SoCMax,
 		PVChargeBonusOreKwh: d.Params.PVChargeBonusOreKwh,
 		SoCLevels:           d.Params.SoCLevels,
 		ActionLevels:        d.Params.ActionLevels,
@@ -385,16 +385,16 @@ func planFromDiagnostic(d *Diagnostic) (*Plan, []Slot, Params, time.Time, bool) 
 			LoadW:               ds.LoadW,
 			BatteryW:            ds.BatteryW,
 			GridW:               ds.GridW,
-			SoCPct:              ds.SoCPct,
+			SoC:              ds.SoC,
 			CostOre:             ds.CostOre,
 			Confidence:          ds.Confidence,
 			Reason:              ds.Reason,
 			EMSMode:             ds.EMSMode,
 			PVLimitW:            ds.PVLimitW,
 			LoadpointW:          ds.LoadpointW,
-			LoadpointSoCPct:     ds.LoadpointSoCPct,
+			LoadpointSoC:     ds.LoadpointSoC,
 			LoadpointPowerW:     ds.LoadpointPowerW,
-			LoadpointSoCPctByID: ds.LoadpointSoCPctByID,
+			LoadpointSoCByID: ds.LoadpointSoCByID,
 			StoragePowerW:       ds.StoragePowerW,
 			StorageEnergyWh:     ds.StorageEnergyWh,
 		}
@@ -424,7 +424,7 @@ func planFromDiagnostic(d *Diagnostic) (*Plan, []Slot, Params, time.Time, bool) 
 		Mode:               params.Mode,
 		HorizonSlots:       horizon,
 		CapacityWh:         params.CapacityWh,
-		InitialSoCPct:      params.InitialSoCPct,
+		InitialSoC:      params.InitialSoC,
 		TotalCostOre:       d.TotalCostOre,
 		Actions:            actions,
 		Solver:             d.Solver,

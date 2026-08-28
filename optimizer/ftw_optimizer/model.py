@@ -909,13 +909,6 @@ def solve(
         ]
         discrete = True
 
-    has_surplus_only = any(bool(flex.spec.get("surplus_only", False)) for flex in flex_loads)
-    if has_surplus_only and storage_charge_active is not None:
-        # A connected surplus-only loadpoint also forbids grid-funded home-
-        # battery charging, even in a slot where the EV happens to be off.
-        for sv in scenario_vars:
-            constraints.append(sv["import"] <= max_site_power * (1 - storage_charge_active))
-
     for flex in flex_loads:
         if flex.selection is None:
             active = flex.power / max(1.0, float(flex.spec["_max_charge_w"]))

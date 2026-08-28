@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/srcfl/ftw/go/internal/loadpoint"
+	"github.com/srcfl/ftw/go/internal/units"
 )
 
 // The EV loadpoint operations: loadpoint.hold pins the charger to a fixed
@@ -237,10 +238,10 @@ func (h *Handler) loadpointBoost(cmd Cmd, uptimeMs int64) error {
 	minSoC, _ := argNum(cmd.Args, "min_battery_soc_pct")
 	evTarget, _ := argNum(cmd.Args, "ev_target_soc_pct")
 	lease := loadpoint.BatteryBoostLease{
-		StartedAt:        now,
-		ExpiresAt:        expires,
-		MinBatterySoCPct: minSoC,
-		EVTargetSoCPct:   evTarget,
+		StartedAt:     now,
+		ExpiresAt:     expires,
+		MinBatterySoC: units.ClampFraction(units.FractionFromLegacyPercent(minSoC)),
+		EVTargetSoC:   units.ClampFraction(units.FractionFromLegacyPercent(evTarget)),
 	}
 	if departureAtMs, ok := argInt(cmd.Args, "departure_at_ms"); ok && departureAtMs > 0 {
 		lease.DepartureAt = time.UnixMilli(departureAtMs)

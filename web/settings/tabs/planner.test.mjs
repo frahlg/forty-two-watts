@@ -106,4 +106,30 @@ describe("render", () => {
     assert.ok(html.includes("[field:planner.optimizer_multistage.service_cvar_weight]"));
     assert.ok(html.includes('data-checkbox-path="planner.optimizer_recourse_shadow"'));
   });
+
+  it("binds SoC bounds as 0–1 fractions", () => {
+    const html = tab.render(stubCtx());
+    assert.ok(html.includes("[field:planner.soc_min]"));
+    assert.ok(html.includes("[field:planner.soc_max]"));
+    assert.ok(!html.includes("planner.soc_min_pct"));
+    assert.ok(!html.includes("planner.soc_max_pct"));
+  });
+
+  it("promotes legacy soc_min_pct / soc_max_pct into 0–1 fields", () => {
+    const ctx = stubCtx();
+    ctx.config.planner = { soc_min_pct: 10, soc_max_pct: 90 };
+    tab.render(ctx);
+    assert.equal(ctx.config.planner.soc_min, 0.1);
+    assert.equal(ctx.config.planner.soc_max, 0.9);
+    assert.equal(ctx.config.planner.soc_min_pct, undefined);
+    assert.equal(ctx.config.planner.soc_max_pct, undefined);
+  });
+
+  it("keeps an already-set soc_min over a leftover percent key", () => {
+    const ctx = stubCtx();
+    ctx.config.planner = { soc_min: 0.15, soc_min_pct: 10, soc_max: 0.92, soc_max_pct: 90 };
+    tab.render(ctx);
+    assert.equal(ctx.config.planner.soc_min, 0.15);
+    assert.equal(ctx.config.planner.soc_max, 0.92);
+  });
 });

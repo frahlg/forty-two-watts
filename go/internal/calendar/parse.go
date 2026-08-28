@@ -21,14 +21,15 @@ func (iv Interval) Contains(t time.Time) bool {
 	return !t.Before(iv.Start) && t.Before(iv.End)
 }
 
-// EVDeadline is "loadpoint LoadpointID must reach TargetSoCPct% by Departure",
-// derived from a calendar event whose start time is the departure.
+// EVDeadline is "loadpoint LoadpointID must reach TargetSoC (0–1) by Departure",
+// derived from a calendar event whose start time is the departure. Titles
+// still write "80%"; that percent is converted here.
 type EVDeadline struct {
-	LoadpointID  string    `json:"loadpoint_id,omitempty"`
-	TargetSoCPct float64   `json:"target_soc_pct"`
-	Departure    time.Time `json:"departure"`
-	UID          string    `json:"uid,omitempty"`
-	Title        string    `json:"title,omitempty"`
+	LoadpointID string    `json:"loadpoint_id,omitempty"`
+	TargetSoC   float64   `json:"target_soc"`
+	Departure   time.Time `json:"departure"`
+	UID         string    `json:"uid,omitempty"`
+	Title       string    `json:"title,omitempty"`
 }
 
 // Intents is the parsed result of one calendar fetch.
@@ -47,18 +48,18 @@ var lpRe = regexp.MustCompile(`(?i)\blp[:=]\s*([A-Za-z0-9_-]+)`)
 // config / network dependency so the title→intent rules are unit-testable in
 // isolation. Keywords are stored already lower-cased.
 type parser struct {
-	awayKeywords        []string
-	evKeywords          []string
-	defaultLoadpointID  string
-	defaultTargetSoCPct float64
+	awayKeywords       []string
+	evKeywords         []string
+	defaultLoadpointID string
+	defaultTargetSoC   float64
 }
 
-func newParser(awayKeywords, evKeywords []string, defaultLoadpointID string, defaultTargetSoCPct float64) *parser {
+func newParser(awayKeywords, evKeywords []string, defaultLoadpointID string, defaultTargetSoC float64) *parser {
 	return &parser{
-		awayKeywords:        lowerAll(awayKeywords),
-		evKeywords:          lowerAll(evKeywords),
-		defaultLoadpointID:  defaultLoadpointID,
-		defaultTargetSoCPct: defaultTargetSoCPct,
+		awayKeywords:       lowerAll(awayKeywords),
+		evKeywords:         lowerAll(evKeywords),
+		defaultLoadpointID: defaultLoadpointID,
+		defaultTargetSoC:   defaultTargetSoC,
 	}
 }
 
@@ -79,10 +80,10 @@ func (p *parser) classify(title string, start, end time.Time, uid string) (*Inte
 	}
 
 	if matchesAny(lt, p.evKeywords) {
-		soc := p.defaultTargetSoCPct
+		soc := p.defaultTargetSoC
 		if m := pctRe.FindStringSubmatch(title); m != nil {
 			if v, err := strconv.ParseFloat(m[1], 64); err == nil {
-				soc = clampPct(v)
+				soc = titlePercentToFraction(v)
 			}
 		}
 		lp := p.defaultLoadpointID
@@ -90,11 +91,11 @@ func (p *parser) classify(title string, start, end time.Time, uid string) (*Inte
 			lp = m[1]
 		}
 		return nil, &EVDeadline{
-			LoadpointID:  lp,
-			TargetSoCPct: soc,
-			Departure:    start,
-			UID:          uid,
-			Title:        title,
+			LoadpointID: lp,
+			TargetSoC:   soc,
+			Departure:   start,
+			UID:         uid,
+			Title:       title,
 		}
 	}
 
@@ -131,12 +132,12 @@ func lowerAll(in []string) []string {
 	return out
 }
 
-func clampPct(v float64) float64 {
+func titlePercentToFraction(v float64) float64 {
 	if v < 0 {
 		return 0
 	}
 	if v > 100 {
-		return 100
+		v = 100
 	}
-	return v
+	return v / 100.0
 }

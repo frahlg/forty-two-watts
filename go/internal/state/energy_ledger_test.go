@@ -173,6 +173,34 @@ func TestEnergyLedgerKeepsSimultaneousMeterDirections(t *testing.T) {
 	}
 }
 
+func TestEnergyLedgerLaterExportDoesNotShrinkImport(t *testing.T) {
+	s := freshStore(t)
+	base := int64(1_800_000_000_000 / EnergyLedgerBucketMS * EnergyLedgerBucketMS)
+	assetID := HardwareEnergyAssetID("maker:serial", AssetGridMeter)
+	recordEnergyTestTick(t, s, base,
+		ledgerObservation(assetID, AssetGridMeter, FlowGridImport, base, energyPtr(1000), energyPtr(600)),
+		ledgerObservation(assetID, AssetGridMeter, FlowGridExport, base, energyPtr(0), energyPtr(0)),
+	)
+	recordEnergyTestTick(t, s, base+60_000,
+		ledgerObservation(assetID, AssetGridMeter, FlowGridImport, base+60_000, energyPtr(1010), energyPtr(0)),
+		ledgerObservation(assetID, AssetGridMeter, FlowGridExport, base+60_000, energyPtr(20), energyPtr(1200)),
+	)
+
+	points := loadLedgerTestPoints(t, s, assetID, base, base+EnergyLedgerBucketMS)
+	totals := map[EnergyFlow]float64{}
+	for _, p := range points {
+		if p.Quality == "measured" {
+			totals[p.Flow] += p.EnergyWh
+		}
+	}
+	if totals[FlowGridImport] != 10 {
+		t.Fatalf("import shrunk after export interval: %#v", totals)
+	}
+	if totals[FlowGridExport] != 20 {
+		t.Fatalf("export = %#v, want 20", totals)
+	}
+}
+
 func TestEnergyLedgerMarksCounterResetAndUsesPowerFallback(t *testing.T) {
 	s := freshStore(t)
 	base := int64(1_800_000_000_000 / EnergyLedgerBucketMS * EnergyLedgerBucketMS)

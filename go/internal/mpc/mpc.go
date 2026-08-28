@@ -140,11 +140,11 @@ type Params struct {
 	Mode Mode
 
 	// SoC grid
-	SoCLevels     int     // e.g. 41 (2.5% steps)
-	CapacityWh    float64 // aggregate battery capacity
-	SoCMinPct     float64 // hardware/chemistry floor — DP feasibility check refuses to land below this
-	SoCMaxPct     float64 // e.g. 95
-	InitialSoCPct float64
+	SoCLevels  int     // e.g. 41 (2.5% steps)
+	CapacityWh float64 // aggregate battery capacity
+	SoCMin     float64 // hardware/chemistry floor — DP feasibility check refuses to land below this
+	SoCMax     float64 // e.g. 95
+	InitialSoC float64
 
 	// Forecast-risk reserve is handled outside the DP cost now: the planner
 	// optimises against downside PV (forecast − k·σ) via
@@ -284,7 +284,7 @@ type Action struct {
 	LoadW      float64 `json:"load_w"`
 	BatteryW   float64 `json:"battery_w"`  // decision (site sign, AC terminals)
 	GridW      float64 `json:"grid_w"`     // resulting grid power
-	SoCPct     float64 `json:"soc_pct"`    // SoC at END of slot
+	SoC        float64 `json:"soc"`        // 0–1 at END of slot
 	CostOre    float64 `json:"cost_ore"`   // this slot's cost (öre). Negative = revenue.
 	Confidence float64 `json:"confidence"` // 1.0 real, <1.0 forecasted (UI uses this to style)
 	Reason     string  `json:"reason"`     // short human-readable explanation
@@ -305,14 +305,14 @@ type Action struct {
 	// multi-LP future; single-value for now.
 	LoadpointW float64 `json:"loadpoint_w,omitempty"`
 
-	// LoadpointSoCPct is the EV SoC at END of slot, following the
-	// same convention as SoCPct for the home battery.
-	LoadpointSoCPct     float64            `json:"loadpoint_soc_pct,omitempty"`
-	LoadpointPowerW     map[string]float64 `json:"loadpoint_power_w,omitempty"`
-	LoadpointSoCPctByID map[string]float64 `json:"loadpoint_soc_pct_by_id,omitempty"`
+	// LoadpointSoC is the EV SoC at END of slot, following the
+	// same convention as SoC for the home battery.
+	LoadpointSoC     float64            `json:"loadpoint_soc,omitempty"`
+	LoadpointPowerW  map[string]float64 `json:"loadpoint_power_w,omitempty"`
+	LoadpointSoCByID map[string]float64 `json:"loadpoint_soc_by_id,omitempty"`
 
 	// Per-storage values make a multi-battery solve auditable. BatteryW and
-	// SoCPct remain the stable aggregate dispatch/API contract.
+	// SoC remain the stable aggregate dispatch/API contract.
 	StoragePowerW   map[string]float64 `json:"storage_power_w,omitempty"`
 	StorageEnergyWh map[string]float64 `json:"storage_energy_wh,omitempty"`
 }
@@ -346,14 +346,21 @@ type Plan struct {
 	// active do not get an execution-facing identity. Together with an
 	// Action's SlotStartMs it forms the stable key for one planned decision.
 	// Direct Optimize callers leave it empty; the service fills it on publish.
-	DecisionID         string            `json:"decision_id,omitempty"`
-	GeneratedAtMs      int64             `json:"generated_at_ms"`
-	Mode               Mode              `json:"mode"`
-	HorizonSlots       int               `json:"horizon_slots"`
-	CapacityWh         float64           `json:"capacity_wh"`
-	InitialSoCPct      float64           `json:"initial_soc_pct"`
-	TotalCostOre       float64           `json:"total_cost_ore"`
-	Actions            []Action          `json:"actions"`
+	DecisionID    string   `json:"decision_id,omitempty"`
+	GeneratedAtMs int64    `json:"generated_at_ms"`
+	Mode          Mode     `json:"mode"`
+	HorizonSlots  int      `json:"horizon_slots"`
+	CapacityWh    float64  `json:"capacity_wh"`
+	InitialSoC    float64  `json:"initial_soc"`
+	TotalCostOre  float64  `json:"total_cost_ore"`
+	Actions       []Action `json:"actions"`
+	// PVNameplateW is the hard generation ceiling (W) applied to
+	// every slot. The UI uses it so a stale megawatt pv_w cannot
+	// paint the chart; 0 means no cut was configured.
+	PVNameplateW float64 `json:"pv_nameplate_w,omitempty"`
+	// LoadMaxW is the hard house-load ceiling (W), normally the fuse.
+	// The UI uses it so a stale wild load_w cannot paint the chart.
+	LoadMaxW           float64           `json:"load_max_w,omitempty"`
 	Baselines          *Baselines        `json:"baselines,omitempty"`
 	Solver             *SolverInfo       `json:"solver,omitempty"`
 	DPShadow           *ShadowPlan       `json:"dp_shadow,omitempty"`
@@ -521,8 +528,8 @@ func Optimize(slots []Slot, p Params) Plan {
 		A = 3
 	}
 
-	socStep := (p.SoCMaxPct - p.SoCMinPct) / float64(S-1)
-	socAt := func(i int) float64 { return p.SoCMinPct + float64(i)*socStep }
+	socStep := (p.SoCMax - p.SoCMin) / float64(S-1)
+	socAt := func(i int) float64 { return p.SoCMin + float64(i)*socStep }
 
 	// Confidence handling: compute the horizon mean (real + forecast)
 	// so we can blend low-confidence prices toward it. Default any
@@ -598,11 +605,11 @@ func Optimize(slots []Slot, p Params) Plan {
 		EL = lp.Levels
 		evSteps = lp.normalizedSteps()
 		EA = len(evSteps)
-		if lp.MaxPct <= lp.MinPct {
-			lp.MaxPct = 100
-			lp.MinPct = 0
+		if lp.SoCMax <= lp.SoCMin {
+			lp.SoCMax = 1.0
+			lp.SoCMin = 0
 		}
-		evSocStep = (lp.MaxPct - lp.MinPct) / float64(EL-1)
+		evSocStep = (lp.SoCMax - lp.SoCMin) / float64(EL-1)
 		if lp.ChargeEfficiency > 0 {
 			evChargeEff = lp.ChargeEfficiency
 		}
@@ -611,7 +618,7 @@ func Optimize(slots []Slot, p Params) Plan {
 		if !evActive {
 			return 0
 		}
-		return lp.MinPct + float64(e)*evSocStep
+		return lp.SoCMin + float64(e)*evSocStep
 	}
 	evActionW := func(ea int) float64 {
 		if !evActive {
@@ -642,7 +649,7 @@ func Optimize(slots []Slot, p Params) Plan {
 	// the DP still "sees" it (rather than silently ignoring). A
 	// target of -1 means no deadline — opportunistic charging only.
 	deadlineSlot := -1
-	if evActive && lp.TargetSoCPct > 0 {
+	if evActive && lp.TargetSoC > 0 {
 		deadlineSlot = lp.TargetSlotIdx
 		if deadlineSlot < 0 {
 			deadlineSlot = -1
@@ -655,7 +662,7 @@ func Optimize(slots []Slot, p Params) Plan {
 	// carries no terminal cost — the deadline-slot penalty below
 	// handles target enforcement and avoids double-counting.
 	for si := 0; si < S; si++ {
-		battKwh := p.CapacityWh * socAt(si) / 100.0 / 1000.0
+		battKwh := p.CapacityWh * socAt(si) / 1000.0
 		battCredit := -p.TerminalSoCPrice * battKwh
 		for ei := 0; ei < EL; ei++ {
 			V[N][si][ei] = battCredit
@@ -682,8 +689,8 @@ func Optimize(slots []Slot, p Params) Plan {
 					} else {
 						dBattWh = +battW * dtH / p.DischargeEfficiency
 					}
-					battSoc2 := soc + dBattWh/p.CapacityWh*100.0
-					if battSoc2 < p.SoCMinPct-1e-9 || battSoc2 > p.SoCMaxPct+1e-9 {
+					battSoc2 := soc + dBattWh/p.CapacityWh
+					if battSoc2 < p.SoCMin-1e-9 || battSoc2 > p.SoCMax+1e-9 {
 						continue
 					}
 
@@ -696,8 +703,8 @@ func Optimize(slots []Slot, p Params) Plan {
 						var evSoc2 float64
 						if evActive {
 							dEvWh := evW * dtH * evChargeEff
-							evSoc2 = evSoc + dEvWh/lp.CapacityWh*100.0
-							if evSoc2 > lp.MaxPct+1e-9 {
+							evSoc2 = evSoc + dEvWh/lp.CapacityWh
+							if evSoc2 > lp.SoCMax+1e-9 {
 								continue
 							}
 						}
@@ -720,28 +727,15 @@ func Optimize(slots []Slot, p Params) Plan {
 							continue
 						}
 
-						// Surplus-only EV: the battery must not steal
-						// PV that the EV could use, and must not
-						// grid-charge for arbitrage while the EV is
-						// connected. Without this rule the planner
-						// "launders" cheap grid through the battery:
-						// import in slot N to charge battery, discharge
-						// to EV in slot N+1 — gridW in N+1 looks ~0,
-						// the EV-only constraint above doesn't catch
-						// it, and the EV ends up grid-fed at retail
-						// import price + roundtrip loss. Forbidding
-						// (battW > 0 AND gridW > 50) when a surplus-
-						// only LP is plugged in closes that loophole.
-						// Battery charging from genuine PV surplus
-						// (gridW ≤ 50) stays allowed — that just
-						// means PV exceeds load+EV+battery and the
-						// battery soaks up what would otherwise
-						// export. Discharge (battW < 0) is always
-						// allowed (peak shaving, fuse guard, self-
-						// consumption when EV not drawing).
-						if evActive && lp.SurplusOnly && battW > 0 && gridW > 50 {
-							continue
-						}
+						// Surplus-only must not also ban home-battery
+						// grid charge. The EV-import rule above keeps
+						// the car off grid, and blocksBatteryToEV()
+						// below already rejects battery→EV, so the
+						// "launder cheap grid through the battery into
+						// the car" path is closed without forbidding
+						// Pixii/house-battery arbitrage while the car
+						// is plugged in. Active arbitrage with a
+						// surplus-only EV is a real operator setup.
 
 						// Don't simultaneously discharge the home battery
 						// for grid export AND charge the EV. Either the
@@ -840,7 +834,7 @@ func Optimize(slots []Slot, p Params) Plan {
 						// preserve SoC for tomorrow's peak — that's
 						// arbitrage behaviour, not self-consumption.
 						// The bias extends all the way down to
-						// SoCMinPct: the operator's configured floor
+						// SoCMin: the operator's configured floor
 						// IS the reserve, no implicit extra buffer on
 						// top of it (#157). The hard floor is still
 						// enforced by the SoC-transition feasibility
@@ -914,15 +908,15 @@ func Optimize(slots []Slot, p Params) Plan {
 						// DP maximizes delivered energy since less
 						// shortfall = less penalty.
 						if deadlineSlot == t {
-							short := lp.TargetSoCPct - evSoc2
+							short := lp.TargetSoC - evSoc2
 							if short > 0 {
-								missedKwh := lp.CapacityWh * short / 100.0 / 1000.0
+								missedKwh := lp.CapacityWh * short / 1000.0
 								cost += missedKwh * meanPrice * 4.0
 							}
 						}
 
 						// Battery SoC interpolation indices.
-						fIdx := (battSoc2 - p.SoCMinPct) / socStep
+						fIdx := (battSoc2 - p.SoCMin) / socStep
 						lo := int(math.Floor(fIdx))
 						hi := lo + 1
 						if lo < 0 {
@@ -944,7 +938,7 @@ func Optimize(slots []Slot, p Params) Plan {
 						eLo, eHi := 0, 0
 						eFrac := 0.0
 						if evActive {
-							f := (evSoc2 - lp.MinPct) / evSocStep
+							f := (evSoc2 - lp.SoCMin) / evSocStep
 							eLo = int(math.Floor(f))
 							eHi = eLo + 1
 							if eLo < 0 {
@@ -993,10 +987,10 @@ func Optimize(slots []Slot, p Params) Plan {
 		Mode:          p.Mode,
 		HorizonSlots:  N,
 		CapacityWh:    p.CapacityWh,
-		InitialSoCPct: p.InitialSoCPct,
+		InitialSoC:    p.InitialSoC,
 		Actions:       make([]Action, 0, N),
 	}
-	fIdx := (p.InitialSoCPct - p.SoCMinPct) / socStep
+	fIdx := (p.InitialSoC - p.SoCMin) / socStep
 	si := int(math.Round(fIdx))
 	if si < 0 {
 		si = 0
@@ -1009,7 +1003,7 @@ func Optimize(slots []Slot, p Params) Plan {
 	ei := 0
 	var evSoc float64
 	if evActive {
-		f := (lp.InitialSoCPct - lp.MinPct) / evSocStep
+		f := (lp.InitialSoC - lp.SoCMin) / evSocStep
 		ei = int(math.Round(f))
 		if ei < 0 {
 			ei = 0
@@ -1035,20 +1029,20 @@ func Optimize(slots []Slot, p Params) Plan {
 		} else {
 			dSoCWh = +actW * dtH / p.DischargeEfficiency
 		}
-		soc2 := soc + dSoCWh/p.CapacityWh*100.0
-		if soc2 < p.SoCMinPct {
-			soc2 = p.SoCMinPct
+		soc2 := soc + dSoCWh/p.CapacityWh
+		if soc2 < p.SoCMin {
+			soc2 = p.SoCMin
 		}
-		if soc2 > p.SoCMaxPct {
-			soc2 = p.SoCMaxPct
+		if soc2 > p.SoCMax {
+			soc2 = p.SoCMax
 		}
 		// EV SoC transition (no-op when !evActive since evW = 0).
 		var evSoc2 float64
 		if evActive {
 			dEvWh := evW * dtH * evChargeEff
-			evSoc2 = evSoc + dEvWh/lp.CapacityWh*100.0
-			if evSoc2 > lp.MaxPct {
-				evSoc2 = lp.MaxPct
+			evSoc2 = evSoc + dEvWh/lp.CapacityWh
+			if evSoc2 > lp.SoCMax {
+				evSoc2 = lp.SoCMax
 			}
 		}
 		gridW := slot.LoadW + slot.PVW + actW + evW
@@ -1068,17 +1062,17 @@ func Optimize(slots []Slot, p Params) Plan {
 			LoadW:       slot.LoadW,
 			BatteryW:    actW,
 			GridW:       gridW,
-			SoCPct:      soc2,
+			SoC:         soc2,
 			CostOre:     cost,
 			Reason:      reasonFor(slot, actW, gridW, meanPrice),
 		}
 		if evActive {
 			a.LoadpointW = evW
-			a.LoadpointSoCPct = evSoc2
+			a.LoadpointSoC = evSoc2
 		}
 		plan.Actions = append(plan.Actions, a)
 		soc = soc2
-		fIdx = (soc - p.SoCMinPct) / socStep
+		fIdx = (soc - p.SoCMin) / socStep
 		si = int(math.Round(fIdx))
 		if si < 0 {
 			si = 0
@@ -1088,7 +1082,7 @@ func Optimize(slots []Slot, p Params) Plan {
 		}
 		if evActive {
 			evSoc = evSoc2
-			f := (evSoc - lp.MinPct) / evSocStep
+			f := (evSoc - lp.SoCMin) / evSocStep
 			ei = int(math.Round(f))
 			if ei < 0 {
 				ei = 0

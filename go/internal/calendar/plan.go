@@ -22,7 +22,7 @@ type PlanSlot struct {
 	Start, End time.Time
 	BatteryW   float64 // site sign: + charging, - discharging
 	GridW      float64 // resulting grid power (+ import, - export)
-	SoCPct     float64 // SoC at END of slot
+	SoC        float64 // SoC at END of slot (0–1)
 	Confidence float64
 }
 
@@ -68,7 +68,7 @@ func buildPlanBlocks(slots []PlanSlot, now time.Time) []planBlock {
 			sum += s.BatteryW
 		}
 		avgKW := math.Abs(sum/float64(len(run))) / 1000
-		endSoC := run[len(run)-1].SoCPct
+		endSoC := run[len(run)-1].SoC * 100 // calendar title door: percent
 		var verb, short string
 		if cat > 0 {
 			verb, short = "Charge battery", "chg"

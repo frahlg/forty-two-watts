@@ -41,6 +41,36 @@ func synthetic(t time.Time) float64 {
 	return base + morning + midday + evening
 }
 
+func TestPredictFloorsHundredWattOvernight(t *testing.T) {
+	// Operator report: overnight forecast sat at ~100 W on a lived-in
+	// house. 100 W is below 25% of the typical 650 W night prior and
+	// must not reach the planner, even when the bucket is fully trusted.
+	m := NewModel(5520)
+	night := time.Date(2026, 8, 18, 3, 0, 0, 0, time.UTC)
+	idx := HourOfWeek(night)
+	m.Bucket[idx].Mean = 100
+	m.Bucket[idx].Samples = 40
+	got := m.Predict(night, HeatingReferenceC)
+	floor := typicalPrior(idx) * poisonFloor
+	if got < floor {
+		t.Fatalf("100 W night must lift to prior×0.25 (%.0f W), got %.0f W", floor, got)
+	}
+}
+
+func TestPredictCapsHeatingAtFuse(t *testing.T) {
+	m := NewModel(5520)
+	m.MaxPlausibleW = 11000
+	m.HeatingW_per_degC = HeatingCoefMaxW
+	midday := time.Date(2026, 1, 5, 12, 0, 0, 0, time.UTC)
+	got := m.Predict(midday, -20)
+	if got > 11000 {
+		t.Fatalf("heating add-on must not exceed the fuse ceiling, got %.0f W", got)
+	}
+	if got < 1000 {
+		t.Fatalf("cold midday should still predict real load, got %.0f W", got)
+	}
+}
+
 func TestDayOnePriorIsUsefulEverywhere(t *testing.T) {
 	// Before any training: predictions at any hour should be within
 	// reasonable bounds (>0 overnight, elevated at peaks). The typical
@@ -52,8 +82,8 @@ func TestDayOnePriorIsUsefulEverywhere(t *testing.T) {
 	o := m.PredictNoTemp(overnight)
 	mo := m.PredictNoTemp(morning)
 	e := m.PredictNoTemp(evening)
-	if o < 100 || o > 800 {
-		t.Errorf("overnight should be in [100, 800], got %f", o)
+	if o < 400 || o > 1000 {
+		t.Errorf("overnight should be in [400, 1000], got %f", o)
 	}
 	if mo < 1500 {
 		t.Errorf("morning peak should be >= 1500, got %f", mo)
@@ -204,10 +234,10 @@ func TestNightBucketNotPoisonedByHeatingSubtraction(t *testing.T) {
 			warmPred, priorW, priorW*poisonFloor)
 	}
 
-	// Feed 30 warm-weather samples at the real baseline (350 W, temp 20°C).
-	// The model should now learn the actual overnight load.
+	// Feed 30 warm-weather samples at the real baseline (350 W, temp 20°C),
+	// same hour-of-week as t0 so the bucket we predict actually moves.
 	for i := 0; i < 30; i++ {
-		m.Update(t0.Add(time.Duration(300+i*7)*24*time.Hour), 350, 20.0)
+		m.Update(t0.Add(time.Duration(i)*7*24*time.Hour), 350, 20.0)
 	}
 	trainedPred := m.Predict(t0, 20.0)
 	if math.Abs(trainedPred-350) > 100 {

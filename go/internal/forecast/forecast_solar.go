@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"time"
+
+	"github.com/srcfl/ftw/go/internal/units"
 )
 
 // ForecastSolarProvider uses the free tier of api.forecast.solar, which
@@ -41,25 +43,26 @@ type ForecastSolarProvider struct {
 
 	// Arrays is the list of physically-distinct panel groups. Each has
 	// its own tilt (0 = flat, 90 = wall), azimuth (compass heading,
-	// 180 = south), and kWp (nameplate DC). One entry means single-array.
+	// 180 = south), and rated watts. One entry means single-array.
 	Arrays []Array
 }
 
-// Array is one panel plane passed to forecast.solar.
+// Array is one panel plane. RatedW is nameplate watts. kWp is derived
+// only when building the forecast.solar URL.
 type Array struct {
 	TiltDeg    float64
 	AzimuthDeg float64
-	KWp        float64
+	RatedW     float64
 }
 
 // NewForecastSolar returns a configured provider with a single panel
 // array. For multi-plane installs, append additional entries to the
-// Arrays field after construction.
-func NewForecastSolar(tiltDeg, azimuthDeg, kWp float64) *ForecastSolarProvider {
+// Arrays field after construction. ratedW is watts.
+func NewForecastSolar(tiltDeg, azimuthDeg, ratedW float64) *ForecastSolarProvider {
 	return &ForecastSolarProvider{
 		Client:  &http.Client{Timeout: 15 * time.Second},
 		BaseURL: "https://api.forecast.solar",
-		Arrays:  []Array{{TiltDeg: tiltDeg, AzimuthDeg: azimuthDeg, KWp: kWp}},
+		Arrays:  []Array{{TiltDeg: tiltDeg, AzimuthDeg: azimuthDeg, RatedW: ratedW}},
 	}
 }
 
@@ -84,17 +87,15 @@ func (f *ForecastSolarProvider) Fetch(ctx context.Context, lat, lon float64) ([]
 		return nil, fmt.Errorf("forecast.solar: at least one array required")
 	}
 	for i, a := range f.Arrays {
-		if a.KWp <= 0 {
-			return nil, fmt.Errorf("forecast.solar: array %d kWp must be > 0 (got %f)", i, a.KWp)
+		if a.RatedW <= 0 {
+			return nil, fmt.Errorf("forecast.solar: array %d rated_w must be > 0 (got %f W)", i, a.RatedW)
 		}
 	}
 	// Multi-plane URL syntax: /estimate/lat/lon/tilt1/az1/kwp1/tilt2/az2/kwp2/...
-	// Single-plane collapses to the standard /estimate/lat/lon/tilt/az/kwp
-	// with no behavior difference. ?time=utc forces UTC timestamps in
-	// the response so we don't have to guess the server's locale.
+	// kWp is this vendor's unit — convert at this door only.
 	var planes string
 	for _, a := range f.Arrays {
-		planes += fmt.Sprintf("/%.1f/%.1f/%.2f", a.TiltDeg, a.AzimuthDeg, a.KWp)
+		planes += fmt.Sprintf("/%.1f/%.1f/%.2f", a.TiltDeg, a.AzimuthDeg, units.KWpFromWatts(a.RatedW))
 	}
 	url := fmt.Sprintf("%s/estimate/%.4f/%.4f%s?time=utc", f.BaseURL, lat, lon, planes)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)

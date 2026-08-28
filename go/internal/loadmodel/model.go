@@ -8,7 +8,7 @@
 //     baseline) without having to fit non-linear basis functions.
 //
 //  2. Typical-home prior. Each bucket is seeded with a reasonable
-//     Swedish-home default (300W overnight, 2000W morning/evening
+//     Swedish-home default (650W overnight, 2000W morning/evening
 //     peaks, 600W midday). Day-one predictions are useful; the model
 //     refines from there.
 //
@@ -131,7 +131,7 @@ func typicalPrior(hourOfWeek int) float64 {
 	weekday := hourOfWeek / 24
 	hour := hourOfWeek % 24
 	isWeekend := weekday >= 5 // Saturday (5), Sunday (6)
-	base := 300.0             // overnight baseload
+	base := 650.0 // overnight baseload — typical Swedish house today, not 2010
 	morning := 2000.0 * math.Exp(-0.5*math.Pow(float64(hour-7)/1.2, 2))
 	midday := 600.0 * math.Exp(-0.5*math.Pow(float64(hour-13)/2.5, 2))
 	eveningH := 18.5
@@ -194,9 +194,9 @@ func (m Model) prior(hourOfWeek int) float64 {
 // repaired model quickly re-learns from warm-season observations.
 //
 // Floor is conservative (25% of prior) so we only touch buckets that are
-// clearly below any plausible real consumption — a house at 75 W overnight
+// clearly below any plausible real consumption — a house at 150 W overnight
 // would be unusual but possible, so we preserve those. A mean of 15 W for an
-// overnight bucket that has prior=300 W is unambiguously poisoned.
+// overnight bucket that has prior=650 W is unambiguously poisoned.
 const poisonFloor = 0.25
 
 func (m *Model) repairPoisonedBuckets() {
@@ -296,11 +296,25 @@ func (m Model) Predict(t time.Time, tempC float64) float64 {
 	prior := m.prior(idx)
 	base := trust*b.Mean + (1-trust)*prior
 	y := base + heatingGain(m.HeatingW_per_degC, tempC)
+	if math.IsNaN(y) || math.IsInf(y, 0) {
+		y = prior
+	}
+	// Same floor as restore repair: a bucket mean of 100 W overnight is
+	// below 25% of the typical prior and must not reach the planner.
+	if floor := prior * poisonFloor; y < floor {
+		y = floor
+	}
 	if y < 0 {
 		return 0
 	}
-	if m.PeakW > 0 && y > 3*m.PeakW {
-		y = 3 * m.PeakW
+	// Prefer the fuse-derived training ceiling; fall back to 3× typical
+	// peak only when no fuse is configured.
+	ceiling := m.MaxPlausibleW
+	if ceiling <= 0 && m.PeakW > 0 {
+		ceiling = 3 * m.PeakW
+	}
+	if ceiling > 0 && y > ceiling {
+		y = ceiling
 	}
 	return y
 }

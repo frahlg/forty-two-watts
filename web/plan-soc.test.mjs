@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 
 import { derivePlanBrief } from "./plan-brief.js";
-import { actionSoCPct, fillPlanSoC, finiteNumber } from "./plan-soc.js";
+import { actionSoC, fillPlanSoC, finiteNumber } from "./plan-soc.js";
 
 const planSource = readFileSync(new URL("./plan.js", import.meta.url), "utf8");
 
@@ -11,7 +11,7 @@ const planSource = readFileSync(new URL("./plan.js", import.meta.url), "utf8");
 // 53.5%, first slot battery -577 W for 15 min, Charge end 52.7%.
 const BJORN = {
   capacityWh: 20000,
-  initialSoC: 53.5,
+  initialSoC: 0.535,
   batteryW: -577,
   slotLenMin: 15,
   chargeEff: 0.95,
@@ -19,24 +19,32 @@ const BJORN = {
 };
 
 describe("plan SoC reconstruction", () => {
-  it("prefers a finite soc_pct over stored energy or integration", () => {
-    const pct = actionSoCPct(
-      { soc_pct: 52.7, battery_w: 7300, storage_energy_wh: { pixii: 0 } },
-      { capacityWh: 20000, prevSoC: 40 },
+  it("prefers a finite soc over stored energy or integration", () => {
+    const soc = actionSoC(
+      { soc: 0.527, battery_w: 7300, storage_energy_wh: { pixii: 0 } },
+      { capacityWh: 20000, prevSoC: 0.40 },
     );
-    assert.equal(pct, 52.7);
+    assert.equal(soc, 0.527);
   });
 
-  it("uses summed storage_energy_wh when soc_pct is missing", () => {
-    const pct = actionSoCPct(
-      { battery_w: 7300, storage_energy_wh: { pixii: 10540 } },
-      { capacityWh: 20000, prevSoC: 40 },
+  it("accepts legacy soc_pct as a 0–100 value", () => {
+    const soc = actionSoC(
+      { soc_pct: 52.7, battery_w: 7300, storage_energy_wh: { pixii: 0 } },
+      { capacityWh: 20000, prevSoC: 0.40 },
     );
-    assert.equal(pct, 52.7);
+    assert.equal(soc, 0.527);
+  });
+
+  it("uses summed storage_energy_wh when soc is missing", () => {
+    const soc = actionSoC(
+      { battery_w: 7300, storage_energy_wh: { pixii: 10540 } },
+      { capacityWh: 20000, prevSoC: 0.40 },
+    );
+    assert.equal(soc, 0.527);
   });
 
   it("replays the Björn first slot from battery_w and efficiencies", () => {
-    const pct = actionSoCPct(
+    const soc = actionSoC(
       { battery_w: BJORN.batteryW, slot_len_min: BJORN.slotLenMin },
       {
         capacityWh: BJORN.capacityWh,
@@ -45,12 +53,12 @@ describe("plan SoC reconstruction", () => {
         dischargeEff: BJORN.dischargeEff,
       },
     );
-    assert.ok(finiteNumber(pct));
-    assert.ok(Math.abs(pct - 52.7) < 0.05, `got ${pct}, want ~52.7`);
+    assert.ok(finiteNumber(soc));
+    assert.ok(Math.abs(soc - 0.527) < 0.0005, `got ${soc}, want ~0.527`);
   });
 
-  it("does not treat a missing soc_pct as 0%", () => {
-    assert.equal(actionSoCPct({ battery_w: 7300 }, {}), null);
+  it("does not treat a missing soc as 0", () => {
+    assert.equal(actionSoC({ battery_w: 7300 }, {}), null);
     assert.equal(finiteNumber(null), false);
     assert.equal(finiteNumber(undefined), false);
     assert.equal(finiteNumber(NaN), false);
@@ -60,56 +68,60 @@ describe("plan SoC reconstruction", () => {
   it("fills a whole plan so later slots follow the first reconstructed SoC", () => {
     const plan = {
       capacity_wh: 20000,
-      initial_soc_pct: 53.5,
+      initial_soc: 0.535,
       actions: [
         { slot_len_min: 15, battery_w: -577 },
         { slot_len_min: 15, battery_w: -577 },
       ],
     };
     fillPlanSoC(plan, { chargeEff: 0.95, dischargeEff: 0.95 });
-    assert.ok(Math.abs(plan.actions[0].soc_pct - 52.7) < 0.05);
-    assert.ok(plan.actions[1].soc_pct < plan.actions[0].soc_pct);
-    assert.ok(plan.actions[1].soc_pct > 51);
+    assert.ok(Math.abs(plan.actions[0].soc - 0.527) < 0.0005);
+    assert.ok(plan.actions[1].soc < plan.actions[0].soc);
+    assert.ok(plan.actions[1].soc > 0.51);
   });
 
-  it("leaves an already-finite soc_pct untouched", () => {
+  it("leaves an already-finite soc untouched", () => {
     const plan = {
       capacity_wh: 20000,
-      initial_soc_pct: 53.5,
-      actions: [{ slot_len_min: 15, battery_w: -10000, soc_pct: 52.7 }],
+      initial_soc: 0.535,
+      actions: [{ slot_len_min: 15, battery_w: -10000, soc: 0.527 }],
     };
     fillPlanSoC(plan, { chargeEff: 0.95, dischargeEff: 0.95 });
-    assert.equal(plan.actions[0].soc_pct, 52.7);
+    assert.equal(plan.actions[0].soc, 0.527);
   });
 
-  it("clamps reconstructed SoC instead of drawing past 0–100%", () => {
+  it("clamps reconstructed SoC instead of drawing past 0–1", () => {
     const plan = {
       capacity_wh: 20000,
-      initial_soc_pct: 53.5,
+      initial_soc: 0.535,
       actions: Array.from({ length: 40 }, () => ({
         slot_len_min: 15,
         battery_w: 10000,
       })),
     };
     fillPlanSoC(plan, { chargeEff: 0.95, dischargeEff: 0.95 });
-    assert.equal(plan.actions[0].soc_pct < 100, true);
-    assert.equal(plan.actions.at(-1).soc_pct, 100);
+    assert.equal(plan.actions[0].soc < 1, true);
+    assert.equal(plan.actions.at(-1).soc, 1);
   });
 });
 
 describe("plan UI uses reconstructed SoC", () => {
   it("loads fillPlanSoC before drawing or describing the plan", () => {
     assert.match(planSource, /import \{ fillPlanSoC \} from "\.\/plan-soc\.js"/);
+    assert.match(planSource, /import \{ derivePlanBrief, unavailablePlannerCopy \} from "\.\/plan-brief\.js"/);
     assert.match(planSource, /fillPlanSoC\(/);
-    assert.match(planSource, /Number\.isFinite\(a\.soc_pct\)/);
-    assert.match(planSource, /Number\.isFinite\(plan\.initial_soc_pct\)/);
+    assert.match(planSource, /socPercent\(a\.soc\)/);
+    assert.match(planSource, /socPercent\(plan\.initial_soc\)/);
+    assert.equal(planSource.includes("socPercent(a.soc) || 0"), false);
+    assert.equal(planSource.includes("socPercent(plan.initial_soc) || 0"), false);
+    assert.match(planSource, /if \(endSoc == null\) continue/);
   });
 
-  it("surfaces Expected charge from a Björn-like plan that omitted soc_pct", () => {
+  it("surfaces Expected charge from a Björn-like plan that omitted soc", () => {
     const now = Date.now();
     const plan = {
       capacity_wh: 20000,
-      initial_soc_pct: 53.5,
+      initial_soc: 0.535,
       actions: [{
         slot_start_ms: now - 7 * 60_000,
         slot_len_min: 15,

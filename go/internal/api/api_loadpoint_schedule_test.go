@@ -43,7 +43,7 @@ func newScheduleServer(t *testing.T) (*Server, *loadpoint.Manager, *mpc.Service)
 	}
 	svc := mpc.New(st, nil, "SE4", mpc.Params{
 		Mode: mpc.ModeSelfConsumption, SoCLevels: 11, ActionLevels: 5,
-		CapacityWh: 10000, InitialSoCPct: 50, SoCMinPct: 10, SoCMaxPct: 95,
+		CapacityWh: 10000, InitialSoC: 0.5, SoCMin: 0.1, SoCMax: 0.95,
 		MaxChargeW: 3000, MaxDischargeW: 3000,
 		ChargeEfficiency: 0.95, DischargeEfficiency: 0.95,
 	})
@@ -74,7 +74,7 @@ func TestSchedulePutStoresRollsAndReplans(t *testing.T) {
 	if !ok {
 		t.Fatal("PUT did not store the schedule")
 	}
-	want := loadpoint.Schedule{SoCPct: 80, TimeOfDayMinUTC: 360, Recurring: true, Days: 31}
+	want := loadpoint.Schedule{SoC: 0.8, TimeOfDayMinUTC: 360, Recurring: true, Days: 31}
 	if got != want {
 		t.Fatalf("stored schedule = %+v, want %+v", got, want)
 	}
@@ -85,8 +85,8 @@ func TestSchedulePutStoresRollsAndReplans(t *testing.T) {
 	if lpState.TargetTime.IsZero() || !lpState.TargetTime.After(time.Now()) {
 		t.Fatalf("PUT did not roll: target_time = %v", lpState.TargetTime)
 	}
-	if lpState.TargetSoCPct != 80 {
-		t.Fatalf("PUT did not roll: target_soc_pct = %v, want 80", lpState.TargetSoCPct)
+	if lpState.TargetSoC != 0.8 {
+		t.Fatalf("PUT did not roll: target_soc_pct = %v, want 80", lpState.TargetSoC)
 	}
 
 	if _, reason := svc.LastReplanInfo(); reason != "loadpoint_schedule_changed" {
@@ -98,7 +98,7 @@ func TestScheduleDeleteClearsAndReplans(t *testing.T) {
 	srv, mgr, svc := newScheduleServer(t)
 	// Seeded on the manager directly, so the replan reason below can
 	// only have come from the DELETE.
-	mgr.SetSchedule("garage", loadpoint.Schedule{SoCPct: 80, TimeOfDayMinUTC: 360, Recurring: true})
+	mgr.SetSchedule("garage", loadpoint.Schedule{SoC: 0.8, TimeOfDayMinUTC: 360, Recurring: true})
 
 	req := httptest.NewRequest(http.MethodDelete, "/api/loadpoints/garage/schedule", nil)
 	rr := httptest.NewRecorder()
@@ -119,7 +119,7 @@ func TestScheduleDeleteClearsAndReplans(t *testing.T) {
 // route's embedded schedule field accepts.
 func TestSchedulePutNullClears(t *testing.T) {
 	srv, mgr, _ := newScheduleServer(t)
-	mgr.SetSchedule("garage", loadpoint.Schedule{SoCPct: 80, TimeOfDayMinUTC: 360, Recurring: true})
+	mgr.SetSchedule("garage", loadpoint.Schedule{SoC: 0.8, TimeOfDayMinUTC: 360, Recurring: true})
 
 	rr := putSchedule(t, srv, "garage", `null`)
 	if rr.Code != http.StatusOK {
@@ -183,7 +183,7 @@ func TestTargetRouteStillCarriesSchedule(t *testing.T) {
 		t.Fatalf("POST target status = %d, want 200 (body: %s)", rr.Code, rr.Body.String())
 	}
 	got, ok := mgr.GetSchedule("garage")
-	if !ok || got.SoCPct != 70 || got.TimeOfDayMinUTC != 420 {
+	if !ok || got.SoC != 0.7 || got.TimeOfDayMinUTC != 420 {
 		t.Fatalf("target route stopped storing schedules: got=%+v ok=%v", got, ok)
 	}
 	if _, reason := svc.LastReplanInfo(); reason != "loadpoint_schedule_changed" {

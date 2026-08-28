@@ -171,7 +171,7 @@ func (s *Service) applyConfig(cfg config.CalDAV, firstLoadpointID string) {
 	if horizonDays <= 0 {
 		horizonDays = config.DefaultCalDAVHorizonDays
 	}
-	targetSoC := cfg.EVDefaultTargetSoCPct
+	targetSoC := cfg.EVDefaultTargetSoC
 	if targetSoC <= 0 {
 		targetSoC = config.DefaultCalDAVEVTargetSoC
 	}
@@ -505,7 +505,7 @@ func (s *Service) apply(intents Intents, now time.Time) {
 	if next != nil && s.lp != nil {
 		if next.LoadpointID == "" {
 			slog.Warn("caldav: EV event has no loadpoint to target; ignoring", "title", next.Title)
-		} else if s.lp.SetTarget(next.LoadpointID, next.TargetSoCPct, next.Departure) {
+		} else if s.lp.SetTarget(next.LoadpointID, next.TargetSoC, next.Departure) {
 			s.mu.Lock()
 			prev := s.lastEV
 			s.lastEV = next
@@ -513,7 +513,7 @@ func (s *Service) apply(intents Intents, now time.Time) {
 			if prev == nil || *prev != *next {
 				slog.Info("caldav: EV target set from calendar",
 					"loadpoint", next.LoadpointID,
-					"target_soc_pct", next.TargetSoCPct,
+					"target_soc", next.TargetSoC,
 					"departure", next.Departure)
 			}
 		}

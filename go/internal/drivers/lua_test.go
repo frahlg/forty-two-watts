@@ -452,8 +452,8 @@ function driver_poll()
 	if got := tel.Get("boundary", telemetry.DerPV); got == nil || got.RawW != -500 {
 		t.Fatalf("valid negative pv reading should pass, got %+v", got)
 	}
-	if got := tel.Get("boundary", telemetry.DerVehicle); got == nil || got.SoC == nil || *got.SoC != 55 {
-		t.Fatalf("vehicle percent soc should pass, got %+v", got)
+	if got := tel.Get("boundary", telemetry.DerVehicle); got == nil || got.SoC == nil || *got.SoC != 0.55 {
+		t.Fatalf("vehicle percent soc should convert to 0.55, got %+v", got)
 	}
 	if got := tel.Get("boundary", telemetry.DerV2X); got == nil || got.RawW != -2500 || got.SoC == nil || *got.SoC != 0.44 {
 		t.Fatalf("v2x signed reading should pass and expose vehicle_soc, got %+v", got)

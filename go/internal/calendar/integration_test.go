@@ -96,8 +96,8 @@ func TestCalDAVIntegration(t *testing.T) {
 	if len(intents.EV) != 1 {
 		t.Fatalf("expected 1 EV deadline, got %d (%+v)", len(intents.EV), intents.EV)
 	}
-	if intents.EV[0].TargetSoCPct != 80 {
-		t.Fatalf("EV target: want 80, got %v", intents.EV[0].TargetSoCPct)
+	if intents.EV[0].TargetSoC != 0.8 {
+		t.Fatalf("EV target: want 80, got %v", intents.EV[0].TargetSoC)
 	}
 	t.Logf("inbound OK: away=%+v ev=%+v", intents.Away[0], intents.EV[0])
 
@@ -169,8 +169,8 @@ func TestCalDAVPlanPublish(t *testing.T) {
 	// Plan v1: a charge window in the near future (two consecutive slots).
 	s.SetPlanSource(func() []PlanSlot {
 		return []PlanSlot{
-			{Start: now.Add(1 * time.Hour), End: now.Add(2 * time.Hour), BatteryW: 4000, SoCPct: 60},
-			{Start: now.Add(2 * time.Hour), End: now.Add(3 * time.Hour), BatteryW: 4000, SoCPct: 80},
+			{Start: now.Add(1 * time.Hour), End: now.Add(2 * time.Hour), BatteryW: 4000, SoC: 0.6},
+			{Start: now.Add(2 * time.Hour), End: now.Add(3 * time.Hour), BatteryW: 4000, SoC: 0.8},
 		}
 	})
 	s.publishPlan(context.Background())
@@ -183,7 +183,7 @@ func TestCalDAVPlanPublish(t *testing.T) {
 	// reconcile must DELETE the stale charge event and PUT the discharge one.
 	s.SetPlanSource(func() []PlanSlot {
 		return []PlanSlot{
-			{Start: now.Add(1 * time.Hour), End: now.Add(2 * time.Hour), BatteryW: -3000, SoCPct: 40},
+			{Start: now.Add(1 * time.Hour), End: now.Add(2 * time.Hour), BatteryW: -3000, SoC: 0.4},
 		}
 	})
 	s.publishPlan(context.Background())

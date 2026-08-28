@@ -128,8 +128,8 @@ func SurplusReserveW(states []State, wakeKickActiveIDs map[string]bool) float64 
 			// (exporting instead of charging the home battery) until it's
 			// unplugged — surfacing the charger's own "done" state into the
 			// loadpoint State would let us skip that too (follow-up).
-			knownFull := st.VehicleSoCPct > 0 && st.VehicleChargeLimitPct > 0 &&
-				st.VehicleSoCPct >= st.VehicleChargeLimitPct
+			knownFull := st.VehicleSoC > 0 && st.VehicleChargeLimit > 0 &&
+				st.VehicleSoC >= st.VehicleChargeLimit
 			if knownFull {
 				continue
 			}
@@ -190,7 +190,7 @@ func surplusOnlyProtected(st State) bool {
 // either is unknown — be optimistic when telemetry is partial)
 // contributes its MaxChargeW. That's the upper bound on what curtail
 // must preserve PV headroom for. Drivers report "no headroom" by
-// setting VehicleSoCPct >= VehicleChargeLimitPct, which excludes
+// setting VehicleSoC >= VehicleChargeLimit, which excludes
 // already-full EVs from the calculation.
 func SurplusPotentialW(states []State) float64 {
 	var sum float64
@@ -200,8 +200,8 @@ func SurplusPotentialW(states []State) float64 {
 		}
 		// Skip when the vehicle is already at/above its charge limit
 		// — both must be > 0 for the comparison to be meaningful.
-		if st.VehicleSoCPct > 0 && st.VehicleChargeLimitPct > 0 &&
-			st.VehicleSoCPct >= st.VehicleChargeLimitPct {
+		if st.VehicleSoC > 0 && st.VehicleChargeLimit > 0 &&
+			st.VehicleSoC >= st.VehicleChargeLimit {
 			continue
 		}
 		head := st.MaxChargeW

@@ -11,15 +11,15 @@ import (
 
 func TestWriteJSONPlanKeepsNumericSoC(t *testing.T) {
 	plan := &mpc.Plan{
-		Mode:          mpc.ModePassiveArbitrage,
-		HorizonSlots:  1,
-		CapacityWh:    20000,
-		InitialSoCPct: 53.5,
+		Mode:         mpc.ModePassiveArbitrage,
+		HorizonSlots: 1,
+		CapacityWh:   20000,
+		InitialSoC:   0.535,
 		Actions: []mpc.Action{{
 			SlotStartMs: 1756323000000,
 			SlotLenMin:  15,
 			BatteryW:    -577,
-			SoCPct:      52.7,
+			SoC:         0.527,
 		}},
 	}
 	rr := httptest.NewRecorder()
@@ -30,14 +30,14 @@ func TestWriteJSONPlanKeepsNumericSoC(t *testing.T) {
 	var got struct {
 		Plan struct {
 			Actions []struct {
-				SoCPct float64 `json:"soc_pct"`
+				SoC float64 `json:"soc"`
 			} `json:"actions"`
 		} `json:"plan"`
 	}
 	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
 		t.Fatal(err)
 	}
-	if len(got.Plan.Actions) != 1 || math.Abs(got.Plan.Actions[0].SoCPct-52.7) > 1e-9 {
+	if len(got.Plan.Actions) != 1 || math.Abs(got.Plan.Actions[0].SoC-0.527) > 1e-9 {
 		t.Fatalf("encoded plan = %s", rr.Body.String())
 	}
 }

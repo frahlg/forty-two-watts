@@ -176,11 +176,11 @@ func TestSurplusReserveWAllowsOnePhaseLadderClimb(t *testing.T) {
 func TestSurplusReserveWPluggedStoppedWithHeadroomReservesMin(t *testing.T) {
 	states := []State{{
 		ID: "garage", SurplusOnly: true, PluggedIn: true,
-		CurrentPowerW:         0, // not drawing
-		MinChargeW:            1380,
-		MaxChargeW:            11000,
-		VehicleSoCPct:         34, // below limit
-		VehicleChargeLimitPct: 60,
+		CurrentPowerW:      0, // not drawing
+		MinChargeW:         1380,
+		MaxChargeW:         11000,
+		VehicleSoC:         0.34, // below limit
+		VehicleChargeLimit: 0.6,
 	}}
 	got := SurplusReserveW(states, nil)
 	if got != 1380 {
@@ -194,11 +194,11 @@ func TestSurplusReserveWPluggedStoppedWithHeadroomReservesMin(t *testing.T) {
 func TestSurplusReserveWPluggedStoppedAtLimitNoReserve(t *testing.T) {
 	states := []State{{
 		ID: "garage", SurplusOnly: true, PluggedIn: true,
-		CurrentPowerW:         0,
-		MinChargeW:            1380,
-		MaxChargeW:            11000,
-		VehicleSoCPct:         60, // at limit
-		VehicleChargeLimitPct: 60,
+		CurrentPowerW:      0,
+		MinChargeW:         1380,
+		MaxChargeW:         11000,
+		VehicleSoC:         0.6, // at limit
+		VehicleChargeLimit: 0.6,
 	}}
 	if got := SurplusReserveW(states, nil); got != 0 {
 		t.Errorf("SurplusReserveW = %.0f, want 0 (EV at limit, no headroom)", got)
@@ -218,7 +218,7 @@ func TestSurplusReserveWPluggedStoppedSoCUnknownBootstraps(t *testing.T) {
 		CurrentPowerW: 0,
 		MinChargeW:    1380,
 		MaxChargeW:    11000,
-		// VehicleSoCPct + VehicleChargeLimitPct both 0 (unknown — dumb charger)
+		// VehicleSoC + VehicleChargeLimit both 0 (unknown — dumb charger)
 	}}
 	if got := SurplusReserveW(states, nil); got != 1380 {
 		t.Errorf("SurplusReserveW = %.0f, want 1380 (MinChargeW bootstrap for dumb charger)", got)

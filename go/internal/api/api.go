@@ -54,6 +54,7 @@ import (
 	"github.com/srcfl/ftw/go/internal/selfupdate"
 	"github.com/srcfl/ftw/go/internal/state"
 	"github.com/srcfl/ftw/go/internal/telemetry"
+	"github.com/srcfl/ftw/go/internal/units"
 	v2xpolicy "github.com/srcfl/ftw/go/internal/v2x"
 )
 
@@ -137,7 +138,7 @@ type Deps struct {
 	Prices   *prices.Service
 	Forecast *forecast.Service
 
-	// Optional: MPC planner. Nil if disabled.
+	// Optional: MPC planner. Nil if disabled or a buildMPC gate skipped it.
 	MPC *mpc.Service
 
 	// Optional: PV digital-twin self-learner.
@@ -1140,13 +1141,11 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"mode":                  ctrl.Mode,
 		"troubleshooting_mode":  troubleshootingMode,
 		"plan_stale":            ctrl.PlanStale,
-		"grid_w":                gridW,
 		"pv_w":                  pvW,
 		"pv_w_predicted":        pvPredictW,
 		"bat_w":                 batW,
 		"ev_w":                  evW,
 		"v2x_w":                 v2xW,
-		"load_w":                loadW,
 		"load_w_predicted":      loadPredictW,
 		"bat_soc":               avgSoC,
 		"grid_target_w":         ctrl.GridTargetW,
@@ -1175,6 +1174,18 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		// from the plan's BatteryEnergyWh by > 50 % (over) or < 50 %
 		// (under). Idle slots (|planned| ≤ 50 Wh) are ignored.
 		"slot_delivery_stats": ctrl.SlotDeliveryStats,
+	}
+	// A stale or missing site meter is not 0 W. Publishing zero made the
+	// dashboard and the FTW app draw "balanced" / "0 W" as if the house
+	// were idle. JSON null is what the flow mapping already treats as
+	// "no data". Development setups with no configured meter keep the
+	// historical zero (haveGrid is forced true above).
+	if haveGrid {
+		resp["grid_w"] = gridW
+		resp["load_w"] = loadW
+	} else {
+		resp["grid_w"] = nil
+		resp["load_w"] = nil
 	}
 	if energyToday != nil || energyCurrentSlot != nil {
 		energy := map[string]any{}
@@ -1324,8 +1335,9 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 // driverSecretKeys returns a map[lua-path]→[]secret-key built from the
 // drivers/ catalog. Used by handleGetConfig + handlePostConfig to scope
 // which `Driver.Config[*]` keys participate in the mask/restore cycle.
-// On catalog read errors returns nil — handlers then skip the secrets
-// pass entirely (fail-open: they still mask the structured fields).
+// On catalog read errors returns nil. maskDriverConfigSecrets then
+// blanks every string in Driver.Config (fail-closed) instead of
+// leaving undeclared tokens in the GET body.
 func (s *Server) driverSecretKeys() map[string][]string {
 	dir := s.deps.DriverDir
 	if dir == "" {
@@ -1337,17 +1349,18 @@ func (s *Server) driverSecretKeys() map[string][]string {
 	}
 	out := make(map[string][]string, len(entries))
 	for _, e := range entries {
-		if len(e.ConfigSecrets) == 0 {
-			continue
+		keys := e.ConfigSecrets
+		if keys == nil {
+			keys = []string{}
 		}
 		path := filepath.ToSlash(e.Path)
-		out[path] = e.ConfigSecrets
+		out[path] = keys
 		base := filepath.ToSlash(filepath.Base(dir))
 		if rel, ok := strings.CutPrefix(path, base+"/"); ok {
 			// Config round-trips paths resolved via -drivers as
 			// "drivers/<rel>" regardless of the actual directory name.
 			// Keep catalog secret matching on that portable alias too.
-			out[filepath.ToSlash(filepath.Join("drivers", rel))] = e.ConfigSecrets
+			out[filepath.ToSlash(filepath.Join("drivers", rel))] = keys
 		}
 	}
 	return out
@@ -1359,11 +1372,19 @@ func (s *Server) driverSecretKeys() map[string][]string {
 // MaskSecrets for fields the config package can't know about (the
 // catalog isn't a config-package dependency on purpose).
 func maskDriverConfigSecrets(cfg *config.Config, secretsByLua map[string][]string) {
-	if cfg == nil || len(secretsByLua) == 0 {
+	if cfg == nil {
+		return
+	}
+	if secretsByLua == nil {
+		maskAllDriverConfigStrings(cfg)
 		return
 	}
 	for i := range cfg.Drivers {
-		keys := secretsByLua[cfg.Drivers[i].Lua]
+		keys, known := secretsByLua[cfg.Drivers[i].Lua]
+		if !known {
+			maskOneDriverConfigStrings(&cfg.Drivers[i])
+			continue
+		}
 		if len(keys) == 0 || cfg.Drivers[i].Config == nil {
 			continue
 		}
@@ -1385,17 +1406,85 @@ func maskDriverConfigSecrets(cfg *config.Config, secretsByLua map[string][]strin
 	}
 }
 
+func maskAllDriverConfigStrings(cfg *config.Config) {
+	for i := range cfg.Drivers {
+		maskOneDriverConfigStrings(&cfg.Drivers[i])
+	}
+}
+
+func maskOneDriverConfigStrings(d *config.Driver) {
+	if d == nil || d.Config == nil {
+		return
+	}
+	cp := make(map[string]any, len(d.Config))
+	for k, v := range d.Config {
+		if s, ok := v.(string); ok && s != "" {
+			cp[k] = maskedPlaceholder
+		} else {
+			cp[k] = v
+		}
+	}
+	d.Config = cp
+}
+
+func restoreAllBlankDriverConfigStrings(incoming, existing *config.Config) {
+	if incoming == nil || existing == nil {
+		return
+	}
+	for i := range incoming.Drivers {
+		restoreOneDriverBlankStrings(&incoming.Drivers[i], existing)
+	}
+}
+
+func restoreOneDriverBlankStrings(incoming *config.Driver, existing *config.Config) {
+	if incoming == nil || existing == nil {
+		return
+	}
+	var ed *config.Driver
+	for j := range existing.Drivers {
+		if existing.Drivers[j].Name == incoming.Name {
+			ed = &existing.Drivers[j]
+			break
+		}
+	}
+	if ed == nil || ed.Config == nil {
+		return
+	}
+	if incoming.Config == nil {
+		incoming.Config = map[string]any{}
+	}
+	for k, existingV := range ed.Config {
+		existingS, ok := existingV.(string)
+		if !ok || existingS == "" {
+			continue
+		}
+		incomingV, hasI := incoming.Config[k]
+		incomingS, _ := incomingV.(string)
+		if !hasI || incomingS == "" || incomingS == maskedPlaceholder {
+			incoming.Config[k] = existingS
+		}
+	}
+}
+
 // restoreDriverConfigSecrets is the symmetric POST-side step: for each
 // driver, any catalog-declared secret value the UI sent back as the
 // masked placeholder OR as an empty string (with a non-empty existing
 // value) gets restored from `existing`. Without this, blanking the
 // password input in the Settings tab would clobber the saved token.
 func restoreDriverConfigSecrets(incoming, existing *config.Config, secretsByLua map[string][]string) {
-	if incoming == nil || existing == nil || len(secretsByLua) == 0 {
+	if incoming == nil || existing == nil {
+		return
+	}
+	if secretsByLua == nil {
+		restoreAllBlankDriverConfigStrings(incoming, existing)
 		return
 	}
 	for i := range incoming.Drivers {
-		keys := secretsByLua[incoming.Drivers[i].Lua]
+		keys, known := secretsByLua[incoming.Drivers[i].Lua]
+		if !known {
+			restoreOneDriverBlankStrings(&incoming.Drivers[i], existing)
+			continue
+		}
 		if len(keys) == 0 {
 			continue
 		}
@@ -1503,6 +1592,9 @@ func (s *Server) handlePostConfig(w http.ResponseWriter, r *http.Request) {
 	s.deps.CfgMu.RLock()
 	oldCfg := *s.deps.Cfg
 	s.deps.CfgMu.RUnlock()
+	// The house-password flag only moves through POST /api/auth/password.
+	// A whole-document save must not turn the lock on (or off) by itself.
+	newCfg.API.LANAuth = oldCfg.API.LANAuth
 	restartReasons := config.RestartRequiredFor(&oldCfg, &newCfg)
 
 	// Persist atomically (Password has yaml:"-" so it won't appear in YAML)
@@ -2289,9 +2381,50 @@ func (s *Server) handleForecast(w http.ResponseWriter, r *http.Request) {
 
 // ---- MPC planner ----
 
+func (s *Server) mpcDisabledPayload() map[string]any {
+	body := map[string]any{"enabled": false}
+	if reason := s.mpcUnavailableReason(); reason != "" {
+		body["reason"] = reason
+	}
+	return body
+}
+
+func (s *Server) mpcUnavailableReason() string {
+	if s.deps.MPC != nil {
+		return ""
+	}
+	var plannerOn bool
+	var priceProvider string
+	if s.deps.CfgMu != nil {
+		s.deps.CfgMu.RLock()
+	}
+	if s.deps.Cfg != nil {
+		plannerOn = s.deps.Cfg.Planner != nil && s.deps.Cfg.Planner.Enabled
+		if s.deps.Cfg.Price != nil {
+			priceProvider = s.deps.Cfg.Price.Provider
+		}
+	}
+	if s.deps.CfgMu != nil {
+		s.deps.CfgMu.RUnlock()
+	}
+	var totalCap float64
+	if s.deps.CapMu != nil {
+		s.deps.CapMu.RLock()
+	}
+	for _, capWh := range s.deps.Capacities {
+		if capWh > 0 {
+			totalCap += capWh
+		}
+	}
+	if s.deps.CapMu != nil {
+		s.deps.CapMu.RUnlock()
+	}
+	return mpc.UnavailableReason(plannerOn, priceProvider, totalCap)
+}
+
 func (s *Server) handleMPCPlan(w http.ResponseWriter, r *http.Request) {
 	if s.deps.MPC == nil {
-		writeJSON(w, 200, map[string]any{"enabled": false})
+		writeJSON(w, 200, s.mpcDisabledPayload())
 		return
 	}
 	plan := s.deps.MPC.Latest()
@@ -2323,7 +2456,7 @@ func (s *Server) handleMPCReplan(w http.ResponseWriter, r *http.Request) {
 // planner decide X at 21:00?" without shelling into the host.
 func (s *Server) handleMPCDiagnose(w http.ResponseWriter, r *http.Request) {
 	if s.deps.MPC == nil {
-		writeJSON(w, 200, map[string]any{"enabled": false})
+		writeJSON(w, 200, s.mpcDisabledPayload())
 		return
 	}
 	diag := s.deps.MPC.Diagnose()
@@ -3346,11 +3479,11 @@ func (s *Server) handleLoadpoints(w http.ResponseWriter, r *http.Request) {
 // every tick — the failure mode observed with two Teslas in the same
 // household.
 //
-// CurrentSoCPct is intentionally NOT overwritten with the BMS reading.
-// The loadpoint controller uses CurrentSoCPct as its inference state;
+// CurrentSoC is intentionally NOT overwritten with the BMS reading.
+// The loadpoint controller uses CurrentSoC as its inference state;
 // overlaying it from the BMS would mean the UI shows BMS truth while
 // the controller's plan was computed from the inferred value the
-// previous tick — a presentation lie. VehicleSoCPct exposes the BMS
+// previous tick — a presentation lie. VehicleSoC exposes the BMS
 // value separately; the frontend renders both and labels which one
 // the controller used.
 func decorateLoadpointsWithVehicle(states []loadpoint.State, tel *telemetry.Store) {
@@ -3375,8 +3508,8 @@ func decorateLoadpointsWithVehicle(states []loadpoint.State, tel *telemetry.Stor
 			continue
 		}
 		states[i].VehicleDriver = pick.Driver
-		states[i].VehicleSoCPct = pick.SoCPct
-		states[i].VehicleChargeLimitPct = pick.ChargeLimitPct
+		states[i].VehicleSoC = pick.SoC
+		states[i].VehicleChargeLimit = pick.ChargeLimit
 		states[i].VehicleChargingState = pick.ChargingState
 		states[i].VehicleStale = pick.Stale
 		states[i].SoCSource = "vehicle"
@@ -3416,6 +3549,7 @@ func (s *Server) handleLoadpointTarget(w http.ResponseWriter, r *http.Request) {
 	// to nil for *struct pointers, which would lose the explicit-clear
 	// signal the UI needs.
 	var req struct {
+		SoC          *float64        `json:"soc,omitempty"`
 		SoCPct       *float64        `json:"soc_pct,omitempty"`
 		TargetTimeMs *int64          `json:"target_time_ms,omitempty"`
 		SurplusOnly  *bool           `json:"surplus_only,omitempty"`
@@ -3425,7 +3559,7 @@ func (s *Server) handleLoadpointTarget(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]string{"error": err.Error()})
 		return
 	}
-	if req.SoCPct == nil && req.TargetTimeMs == nil && req.SurplusOnly == nil && len(req.Schedule) == 0 {
+	if req.SoC == nil && req.SoCPct == nil && req.TargetTimeMs == nil && req.SurplusOnly == nil && len(req.Schedule) == 0 {
 		writeJSON(w, 400, map[string]string{"error": "no fields to update"})
 		return
 	}
@@ -3440,7 +3574,7 @@ func (s *Server) handleLoadpointTarget(w http.ResponseWriter, r *http.Request) {
 		}
 		scheduleChanged = true
 	}
-	if req.SoCPct != nil || req.TargetTimeMs != nil {
+	if req.SoC != nil || req.SoCPct != nil || req.TargetTimeMs != nil {
 		// SetTarget always takes both fields, so when the caller
 		// omitted one we have to look up the existing value to
 		// preserve it. Read-modify-write under the manager's lock
@@ -3451,9 +3585,16 @@ func (s *Server) handleLoadpointTarget(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, 404, map[string]string{"error": "loadpoint not found"})
 			return
 		}
-		soc := st.TargetSoCPct
-		if req.SoCPct != nil {
-			soc = *req.SoCPct
+		soc := st.TargetSoC
+		if req.SoC != nil || req.SoCPct != nil {
+			var canonical, legacy float64
+			if req.SoC != nil {
+				canonical = *req.SoC
+			}
+			if req.SoCPct != nil {
+				legacy = *req.SoCPct
+			}
+			soc = units.DecodeJSONFraction(canonical, legacy)
 		}
 		deadline := st.TargetTime
 		if req.TargetTimeMs != nil {
@@ -3476,13 +3617,12 @@ func (s *Server) handleLoadpointTarget(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// Disabling surplus_only is a planner regime change: the
-		// terminal SoC credit flips from self-consumption back to the
-		// arbitrage default (much higher), the grid-charge ban lifts,
-		// and the LP may now be eligible for grid-arbitrage scheduling
-		// (when target_soc_pct > 0). Force a synchronous replan with a
-		// tagged reason so the new schedule is in place by the time
-		// this HTTP response returns and the diagnose snapshot records
-		// "why" the plan changed at this timestamp.
+		// loadpoint may now import from the grid (and the home
+		// battery may feed it if BatteryCoversEV is on). Force a
+		// synchronous replan with a tagged reason so the new
+		// schedule is in place by the time this HTTP response
+		// returns and the diagnose snapshot records "why" the
+		// plan changed at this timestamp.
 		if prev && !*req.SurplusOnly {
 			surplusDisabled = true
 		}
@@ -3663,18 +3803,20 @@ func (s *Server) handleLoadpointSoC(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
+		SoC    float64 `json:"soc"`
 		SoCPct float64 `json:"soc_pct"`
 	}
 	if err := readJSON(r, &req); err != nil {
 		writeJSON(w, 400, map[string]string{"error": err.Error()})
 		return
 	}
+	soc := units.DecodeJSONFraction(req.SoC, req.SoCPct)
 	// Confirm loadpoint exists before inspecting plug state.
 	if _, ok := s.deps.Loadpoints.State(id); !ok {
 		writeJSON(w, 404, map[string]string{"error": "loadpoint not found"})
 		return
 	}
-	if !s.deps.Loadpoints.SetCurrentSoC(id, req.SoCPct) {
+	if !s.deps.Loadpoints.SetCurrentSoC(id, soc) {
 		writeJSON(w, 409, map[string]string{
 			"error": "loadpoint not plugged in — SoC can only be set during an active session",
 		})

@@ -15,9 +15,9 @@ func TestSelfWithheldNCRQDoesNotComplete(t *testing.T) {
 	m := NewManager()
 	m.Load([]Config{{
 		ID: "garage", DriverName: "ctek",
-		VehicleCapacityWh: 60000, PluginSoCPct: 20,
+		VehicleCapacityWh: 60000, PluginSoC: 0.2,
 	}})
-	m.SetTarget("garage", 80, time.Date(2026, 6, 8, 6, 0, 0, 0, time.UTC))
+	m.SetTarget("garage", 0.8, time.Date(2026, 6, 8, 6, 0, 0, 0, time.UTC))
 
 	clock := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
 	m.SetNowFn(func() time.Time { return clock })
@@ -41,9 +41,9 @@ func TestGenuineNCRQStillCompletesAfterWithheldClears(t *testing.T) {
 	m := NewManager()
 	m.Load([]Config{{
 		ID: "garage", DriverName: "ctek",
-		VehicleCapacityWh: 60000, PluginSoCPct: 20,
+		VehicleCapacityWh: 60000, PluginSoC: 0.2,
 	}})
-	m.SetTarget("garage", 80, time.Date(2026, 6, 8, 6, 0, 0, 0, time.UTC))
+	m.SetTarget("garage", 0.8, time.Date(2026, 6, 8, 6, 0, 0, 0, time.UTC))
 
 	clock := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
 	m.SetNowFn(func() time.Time { return clock })

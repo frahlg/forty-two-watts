@@ -270,6 +270,7 @@ type Loadpoint struct {
 	MaxChargeW        float64   `yaml:"max_charge_w,omitempty" json:"max_charge_w,omitempty"`
 	AllowedStepsW     []float64 `yaml:"allowed_steps_w,omitempty" json:"allowed_steps_w,omitempty"`
 	VehicleCapacityWh float64   `yaml:"vehicle_capacity_wh,omitempty" json:"vehicle_capacity_wh,omitempty"`
+	PluginSoC         float64   `yaml:"plugin_soc,omitempty" json:"plugin_soc,omitempty"`
 	PluginSoCPct      float64   `yaml:"plugin_soc_pct,omitempty" json:"plugin_soc_pct,omitempty"`
 
 	// PhaseMode selects how the controller picks between 1Φ and 3Φ
@@ -296,7 +297,8 @@ type V2XPolicy struct {
 	// required for reserve/departure energy math when the driver does not.
 	VehicleCapacityWh float64 `yaml:"vehicle_capacity_wh,omitempty" json:"vehicle_capacity_wh,omitempty"`
 
-	// SoC percentages are YAML-facing 0..100 values. Telemetry stays 0..1.
+	MinReserveSoC         float64 `yaml:"min_reserve_soc,omitempty" json:"min_reserve_soc,omitempty"`
+	DepartureTargetSoC    float64 `yaml:"departure_target_soc,omitempty" json:"departure_target_soc,omitempty"`
 	MinReserveSoCPct      float64 `yaml:"min_reserve_soc_pct,omitempty" json:"min_reserve_soc_pct,omitempty"`
 	DepartureTargetSoCPct float64 `yaml:"departure_target_soc_pct,omitempty" json:"departure_target_soc_pct,omitempty"`
 
@@ -321,14 +323,14 @@ type V2XPolicy struct {
 // handler on POST /api/config. Providers that don't need auth (e.g. local
 // Modbus) leave Username + Password empty.
 type EVCharger struct {
-	Provider string `yaml:"provider" json:"provider"` // "easee" | "ctek"
+	Provider string `yaml:"provider" json:"provider"` // "easee" | "zaptec" | "ctek"
 
 	// Connection — populate the block matching the provider's transport.
 	HTTP   *EVChargerHTTP   `yaml:"http,omitempty" json:"http,omitempty"`
 	Modbus *EVChargerModbus `yaml:"modbus,omitempty" json:"modbus,omitempty"`
 
-	// Optional auth — required by cloud HTTP providers like Easee,
-	// unused by local Modbus providers like CTEK.
+	// Optional auth — required by cloud HTTP providers like Easee and
+	// Zaptec, unused by local Modbus providers like CTEK.
 	Username string `yaml:"username,omitempty" json:"username,omitempty"`
 	Password string `yaml:"-" json:"password,omitempty"` // persisted in state.db, not YAML
 
@@ -399,8 +401,7 @@ type CalDAV struct {
 	// names no specific one. Empty = the first/only configured loadpoint.
 	EVLoadpointID string `yaml:"ev_loadpoint_id,omitempty" json:"ev_loadpoint_id,omitempty"`
 
-	// EVDefaultTargetSoCPct is used when an EV event's title carries no
-	// explicit percentage. Default 80.
+	EVDefaultTargetSoC    float64 `yaml:"ev_default_target_soc,omitempty" json:"ev_default_target_soc,omitempty"`
 	EVDefaultTargetSoCPct float64 `yaml:"ev_default_target_soc_pct,omitempty" json:"ev_default_target_soc_pct,omitempty"`
 
 	// AwayKeywords / EVKeywords classify an event by its title. Matching is
@@ -475,7 +476,7 @@ var (
 	DefaultCalDAVUsername     = "fortytwowatts"
 	DefaultCalDAVPollS        = 300
 	DefaultCalDAVHorizonDays  = 7
-	DefaultCalDAVEVTargetSoC  = 80.0
+	DefaultCalDAVEVTargetSoC  = 0.8
 	DefaultAwayKeywords       = []string{"away", "vacation", "holiday"}
 	DefaultEVKeywords         = []string{"ev", "car", "charge"}
 )
@@ -492,8 +493,8 @@ func (cv *CalDAV) Validate() error {
 	if cv.HorizonDays < 0 {
 		return errors.New("caldav.horizon_days must be >= 0")
 	}
-	if cv.EVDefaultTargetSoCPct < 0 || cv.EVDefaultTargetSoCPct > 100 {
-		return errors.New("caldav.ev_default_target_soc_pct must be in [0, 100]")
+	if cv.EVDefaultTargetSoC < 0 || cv.EVDefaultTargetSoC > 1 {
+		return errors.New("caldav.ev_default_target_soc must be in [0, 1]")
 	}
 	return nil
 }
@@ -521,15 +522,15 @@ func (e *EVCharger) Validate() error {
 	switch e.Provider {
 	case "":
 		return errors.New("ev_charger.provider: required")
-	case "easee":
-		// Username/Password are NOT enforced here. The runtime easee
+	case "easee", "zaptec":
+		// Username/Password are NOT enforced here. The runtime cloud
 		// driver logs + idles when creds are missing, and the API picker
-		// requires both before calling Easee Cloud. Letting a partial
+		// requires both before calling the vendor cloud. Letting a partial
 		// ev_charger block load is the original contract — the wizard
 		// writes provider intent first, then captures creds in a second
 		// API call.
 		if e.Modbus != nil {
-			return errors.New("ev_charger.modbus: not valid for provider easee (HTTP transport)")
+			return fmt.Errorf("ev_charger.modbus: not valid for provider %s (HTTP transport)", e.Provider)
 		}
 	case "ctek":
 		if e.Modbus == nil || e.Modbus.Host == "" {
@@ -548,7 +549,7 @@ func (e *EVCharger) Validate() error {
 			return errors.New("ev_charger: username/password not valid for provider ctek")
 		}
 	default:
-		return fmt.Errorf("ev_charger.provider %q: not supported (valid: easee, ctek)", e.Provider)
+		return fmt.Errorf("ev_charger.provider %q: not supported (valid: easee, zaptec, ctek)", e.Provider)
 	}
 	return nil
 }
@@ -602,6 +603,8 @@ type Planner struct {
 	BaseLoadW                             float64              `yaml:"base_load_w,omitempty" json:"base_load_w,omitempty"`
 	HorizonHours                          int                  `yaml:"horizon_hours,omitempty" json:"horizon_hours,omitempty"`
 	IntervalMin                           int                  `yaml:"interval_min,omitempty" json:"interval_min,omitempty"`
+	SoCMin                                float64              `yaml:"soc_min,omitempty" json:"soc_min,omitempty"`
+	SoCMax                                float64              `yaml:"soc_max,omitempty" json:"soc_max,omitempty"`
 	SoCMinPct                             float64              `yaml:"soc_min_pct,omitempty" json:"soc_min_pct,omitempty"`
 	SoCMaxPct                             float64              `yaml:"soc_max_pct,omitempty" json:"soc_max_pct,omitempty"`
 
@@ -722,8 +725,9 @@ type Site struct {
 	// still enable a slot when capture displaces a more expensive future
 	// grid-funded charge.
 	//
-	// Suggested 88 — leaves 2 pp margin below the planner's typical
-	// soc_max_pct = 90 so the absorber doesn't slam into the wall.
+	// Suggested 0.88 — leaves a little margin below the planner's typical
+	// soc_max = 0.90 so the absorber doesn't slam into the wall.
+	PVSurplusAbsorbSoCCap    float64 `yaml:"pv_surplus_absorb_soc_cap,omitempty" json:"pv_surplus_absorb_soc_cap,omitempty"`
 	PVSurplusAbsorbSoCCapPct float64 `yaml:"pv_surplus_absorb_soc_cap_pct,omitempty" json:"pv_surplus_absorb_soc_cap_pct,omitempty"`
 
 	// PVSurplusAbsorbThresholdW is the trigger threshold for the
@@ -1107,10 +1111,12 @@ type Weather struct {
 // PVArray is one physically-distinct panel group. Multi-plane
 // residential installs typically have two or three (e.g. south roof
 // + east roof + garage) with different tilt/azimuth. The sum of all
-// KWp values should match the total PV nameplate at the site.
+// rated_w values should match the total PV nameplate at the site.
+// kwp is a legacy YAML key folded into rated_w on load.
 type PVArray struct {
 	Name       string   `yaml:"name,omitempty" json:"name,omitempty"`
-	KWp        float64  `yaml:"kwp" json:"kwp"`
+	RatedW     float64  `yaml:"rated_w,omitempty" json:"rated_w,omitempty"`
+	KWp        float64  `yaml:"kwp,omitempty" json:"kwp,omitempty"`
 	TiltDeg    *float64 `yaml:"tilt_deg" json:"tilt_deg"`
 	AzimuthDeg *float64 `yaml:"azimuth_deg" json:"azimuth_deg"`
 }
@@ -1119,8 +1125,9 @@ type PVArray struct {
 // pointers so an omitted field cannot be confused with a valid 0° value.
 // Invalid or partial entries are intentionally not fatal: callers use the
 // flat forecast path when no complete plane remains.
-func (a PVArray) CompleteGeometry() (tiltDeg, azimuthDeg, kWp float64, ok bool) {
-	if a.KWp <= 0 || math.IsNaN(a.KWp) || math.IsInf(a.KWp, 0) ||
+func (a PVArray) CompleteGeometry() (tiltDeg, azimuthDeg, ratedW float64, ok bool) {
+	ratedW = a.RatedWatts()
+	if ratedW <= 0 || math.IsNaN(ratedW) || math.IsInf(ratedW, 0) ||
 		a.TiltDeg == nil || a.AzimuthDeg == nil {
 		return 0, 0, 0, false
 	}
@@ -1129,7 +1136,7 @@ func (a PVArray) CompleteGeometry() (tiltDeg, azimuthDeg, kWp float64, ok bool) 
 		math.IsNaN(azimuthDeg) || math.IsInf(azimuthDeg, 0) || azimuthDeg < 0 || azimuthDeg > 360 {
 		return 0, 0, 0, false
 	}
-	return tiltDeg, azimuthDeg, a.KWp, true
+	return tiltDeg, azimuthDeg, ratedW, true
 }
 
 // Battery is per-battery overrides (keyed by driver name in the top-level map).
@@ -1689,6 +1696,7 @@ func isLegacyDefaultDriverRepository(repo DriverRepositorySource) bool {
 
 // Validate ensures the config is internally consistent and safe to run with.
 func (c *Config) Validate() error {
+	c.NormalizeUnits()
 	if c.State != nil && c.State.ColdRetentionDays < 0 {
 		return fmt.Errorf("state.cold_retention_days must be >= 0, got %d", c.State.ColdRetentionDays)
 	}
@@ -2017,12 +2025,12 @@ func (c *Config) validateV2XPolicy(driverNames map[string]bool) error {
 		return fmt.Errorf("v2x.driver_name %q: no such driver", p.DriverName)
 	}
 	for name, value := range map[string]float64{
-		"v2x.vehicle_capacity_wh":      p.VehicleCapacityWh,
-		"v2x.max_charge_w":             p.MaxChargeW,
-		"v2x.max_discharge_w":          p.MaxDischargeW,
-		"v2x.cycle_cost_ore_kwh":       p.CycleCostOreKWh,
-		"v2x.min_reserve_soc_pct":      p.MinReserveSoCPct,
-		"v2x.departure_target_soc_pct": p.DepartureTargetSoCPct,
+		"v2x.vehicle_capacity_wh":  p.VehicleCapacityWh,
+		"v2x.max_charge_w":         p.MaxChargeW,
+		"v2x.max_discharge_w":      p.MaxDischargeW,
+		"v2x.cycle_cost_ore_kwh":   p.CycleCostOreKWh,
+		"v2x.min_reserve_soc":      p.MinReserveSoC,
+		"v2x.departure_target_soc": p.DepartureTargetSoC,
 	} {
 		if math.IsNaN(value) || math.IsInf(value, 0) {
 			return fmt.Errorf("%s must be finite", name)
@@ -2040,25 +2048,25 @@ func (c *Config) validateV2XPolicy(driverNames map[string]bool) error {
 	if p.CycleCostOreKWh < 0 {
 		return errors.New("v2x.cycle_cost_ore_kwh must be >= 0")
 	}
-	if p.MinReserveSoCPct < 0 || p.MinReserveSoCPct > 100 {
-		return errors.New("v2x.min_reserve_soc_pct must be in [0,100]")
+	if p.MinReserveSoC < 0 || p.MinReserveSoC > 1 {
+		return errors.New("v2x.min_reserve_soc must be in [0,1]")
 	}
-	if p.DepartureTargetSoCPct < 0 || p.DepartureTargetSoCPct > 100 {
-		return errors.New("v2x.departure_target_soc_pct must be in [0,100]")
+	if p.DepartureTargetSoC < 0 || p.DepartureTargetSoC > 1 {
+		return errors.New("v2x.departure_target_soc must be in [0,1]")
 	}
-	if p.Enabled && p.MinReserveSoCPct <= 0 {
-		return errors.New("v2x.min_reserve_soc_pct must be > 0 when v2x.enabled")
+	if p.Enabled && p.MinReserveSoC <= 0 {
+		return errors.New("v2x.min_reserve_soc must be > 0 when v2x.enabled")
 	}
 	if p.DepartureTime != "" {
 		if err := validateV2XDepartureTime(p.DepartureTime); err != nil {
 			return err
 		}
 	}
-	if (p.DepartureTargetSoCPct > 0) != (p.DepartureTime != "") {
-		return errors.New("v2x.departure_target_soc_pct and v2x.departure_time must be set together")
+	if (p.DepartureTargetSoC > 0) != (p.DepartureTime != "") {
+		return errors.New("v2x.departure_target_soc and v2x.departure_time must be set together")
 	}
-	if p.DepartureTargetSoCPct > 0 && p.DepartureTargetSoCPct < p.MinReserveSoCPct {
-		return errors.New("v2x.departure_target_soc_pct must be >= v2x.min_reserve_soc_pct")
+	if p.DepartureTargetSoC > 0 && p.DepartureTargetSoC < p.MinReserveSoC {
+		return errors.New("v2x.departure_target_soc must be >= v2x.min_reserve_soc")
 	}
 	return nil
 }

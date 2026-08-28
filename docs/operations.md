@@ -84,7 +84,7 @@ changing them. When unsure, inspect the restart classification in
 
 FTW accepts state-changing requests without credentials only when they are
 addressed through a local name or address: loopback, private/link-local IP,
-an unqualified hostname, `.local`, `.localhost`, or `.home.arpa`. The setup
+`.local`, `.localhost`, or `.home.arpa`. The setup
 wizard follows the same rule, and the actual client address must also be local.
 Browser writes must also be same-origin; FTW checks `Origin`, `Host`, and
 `Sec-Fetch-Site` and does not advertise CORS.
@@ -94,9 +94,10 @@ Local non-browser clients such as `curl` and Home Assistant may omit browser
 fetch headers, but JSON bodies must use `Content-Type: application/json`.
 Active reads that start discovery, begin an authorization flow, or force an
 external update check pass through the same boundary. So do reads of config,
-logs, support dump and report, driver source, system info, research dump, and
-the app-link device list. Live dashboard reads such as status, energy, prices
-and plan stay compatible.
+logs, support dump and report, driver source, system info, research dump, the
+app-link device list, driver health, EV charger detail, planner diagnose,
+time series, and the fleet-ping payload. Live dashboard reads such as status,
+energy, prices, plan, loadpoints and history stay compatible.
 
 Mutation requests addressed through any other hostname or a public IP fail
 closed. To expose that API intentionally, generate a random token of at least
@@ -122,10 +123,12 @@ deployment, put FTW behind an operator-managed HTTPS reverse proxy with login
 or session authentication and have that trusted proxy inject the Bearer header
 upstream. The token, and the same-origin / local-address checks, now also
 cover config, logs, support dump and report, driver source and identity,
-integration status, notification history, system and storage info, local
-repository and snapshot paths, research dump, and the app-link device list.
-Live dashboard reads (status, energy, prices, plan) stay open if someone
-publishes the port. Still do not publish the box directly to the internet.
+integration status, notification history and rules, system and storage info,
+local repository and snapshot paths, research dump, the app-link device list,
+driver health, EV charger detail, planner diagnose, time series, and the
+fleet-ping payload. Live dashboard reads (status, energy, prices, plan,
+loadpoints, history) stay open if someone publishes the port. Still do not
+publish the box directly to the internet.
 
 Recovery cannot be disabled by a bad token: connect through `localhost`, the
 host's private IP, or its `.local` name, correct/remove `FTW_API_TOKEN`, and
@@ -136,12 +139,35 @@ mutations remain locked.
 tunnel credential for future remote access. That expansion point is described in
 [architecture.md](architecture.md#future-remote-access-boundary).
 
-`api.lan_auth` is off by default. Turn it on from Settings → System (LAN
-password). When on, protected LAN routes need the house password. `curl`
-sends `Authorization: Bearer <house-password>`. The browser login form
+`api.lan_auth` is off by default. Turn it on from loopback inside the
+process. On a Pi with host networking that is
+`http://127.0.0.1:8080` Settings → System, or `curl` to `127.0.0.1`.
+On Docker Desktop (`docker-compose.macos.yml`) a host curl to localhost
+arrives as the bridge gateway, not loopback, so Settings and host curl
+get 403. Enable from inside the container:
+
+```bash
+docker compose -f docker-compose.macos.yml exec ftw \
+  wget -qO- --header='Content-Type: application/json' \
+  --post-data='{"enabled":true,"password":"ETT-LANGT-LOSEN"}' \
+  http://127.0.0.1:8080/api/auth/password
+```
+
+Do not treat that gateway as loopback: Desktop SNAT uses the same peer
+for every published-port client, including LAN visitors. A first enable
+from another LAN address is refused, so a visitor cannot set the
+password. `POST /api/config` cannot flip the flag. When on,
+protected LAN routes need the house password. `curl` sends
+`Authorization: Bearer <house-password>`. The browser login form
 sets a session cookie (`ftw_lan`, 12 hours). Loopback (`127.0.0.1` / `::1`)
 never asks. Live status stays readable without the password; a viewer
 caller is minted for those reads.
+
+An owner pairing QR is minted only from loopback or with the house
+password. Promoting a paired phone to owner uses the same gate. The
+first pairing on an empty box is an owner whatever the code said, so
+that mint also stays at the box. A viewer invite still works from the
+LAN once an owner exists.
 
 The FTW app and Home Assistant MQTT are unchanged.
 

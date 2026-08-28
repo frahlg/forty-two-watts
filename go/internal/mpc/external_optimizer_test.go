@@ -35,7 +35,7 @@ func externalTestFixture() ([]Slot, Params) {
 	}
 	p := Params{
 		Mode: ModeArbitrage, CapacityWh: 10000,
-		SoCMinPct: 10, SoCMaxPct: 95, InitialSoCPct: 20,
+		SoCMin: 0.1, SoCMax: 0.95, InitialSoC: 0.2,
 		MaxChargeW: 5000, MaxDischargeW: 5000,
 		ChargeEfficiency: 0.95, DischargeEfficiency: 0.95,
 		TerminalSoCPrice: 20,
@@ -106,10 +106,10 @@ func TestValidatePlanAcceptsContinuousPowerTrajectory(t *testing.T) {
 	slots, p := externalTestFixture()
 	plan := Plan{
 		Mode: p.Mode, HorizonSlots: 2, CapacityWh: p.CapacityWh,
-		InitialSoCPct: p.InitialSoCPct, TotalCostOre: 29.085,
+		InitialSoC: p.InitialSoC, TotalCostOre: 29.085,
 		Actions: []Action{
-			{SlotStartMs: 1, SlotLenMin: 60, BatteryW: 1234.5, GridW: 1734.5, SoCPct: 31.72775, CostOre: 34.69},
-			{SlotStartMs: 3600001, SlotLenMin: 60, BatteryW: -2000, GridW: 500, SoCPct: 10.67511842105263, CostOre: 150},
+			{SlotStartMs: 1, SlotLenMin: 60, BatteryW: 1234.5, GridW: 1734.5, SoC: 0.317277, CostOre: 34.69},
+			{SlotStartMs: 3600001, SlotLenMin: 60, BatteryW: -2000, GridW: 500, SoC: 0.106751, CostOre: 150},
 		},
 	}
 	// Raw total cost is the sum of both slot costs.
@@ -123,7 +123,7 @@ func TestValidatePlanRejectsBrokenGridBalance(t *testing.T) {
 	slots, p := externalTestFixture()
 	plan := Optimize(slots, Params{
 		Mode: p.Mode, SoCLevels: 21, CapacityWh: p.CapacityWh,
-		SoCMinPct: p.SoCMinPct, SoCMaxPct: p.SoCMaxPct, InitialSoCPct: p.InitialSoCPct,
+		SoCMin: p.SoCMin, SoCMax: p.SoCMax, InitialSoC: p.InitialSoC,
 		ActionLevels: 21, MaxChargeW: p.MaxChargeW, MaxDischargeW: p.MaxDischargeW,
 		ChargeEfficiency: p.ChargeEfficiency, DischargeEfficiency: p.DischargeEfficiency,
 		TerminalSoCPrice: p.TerminalSoCPrice,
@@ -138,13 +138,13 @@ func TestValidatePlanAcceptsSubWattSolverResidueInPassiveMode(t *testing.T) {
 	slots := []Slot{{StartMs: 1, LenMin: 15, PriceOre: 100, Confidence: 1, LoadW: 0}}
 	p := Params{
 		Mode: ModePassiveArbitrage, CapacityWh: 10000,
-		SoCMinPct: 10, SoCMaxPct: 95, InitialSoCPct: 50,
+		SoCMin: 0.1, SoCMax: 0.95, InitialSoC: 0.5,
 		MaxChargeW: 5000, MaxDischargeW: 5000,
 		ChargeEfficiency: 1, DischargeEfficiency: 1,
 	}
 	plan := Plan{TotalCostOre: -0.0000025, Actions: []Action{{
 		SlotStartMs: 1, SlotLenMin: 15, BatteryW: -0.0001, GridW: -0.0001,
-		SoCPct: 49.99999975, CostOre: -0.0000025,
+		SoC: 0.5, CostOre: -0.0000025,
 	}}}
 	if err := ValidatePlan(slots, p, &plan); err != nil {
 		t.Fatalf("ValidatePlan rejected numerical solver residue: %v", err)
@@ -155,13 +155,13 @@ func TestValidatePlanModeErrorIncludesPowerValues(t *testing.T) {
 	slots := []Slot{{StartMs: 1, LenMin: 15, PriceOre: 100, Confidence: 1, LoadW: 0}}
 	p := Params{
 		Mode: ModePassiveArbitrage, CapacityWh: 10000,
-		SoCMinPct: 10, SoCMaxPct: 95, InitialSoCPct: 50,
+		SoCMin: 0.1, SoCMax: 0.95, InitialSoC: 0.5,
 		MaxChargeW: 5000, MaxDischargeW: 5000,
 		ChargeEfficiency: 1, DischargeEfficiency: 1,
 	}
 	plan := Plan{TotalCostOre: -0.0025, Actions: []Action{{
 		SlotStartMs: 1, SlotLenMin: 15, BatteryW: -0.2, GridW: -0.2,
-		SoCPct: 49.9995, CostOre: -0.005,
+		SoC: 0.499995, CostOre: -0.005,
 	}}}
 	plan.TotalCostOre = plan.Actions[0].CostOre
 	err := ValidatePlan(slots, p, &plan)
@@ -227,19 +227,19 @@ func TestValidatePlanAllowsButDoesNotWorsenInitialSoCBelowMinimum(t *testing.T) 
 	slots := []Slot{{StartMs: 1, LenMin: 60, PriceOre: 100, SpotOre: 50, Confidence: 1, LoadW: 500}}
 	p := Params{
 		Mode: ModeArbitrage, CapacityWh: 10000,
-		SoCMinPct: 10, SoCMaxPct: 95, InitialSoCPct: 5,
+		SoCMin: 0.1, SoCMax: 0.95, InitialSoC: 0.05,
 		MaxChargeW: 5000, MaxDischargeW: 5000,
 		ChargeEfficiency: 0.95, DischargeEfficiency: 0.95,
 	}
 	plan := Plan{TotalCostOre: 50, Actions: []Action{{
-		SlotStartMs: 1, SlotLenMin: 60, BatteryW: 0, GridW: 500, SoCPct: 5, CostOre: 50,
+		SlotStartMs: 1, SlotLenMin: 60, BatteryW: 0, GridW: 500, SoC: 0.05, CostOre: 50,
 	}}}
 	if err := ValidatePlan(slots, p, &plan); err != nil {
 		t.Fatalf("ValidatePlan rejected stable recovery state: %v", err)
 	}
 	plan.Actions[0] = Action{
 		SlotStartMs: 1, SlotLenMin: 60, BatteryW: -100, GridW: 400,
-		SoCPct: 3.947368421052632, CostOre: 40,
+		SoC: 0.039474, CostOre: 40,
 	}
 	plan.TotalCostOre = 40
 	if err := ValidatePlan(slots, p, &plan); err == nil {
@@ -251,25 +251,51 @@ func TestValidatePlanRejectsBatteryFedSurplusLoadpoint(t *testing.T) {
 	slots := []Slot{{StartMs: 1, LenMin: 60, PriceOre: 100, SpotOre: 70, Confidence: 1, LoadW: 500}}
 	p := Params{
 		Mode: ModeArbitrage, CapacityWh: 10000,
-		SoCMinPct: 10, SoCMaxPct: 95, InitialSoCPct: 50,
+		SoCMin: 0.1, SoCMax: 0.95, InitialSoC: 0.5,
 		MaxChargeW: 5000, MaxDischargeW: 5000,
 		ChargeEfficiency: 0.95, DischargeEfficiency: 0.95,
 		Loadpoint: &LoadpointSpec{
-			ID: "car", CapacityWh: 40000, Levels: 11, MinPct: 0, MaxPct: 100,
-			InitialSoCPct: 25, PluggedIn: true, MaxChargeW: 2000,
+			ID: "car", CapacityWh: 40000, Levels: 11, SoCMin: 0, SoCMax: 1.0,
+			InitialSoC: 0.25, PluggedIn: true, MaxChargeW: 2000,
 			AllowedStepsW: []float64{0, 2000}, ChargeEfficiency: 1,
 			SurplusOnly: true,
 		},
 	}
-	plan := Plan{Mode: p.Mode, HorizonSlots: 1, CapacityWh: p.CapacityWh, InitialSoCPct: 50,
+	plan := Plan{Mode: p.Mode, HorizonSlots: 1, CapacityWh: p.CapacityWh, InitialSoC: 0.5,
 		TotalCostOre: 0, Actions: []Action{{
 			SlotStartMs: 1, SlotLenMin: 60,
-			BatteryW: -2000, GridW: 500, SoCPct: 28.94736842105263,
-			LoadpointW: 2000, LoadpointSoCPct: 30, CostOre: 50,
+			BatteryW: -2000, GridW: 500, SoC: 0.289474,
+			LoadpointW: 2000, LoadpointSoC: 0.3, CostOre: 50,
 		}}}
 	plan.TotalCostOre = 50
 	if err := ValidatePlan(slots, p, &plan); err == nil {
 		t.Fatal("ValidatePlan accepted battery-fed surplus-only loadpoint")
+	}
+}
+
+func TestValidatePlanAllowsGridChargeWithIdleSurplusOnlyEV(t *testing.T) {
+	slots := []Slot{{StartMs: 1, LenMin: 60, PriceOre: 30, SpotOre: 10, Confidence: 1, LoadW: 500}}
+	p := Params{
+		Mode: ModeArbitrage, CapacityWh: 10000,
+		SoCMin: 0.1, SoCMax: 0.95, InitialSoC: 0.2,
+		MaxChargeW: 5000, MaxDischargeW: 5000,
+		ChargeEfficiency: 0.95, DischargeEfficiency: 0.95,
+		Loadpoint: &LoadpointSpec{
+			ID: "car", CapacityWh: 40000, Levels: 11, SoCMin: 0, SoCMax: 1.0,
+			InitialSoC: 0.8, PluggedIn: true, MaxChargeW: 2000,
+			AllowedStepsW: []float64{0, 2000}, ChargeEfficiency: 1,
+			SurplusOnly: true,
+		},
+	}
+	// 4000 W charge for 1 h at 95% from 20% of 10 kWh → 20 + 38 = 58%.
+	plan := Plan{Mode: p.Mode, HorizonSlots: 1, CapacityWh: p.CapacityWh, InitialSoC: 0.2,
+		TotalCostOre: 135, Actions: []Action{{
+			SlotStartMs: 1, SlotLenMin: 60,
+			BatteryW: 4000, GridW: 4500, SoC: 0.58,
+			LoadpointW: 0, LoadpointSoC: 0.8, CostOre: 135,
+		}}}
+	if err := ValidatePlan(slots, p, &plan); err != nil {
+		t.Fatalf("ValidatePlan rejected idle surplus-only EV plus battery grid-charge: %v", err)
 	}
 }
 
@@ -356,16 +382,16 @@ func TestExternalOptimizerPlansMultipleLoadpoints(t *testing.T) {
 	defer optimizer.Close()
 	slots, p := externalTestFixture()
 	p.Loadpoints = []*LoadpointSpec{
-		{ID: "car-a", CapacityWh: 40000, Levels: 11, MinPct: 0, MaxPct: 100, InitialSoCPct: 25, PluggedIn: true, TargetSoCPct: 30, TargetSlotIdx: 1, MaxChargeW: 4000, AllowedStepsW: []float64{0, 2000, 4000}, ChargeEfficiency: 1},
-		{ID: "car-b", CapacityWh: 60000, Levels: 11, MinPct: 0, MaxPct: 100, InitialSoCPct: 20, PluggedIn: true, TargetSoCPct: 25, TargetSlotIdx: 1, MaxChargeW: 3000, AllowedStepsW: []float64{0, 3000}, ChargeEfficiency: 1},
+		{ID: "car-a", CapacityWh: 40000, Levels: 11, SoCMin: 0, SoCMax: 1.0, InitialSoC: 0.25, PluggedIn: true, TargetSoC: 0.3, TargetSlotIdx: 1, MaxChargeW: 4000, AllowedStepsW: []float64{0, 2000, 4000}, ChargeEfficiency: 1},
+		{ID: "car-b", CapacityWh: 60000, Levels: 11, SoCMin: 0, SoCMax: 1.0, InitialSoC: 0.2, PluggedIn: true, TargetSoC: 0.25, TargetSlotIdx: 1, MaxChargeW: 3000, AllowedStepsW: []float64{0, 3000}, ChargeEfficiency: 1},
 	}
 	plan, err := optimizer.Optimize(context.Background(), slots, p)
 	if err != nil {
 		t.Fatalf("Optimize: %v", err)
 	}
 	last := plan.Actions[len(plan.Actions)-1]
-	if last.LoadpointSoCPctByID["car-a"] < 30-0.02 || last.LoadpointSoCPctByID["car-b"] < 25-0.02 {
-		t.Fatalf("targets not met: %+v", last.LoadpointSoCPctByID)
+	if last.LoadpointSoCByID["car-a"] < 0.30-0.02 || last.LoadpointSoCByID["car-b"] < 0.25-0.02 {
+		t.Fatalf("targets not met: %+v", last.LoadpointSoCByID)
 	}
 	if len(last.LoadpointPowerW) != 2 {
 		t.Fatalf("expected two loadpoint schedules, got %+v", last.LoadpointPowerW)

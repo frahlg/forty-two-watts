@@ -43,7 +43,7 @@ func TestForecastSolar_BucketsToHours(t *testing.T) {
 
 	fs := &ForecastSolarProvider{
 		Client: srv.Client(), BaseURL: srv.URL,
-		Arrays: []Array{{TiltDeg: 35, AzimuthDeg: 180, KWp: 10}},
+		Arrays: []Array{{TiltDeg: 35, AzimuthDeg: 180, RatedW: 10000}},
 	}
 	rows, err := fs.Fetch(context.Background(), 56.7, 16.3)
 	if err != nil {
@@ -89,7 +89,7 @@ func TestForecastSolar_RateLimitedError(t *testing.T) {
 		fmt.Fprint(w, `{"message":{"code":429,"type":"error","text":"rate limit"}}`)
 	}))
 	defer srv.Close()
-	fs := &ForecastSolarProvider{Client: srv.Client(), BaseURL: srv.URL, Arrays: []Array{{TiltDeg: 35, AzimuthDeg: 180, KWp: 10}}}
+	fs := &ForecastSolarProvider{Client: srv.Client(), BaseURL: srv.URL, Arrays: []Array{{TiltDeg: 35, AzimuthDeg: 180, RatedW: 10000}}}
 	_, err := fs.Fetch(context.Background(), 0, 0)
 	if err == nil || !strings.Contains(err.Error(), "rate") {
 		t.Errorf("want rate-limit error, got %v", err)
@@ -119,8 +119,8 @@ func TestForecastSolar_MultiPlaneURL(t *testing.T) {
 	fs := &ForecastSolarProvider{
 		Client: srv.Client(), BaseURL: srv.URL,
 		Arrays: []Array{
-			{TiltDeg: 35, AzimuthDeg: 180, KWp: 6.0}, // south roof
-			{TiltDeg: 30, AzimuthDeg: 90, KWp: 4.0},  // east roof
+			{TiltDeg: 35, AzimuthDeg: 180, RatedW: 6000}, // south roof
+			{TiltDeg: 30, AzimuthDeg: 90, RatedW: 4000},  // east roof
 		},
 	}
 	if _, err := fs.Fetch(context.Background(), 56.7, 16.3); err != nil {

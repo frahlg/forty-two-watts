@@ -11,6 +11,8 @@ const (
 	PushChargingSessionComplete = "charging.session_complete"
 	PushChargingInterrupted     = "charging.interrupted"
 	PushUpdateInstalled         = "update.installed"
+	PushDriverOffline           = "driver.offline"
+	PushFuseOverLimit           = "fuse.over_limit"
 	PushBoxUnreachable          = "box.unreachable"
 )
 
@@ -26,5 +28,7 @@ var PushSentences = map[string]PushSentence{
 	PushChargingSessionComplete: {Title: "Car charged", Body: "{kwh} kWh delivered — ready to go."},
 	PushChargingInterrupted:     {Title: "Charging stopped early", Body: "The car stopped charging before it was done."},
 	PushUpdateInstalled:         {Title: "Your box updated itself", Body: "Now running {version}. Everything came back on its own."},
+	PushDriverOffline:           {Title: "A device went quiet", Body: "{name} stopped answering."},
+	PushFuseOverLimit:           {Title: "The house is drawing too much", Body: "{phase} is over the fuse rating."},
 	PushBoxUnreachable:          {Title: "Your box is out of reach", Body: "It stopped answering. Power cut, or the internet at home is down."},
 }

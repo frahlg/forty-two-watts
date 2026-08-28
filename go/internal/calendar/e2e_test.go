@@ -51,13 +51,13 @@ func TestEndToEndRealCollaborators(t *testing.T) {
 	// --- EV: the real loadpoint manager receives the target SoC + deadline,
 	// which is exactly what the MPC loadpoint probe reads. ---
 	dep := now.Add(3 * time.Hour)
-	s.apply(Intents{EV: []EVDeadline{{LoadpointID: "garage", TargetSoCPct: 80, Departure: dep}}}, now)
+	s.apply(Intents{EV: []EVDeadline{{LoadpointID: "garage", TargetSoC: 0.8, Departure: dep}}}, now)
 	lpState, ok := lpMgr.State("garage")
 	if !ok {
 		t.Fatal("garage loadpoint not found")
 	}
-	if lpState.TargetSoCPct != 80 {
-		t.Fatalf("loadpoint target SoC: want 80, got %v", lpState.TargetSoCPct)
+	if lpState.TargetSoC != 0.8 {
+		t.Fatalf("loadpoint target SoC: want 80, got %v", lpState.TargetSoC)
 	}
 	if !lpState.TargetTime.Equal(dep) {
 		t.Fatalf("loadpoint target time: want %v, got %v", dep, lpState.TargetTime)

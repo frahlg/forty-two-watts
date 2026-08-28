@@ -110,6 +110,10 @@
     render: function (ctx) {
       var field = ctx.field, config = ctx.config;
       if (!config.caldav) config.caldav = {};
+      if (config.caldav.ev_default_target_soc == null && config.caldav.ev_default_target_soc_pct != null) {
+        config.caldav.ev_default_target_soc = config.caldav.ev_default_target_soc_pct / 100;
+      }
+      delete config.caldav.ev_default_target_soc_pct;
       var managed = config.caldav.manage_credentials !== false; // default on
       var html =
         '<div id="caldav-status-indicator" class="ha-status-indicator">checking…</div>' +
@@ -135,7 +139,7 @@
         '<div class="field-row"><div>' +
         field("Poll interval (s)", "caldav.poll_interval_s", "number", 300) +
         "</div><div>" +
-        field("Default EV target SoC (%)", "caldav.ev_default_target_soc_pct", "number", 80) +
+        field("Default EV target SoC (0–1)", "caldav.ev_default_target_soc", "number", 0.80) +
         "</div></div>" +
         '<label><input type="checkbox" data-checkbox-path="caldav.evse_history"' + (config.caldav.evse_history === false ? "" : " checked") + "> Write EVSE usage as calendar history</label>" +
         '<label><input type="checkbox" data-checkbox-path="caldav.publish_plan"' + (config.caldav.publish_plan === false ? "" : " checked") + "> Publish the planner's upcoming charge/discharge windows</label>" +

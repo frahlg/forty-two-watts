@@ -80,7 +80,7 @@ Events are classified by case-insensitive keyword in the **title**:
 | Title example | Meaning |
 |---|---|
 | `Away`, `Vacation 2 weeks`, `Holiday` | Away interval `[start, end)` → away load profile (~25% load); planner conserves battery. |
-| `Charge car 80%` | EV must reach 80% by the event's **start** time. `lp:<id>` selects a loadpoint; no `%` → `ev_default_target_soc_pct`. |
+| `Charge car 80%` | EV must reach 80% by the event's **start** time. `lp:<id>` selects a loadpoint; no `%` → `ev_default_target_soc` (0–1). |
 
 Keyword lists (`away_keywords`, `ev_keywords`) are configurable for other
 languages. What FTW parsed is visible at `GET /api/caldav/status`.

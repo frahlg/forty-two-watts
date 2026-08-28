@@ -203,11 +203,11 @@ func Apply(
 	if newCfg.Site.MinDispatchIntervalS != oldCfg.Site.MinDispatchIntervalS {
 		ctrl.MinDispatchIntervalS = newCfg.Site.MinDispatchIntervalS
 	}
-	if newCfg.Site.PVSurplusAbsorbSoCCapPct != oldCfg.Site.PVSurplusAbsorbSoCCapPct {
-		slog.Info("config reload: pv_surplus_absorb_soc_cap_pct",
-			"old", oldCfg.Site.PVSurplusAbsorbSoCCapPct,
-			"new", newCfg.Site.PVSurplusAbsorbSoCCapPct)
-		ctrl.PVSurplusAbsorbSoCCapPct = newCfg.Site.PVSurplusAbsorbSoCCapPct
+	if newCfg.Site.PVSurplusAbsorbSoCCap != oldCfg.Site.PVSurplusAbsorbSoCCap {
+		slog.Info("config reload: pv_surplus_absorb_soc_cap",
+			"old", oldCfg.Site.PVSurplusAbsorbSoCCap,
+			"new", newCfg.Site.PVSurplusAbsorbSoCCap)
+		ctrl.PVSurplusAbsorbSoCCap = newCfg.Site.PVSurplusAbsorbSoCCap
 	}
 	if newCfg.Site.PVSurplusAbsorbThresholdW != oldCfg.Site.PVSurplusAbsorbThresholdW {
 		ctrl.PVSurplusAbsorbThresholdW = newCfg.Site.PVSurplusAbsorbThresholdW

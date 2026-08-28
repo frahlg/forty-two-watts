@@ -53,6 +53,15 @@
     render: function (ctx) {
       var field = ctx.field, selectField = ctx.selectField, help = ctx.help, config = ctx.config;
       if (!config.planner) config.planner = {};
+      var planner = config.planner;
+      if (planner.soc_min == null && planner.soc_min_pct != null) {
+        planner.soc_min = planner.soc_min_pct / 100;
+      }
+      if (planner.soc_max == null && planner.soc_max_pct != null) {
+        planner.soc_max = planner.soc_max_pct / 100;
+      }
+      delete planner.soc_min_pct;
+      delete planner.soc_max_pct;
       return '<fieldset><legend>MPC Planner</legend>' +
         '<label><input type="checkbox" data-checkbox-path="planner.enabled"' + (config.planner.enabled ? ' checked' : '') + '> Enabled ' +
         help('Enable the MPC planner. When active it overrides manual mode with an optimised schedule.') + '</label>' +
@@ -120,11 +129,11 @@
           "Scenario count above which auto mode uses eligible Progressive Hedging or reduces to the exact extensive budget.") +
         '</div></div>' +
         '<div class="field-row"><div>' +
-        field("SoC min (%)", "planner.soc_min_pct", "number", 10,
-          "Lowest SoC the planner will discharge to (percent). 10 = 10%.") +
+        field("Min SoC (0–1)", "planner.soc_min", "number", 0.10,
+          "Lowest SoC the planner will discharge to. 0.10 = 10%.") +
         '</div><div>' +
-        field("SoC max (%)", "planner.soc_max_pct", "number", 90,
-          "Highest SoC the planner will charge to (percent). 90 = 90%.") +
+        field("Max SoC (0–1)", "planner.soc_max", "number", 0.90,
+          "Highest SoC the planner will charge to. 0.90 = 90%.") +
         '</div></div>' +
         '<div class="field-row"><div>' +
         field("PV forecast safety (k)", "planner.pv_forecast_safety_k", "number", 1.0,

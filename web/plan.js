@@ -2,7 +2,7 @@
 // Renders a stacked canvas chart: price bars on top, battery+grid bars in
 // the middle, SoC + PV line on bottom. Refreshes every 30s.
 
-import { derivePlanBrief } from "./plan-brief.js";
+import { derivePlanBrief, unavailablePlannerCopy } from "./plan-brief.js";
 import { fillPlanSoC } from "./plan-soc.js";
 import { setActiveCurrency, toDisplay, unitFor } from "./components/price-units.js";
 
@@ -35,6 +35,29 @@ import { setActiveCurrency, toDisplay, unitFor } from "./components/price-units.
       .replace(/>/g, '&gt;')
       .replace(/"/g, '&quot;')
       .replace(/'/g, '&#39;');
+  }
+
+  // Plan JSON SoC is a 0–1 fraction. Multiply only when showing "%".
+  function socPercent(frac) {
+    if (frac == null || !Number.isFinite(frac)) return null;
+    return frac * 100;
+  }
+
+  // Hard cut: the roof cannot make more than its nameplate. A stale
+  // megawatt pv_w (kWp pasted as watts) must not paint the chart.
+  function sitePVWCapped(pvW, nameplateW) {
+    if (pvW == null || !(nameplateW > 0)) return pvW;
+    var gen = Math.max(0, -Number(pvW));
+    if (gen > nameplateW) return -nameplateW;
+    return pvW;
+  }
+
+  function siteLoadWCapped(loadW, maxW) {
+    if (loadW == null) return loadW;
+    var w = Number(loadW);
+    if (!(w >= 0) || isNaN(w)) return 0;
+    if (maxW > 0 && w > maxW) return maxW;
+    return w;
   }
 
   // Horizon controls the x-axis bounds; mirrors the price chart's
@@ -127,11 +150,13 @@ import { setActiveCurrency, toDisplay, unitFor } from "./components/price-units.
       prices: p && p.enabled,
       forecast: f && f.enabled,
       mpc: m && m.enabled,
+      mpcReason: (m && m.reason) || "",
     };
     state.lastUpdate = new Date();
     window.dispatchEvent(new CustomEvent("ftw-plan-data", {
       detail: { plan: state.plan },
     }));
+    applyPlannerModeAvailability();
     render();
   }
 
@@ -181,6 +206,7 @@ import { setActiveCurrency, toDisplay, unitFor } from "./components/price-units.
   function renderPlanBrief(plan) {
     const brief = derivePlanBrief({
       enabled: !!(state.enabled && state.enabled.mpc),
+      unavailableReason: (state.enabled && state.enabled.mpcReason) || "",
       plan,
       status: state.status || {},
       socOpts: state.socOpts,
@@ -501,7 +527,7 @@ import { setActiveCurrency, toDisplay, unitFor } from "./components/price-units.
         if (a.slot_start_ms > tMax) break;
         if (a.pv_w == null) continue;
         const x = xScale(a.slot_start_ms);
-        const y = powerY(a.pv_w); // plan.pv_w is already site-signed
+        const y = powerY(sitePVWCapped(a.pv_w, plan.pv_nameplate_w)); // site-signed, cut at nameplate
         if (first) { ctx.moveTo(x, y); first = false; }
         else ctx.lineTo(x, y);
       }
@@ -509,7 +535,7 @@ import { setActiveCurrency, toDisplay, unitFor } from "./components/price-units.
       for (const f of state.forecast || []) {
         if (f.slot_ts_ms > tMax || !f.pv_w_estimated) continue;
         const x = xScale(f.slot_ts_ms);
-        const y = powerY(-f.pv_w_estimated); // flip forecast → site sign
+        const y = powerY(sitePVWCapped(-f.pv_w_estimated, plan && plan.pv_nameplate_w)); // flip + nameplate cut
         if (first) { ctx.moveTo(x, y); first = false; }
         else ctx.lineTo(x, y);
       }
@@ -529,7 +555,7 @@ import { setActiveCurrency, toDisplay, unitFor } from "./components/price-units.
         if (a.slot_start_ms > tMax) break;
         if (a.load_w == null) continue;
         const x = xScale(a.slot_start_ms);
-        const y = powerY(a.load_w);
+        const y = powerY(siteLoadWCapped(a.load_w, plan.load_max_w));
         if (f2) { ctx.moveTo(x, y); f2 = false; }
         else ctx.lineTo(x, y);
       }
@@ -636,16 +662,18 @@ import { setActiveCurrency, toDisplay, unitFor } from "./components/price-units.
       ctx.beginPath();
       first = true;
       // Anchor at start SoC at now. Skip non-finite points: a missing
-      // soc_pct used to become canvas y=0 (a fake empty battery).
-      if (Number.isFinite(plan.initial_soc_pct)) {
-        ctx.moveTo(xScale(now), socY(plan.initial_soc_pct));
+      // soc used to become canvas y=0 (a fake empty battery).
+      const startSoc = socPercent(plan.initial_soc);
+      if (startSoc != null) {
+        ctx.moveTo(xScale(now), socY(startSoc));
         first = false;
       }
       for (const a of plan.actions) {
         if (a.slot_start_ms > tMax) break;
-        if (!Number.isFinite(a.soc_pct)) continue;
+        const endSoc = socPercent(a.soc);
+        if (endSoc == null) continue;
         const x = xScale(a.slot_start_ms + a.slot_len_min * 60 * 1000);
-        const y = socY(a.soc_pct);
+        const y = socY(endSoc);
         if (first) { ctx.moveTo(x, y); first = false; }
         else ctx.lineTo(x, y);
       }
@@ -670,7 +698,7 @@ import { setActiveCurrency, toDisplay, unitFor } from "./components/price-units.
     const summary = document.getElementById('plan-summary');
     if (summary) {
       if (!state.enabled || !state.enabled.mpc) {
-        summary.textContent = 'MPC planner disabled';
+        summary.textContent = unavailablePlannerCopy(state.enabled && state.enabled.mpcReason).summary;
       } else if (!plan) {
         const visibleInputs = [];
         if (state.prices && state.prices.length) visibleInputs.push('prices');
@@ -738,11 +766,12 @@ import { setActiveCurrency, toDisplay, unitFor } from "./components/price-units.
             `<span class="s-value">${escapeHTML(comparison)}</span></span>`
           );
         }
-        if (Number.isFinite(plan.initial_soc_pct)) {
+        const startSoc = socPercent(plan.initial_soc);
+        if (startSoc != null) {
           parts.push(
             `<span title="Battery state of charge right now — the plan starts from here">` +
             `<span class="s-label">start SoC </span>` +
-            `<span class="s-value">${plan.initial_soc_pct.toFixed(0)}%</span></span>`
+            `<span class="s-value">${startSoc.toFixed(0)}%</span></span>`
           );
         }
         parts.push(
@@ -752,7 +781,7 @@ import { setActiveCurrency, toDisplay, unitFor } from "./components/price-units.
         );
         if (state.planMeta && state.planMeta.last_replan_ms) {
           const age = Math.round((Date.now() - state.planMeta.last_replan_ms) / 1000);
-          const reason = state.planMeta.last_replan_reason || '';
+          const reason = escapeHTML(state.planMeta.last_replan_reason || '');
           const ageTxt = age < 60 ? `${age}s` : `${Math.round(age/60)}m`;
           parts.push(
             `<span title="Time since the last optimisation pass. Reason: ${reason}. Click Replan to force a fresh pass.">` +
@@ -860,12 +889,17 @@ import { setActiveCurrency, toDisplay, unitFor } from "./components/price-units.
         );
       }
       if (a.pv_w != null) {
-        const pvGen = Math.max(0, -a.pv_w) / 1000;
-        lines.push(`<div class="tip-row"><span title="Solar generation the plan assumes for this slot">PV forecast</span><b>${pvGen.toFixed(1)} kW</b></div>`);
+        const pvW = sitePVWCapped(a.pv_w, state.plan && state.plan.pv_nameplate_w);
+        const pvGen = Math.max(0, -pvW) / 1000;
+        lines.push(`<div class="tip-row"><span title="Solar generation the plan assumes for this slot — cut at the site nameplate">PV forecast</span><b>${pvGen.toFixed(1)} kW</b></div>`);
       }
-      if (a.load_w != null) lines.push(`<div class="tip-row"><span title="Household consumption the plan assumes for this slot">Load forecast</span><b>${(a.load_w / 1000).toFixed(1)} kW</b></div>`);
+      if (a.load_w != null) {
+        const loadW = siteLoadWCapped(a.load_w, state.plan && state.plan.load_max_w);
+        lines.push(`<div class="tip-row"><span title="Household consumption the plan assumes for this slot — floored against recent days and cut at the fuse">Load forecast</span><b>${(loadW / 1000).toFixed(1)} kW</b></div>`);
+      }
       if (a.loadpoint_w != null && a.loadpoint_w > 0) {
-        const evSoc = a.loadpoint_soc_pct != null ? ` → ${a.loadpoint_soc_pct.toFixed(0)}%` : '';
+        const lpSoc = socPercent(a.loadpoint_soc);
+        const evSoc = lpSoc != null ? ` → ${lpSoc.toFixed(0)}%` : '';
         lines.push(`<div class="tip-row"><span title="Planned EV charging power for this slot">EV charging</span><b>${(a.loadpoint_w / 1000).toFixed(1)} kW${evSoc}</b></div>`);
       }
       if (a.battery_w != null) {
@@ -876,16 +910,17 @@ import { setActiveCurrency, toDisplay, unitFor } from "./components/price-units.
         const gdir = a.grid_w > 0 ? 'import' : 'export';
         lines.push(`<div class="tip-row"><span title="Net grid flow the plan expects. Import = buy from grid, export = sell back">Grid</span><b>${(Math.abs(a.grid_w) / 1000).toFixed(1)} kW ${gdir}</b></div>`);
       }
-      if (Number.isFinite(a.soc_pct)) lines.push(`<div class="tip-row"><span title="Battery state of charge at the end of this slot">SoC (end)</span><b>${a.soc_pct.toFixed(0)}%</b></div>`);
+      const endSoc = socPercent(a.soc);
+      if (endSoc != null) lines.push(`<div class="tip-row"><span title="Battery state of charge at the end of this slot">SoC (end)</span><b>${endSoc.toFixed(0)}%</b></div>`);
       if (a.battery_w != null) {
         let action, actionHint;
         if (a.battery_w > 100) { action = 'Charging'; actionHint = 'import to cover load + top up battery'; }
         else if (a.battery_w < -100) { action = 'Discharging'; actionHint = 'battery covers load (and may export)'; }
         else { action = 'Idle'; actionHint = 'battery neither charges nor discharges'; }
         lines.push(`<div class="tip-row"><span title="Battery action this slot">Plan</span><b>${action}</b></div>`);
-        lines.push(`<div class="tip-reason">${a.reason ? a.reason : `${action.toLowerCase()} — ${actionHint}${predicted ? ' (predicted)' : ''}`}</div>`);
+        lines.push(`<div class="tip-reason">${a.reason ? escapeHTML(a.reason) : `${action.toLowerCase()} — ${actionHint}${predicted ? ' (predicted)' : ''}`}</div>`);
       } else if (a.reason) {
-        lines.push(`<div class="tip-reason">${a.reason}</div>`);
+        lines.push(`<div class="tip-reason">${escapeHTML(a.reason)}</div>`);
       }
       tip.innerHTML = lines.join('');
       // Touch scrub on a phone has no cursor, so the tooltip is positioned
@@ -983,12 +1018,41 @@ import { setActiveCurrency, toDisplay, unitFor } from "./components/price-units.
     charge: 'Manual full charge — forces the battery to charge regardless of price.',
     idle: 'Stop batteries. Every battery is held at 0 W while this mode is on, so none drifts back to the inverter\'s own behaviour. Fuse protection still applies. EV charging and PV curtailment carry on.',
   };
+  function applyPlannerModeAvailability() {
+    const enabled = !!(state.enabled && state.enabled.mpc);
+    const copy = unavailablePlannerCopy(state.enabled && state.enabled.mpcReason);
+    const buttons = document.querySelectorAll('#mode-buttons-primary button, #mode-buttons button');
+    buttons.forEach(function (btn) {
+      const plannerMode = String(btn.dataset.mode || '').indexOf('planner_') === 0;
+      if (!btn.dataset.catalogTitle && btn.title) btn.dataset.catalogTitle = btn.title;
+      if (!plannerMode) {
+        btn.disabled = false;
+        return;
+      }
+      btn.disabled = !enabled;
+      btn.title = enabled ? (btn.dataset.catalogTitle || '') : copy.detail;
+    });
+    const replan = document.getElementById('plan-replan');
+    if (replan) {
+      replan.disabled = !enabled;
+      replan.title = enabled ? 'Force a fresh plan' : copy.summary;
+    }
+  }
+
   function renderStrategyHint() {
+    applyPlannerModeAvailability();
     apiFetch('/api/status')
       .then(function (r) { return r.json(); })
       .then(function (d) {
         const el = document.getElementById('strategy-hint');
         if (!el) return;
+        const enabled = !!(state.enabled && state.enabled.mpc);
+        const plannerMode = String(d.mode || '').indexOf('planner_') === 0;
+        if (!enabled && plannerMode) {
+          const copy = unavailablePlannerCopy(state.enabled && state.enabled.mpcReason);
+          el.textContent = copy.action + '. ' + copy.nextStep + '.';
+          return;
+        }
         el.textContent = STRATEGY_DESC[d.mode] || '';
       })
       .catch(function () {});

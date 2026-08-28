@@ -419,10 +419,11 @@
 
       return (
         "<fieldset><legend>The FTW app</legend>" +
-        '<p class="hint">The FTW app talks to this box directly. Keeping this on ' +
-        "lets it reach you when you are away from home. Readings and commands are " +
-        "end-to-end encrypted. Sourceful can see your IP and when the box is " +
-        "connected, but cannot read them.</p>" +
+        '<p class="hint">This is not the Sourceful (Zap) app. The FTW app at ' +
+        "app.ftw.energy talks to this box when you are away. On the same Wi-Fi you " +
+        "can just open this page in a browser — no pairing needed. Readings and " +
+        "commands are end-to-end encrypted. Sourceful can see your IP and when the " +
+        "box is connected, but cannot read them.</p>" +
         '<label><input type="checkbox" id="app-link-enabled" ' +
         'data-checkbox-path="app_link.enabled"' + (enabled ? " checked" : "") +
         "> Let the FTW app connect to this box</label>" +

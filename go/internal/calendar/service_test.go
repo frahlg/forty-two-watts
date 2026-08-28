@@ -103,12 +103,12 @@ func TestApplyEVTargetSet(t *testing.T) {
 	now := time.Date(2026, 7, 1, 6, 0, 0, 0, time.UTC)
 	dep := now.Add(2 * time.Hour)
 
-	s.apply(Intents{EV: []EVDeadline{{LoadpointID: "garage", TargetSoCPct: 80, Departure: dep}}}, now)
+	s.apply(Intents{EV: []EVDeadline{{LoadpointID: "garage", TargetSoC: 0.8, Departure: dep}}}, now)
 
 	if lp.called != 1 {
 		t.Fatalf("expected SetTarget once, got %d", lp.called)
 	}
-	if lp.id != "garage" || lp.soc != 80 || !lp.when.Equal(dep) {
+	if lp.id != "garage" || lp.soc != 0.8 || !lp.when.Equal(dep) {
 		t.Fatalf("SetTarget args wrong: id=%q soc=%v when=%v", lp.id, lp.soc, lp.when)
 	}
 }
@@ -119,12 +119,12 @@ func TestApplyEVPicksEarliestUpcoming(t *testing.T) {
 	now := time.Date(2026, 7, 1, 6, 0, 0, 0, time.UTC)
 
 	s.apply(Intents{EV: []EVDeadline{
-		{LoadpointID: "garage", TargetSoCPct: 70, Departure: now.Add(-time.Hour)}, // past — ignored
-		{LoadpointID: "garage", TargetSoCPct: 90, Departure: now.Add(5 * time.Hour)},
-		{LoadpointID: "garage", TargetSoCPct: 60, Departure: now.Add(1 * time.Hour)}, // earliest upcoming
+		{LoadpointID: "garage", TargetSoC: 0.7, Departure: now.Add(-time.Hour)}, // past — ignored
+		{LoadpointID: "garage", TargetSoC: 0.9, Departure: now.Add(5 * time.Hour)},
+		{LoadpointID: "garage", TargetSoC: 0.6, Departure: now.Add(1 * time.Hour)}, // earliest upcoming
 	}}, now)
 
-	if lp.soc != 60 {
+	if lp.soc != 0.6 {
 		t.Fatalf("expected earliest upcoming deadline (soc 60), got %v", lp.soc)
 	}
 }
@@ -134,7 +134,7 @@ func TestApplyEVMissingLoadpointIgnored(t *testing.T) {
 	// firstLoadpointID empty → no default → EV event with no id is unactionable.
 	s := New(config.CalDAV{Enabled: true}, lp, &fakeLM{}, "")
 	now := time.Now()
-	s.apply(Intents{EV: []EVDeadline{{TargetSoCPct: 80, Departure: now.Add(time.Hour)}}}, now)
+	s.apply(Intents{EV: []EVDeadline{{TargetSoC: 0.8, Departure: now.Add(time.Hour)}}}, now)
 	if lp.called != 0 {
 		t.Fatalf("EV event without a loadpoint must not call SetTarget")
 	}

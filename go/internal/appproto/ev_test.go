@@ -233,7 +233,7 @@ func TestLoadpointBoostAcksThenConfirmsFromAReadBack(t *testing.T) {
 	if want := clock.now.Add(time.Hour); !lp.boostLease.ExpiresAt.Equal(want) {
 		t.Fatalf("lease expires %v, want %v", lp.boostLease.ExpiresAt, want)
 	}
-	if lp.boostLease.MinBatterySoCPct != 30 || lp.boostLease.EVTargetSoCPct != 80 {
+	if lp.boostLease.MinBatterySoC != 0.30 || lp.boostLease.EVTargetSoC != 0.80 {
 		t.Fatalf("lease = %+v", lp.boostLease)
 	}
 }

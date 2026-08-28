@@ -30,7 +30,7 @@ func TestStaleSiteMeterStopsScheduledChargeAndRecovers(t *testing.T) {
 	}
 	c := newTestController(t, []Config{cfg}, directive, samples, sender)
 	if !c.manager.SetSchedule(cfg.ID, Schedule{
-		SoCPct:          80,
+		SoC:             0.8,
 		TimeOfDayMinUTC: 13 * 60,
 		Recurring:       true,
 	}) {
@@ -43,7 +43,7 @@ func TestStaleSiteMeterStopsScheduledChargeAndRecovers(t *testing.T) {
 		t.Fatalf("stale site meter must stand scheduled EV down: %+v", sender.calls)
 	}
 	state, ok := c.manager.State(cfg.ID)
-	if !ok || !state.PluggedIn || state.TargetSoCPct != 80 || state.TargetTime.IsZero() {
+	if !ok || !state.PluggedIn || state.TargetSoC != 0.8 || state.TargetTime.IsZero() {
 		t.Fatalf("schedule/observation did not stay live while blocked: %+v", state)
 	}
 

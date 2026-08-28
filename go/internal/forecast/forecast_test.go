@@ -27,7 +27,7 @@ func (p staticForecastProvider) Fetch(context.Context, float64, float64) ([]RawF
 func testPVArray(name string, kwp, tiltDeg, azimuthDeg float64) config.PVArray {
 	return config.PVArray{
 		Name:       name,
-		KWp:        kwp,
+		KWp:        kwp, // legacy kWp; RatedWatts() converts at the config door
 		TiltDeg:    &tiltDeg,
 		AzimuthDeg: &azimuthDeg,
 	}
@@ -38,7 +38,7 @@ func testPVArray(name string, kwp, tiltDeg, azimuthDeg float64) config.PVArray {
 func TestClearSkyIsZeroAtMidnight(t *testing.T) {
 	// Stockholm midnight in winter
 	tt := time.Date(2026, 12, 21, 0, 0, 0, 0, time.UTC)
-	w := ClearSkyW(59.3293, 18.0686, tt)
+	w := ClearSkyWm2(59.3293, 18.0686, tt)
 	if w != 0 {
 		t.Errorf("midnight winter Stockholm should be 0 W/m², got %f", w)
 	}
@@ -47,7 +47,7 @@ func TestClearSkyIsZeroAtMidnight(t *testing.T) {
 func TestClearSkyIsHighAtSummerNoon(t *testing.T) {
 	// Stockholm around solar noon at summer solstice (11:00 UTC ≈ 13:00 local summer)
 	tt := time.Date(2026, 6, 21, 11, 0, 0, 0, time.UTC)
-	w := ClearSkyW(59.3293, 18.0686, tt)
+	w := ClearSkyWm2(59.3293, 18.0686, tt)
 	if w < 500 {
 		t.Errorf("summer solstice Stockholm should be >500 W/m², got %f", w)
 	}
@@ -59,8 +59,8 @@ func TestClearSkyIsHighAtSummerNoon(t *testing.T) {
 func TestClearSkyLatitudeDependence(t *testing.T) {
 	// At winter solstice, equator gets much more sun than high latitudes at noon
 	winter := time.Date(2026, 12, 21, 12, 0, 0, 0, time.UTC)
-	equator := ClearSkyW(0, 0, winter)
-	arctic := ClearSkyW(80, 0, winter)
+	equator := ClearSkyWm2(0, 0, winter)
+	arctic := ClearSkyWm2(80, 0, winter)
 	if equator <= arctic {
 		t.Errorf("equator (%f) should get more winter sun than arctic (%f)", equator, arctic)
 	}
@@ -283,7 +283,7 @@ func TestFromConfigPopulatesArrays(t *testing.T) {
 	if len(s.Arrays) != 2 {
 		t.Fatalf("expected 2 arrays (kWp>0 only), got %d", len(s.Arrays))
 	}
-	if s.Arrays[0].KWp != 6 || s.Arrays[1].AzimuthDeg != 90 {
+	if s.Arrays[0].RatedW != 6000 || s.Arrays[1].AzimuthDeg != 90 {
 		t.Errorf("array geometry mismatch: %+v", s.Arrays)
 	}
 }
@@ -298,7 +298,7 @@ func TestFromConfigSkipsPartialArrayGeometry(t *testing.T) {
 	cfg := &config.Weather{
 		Provider: "open_meteo", Latitude: 59.3293, Longitude: 18.0686,
 		PVArrays: []config.PVArray{
-			{Name: "missing azimuth", KWp: 10, TiltDeg: &tilt},
+			{Name: "missing azimuth", RatedW: 10000, TiltDeg: &tilt},
 			testPVArray("Stockholm south", 6, 35, 180),
 		},
 	}
@@ -309,7 +309,7 @@ func TestFromConfigSkipsPartialArrayGeometry(t *testing.T) {
 	if len(s.Arrays) != 1 {
 		t.Fatalf("expected only complete Stockholm geometry, got %d arrays: %+v", len(s.Arrays), s.Arrays)
 	}
-	if s.Arrays[0].AzimuthDeg != 180 || s.Arrays[0].KWp != 6 {
+	if s.Arrays[0].AzimuthDeg != 180 || s.Arrays[0].RatedW != 6000 {
 		t.Fatalf("unexpected complete geometry: %+v", s.Arrays[0])
 	}
 }
@@ -318,10 +318,10 @@ func TestFromConfigSkipsPartialArrayGeometry(t *testing.T) {
 
 func TestPOAPVWattsSumsArrays(t *testing.T) {
 	tt := time.Date(2026, 6, 21, 11, 0, 0, 0, time.UTC)
-	one := poaPVWattsFromGHI(59.3293, 18.0686, tt, 700, []Array{{TiltDeg: 35, AzimuthDeg: 180, KWp: 5}})
+	one := poaPVWattsFromGHI(59.3293, 18.0686, tt, 700, []Array{{TiltDeg: 35, AzimuthDeg: 180, RatedW: 5000}})
 	two := poaPVWattsFromGHI(59.3293, 18.0686, tt, 700, []Array{
-		{TiltDeg: 35, AzimuthDeg: 180, KWp: 5},
-		{TiltDeg: 35, AzimuthDeg: 180, KWp: 5},
+		{TiltDeg: 35, AzimuthDeg: 180, RatedW: 5000},
+		{TiltDeg: 35, AzimuthDeg: 180, RatedW: 5000},
 	})
 	if one <= 0 {
 		t.Fatalf("expected positive POA watts, got %.1f", one)
@@ -333,7 +333,7 @@ func TestPOAPVWattsSumsArrays(t *testing.T) {
 
 func TestPOAPVWattsZeroAtNight(t *testing.T) {
 	tt := time.Date(2026, 12, 21, 23, 0, 0, 0, time.UTC)
-	w := poaPVWattsFromGHI(59.3293, 18.0686, tt, 500, []Array{{TiltDeg: 35, AzimuthDeg: 180, KWp: 10}})
+	w := poaPVWattsFromGHI(59.3293, 18.0686, tt, 500, []Array{{TiltDeg: 35, AzimuthDeg: 180, RatedW: 10000}})
 	if w != 0 {
 		t.Errorf("night POA watts should be 0, got %.2f", w)
 	}
@@ -374,7 +374,7 @@ func TestServiceGHIPhysicalBounds(t *testing.T) {
 					Arrays:   nil,
 				}
 				if withArrays {
-					s.Arrays = []Array{{TiltDeg: 35, AzimuthDeg: 180, KWp: 10}}
+					s.Arrays = []Array{{TiltDeg: 35, AzimuthDeg: 180, RatedW: 10000}}
 				}
 				s.fetchAndStore(context.Background())
 
@@ -426,7 +426,7 @@ func TestServicePOAPathDiffersFromFlat(t *testing.T) {
 	p.BaseURL = srv.URL
 	s := &Service{
 		Provider: p, Store: st, Lat: 59.3293, Lon: 18.0686, RatedPVW: 10000,
-		Arrays: []Array{{TiltDeg: 35, AzimuthDeg: 180, KWp: 10}},
+		Arrays: []Array{{TiltDeg: 35, AzimuthDeg: 180, RatedW: 10000}},
 	}
 	s.fetchAndStore(context.Background())
 
@@ -448,4 +448,176 @@ func TestServicePOAPathDiffersFromFlat(t *testing.T) {
 		t.Errorf("POA estimate should differ from flat %.0f, got %.1f", flat, got)
 	}
 	t.Logf("POA-per-array estimate %.0fW vs flat %.0fW", got, flat)
+}
+
+func TestNameplateWSumsRatedWatts(t *testing.T) {
+	t.Parallel()
+	got := NameplateW(10000, []Array{{RatedW: 6000}, {RatedW: 4000}})
+	if got != 10000 {
+		t.Fatalf("NameplateW sum = %.0f; want 10000", got)
+	}
+	got = NameplateW(18960, nil)
+	if got != 18960 {
+		t.Fatalf("no arrays: NameplateW = %.0f; want rated 18960", got)
+	}
+}
+
+func TestFromConfigLegacyKWpBecomesWatts(t *testing.T) {
+	st, err := state.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	s := FromConfig(&config.Weather{
+		Provider: "open_meteo", Latitude: 59.3293, Longitude: 18.0686,
+		PVRatedW: 10000,
+		PVArrays: []config.PVArray{testPVArray("south", 10, 35, 180)},
+	}, 10000, st, "ua")
+	if s == nil {
+		t.Fatal("expected service")
+	}
+	if len(s.Arrays) != 1 || s.Arrays[0].RatedW != 10000 {
+		t.Fatalf("legacy 10 kWp must become 10000 W, got %+v", s.Arrays)
+	}
+	pasted := FromConfig(&config.Weather{
+		Provider: "open_meteo", Latitude: 59.3293, Longitude: 18.0686,
+		PVRatedW: 18960,
+		PVArrays: []config.PVArray{testPVArray("east", 12960, 27, 150), testPVArray("south", 6000, 27, 240)},
+	}, 18960, st, "ua")
+	if pasted == nil || len(pasted.Arrays) != 2 {
+		t.Fatal("expected two arrays")
+	}
+	if pasted.Arrays[0].RatedW != 12960 || pasted.Arrays[1].RatedW != 6000 {
+		t.Fatalf("pasted watts-as-kwp must stay watts, got %+v", pasted.Arrays)
+	}
+}
+
+func TestPOAPVWattsDoesNotTreatWattsAsKWp(t *testing.T) {
+	tt := time.Date(2026, 8, 18, 16, 45, 0, 0, time.UTC) // 18:45 Swedish summer
+	ghi := 354.0
+	house := poaPVWattsFromGHI(59.3293, 18.0686, tt, ghi, []Array{{TiltDeg: 35, AzimuthDeg: 180, RatedW: 10000}})
+	pasted := poaPVWattsFromGHI(59.3293, 18.0686, tt, ghi, []Array{{TiltDeg: 35, AzimuthDeg: 180, RatedW: 10000}})
+	if house <= 0 {
+		t.Fatalf("expected late-afternoon production, got %.1f W", house)
+	}
+	if house > 15000 {
+		t.Fatalf("10 kWp at 354 W/m² GHI should stay on a house scale, got %.1f W", house)
+	}
+	if math.Abs(pasted-house) > 1 {
+		t.Fatalf("kWp=10000 (watts pasted) must match kWp=10, house=%.1f pasted=%.1f", house, pasted)
+	}
+}
+
+// Screenshot case: Stockholm 18:45, GHI ~354 W/m², kWp pasted as 10000
+// (the Watts field). Before the sanitizer this stored ~3.5 MW and the
+// Plan tooltip showed "PV Forecast: 3544.2 kW".
+func TestFetchAndStoreCapsPastedWattsGHI(t *testing.T) {
+	tt := time.Date(2026, 8, 18, 16, 45, 0, 0, time.UTC)
+	ghi := 354.0
+	st, err := state.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	s := &Service{
+		Provider: staticForecastProvider{rows: []RawForecast{{HourStart: tt, SolarWm2: &ghi}}},
+		Store:    st,
+		Lat:      59.3293,
+		Lon:      18.0686,
+		RatedPVW: 10000,
+		Arrays:   []Array{{TiltDeg: 35, AzimuthDeg: 180, RatedW: 10000}},
+	}
+	s.fetchAndStore(context.Background())
+	rows, err := st.LoadForecasts(tt.UnixMilli(), tt.Add(time.Hour).UnixMilli())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].PVWEstimated == nil {
+		t.Fatalf("expected one stored row, got %+v", rows)
+	}
+	got := *rows[0].PVWEstimated
+	if got > 10000*nameplateHeadroom+1 {
+		t.Fatalf("pasted 10000 kWp at 354 W/m² must not store megawatts, got %.1f W", got)
+	}
+	if got <= 0 {
+		t.Fatalf("late-afternoon GHI should still produce some PV, got %.1f W", got)
+	}
+}
+
+// Björn, 2026-08-18: Settings → Weather "PV rated (W)" = 18960.
+// Plan tooltip Tue 19:45 showed "PV forecast 2046.2 kW" with house-scale
+// load 0.7 kW and 8.2 kW export. Changing weather provider did not help.
+//
+// The tooltip already does Math.max(0, -pv_w) / 1000, so 2046.2 kW is
+// |pv_w| ≈ 2 046 200 W — not watts labelled as kilowatts. 2046200 / 18960
+// ≈ 108 W/m², which is a late-evening POA if array kWp was pasted as 18960
+// (the watts field). A display-only /1000 miss would mean |pv_w| = 2046 W
+// and implied POA 0.11 W/m², which cannot export 8.2 kW or spike the
+// ±16 kW chart.
+func TestBjorn18960WTooltipIsPastedKWpNotDisplayScale(t *testing.T) {
+	t.Parallel()
+	const ratedW = 18960.0
+	const tooltipKW = 2046.2
+	storedW := tooltipKW * 1000
+	impliedPOA := storedW / ratedW
+	if impliedPOA < 90 || impliedPOA > 130 {
+		t.Fatalf("2046.2 kW / 18960 W = %.2f W/m²; want ~108 (evening POA on pasted kWp)", impliedPOA)
+	}
+	displayBugPOA := (tooltipKW) / ratedW
+	if displayBugPOA > 1 {
+		t.Fatalf("if tooltip forgot /1000, implied POA would be %.3f W/m², not evening sun", displayBugPOA)
+	}
+
+	if NameplateW(ratedW, []Array{{RatedW: ratedW}}) != ratedW {
+		t.Fatalf("nameplate = %.0f, want 18960 W", NameplateW(ratedW, []Array{{RatedW: ratedW}}))
+	}
+
+	capped, ok := clampPVToNameplate(storedW, ratedW)
+	if !ok || capped > ratedW*nameplateHeadroom+1 {
+		t.Fatalf("stored %.0f W must clamp to 1.25×18960, got %.1f ok=%v", storedW, capped, ok)
+	}
+
+	tt := time.Date(2026, 8, 18, 17, 45, 0, 0, time.UTC) // 19:45 Swedish summer
+	house := poaPVWattsFromGHI(59.3293, 18.0686, tt, impliedPOA, []Array{{TiltDeg: 35, AzimuthDeg: 180, RatedW: 18960}})
+	pastedW := poaPVWattsFromGHI(59.3293, 18.0686, tt, impliedPOA, []Array{{TiltDeg: 35, AzimuthDeg: 180, RatedW: 18960}})
+	if house <= 0 || house > ratedW*nameplateHeadroom {
+		t.Fatalf("18.96 kWp at ~108 W/m² must stay on a house scale, got %.1f W", house)
+	}
+	if math.Abs(pastedW-house) > 1 {
+		t.Fatalf("kWp=18960 (rated W pasted) must match 18.96 kWp, house=%.1f pasted=%.1f", house, pastedW)
+	}
+}
+
+func TestLoadClampsStoredMegawattForecast(t *testing.T) {
+	st, err := state.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	wild := 3544200.0
+	ts := time.Date(2026, 8, 18, 16, 45, 0, 0, time.UTC).UnixMilli()
+	if err := st.SaveForecasts([]state.ForecastPoint{{
+		SlotTsMs: ts, SlotLenMin: 60, PVWEstimated: &wild, Source: "open_meteo",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	s := &Service{
+		Store:    st,
+		RatedPVW: 10000,
+		Arrays:   []Array{{TiltDeg: 35, AzimuthDeg: 180, RatedW: 10000}},
+	}
+	rows, err := s.Load(ts, ts+3600*1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].PVWEstimated == nil {
+		t.Fatalf("expected one clamped row, got %+v", rows)
+	}
+	got := *rows[0].PVWEstimated
+	if got > 10000*nameplateHeadroom+1 {
+		t.Fatalf("stored 3544 kW forecast must clamp to nameplate, got %.1f W", got)
+	}
+	if got < 10000 {
+		t.Fatalf("clamp should sit on the nameplate ceiling, got %.1f W", got)
+	}
 }

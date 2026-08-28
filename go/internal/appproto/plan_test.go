@@ -14,13 +14,13 @@ func samplePlan(generatedAt time.Time) *mpc.Plan {
 		Mode:          mpc.ModePassiveArbitrage,
 		Actions: []mpc.Action{
 			// Cheap night hour, charging off the meter.
-			{SlotStartMs: slot, SlotLenMin: 15, PriceOre: 30, PVW: 0, LoadW: 500, BatteryW: 3000, GridW: 3500, SoCPct: 40},
+			{SlotStartMs: slot, SlotLenMin: 15, PriceOre: 30, PVW: 0, LoadW: 500, BatteryW: 3000, GridW: 3500, SoC: 0.4},
 			// Midday, PV covers the house and fills the battery.
-			{SlotStartMs: slot + 900_000, SlotLenMin: 15, PriceOre: 60, PVW: -5000, LoadW: 800, BatteryW: 3500, GridW: -700, SoCPct: 60},
+			{SlotStartMs: slot + 900_000, SlotLenMin: 15, PriceOre: 60, PVW: -5000, LoadW: 800, BatteryW: 3500, GridW: -700, SoC: 0.6},
 			// Evening peak, battery covers the house.
-			{SlotStartMs: slot + 1_800_000, SlotLenMin: 15, PriceOre: 180, PVW: 0, LoadW: 4000, BatteryW: -3500, GridW: 500, SoCPct: 45},
+			{SlotStartMs: slot + 1_800_000, SlotLenMin: 15, PriceOre: 180, PVW: 0, LoadW: 4000, BatteryW: -3500, GridW: 500, SoC: 0.45},
 			// Nothing to do.
-			{SlotStartMs: slot + 2_700_000, SlotLenMin: 15, PriceOre: 55, PVW: 0, LoadW: 600, BatteryW: 0, GridW: 600, SoCPct: 45},
+			{SlotStartMs: slot + 2_700_000, SlotLenMin: 15, PriceOre: 55, PVW: 0, LoadW: 600, BatteryW: 0, GridW: 600, SoC: 0.45},
 		},
 	}
 }
@@ -93,14 +93,14 @@ func TestPlanReasonsAreStableCodes(t *testing.T) {
 // outranks the price bands when both could explain a slot.
 func TestDefendingACeilingReadsAsPeakShaving(t *testing.T) {
 	ceiling := int64(9000)
-	a := mpc.Action{PriceOre: 50, PVW: 0, LoadW: 12000, BatteryW: -3000, GridW: 9000, SoCPct: 50}
+	a := mpc.Action{PriceOre: 50, PVW: 0, LoadW: 12000, BatteryW: -3000, GridW: 9000, SoC: 0.5}
 	if got := reasonCode(a, 100, 40, &ceiling); got != ReasonPeakShaving {
 		t.Fatalf("reason = %q, want %q", got, ReasonPeakShaving)
 	}
 }
 
 func TestDischargingIntoAnExportingMeterReadsAsPaidExport(t *testing.T) {
-	a := mpc.Action{PriceOre: 200, PVW: 0, LoadW: 500, BatteryW: -4000, GridW: -3500, SoCPct: 50}
+	a := mpc.Action{PriceOre: 200, PVW: 0, LoadW: 500, BatteryW: -4000, GridW: -3500, SoC: 0.5}
 	if got := reasonCode(a, 100, 20, nil); got != ReasonExportPaid {
 		t.Fatalf("reason = %q, want %q", got, ReasonExportPaid)
 	}
@@ -110,14 +110,14 @@ func TestDischargingIntoAnExportingMeterReadsAsPaidExport(t *testing.T) {
 // refusing to spend the reserve, which is worth naming rather than calling
 // nothing.
 func TestHoldingTheReserveIsNotTheSameAsIdle(t *testing.T) {
-	held := mpc.Action{PriceOre: 200, PVW: 0, LoadW: 600, BatteryW: 0, GridW: 600, SoCPct: 10}
+	held := mpc.Action{PriceOre: 200, PVW: 0, LoadW: 600, BatteryW: 0, GridW: 600, SoC: 0.1}
 	if got := reasonCode(held, 100, 10, nil); got != ReasonReserveHeld {
 		t.Fatalf("reason = %q, want %q", got, ReasonReserveHeld)
 	}
 
 	// The same slot with the battery well above its floor is simply idle.
 	idle := held
-	idle.SoCPct = 70
+	idle.SoC = 70
 	if got := reasonCode(idle, 100, 10, nil); got != ReasonIdle {
 		t.Fatalf("reason = %q, want %q", got, ReasonIdle)
 	}

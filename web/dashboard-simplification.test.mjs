@@ -82,12 +82,28 @@ describe("simplified dashboard overview", () => {
     assert.match(flow, /:host\(\[embedded\]\) \.title/);
   });
 
-  it("replays the first live payload when the Flow component finishes upgrading", () => {
+  it("replays the first live payload when the Flow mapper or component becomes ready", () => {
+    assert.match(app, /lastFlowStatus/);
     assert.match(app, /lastFlowReadings/);
+    assert.match(app, /ftwOnFlowMapperReady/);
     assert.match(
       app,
-      /customElements\.whenDefined\("ftw-energy-flow"\)[\s\S]*?setReadings\(lastFlowReadings\)/,
+      /customElements\.whenDefined\("ftw-energy-flow"\)[\s\S]*?paintEnergyFlow\(lastFlowStatus\)/,
     );
+    assert.match(app, /setReadings\(lastFlowReadings\)/);
+  });
+
+  it("builds the hero from the shared status mapper, not inline 0 W defaults", () => {
+    assert.match(app, /ftwFlowReadingsFromStatus/);
+    assert.doesNotMatch(app, /var gkw = \(data\.grid_w \|\| 0\) \/ 1000/);
+  });
+
+  it("does not feed the live stats strip 0 W when configured solar or battery is offline", () => {
+    assert.match(app, /updateLiveStat\("pv", pvStat/);
+    assert.match(app, /pvConfigured && !pvLive \? null/);
+    assert.match(app, /updateLiveStat\("bat", batStat/);
+    assert.match(app, /batConfigured && !batLive \? null/);
+    assert.match(app, /updateLiveSocStat\(socStat\)/);
   });
 
   it("keeps each live telemetry rendering target singular", () => {
@@ -162,7 +178,7 @@ describe("simplified dashboard overview", () => {
     // The cache-bust token moves whenever plan.js changes; what this test
     // is about is that the page loads plan.js as a module at all.
     assert.match(html, /<script type="module" src="\/plan\.js(\?v=[^"]*)?"><\/script>/);
-    assert.match(plan, /import \{ derivePlanBrief \} from "\.\/plan-brief\.js"/);
+    assert.match(plan, /import \{ derivePlanBrief, unavailablePlannerCopy \} from "\.\/plan-brief\.js"/);
     assert.equal((plan.match(/apiFetch\(['"]\/api\/mpc\/plan['"]/g) || []).length, 1);
     assert.doesNotMatch(app, /apiFetch\(['"]\/api\/mpc\/plan['"]/);
     assert.match(plan, /ftw-plan-data/);

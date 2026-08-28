@@ -292,12 +292,12 @@ type externalError struct {
 }
 
 type externalPlan struct {
-	Mode          Mode             `json:"mode"`
-	HorizonSlots  int              `json:"horizon_slots"`
-	CapacityWh    float64          `json:"capacity_wh"`
-	InitialSoCPct float64          `json:"initial_soc_pct"`
-	TotalCostOre  float64          `json:"total_cost_ore"`
-	Actions       []externalAction `json:"actions"`
+	Mode         Mode             `json:"mode"`
+	HorizonSlots int              `json:"horizon_slots"`
+	CapacityWh   float64          `json:"capacity_wh"`
+	InitialSoC   float64          `json:"initial_soc_pct"`
+	TotalCostOre float64          `json:"total_cost_ore"`
+	Actions      []externalAction `json:"actions"`
 }
 
 type externalAction struct {
@@ -444,9 +444,9 @@ func (o *ExternalOptimizer) buildRequest(slots []Slot, p Params) externalRequest
 	} else if p.CapacityWh > 0 {
 		req.Storages = []externalStorage{{
 			ID: "home-battery", CapacityWh: p.CapacityWh,
-			InitialEnergyWh: p.CapacityWh * p.InitialSoCPct / 100,
-			MinEnergyWh:     p.CapacityWh * p.SoCMinPct / 100,
-			MaxEnergyWh:     p.CapacityWh * p.SoCMaxPct / 100,
+			InitialEnergyWh: p.CapacityWh * p.InitialSoC,
+			MinEnergyWh:     p.CapacityWh * p.SoCMin,
+			MaxEnergyWh:     p.CapacityWh * p.SoCMax,
 			MaxChargeW:      p.MaxChargeW, MaxDischargeW: p.MaxDischargeW,
 			ChargeEfficiency: p.ChargeEfficiency, DischargeEfficiency: p.DischargeEfficiency,
 			TerminalPriceOreKWh: p.TerminalSoCPrice,
@@ -458,17 +458,17 @@ func (o *ExternalOptimizer) buildRequest(slots []Slot, p Params) externalRequest
 		if efficiency <= 0 {
 			efficiency = 0.9
 		}
-		minPct, maxPct := lp.MinPct, lp.MaxPct
-		if maxPct <= minPct {
-			minPct, maxPct = 0, 100
+		minSoC, maxSoC := lp.SoCMin, lp.SoCMax
+		if maxSoC <= minSoC {
+			minSoC, maxSoC = 0, 1
 		}
-		initialPct := math.Max(minPct, math.Min(maxPct, lp.InitialSoCPct))
-		targetPct := math.Max(minPct, math.Min(maxPct, lp.TargetSoCPct))
+		initialSoC := math.Max(minSoC, math.Min(maxSoC, lp.InitialSoC))
+		targetSoC := math.Max(minSoC, math.Min(maxSoC, lp.TargetSoC))
 		req.FlexLoads = append(req.FlexLoads, externalFlexLoad{
 			ID: lp.ID, CapacityWh: lp.CapacityWh,
-			InitialEnergyWh: lp.CapacityWh * initialPct / 100,
-			MaxEnergyWh:     lp.CapacityWh * maxPct / 100,
-			TargetEnergyWh:  lp.CapacityWh * targetPct / 100,
+			InitialEnergyWh: lp.CapacityWh * initialSoC,
+			MaxEnergyWh:     lp.CapacityWh * maxSoC,
+			TargetEnergyWh:  lp.CapacityWh * targetSoC,
 			TargetSlot:      lp.TargetSlotIdx, ChargeEfficiency: efficiency,
 			MaxChargeW: lp.MaxChargeW, AllowedStepsW: steps,
 			SurplusOnly: lp.SurplusOnly, NoStorageToLoad: lp.blocksBatteryToEV(),
@@ -506,7 +506,7 @@ func (r externalResponse) toPlan(slots []Slot, p Params) Plan {
 	plan := Plan{
 		GeneratedAtMs: time.Now().UnixMilli(), Mode: p.Mode,
 		HorizonSlots: len(slots), CapacityWh: p.CapacityWh,
-		InitialSoCPct: p.InitialSoCPct, TotalCostOre: r.Plan.TotalCostOre,
+		InitialSoC: p.InitialSoC, TotalCostOre: r.Plan.TotalCostOre,
 		Actions: make([]Action, 0, len(r.Plan.Actions)), Solver: &r.Solver,
 	}
 	meanPrice := 0.0
@@ -524,7 +524,7 @@ func (r externalResponse) toPlan(slots []Slot, p Params) Plan {
 			PriceOre: slot.PriceOre, SpotOre: slot.SpotOre,
 			PVW: slot.PVW, LoadW: slot.LoadW, Confidence: slot.Confidence,
 			BatteryW: candidate.BatteryW, GridW: candidate.GridW,
-			SoCPct: candidate.SoCPct, CostOre: candidate.CostOre,
+			SoC: candidate.SoCPct / 100, CostOre: candidate.CostOre,
 			PVLimitW:        candidate.PVLimitW,
 			StoragePowerW:   candidate.StoragePowerW,
 			StorageEnergyWh: candidate.StorageEnergy,
@@ -532,15 +532,15 @@ func (r externalResponse) toPlan(slots []Slot, p Params) Plan {
 		activeLoadpoints := p.activeLoadpoints()
 		if len(activeLoadpoints) > 0 {
 			action.LoadpointPowerW = make(map[string]float64, len(activeLoadpoints))
-			action.LoadpointSoCPctByID = make(map[string]float64, len(activeLoadpoints))
+			action.LoadpointSoCByID = make(map[string]float64, len(activeLoadpoints))
 			for lpIdx, lp := range activeLoadpoints {
 				powerW := candidate.FlexPowerW[lp.ID]
-				socPct := candidate.FlexEnergyWh[lp.ID] / lp.CapacityWh * 100
+				soc := candidate.FlexEnergyWh[lp.ID] / lp.CapacityWh
 				action.LoadpointPowerW[lp.ID] = powerW
-				action.LoadpointSoCPctByID[lp.ID] = socPct
+				action.LoadpointSoCByID[lp.ID] = soc
 				if lpIdx == 0 {
 					action.LoadpointW = powerW
-					action.LoadpointSoCPct = socPct
+					action.LoadpointSoC = soc
 				}
 			}
 		}
@@ -572,7 +572,7 @@ func ValidatePlan(slots []Slot, p Params, plan *Plan) error {
 	if len(slots) == 0 {
 		return errors.New("empty plan")
 	}
-	soc := p.InitialSoCPct
+	soc := p.InitialSoC
 	storageEnergy := make(map[string]float64, len(p.Storages))
 	storageLowerRecovery := make(map[string]float64, len(p.Storages))
 	storageUpperRecovery := make(map[string]float64, len(p.Storages))
@@ -581,17 +581,17 @@ func ValidatePlan(slots []Slot, p Params, plan *Plan) error {
 		storageLowerRecovery[storage.ID] = math.Max(0, storage.MinEnergyWh-storage.InitialEnergyWh)
 		storageUpperRecovery[storage.ID] = math.Max(0, storage.InitialEnergyWh-storage.MaxEnergyWh)
 	}
-	lowerSoCRecovery := math.Max(0, p.SoCMinPct-p.InitialSoCPct)
-	upperSoCRecovery := math.Max(0, p.InitialSoCPct-p.SoCMaxPct)
+	lowerSoCRecovery := math.Max(0, p.SoCMin-p.InitialSoC)
+	upperSoCRecovery := math.Max(0, p.InitialSoC-p.SoCMax)
 	activeLoadpoints := p.activeLoadpoints()
 	evSoC := make(map[string]float64, len(activeLoadpoints))
 	for _, lp := range activeLoadpoints {
-		evSoC[lp.ID] = lp.InitialSoCPct
+		evSoC[lp.ID] = lp.InitialSoC
 	}
 	totalCost := 0.0
 	for i, slot := range slots {
 		a := plan.Actions[i]
-		values := []float64{a.BatteryW, a.GridW, a.SoCPct, a.CostOre, a.LoadpointW, a.LoadpointSoCPct, a.PVLimitW}
+		values := []float64{a.BatteryW, a.GridW, a.SoC, a.CostOre, a.LoadpointW, a.LoadpointSoC, a.PVLimitW}
 		for _, value := range values {
 			if math.IsNaN(value) || math.IsInf(value, 0) {
 				return fmt.Errorf("slot %d contains non-finite output", i)
@@ -642,25 +642,25 @@ func ValidatePlan(slots []Slot, p Params, plan *Plan) error {
 			if math.Abs(a.BatteryW-totalPowerW) > 2 {
 				return fmt.Errorf("slot %d aggregate battery_w %.3f, want %.3f", i, a.BatteryW, totalPowerW)
 			}
-			soc = totalEnergyWh / p.CapacityWh * 100
+			soc = totalEnergyWh / p.CapacityWh
 		} else if a.BatteryW >= 0 {
-			soc += a.BatteryW * dtH * p.ChargeEfficiency / p.CapacityWh * 100
+			soc += a.BatteryW * dtH * p.ChargeEfficiency / p.CapacityWh
 		} else {
-			soc += a.BatteryW * dtH / p.DischargeEfficiency / p.CapacityWh * 100
+			soc += a.BatteryW * dtH / p.DischargeEfficiency / p.CapacityWh
 		}
-		lowerRecovery := math.Max(0, p.SoCMinPct-soc)
-		upperRecovery := math.Max(0, soc-p.SoCMaxPct)
-		if lowerRecovery > lowerSoCRecovery+0.02 || upperRecovery > upperSoCRecovery+0.02 || math.Abs(a.SoCPct-soc) > 0.02 {
-			return fmt.Errorf("slot %d SoC %.4f inconsistent with replay %.4f", i, a.SoCPct, soc)
+		lowerRecovery := math.Max(0, p.SoCMin-soc)
+		upperRecovery := math.Max(0, soc-p.SoCMax)
+		if lowerRecovery > lowerSoCRecovery+0.0002 || upperRecovery > upperSoCRecovery+0.0002 || math.Abs(a.SoC-soc) > 0.0002 {
+			return fmt.Errorf("slot %d SoC %.4f inconsistent with replay %.4f", i, a.SoC, soc)
 		}
 		lowerSoCRecovery = math.Min(lowerSoCRecovery, lowerRecovery)
 		upperSoCRecovery = math.Min(upperSoCRecovery, upperRecovery)
 		totalLoadpointW := 0.0
 		for lpIdx, lp := range activeLoadpoints {
 			powerW := a.LoadpointPowerW[lp.ID]
-			reportedSoC := a.LoadpointSoCPctByID[lp.ID]
+			reportedSoC := a.LoadpointSoCByID[lp.ID]
 			if len(a.LoadpointPowerW) == 0 && lpIdx == 0 {
-				powerW, reportedSoC = a.LoadpointW, a.LoadpointSoCPct
+				powerW, reportedSoC = a.LoadpointW, a.LoadpointSoC
 			}
 			if math.IsNaN(powerW) || math.IsInf(powerW, 0) || math.IsNaN(reportedSoC) || math.IsInf(reportedSoC, 0) {
 				return fmt.Errorf("slot %d loadpoint %s contains non-finite output", i, lp.ID)
@@ -673,8 +673,8 @@ func ValidatePlan(slots []Slot, p Params, plan *Plan) error {
 			if eff <= 0 {
 				eff = 0.9
 			}
-			evSoC[lp.ID] += powerW * dtH * eff / lp.CapacityWh * 100
-			if math.Abs(reportedSoC-evSoC[lp.ID]) > 0.02 {
+			evSoC[lp.ID] += powerW * dtH * eff / lp.CapacityWh
+			if math.Abs(reportedSoC-evSoC[lp.ID]) > 0.0002 {
 				return fmt.Errorf("slot %d loadpoint %s SoC %.4f inconsistent with replay %.4f", i, lp.ID, reportedSoC, evSoC[lp.ID])
 			}
 			totalLoadpointW += powerW
@@ -693,9 +693,6 @@ func ValidatePlan(slots []Slot, p Params, plan *Plan) error {
 			}
 			if lp.SurplusOnly && powerW > 0 && a.GridW > 50 {
 				return fmt.Errorf("slot %d surplus-only loadpoint %s imports from grid", i, lp.ID)
-			}
-			if lp.SurplusOnly && a.BatteryW > 0 && a.GridW > 50 {
-				return fmt.Errorf("slot %d surplus-only loadpoint %s permits grid-funded battery charge", i, lp.ID)
 			}
 			if powerW > 0 && a.BatteryW < 0 && a.GridW < -50 {
 				return fmt.Errorf("slot %d loadpoint %s charges during battery-driven export", i, lp.ID)

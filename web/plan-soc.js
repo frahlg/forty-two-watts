@@ -1,7 +1,8 @@
-// Reconstruct planned battery SoC when a slot omits a finite soc_pct.
-// The on-box Plan chart used to treat a missing value as 0% (canvas NaN
-// becomes the 0% axis) and skip the tooltip row, while the help report
-// still printed Charge end from the in-memory Go plan.
+// Reconstruct planned battery SoC when a slot omits a finite soc.
+// Plan JSON stores SoC as a 0–1 fraction. The on-box Plan chart used to
+// treat a missing value as 0% (canvas NaN becomes the 0% axis) and skip
+// the tooltip row, while the help report still printed Charge end from
+// the in-memory Go plan.
 
 export function finiteNumber(value) {
   return typeof value === "number" && Number.isFinite(value);
@@ -20,9 +21,14 @@ function storageEnergyWh(action) {
   return any ? sum : null;
 }
 
-function clampPct(pct) {
+function clampFrac(soc) {
+  if (!finiteNumber(soc)) return null;
+  return Math.min(1, Math.max(0, soc));
+}
+
+function legacyPercentToFrac(pct) {
   if (!finiteNumber(pct)) return null;
-  return Math.min(100, Math.max(0, pct));
+  return pct / 100;
 }
 
 function integrateBatteryWh(batteryW, slotLenMin, chargeEff, dischargeEff) {
@@ -35,16 +41,18 @@ function integrateBatteryWh(batteryW, slotLenMin, chargeEff, dischargeEff) {
   return batteryW * hours / discharge;
 }
 
-export function actionSoCPct(action, {
+export function actionSoC(action, {
   capacityWh = null,
   prevSoC = null,
   chargeEff = 1,
   dischargeEff = 1,
 } = {}) {
-  if (finiteNumber(action && action.soc_pct)) return action.soc_pct;
+  if (finiteNumber(action && action.soc)) return action.soc;
+  const legacy = legacyPercentToFrac(action && action.soc_pct);
+  if (legacy != null) return legacy;
   const storedWh = storageEnergyWh(action);
   if (finiteNumber(storedWh) && finiteNumber(capacityWh) && capacityWh > 0) {
-    return clampPct(storedWh / capacityWh * 100);
+    return clampFrac(storedWh / capacityWh);
   }
   if (!finiteNumber(prevSoC) || !finiteNumber(capacityWh) || capacityWh <= 0) return null;
   const deltaWh = integrateBatteryWh(
@@ -53,18 +61,20 @@ export function actionSoCPct(action, {
     chargeEff,
     dischargeEff,
   );
-  return clampPct(prevSoC + deltaWh / capacityWh * 100);
+  return clampFrac(prevSoC + deltaWh / capacityWh);
 }
 
 export function fillPlanSoC(plan, opts = {}) {
   if (!plan || !Array.isArray(plan.actions)) return plan;
   const capacityWh = finiteNumber(plan.capacity_wh) ? plan.capacity_wh : null;
-  let prevSoC = finiteNumber(plan.initial_soc_pct) ? plan.initial_soc_pct : null;
+  let prevSoC = finiteNumber(plan.initial_soc)
+    ? plan.initial_soc
+    : legacyPercentToFrac(plan.initial_soc_pct);
   for (const action of plan.actions) {
-    const pct = actionSoCPct(action, { capacityWh, prevSoC, ...opts });
-    if (!finiteNumber(pct)) continue;
-    action.soc_pct = pct;
-    prevSoC = pct;
+    const soc = actionSoC(action, { capacityWh, prevSoC, ...opts });
+    if (!finiteNumber(soc)) continue;
+    action.soc = soc;
+    prevSoC = soc;
   }
   return plan;
 }

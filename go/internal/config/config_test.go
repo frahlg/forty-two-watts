@@ -257,7 +257,7 @@ v2x:
 	if c.V2X == nil {
 		t.Fatal("v2x policy not parsed")
 	}
-	if !c.V2X.Enabled || c.V2X.DriverName != "ferroamp" || c.V2X.MinReserveSoCPct != 35 {
+	if !c.V2X.Enabled || c.V2X.DriverName != "ferroamp" || c.V2X.MinReserveSoC != 0.35 {
 		t.Fatalf("unexpected v2x policy: %+v", c.V2X)
 	}
 }
@@ -634,9 +634,9 @@ weather:
 		t.Fatal("partial geometry must not be treated as a north-facing array")
 	}
 	northFlat := c.Weather.PVArrays[1]
-	tilt, azimuth, kwp, ok := northFlat.CompleteGeometry()
-	if !ok || tilt != 0 || azimuth != 0 || kwp != 5 {
-		t.Fatalf("explicit zero geometry should remain valid: tilt=%v azimuth=%v kwp=%v ok=%v", tilt, azimuth, kwp, ok)
+	tilt, azimuth, ratedW, ok := northFlat.CompleteGeometry()
+	if !ok || tilt != 0 || azimuth != 0 || ratedW != 5000 {
+		t.Fatalf("explicit zero geometry should remain valid: tilt=%v azimuth=%v ratedW=%v ok=%v", tilt, azimuth, ratedW, ok)
 	}
 }
 

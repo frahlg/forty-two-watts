@@ -28,6 +28,8 @@ package api
 import (
 	"context"
 	"fmt"
+
+	"github.com/srcfl/ftw/go/internal/units"
 	"math"
 	"net/http"
 	"sort"
@@ -472,7 +474,7 @@ func writePlanSection(
 			a.PriceOre, a.SpotOre,
 			fmtReportW(a.PVW), fmtReportW(a.LoadW),
 			fmtReportW(a.BatteryW), fmtReportW(a.GridW),
-			a.SoCPct, a.Reason)
+			units.PercentFromFraction(a.SoC), a.Reason)
 		shown++
 	}
 	if shown == 0 {

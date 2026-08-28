@@ -116,9 +116,9 @@ func TestReplanCallsSaveDiag(t *testing.T) {
 		Mode:                ModeSelfConsumption,
 		SoCLevels:           11,
 		CapacityWh:          10000,
-		SoCMinPct:           10,
-		SoCMaxPct:           95,
-		InitialSoCPct:       50,
+		SoCMin: 0.1,
+		SoCMax: 0.95,
+		InitialSoC: 0.5,
 		ActionLevels:        5,
 		MaxChargeW:          3000,
 		MaxDischargeW:       3000,
@@ -221,7 +221,7 @@ func TestReplanWithoutSaveDiagAssignsDistinctDecisionIDs(t *testing.T) {
 	}})
 	svc := New(st, nil, "SE3", Params{
 		Mode: ModeSelfConsumption, SoCLevels: 11, CapacityWh: 10000,
-		SoCMinPct: 10, SoCMaxPct: 95, InitialSoCPct: 50,
+		SoCMin: 0.1, SoCMax: 0.95, InitialSoC: 0.5,
 		ActionLevels: 5, MaxChargeW: 2000, MaxDischargeW: 2000,
 		ChargeEfficiency: 0.95, DischargeEfficiency: 0.95,
 	})
@@ -271,7 +271,7 @@ func TestReplanRejectsTimelineItCannotRestore(t *testing.T) {
 
 	svc := New(st, nil, "SE3", Params{
 		Mode: ModeSelfConsumption, SoCLevels: 11, CapacityWh: 10000,
-		SoCMinPct: 10, SoCMaxPct: 95, InitialSoCPct: 50,
+		SoCMin: 0.1, SoCMax: 0.95, InitialSoC: 0.5,
 		ActionLevels: 5, MaxChargeW: 2000, MaxDischargeW: 2000,
 		ChargeEfficiency: 0.95, DischargeEfficiency: 0.95,
 	})
@@ -336,7 +336,7 @@ func TestReplanRejectsOptimizerTimelineThatChangesActionKey(t *testing.T) {
 
 	svc := New(st, nil, "SE3", Params{
 		Mode: ModeSelfConsumption, SoCLevels: 11, CapacityWh: 10000,
-		SoCMinPct: 10, SoCMaxPct: 95, InitialSoCPct: 50,
+		SoCMin: 0.1, SoCMax: 0.95, InitialSoC: 0.5,
 		ActionLevels: 5, MaxChargeW: 2000, MaxDischargeW: 2000,
 		ChargeEfficiency: 0.95, DischargeEfficiency: 0.95,
 	})
@@ -417,7 +417,7 @@ func TestReplanRetainsInputProvenanceAcrossOptimizerPaths(t *testing.T) {
 
 			svc := New(st, nil, "SE3", Params{
 				Mode: ModeSelfConsumption, SoCLevels: 11, CapacityWh: 10000,
-				SoCMinPct: 10, SoCMaxPct: 95, InitialSoCPct: 50,
+				SoCMin: 0.1, SoCMax: 0.95, InitialSoC: 0.5,
 				ActionLevels: 5, MaxChargeW: 2000, MaxDischargeW: 2000,
 				ChargeEfficiency: 0.95, DischargeEfficiency: 0.95,
 			})
@@ -481,7 +481,7 @@ func TestReplanLoadsHourlyWeatherCoveringCurrentPriceSlot(t *testing.T) {
 
 	svc := New(st, nil, "SE3", Params{
 		Mode: ModeSelfConsumption, SoCLevels: 11, CapacityWh: 10000,
-		SoCMinPct: 10, SoCMaxPct: 95, InitialSoCPct: 50,
+		SoCMin: 0.1, SoCMax: 0.95, InitialSoC: 0.5,
 		ActionLevels: 5, MaxChargeW: 2000, MaxDischargeW: 2000,
 		ChargeEfficiency: 0.95, DischargeEfficiency: 0.95,
 	})
@@ -515,7 +515,7 @@ func TestPrimaryOptimizerKeepsDPAsDiagnosticShadow(t *testing.T) {
 	}
 	svc := New(st, nil, "SE3", Params{
 		Mode: ModePassiveArbitrage, SoCLevels: 11, CapacityWh: 10000,
-		SoCMinPct: 10, SoCMaxPct: 95, InitialSoCPct: 50,
+		SoCMin: 0.1, SoCMax: 0.95, InitialSoC: 0.5,
 		ActionLevels: 5, MaxChargeW: 2000, MaxDischargeW: 2000,
 		ChargeEfficiency: 0.95, DischargeEfficiency: 0.95,
 	})
@@ -562,7 +562,7 @@ func TestPrimaryOptimizerCanSelectMultistageShadow(t *testing.T) {
 	}
 	svc := New(st, nil, "SE3", Params{
 		Mode: ModePassiveArbitrage, SoCLevels: 11, CapacityWh: 10000,
-		SoCMinPct: 10, SoCMaxPct: 95, InitialSoCPct: 50,
+		SoCMin: 0.1, SoCMax: 0.95, InitialSoC: 0.5,
 		ActionLevels: 5, MaxChargeW: 2000, MaxDischargeW: 2000,
 		ChargeEfficiency: 0.95, DischargeEfficiency: 0.95,
 	})

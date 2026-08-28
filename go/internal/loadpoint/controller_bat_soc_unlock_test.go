@@ -29,17 +29,17 @@ func TestEvalBatSoCArm_RequiresLivePV(t *testing.T) {
 	soc := 0.85
 	surplus := 1500.0 // PV producing
 	c := armCtrl(&soc, &surplus)
-	if !c.evalBatSoCArm("garage", 80) {
+	if !c.evalBatSoCArm("garage", 0.8) {
 		t.Fatal("should arm: bat 85% >= threshold AND PV > 0")
 	}
 	// PV gone — staying armed for a few ticks (hysteresis), then released.
 	surplus = -100
 	for i := 0; i < batSoCPVGoneTicks-1; i++ {
-		if !c.evalBatSoCArm("garage", 80) {
+		if !c.evalBatSoCArm("garage", 0.8) {
 			t.Errorf("tick %d: should still be armed during PV-gone hysteresis", i)
 		}
 	}
-	if c.evalBatSoCArm("garage", 80) {
+	if c.evalBatSoCArm("garage", 0.8) {
 		t.Error("after PV-gone hysteresis ticks expired, should release")
 	}
 }
@@ -48,16 +48,16 @@ func TestEvalBatSoCArm_PVReturnRearms(t *testing.T) {
 	soc := 0.85
 	surplus := 1500.0
 	c := armCtrl(&soc, &surplus)
-	c.evalBatSoCArm("garage", 80) // arm
+	c.evalBatSoCArm("garage", 0.8) // arm
 
 	// Brief PV dip: 3 ticks no PV (below batSoCPVGoneTicks threshold)
 	surplus = 0
 	for i := 0; i < 3; i++ {
-		c.evalBatSoCArm("garage", 80)
+		c.evalBatSoCArm("garage", 0.8)
 	}
 	// PV comes back before hysteresis expires
 	surplus = 1500
-	if !c.evalBatSoCArm("garage", 80) {
+	if !c.evalBatSoCArm("garage", 0.8) {
 		t.Error("brief PV dip must not disarm before hysteresis ticks expire")
 	}
 }
@@ -66,9 +66,9 @@ func TestEvalBatSoCArm_SoCBelowReleaseDisarms(t *testing.T) {
 	soc := 0.85
 	surplus := 1500.0
 	c := armCtrl(&soc, &surplus)
-	c.evalBatSoCArm("garage", 80) // arm
-	soc = 0.74                    // below threshold-hyst (80-5=75) → release
-	if c.evalBatSoCArm("garage", 80) {
+	c.evalBatSoCArm("garage", 0.8) // arm
+	soc = 0.74                     // below threshold-hyst (80-5=75) → release
+	if c.evalBatSoCArm("garage", 0.8) {
 		t.Error("soc 74% < 75% release floor must disarm regardless of PV")
 	}
 }
@@ -77,10 +77,10 @@ func TestEvalBatSoCArm_StalePreservesState(t *testing.T) {
 	soc := 0.85
 	surplus := 1500.0
 	c := armCtrl(&soc, &surplus)
-	c.evalBatSoCArm("garage", 80) // arm
+	c.evalBatSoCArm("garage", 0.8) // arm
 	// Stale bat_soc — must preserve.
 	c.SetBatSoCProvider(func() (float64, bool) { return 0, false })
-	if !c.evalBatSoCArm("garage", 80) {
+	if !c.evalBatSoCArm("garage", 0.8) {
 		t.Error("stale bat_soc reading must preserve previous arm state")
 	}
 }
@@ -97,7 +97,7 @@ func TestEvalBatSoCArm_ZeroThresholdDisables(t *testing.T) {
 func TestSurplusActive_NilProviderGracefullyOff(t *testing.T) {
 	c := NewController(NewManager(), nil, nil, nil)
 	cfg := Config{ID: "garage", SurplusOnly: false}
-	sched := Schedule{SurplusUnlockBatSoCPct: 80}
+	sched := Schedule{SurplusUnlockBatSoC: 0.8}
 	if c.surplusActive(cfg, sched) {
 		t.Error("nil bat-soc provider: surplusActive should be false when SurplusOnly is off")
 	}
@@ -166,20 +166,20 @@ func TestAnyLoadpointSurplusActive(t *testing.T) {
 	}
 
 	// Schedule with bat-SoC unlock, but not yet evaluated (no Tick) → false
-	m.SetSchedule("garage", Schedule{SurplusUnlockBatSoCPct: 80})
+	m.SetSchedule("garage", Schedule{SurplusUnlockBatSoC: 0.8})
 	if c.AnyLoadpointSurplusActive() {
 		t.Error("schedule alone (without evalBatSoCArm being called) must not flip true")
 	}
 
 	// Evaluate arm — bat 85% with PV > 0 should arm; then aggregator true.
-	c.evalBatSoCArm("garage", 80)
+	c.evalBatSoCArm("garage", 0.8)
 	if !c.AnyLoadpointSurplusActive() {
 		t.Error("after arm via evalBatSoCArm, aggregator must report true")
 	}
 
 	// Disarm via SoC drop → aggregator back to false.
 	soc = 0.50
-	c.evalBatSoCArm("garage", 80)
+	c.evalBatSoCArm("garage", 0.8)
 	if c.AnyLoadpointSurplusActive() {
 		t.Error("after disarm, aggregator must report false")
 	}

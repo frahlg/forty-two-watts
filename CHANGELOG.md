@@ -1,5 +1,90 @@
 # Changelog
 
+## 2.2.1
+
+### Patch Changes
+
+- 77c9514: The phone app now shows EV charging as its own number, the same way the local page does. A charger that is drawing but cannot take a command no longer hides that draw inside "house", and the battery no longer discharges into the car when cover-EV is off.
+- 9fdc46d: The house password can only be turned on from loopback inside the process. Saving Settings can no longer flip that lock through the whole config document. On Docker Desktop that means `compose exec`, not a host curl to localhost.
+- e2187f4: An owner pairing code can only be minted on the box itself, or after the house password is on. The same gate covers promoting a phone to owner and the first pairing on an empty box, which would otherwise become an owner. A viewer invite still works from the LAN once an owner exists.
+- 60fbf35: FTW now rejects corrupt, non-finite, and non-positive exchange rates before they can enter price data.
+- 5adda2f: A hostname with no dot is no longer treated as local. If the driver catalog cannot be read, or a configured driver is missing from it, config secrets stay hidden. Driver test and fingerprint refuse loopback, localhost, and link-local targets on MQTT, Modbus, HTTP, WebSocket and TCP.
+
+## 2.2.0
+
+### Minor Changes
+
+- f258a4d: Core stores power in watts, energy in watt-hours, SoC as 0–1, and PV arrays as rated watts. kWp and 0–100 percents remain only at UI, Home Assistant, appproto, calendar titles, and the forecast.solar URL. Loadpoint, calendar, vehicle telemetry, and V2X envelopes use 0–1 without `_pct` names. Pasting watts into the old kWp field is converted on config load. Heat-pump diagnostics emit W/Wh.
+
+### Patch Changes
+
+- 19f9264: An MQTT driver that stops draining its subscription no longer grows the inbound queue without limit. The buffer is bounded at 1024 messages, dropping the oldest half on overflow — the same rule the websocket and TCP capabilities already follow — so a stalled driver on a busy broker can no longer exhaust memory on the box.
+- 810fef9: The dashboard escapes driver names and planner reasons before putting them in HTML, so a crafted name cannot run script in the browser.
+- 1642fe3: Load forecast slots are hard-cut to the site fuse and cannot sit far below recent days. A 100 W overnight prediction on a lived-in house is lifted to the existing 25% prior floor before it reaches the planner.
+- 762e135: When planning cannot start, the Plan view now says why — a missing battery, no prices, or the planner being off — instead of asking you to pick a strategy you already picked.
+- f65007e: Public hosts now need the API token for diagnose, series, EV detail, driver list, fleet ping, and similar reads. The live dashboard (status, energy, prices, plan, loadpoints) stays open.
+- 1642fe3: A PV forecast can no longer exceed the site nameplate. Pasting watts into array kWp (18960 W → 18960 kWp) is treated as 18.96 kW, and both the stored forecast and the plan are hard-cut at rated watts.
+- b8cd2b6: A slew rate of 0 W/cycle no longer freezes battery dispatch. The limiter anchors on the battery's measured power, so a zero budget snapped every target back to whatever the battery was already doing and the site held that power until restart. Non-positive now means "no external ramp limit", the same as `slew_enabled: false`.
+
+## 2.1.0
+
+### Minor Changes
+
+- 928c9d5: Optional `api.lan_auth` asks for a house password on the LAN before config, logs, dumps and writes. Off by default. Loopback and the phone app stay as they are.
+- eec4c86: When LAN auth is on, the dashboard asks for the house password and keeps a session cookie. Settings → System turns the lock on and off.
+- 60685f6: Core now actually sends the solar surplus to a driver whose Solar PV feed is armed. Every control tick computes the site's solar-attributable export — the smaller of live PV generation and grid export, after subtracting battery/V2X discharge so stored energy is never advertised as sunshine — and hands it, site-signed, to every driver whose operator enabled the write path (the `solar_pv` action, e.g. the NIBE S-series surplus feed). Dispatch runs behind the existing site-meter freshness gate: stale telemetry stops the feed and the driver's default mode / dead-man switch clears the device register. Standing refusals (pump-side enable still off) log once per transition instead of every tick.
+- 60685f6: A driver's opt-in write path can be turned on from Settings, instead of by
+  hand-editing two keys in config.yaml.
+
+  Everything in the catalog reads. One driver can also write — the NIBE S-series
+  solar surplus feed — and arming it meant setting `config.write.solar_pv` on the
+  driver _and_ `capabilities.http.allow_write` on the host, neither of which the
+  settings screen offered. An owner could install the driver from a card in the
+  UI and then had no way to use the one thing it was built for.
+
+  A driver now names its write paths in its `DRIVER` block
+  (`write_capabilities = { "solar_pv" }`), and Settings → Devices grows a _Solar
+  PV surplus feed_ panel on the drivers that declare one: a switch and the
+  maximum surplus to report. A driver that declares nothing gets no panel and no
+  markup, so read-only drivers are untouched and nothing about writing is written
+  into their config.
+
+  The panel keeps the safety properties the YAML had, where an operator can see
+  them. One switch moves both gates, because holding one without the other never
+  wrote anything anyway — the host refuses the verb without the grant, and the
+  driver disables the feed without the verb — so a half-armed config reads as
+  off. The feed will not arm without a maximum above 0: that ceiling is what
+  stops a sign error or a telemetry spike from telling a pump there are 100 kW
+  going spare, and clearing it disarms a running feed. What the pump needs at its
+  own end — installer menu 7.5.15 set to read/write, its Solar PV input on —
+  cannot be checked from FTW, so the panel says so rather than letting the writes
+  fail silently as `read only value`.
+
+  The local-API help text also stopped telling NIBE owners to enable the API in
+  the myUplink app. It is generated on the pump's own screen; there is no app and
+  no cloud account in that path.
+
+### Patch Changes
+
+- 1be6c0c: Active arbitrage can buy from the grid again while a surplus-only EV is plugged in.
+
+  Surplus-only still keeps the car off the grid and still forbids feeding it from the home battery. Those two rules already stop "cheap grid laundered through the Pixii into the car". The extra rule that also forbade charging the house battery from the grid, for the whole time the car sat on the charger, is gone — including the automatic surplus-only that kicks in when the EV deadline is past published prices.
+
+  Unpublished hours after the day-ahead cut-off no longer jump to the hour-of-week climatology (often 60–80 öre right after a 200 öre evening). They start from the last known spot and fade toward the typical curve over about six hours, so the planner does not skip charging on a price crash that has not happened yet.
+
+  The load twin's overnight prior is 650 W instead of 300 W, which is closer to a current Swedish house on a cold start or a repaired night bucket.
+
+- 359e080: The setup wizard now installs a discovered device by its self-broadcast mDNS
+  (.local) name instead of its raw IP when the device advertises one, so the
+  connection survives DHCP lease changes. When only an IP address is used, the
+  wizard and device settings now tell the operator to reserve that IP for the
+  device in the router's DHCP settings.
+- d17141a: Startup no longer hard-fails when GitHub/GHCR is unreachable. `docker compose pull` fetches images from ghcr.io (GitHub Container Registry), and every start path gated `up` on it: `scripts/install.sh` (under `set -e`) aborted before `up -d`, and the Raspberry Pi first-boot provisioner retried the pull forever and never reached `up -d`. During a GitHub outage that left the box unable to start.
+
+  The pull is now best-effort and the stack starts from the locally-present last-known-good images instead: install falls through to `up -d` after a failed pull, and first-boot brings the stack up on local images first, only reaching GHCR for a genuinely missing image. A truly fresh host with no local image still needs GHCR reachable — pre-baking images into the OS image is the follow-up for that.
+
+- 3afa0b4: A brief GitHub outage no longer sticks as the last update-check error for hours. The checker retries 5xx and 429 replies a few times, does not cache a failed check, and the Updates dialog retries on its own and says Check for updates will try again.
+
 ## 2.0.0
 
 ### Major Changes

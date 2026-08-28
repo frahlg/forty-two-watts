@@ -8,17 +8,17 @@ import (
 
 func planSlot(now time.Time, offMin, lenMin int, batW, soc float64) PlanSlot {
 	s := now.Add(time.Duration(offMin) * time.Minute)
-	return PlanSlot{Start: s, End: s.Add(time.Duration(lenMin) * time.Minute), BatteryW: batW, SoCPct: soc}
+	return PlanSlot{Start: s, End: s.Add(time.Duration(lenMin) * time.Minute), BatteryW: batW, SoC: soc}
 }
 
 func TestBuildPlanBlocksCoalesces(t *testing.T) {
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 	slots := []PlanSlot{
-		planSlot(now, 0, 15, 3000, 55),   // charge
-		planSlot(now, 15, 15, 3200, 60),  // charge (same run)
-		planSlot(now, 30, 15, 50, 60),    // hold → breaks the run, not published
-		planSlot(now, 45, 15, -2000, 50), // discharge
-		planSlot(now, 60, 15, -2100, 45), // discharge (same run)
+		planSlot(now, 0, 15, 3000, 0.55),   // charge
+		planSlot(now, 15, 15, 3200, 0.60),  // charge (same run)
+		planSlot(now, 30, 15, 50, 0.60),    // hold → breaks the run, not published
+		planSlot(now, 45, 15, -2000, 0.50), // discharge
+		planSlot(now, 60, 15, -2100, 0.45), // discharge (same run)
 	}
 	blocks := buildPlanBlocks(slots, now)
 	if len(blocks) != 2 {
@@ -41,8 +41,8 @@ func TestBuildPlanBlocksCoalesces(t *testing.T) {
 func TestBuildPlanBlocksSkipsPast(t *testing.T) {
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 	slots := []PlanSlot{
-		planSlot(now, -120, 60, 3000, 50), // ended an hour ago → skipped
-		planSlot(now, -60, 60, 3000, 60),  // ended exactly at now → skipped (End not after now)
+		planSlot(now, -120, 60, 3000, 0.50), // ended an hour ago → skipped
+		planSlot(now, -60, 60, 3000, 0.60),  // ended exactly at now → skipped (End not after now)
 	}
 	if blocks := buildPlanBlocks(slots, now); len(blocks) != 0 {
 		t.Fatalf("past blocks should be skipped, got %d: %+v", len(blocks), blocks)
@@ -51,7 +51,7 @@ func TestBuildPlanBlocksSkipsPast(t *testing.T) {
 
 func TestBuildPlanBlocksSpanningNowIncluded(t *testing.T) {
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
-	slots := []PlanSlot{planSlot(now, -30, 120, 4000, 70)} // started 30m ago, ends in 90m
+	slots := []PlanSlot{planSlot(now, -30, 120, 4000, 0.70)} // started 30m ago, ends in 90m
 	blocks := buildPlanBlocks(slots, now)
 	if len(blocks) != 1 {
 		t.Fatalf("block spanning now should be included, got %d", len(blocks))
@@ -63,7 +63,7 @@ func TestBuildPlanBlocksSpanningNowIncluded(t *testing.T) {
 
 func TestPlanBlockHashStableAndUID(t *testing.T) {
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
-	slots := []PlanSlot{planSlot(now, 60, 60, 5000, 80)}
+	slots := []PlanSlot{planSlot(now, 60, 60, 5000, 0.80)}
 	a := buildPlanBlocks(slots, now)
 	b := buildPlanBlocks(slots, now)
 	if a[0].uid != b[0].uid {

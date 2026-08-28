@@ -62,6 +62,80 @@ func TestAppSnapshotKeepsTheSiteSignConvention(t *testing.T) {
 	}
 }
 
+// The LAN dashboard splits house and car from every charger that is still
+// reporting, including one that cannot take a command. The app snapshot has
+// to do the same: hiding that draw in load_w is how the phone showed EV at
+// 0 W and house at house+car.
+func TestAppSnapshotSplitsEVFromHouseLoad(t *testing.T) {
+	tel, ctrl := seedSite(t)
+	tel.Update("easee", telemetry.DerEV, 2000, nil, nil)
+	tel.RecordDriverSuccess("easee")
+
+	site := &appSite{
+		tel: tel, ctrl: ctrl, ctrlMu: &sync.Mutex{},
+		revision: &control.Revision{}, started: time.Now(),
+		siteMeterStale: time.Minute,
+	}
+	snap := site.Snapshot()
+
+	if !snap.EVWKnown {
+		t.Fatal("a site with a charger did not send field 10")
+	}
+	if snap.EVW != 2000 {
+		t.Fatalf("ev = %v, want 2000", snap.EVW)
+	}
+	// grid 1200, battery +900, PV -3400, EV 2000 → house 1700.
+	if snap.LoadW != 1700 {
+		t.Fatalf("load = %v, want 1700 (house, not house+car)", snap.LoadW)
+	}
+}
+
+func TestAppSnapshotCountsAFaultedChargersDraw(t *testing.T) {
+	tel, ctrl := seedSite(t)
+	tel.Update("easee", telemetry.DerEV, 2000, nil, nil)
+	tel.RecordDriverSuccess("easee")
+	tel.SetDriverDeviceFault("easee", true, "setpoint refused")
+
+	site := &appSite{
+		tel: tel, ctrl: ctrl, ctrlMu: &sync.Mutex{},
+		revision: &control.Revision{}, started: time.Now(),
+		siteMeterStale: time.Minute,
+	}
+	snap := site.Snapshot()
+
+	if !snap.EVWKnown || snap.EVW != 2000 {
+		t.Fatalf("ev = %v known=%v; a faulted charger is still drawing", snap.EVW, snap.EVWKnown)
+	}
+	if snap.LoadW != 1700 {
+		t.Fatalf("load = %v; the car's draw landed in the house", snap.LoadW)
+	}
+}
+
+func TestAppSnapshotIgnoresAnOfflineChargersDraw(t *testing.T) {
+	tel, ctrl := seedSite(t)
+	tel.Update("easee", telemetry.DerEV, 11400, nil, nil)
+	tel.RecordDriverSuccess("easee")
+	tel.DriverHealthMut("easee").SetOffline()
+
+	site := &appSite{
+		tel: tel, ctrl: ctrl, ctrlMu: &sync.Mutex{},
+		revision: &control.Revision{}, started: time.Now(),
+		siteMeterStale: time.Minute,
+	}
+	snap := site.Snapshot()
+
+	if !snap.EVWKnown {
+		t.Fatal("an idle-looking charger that exists must still be named")
+	}
+	if snap.EVW != 0 {
+		t.Fatalf("ev = %v; an offline charger's last-known draw leaked", snap.EVW)
+	}
+	// grid 1200 - bat 900 - pv -3400 = 3700, no EV subtracted.
+	if snap.LoadW != 1200-900+3400 {
+		t.Fatalf("load = %v, want house without a live car", snap.LoadW)
+	}
+}
+
 // An offline driver contributes nothing. Adding its last reading would show a
 // number that is not happening as though it were.
 func TestAppSnapshotIgnoresAnOfflineDriversReading(t *testing.T) {

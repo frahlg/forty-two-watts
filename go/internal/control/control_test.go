@@ -1082,6 +1082,36 @@ func TestPlannerSelfBatteryCoversEVOffExcludesEVFromGrid(t *testing.T) {
 	}
 }
 
+func TestPlannerDoesNotDischargeIntoAFaultedChargersDraw(t *testing.T) {
+	// Site importing 9.9 kW because the car is drawing 11.4 kW against
+	// 1.5 kW of solar-minus-house. The charger is emitting that 11.4 kW
+	// but DeviceFault so it cannot take a command. BatteryCoversEV is
+	// off. Before the TelemetryLive split, IsOnline() hid the car and
+	// the planner discharged the battery into it as if it were house
+	// load.
+	store := seedStore(9900, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	store.Update("easee", telemetry.DerEV, 11400, nil, nil)
+	store.DriverHealthMut("easee").RecordSuccess()
+	store.SetDriverDeviceFault("easee", true, "setpoint refused")
+
+	st := NewState(0, 50, "ferroamp")
+	st.Mode = ModePlannerSelf
+	st.BatteryCoversEV = false
+	st.SlewRateW = 100000
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if st.EVChargingW < 11000 {
+		t.Fatalf("EVChargingW = %f; a faulted charger still drawing was ignored", st.EVChargingW)
+	}
+	if len(targets) > 0 && targets[0].TargetW < -2000 {
+		t.Errorf("battery discharged %.0f W into a car that cover-EV is off for", targets[0].TargetW)
+	}
+}
+
 func TestEVChargingSignalOverriddenByDerEVReading(t *testing.T) {
 	// A DerEV driver reports 4000W. EVChargingW was 0 (no manual slider).
 	// After ComputeDispatch, EVChargingW must reflect the live reading
@@ -5291,7 +5321,7 @@ func TestMeterClampRespectsNonZeroGridTarget(t *testing.T) {
 // ---- PV surplus absorber underlay ----
 //
 // Opt-in policy reversal of TestEnergyDispatchDoesNotAbsorbPVSurprise: when
-// the operator sets a SoC cap (PVSurplusAbsorbSoCCapPct > 0), the dispatch
+// the operator sets a SoC cap (PVSurplusAbsorbSoCCap > 0), the dispatch
 // catches the gap between the planner's 15-min slot allocation and the
 // live PV/load drift — additional export beyond plan flows into the
 // battery instead of out the meter at low spot price. Only kicks in
@@ -5321,7 +5351,7 @@ func TestPVSurplusAbsorberAbsorbsExtraExportWhenEnabled(t *testing.T) {
 	store.DriverHealthMut("pv-1").RecordSuccess()
 
 	st := newStateWithEnergyDispatch(dir, "ferroamp")
-	st.PVSurplusAbsorbSoCCapPct = 88 // enable
+	st.PVSurplusAbsorbSoCCap = 0.88 // enable
 	st.PVSurplusAbsorbThresholdW = 100
 
 	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
@@ -5350,13 +5380,13 @@ func TestPVSurplusAbsorberAbsorbsExtraExportWhenEnabled(t *testing.T) {
 func TestPVSurplusAbsorberDisplacesLaterGridCharge(t *testing.T) {
 	now := time.Now()
 	dir := SlotDirective{
-		SlotStart:              now,
-		SlotEnd:                now.Add(15 * time.Minute),
-		BatteryEnergyWh:        200, // plan only asked for ~800 W now
-		Strategy:               "arbitrage",
-		PlannedGridW:           -1000, // preserve 1 kW of planned PV export
-		HasPlannedGridW:        true,
-		LivePVSurplusSoCCapPct: 80, // energy-derived replacement ceiling
+		SlotStart:           now,
+		SlotEnd:             now.Add(15 * time.Minute),
+		BatteryEnergyWh:     200, // plan only asked for ~800 W now
+		Strategy:            "arbitrage",
+		PlannedGridW:        -1000, // preserve 1 kW of planned PV export
+		HasPlannedGridW:     true,
+		LivePVSurplusSoCCap: 0.8, // energy-derived replacement ceiling
 	}
 	store := seedStore(-4000, []struct {
 		name          string
@@ -5368,7 +5398,7 @@ func TestPVSurplusAbsorberDisplacesLaterGridCharge(t *testing.T) {
 	store.DriverHealthMut("pv-1").RecordSuccess()
 
 	st := newStateWithEnergyDispatch(dir, "ferroamp")
-	// No PVSurplusAbsorbSoCCapPct operator override: the plan directive
+	// No PVSurplusAbsorbSoCCap operator override: the plan directive
 	// alone must enable this economically justified slot.
 	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
 	if len(targets) != 1 {
@@ -5379,7 +5409,7 @@ func TestPVSurplusAbsorberDisplacesLaterGridCharge(t *testing.T) {
 	}
 }
 
-// Defaults preserve back-compat: PVSurplusAbsorbSoCCapPct = 0 means
+// Defaults preserve back-compat: PVSurplusAbsorbSoCCap = 0 means
 // disabled; original "don't absorb surprise" behavior holds.
 func TestPVSurplusAbsorberDisabledByDefault(t *testing.T) {
 	now := time.Now()
@@ -5399,7 +5429,7 @@ func TestPVSurplusAbsorberDisabledByDefault(t *testing.T) {
 	store.DriverHealthMut("pv-1").RecordSuccess()
 
 	st := newStateWithEnergyDispatch(dir, "ferroamp")
-	// No PVSurplusAbsorbSoCCapPct set → defaults to 0 → feature off.
+	// No PVSurplusAbsorbSoCCap set → defaults to 0 → feature off.
 
 	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
 	got := targets[0].TargetW
@@ -5431,7 +5461,7 @@ func TestPVSurplusAbsorberHoldsAtCap(t *testing.T) {
 	store.DriverHealthMut("pv-1").RecordSuccess()
 
 	st := newStateWithEnergyDispatch(dir, "ferroamp")
-	st.PVSurplusAbsorbSoCCapPct = 88
+	st.PVSurplusAbsorbSoCCap = 0.88
 
 	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
 	got := targets[0].TargetW
@@ -5579,6 +5609,36 @@ func TestEnergyDispatchAbsorbsSurplusBeyondEVReserveActualDraw(t *testing.T) {
 	}
 }
 
+func TestEnergyDispatchHonoursPlannedGridChargeWithIdleSurplusOnlyEV(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: 1250, // ~5 kW over 15 min
+		Strategy:        "arbitrage",
+		HasPlannedGridW: true,
+		PlannedGridW:    5500,
+	}
+	store := seedStore(500, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	st := newStateWithEnergyDispatch(dir, "ferroamp")
+	st.EVSurplusOnlyReserveW = 2000
+	st.EVSurplusOnlyChargingW = 0
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	got := targets[0].TargetW
+	if got < 4000 {
+		t.Errorf("TargetW = %.0f W — idle surplus-only EV must not zero a planned night grid-charge (want ~5000)", got)
+	}
+}
+
 func TestEnergyDispatchDoesNotChargeBatteryFromV2XDischargeByDefault(t *testing.T) {
 	now := time.Now()
 	dir := SlotDirective{
@@ -5662,7 +5722,7 @@ func TestPVSurplusAbsorberDoesNotReverseDischarge(t *testing.T) {
 	store.DriverHealthMut("pv-1").RecordSuccess()
 
 	st := newStateWithEnergyDispatch(dir, "ferroamp")
-	st.PVSurplusAbsorbSoCCapPct = 88
+	st.PVSurplusAbsorbSoCCap = 0.88
 
 	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
 	got := targets[0].TargetW
@@ -6302,13 +6362,13 @@ func TestPlannerArbitrageIdleSlotDoesNotAbsorbLiveSurplus(t *testing.T) {
 func TestPlannerPassiveArbitrageIdleSlotPreservesPlannedExportWithAbsorber(t *testing.T) {
 	now := time.Now()
 	dir := SlotDirective{
-		SlotStart:              now,
-		SlotEnd:                now.Add(15 * time.Minute),
-		BatteryEnergyWh:        0,
-		Strategy:               "passive_arbitrage",
-		PlannedGridW:           -2000,
-		HasPlannedGridW:        true,
-		LivePVSurplusSoCCapPct: 80,
+		SlotStart:           now,
+		SlotEnd:             now.Add(15 * time.Minute),
+		BatteryEnergyWh:     0,
+		Strategy:            "passive_arbitrage",
+		PlannedGridW:        -2000,
+		HasPlannedGridW:     true,
+		LivePVSurplusSoCCap: 0.8,
 	}
 	// Meter exports only 100 W because the battery is already absorbing
 	// 1900 W. Without battery charge the site would export the planned 2 kW.
@@ -6340,13 +6400,13 @@ func TestPlannerPassiveArbitrageIdleSlotPreservesPlannedExportWithAbsorber(t *te
 func TestPlannerArbitrageIdleSlotAbsorbsSurplusThatDisplacesGridCharge(t *testing.T) {
 	now := time.Now()
 	dir := SlotDirective{
-		SlotStart:              now,
-		SlotEnd:                now.Add(15 * time.Minute),
-		BatteryEnergyWh:        0,
-		Strategy:               "arbitrage",
-		PlannedGridW:           2000, // plan forecast a load deficit
-		HasPlannedGridW:        true,
-		LivePVSurplusSoCCapPct: 80,
+		SlotStart:           now,
+		SlotEnd:             now.Add(15 * time.Minute),
+		BatteryEnergyWh:     0,
+		Strategy:            "arbitrage",
+		PlannedGridW:        2000, // plan forecast a load deficit
+		HasPlannedGridW:     true,
+		LivePVSurplusSoCCap: 0.8,
 	}
 	store := seedStore(-2000, []struct {
 		name          string

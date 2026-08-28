@@ -100,7 +100,7 @@ func TestPlanReconcileReclaimsOrphansOnRestart(t *testing.T) {
 	// Fresh service (empty planWritten, planSeeded=false) models the restart.
 	s := planService(t, srv.URL)
 	s.SetPlanSource(func() []PlanSlot {
-		return []PlanSlot{{Start: now.Add(time.Hour), End: now.Add(2 * time.Hour), BatteryW: 4000, SoCPct: 70}}
+		return []PlanSlot{{Start: now.Add(time.Hour), End: now.Add(2 * time.Hour), BatteryW: 4000, SoC: 0.7}}
 	})
 	s.publishPlan(context.Background())
 

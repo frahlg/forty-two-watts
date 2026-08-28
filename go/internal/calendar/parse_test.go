@@ -10,7 +10,7 @@ func testParser() *parser {
 		[]string{"away", "vacation", "holiday"},
 		[]string{"ev", "car", "charge"},
 		"garage",
-		80,
+		0.80,
 	)
 }
 
@@ -58,8 +58,8 @@ func TestClassifyEVWithPercent(t *testing.T) {
 	if ev == nil {
 		t.Fatal("expected an EV deadline")
 	}
-	if ev.TargetSoCPct != 65 {
-		t.Fatalf("target soc: want 65, got %v", ev.TargetSoCPct)
+	if ev.TargetSoC != 0.65 {
+		t.Fatalf("target soc: want 65, got %v", ev.TargetSoC)
 	}
 	if !ev.Departure.Equal(start) {
 		t.Fatalf("departure should be the event start: got %v", ev.Departure)
@@ -77,8 +77,8 @@ func TestClassifyEVDefaultTargetWhenNoPercent(t *testing.T) {
 	if ev == nil {
 		t.Fatal("expected an EV deadline")
 	}
-	if ev.TargetSoCPct != 80 {
-		t.Fatalf("want default 80, got %v", ev.TargetSoCPct)
+	if ev.TargetSoC != 0.8 {
+		t.Fatalf("want default 80, got %v", ev.TargetSoC)
 	}
 }
 
@@ -93,8 +93,8 @@ func TestClassifyEVExplicitLoadpoint(t *testing.T) {
 	if ev.LoadpointID != "carport" {
 		t.Fatalf("explicit loadpoint not honoured: got %q", ev.LoadpointID)
 	}
-	if ev.TargetSoCPct != 90 {
-		t.Fatalf("want 90, got %v", ev.TargetSoCPct)
+	if ev.TargetSoC != 0.9 {
+		t.Fatalf("want 90, got %v", ev.TargetSoC)
 	}
 }
 
@@ -102,7 +102,7 @@ func TestClassifyPercentClamped(t *testing.T) {
 	p := testParser()
 	start := time.Now()
 	_, ev := p.classify("charge 150%", start, start.Add(time.Hour), "")
-	if ev == nil || ev.TargetSoCPct != 100 {
+	if ev == nil || ev.TargetSoC != 1 {
 		t.Fatalf("percent should clamp to 100: %+v", ev)
 	}
 }

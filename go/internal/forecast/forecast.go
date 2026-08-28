@@ -8,8 +8,8 @@
 //
 // PV estimate formula (simple, works ok for a fixed-azimuth array):
 //
-//   clear_sky_w(lat, lon, t) — geometric solar elevation × array rating
-//   pv_w ≈ clear_sky_w × (1 − cloud_cover/100)^1.5
+//	clear_sky_w(lat, lon, t) — geometric solar elevation × array rating
+//	pv_w ≈ clear_sky_w × (1 − cloud_cover/100)^1.5
 //
 // A full model would factor in panel tilt, azimuth, temperature derating,
 // soiling, etc. This is intentionally coarse — the battery models + RLS
@@ -30,6 +30,7 @@ import (
 	"github.com/srcfl/ftw/go/internal/config"
 	"github.com/srcfl/ftw/go/internal/state"
 	"github.com/srcfl/ftw/go/internal/sunpos"
+	"github.com/srcfl/ftw/go/internal/units"
 )
 
 // Provider is implemented by each weather source.
@@ -79,10 +80,14 @@ func (m *MetNoProvider) Name() string { return "met_no" }
 func (m *MetNoProvider) Fetch(ctx context.Context, lat, lon float64) ([]RawForecast, error) {
 	url := fmt.Sprintf("%s?lat=%.4f&lon=%.4f", m.BaseURL, lat, lon)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	req.Header.Set("User-Agent", m.UserAgent)
 	resp, err := m.Client.Do(req)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
@@ -110,7 +115,9 @@ func (m *MetNoProvider) Fetch(ctx context.Context, lat, lon float64) ([]RawForec
 	out := make([]RawForecast, 0, len(doc.Properties.Timeseries))
 	for _, ts := range doc.Properties.Timeseries {
 		t, err := time.Parse(time.RFC3339, ts.Time)
-		if err != nil { continue }
+		if err != nil {
+			continue
+		}
 		// Snap to UTC hour boundary (met.no returns exact hours in UTC)
 		t = t.UTC().Truncate(time.Hour)
 		out = append(out, RawForecast{
@@ -150,9 +157,13 @@ func (o *OpenWeatherProvider) Fetch(ctx context.Context, lat, lon float64) ([]Ra
 	url := fmt.Sprintf("%s?lat=%.4f&lon=%.4f&exclude=current,minutely,daily,alerts&units=metric&appid=%s",
 		o.BaseURL, lat, lon, o.APIKey)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	resp, err := o.Client.Do(req)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
@@ -160,8 +171,8 @@ func (o *OpenWeatherProvider) Fetch(ctx context.Context, lat, lon float64) ([]Ra
 	}
 	var doc struct {
 		Hourly []struct {
-			Dt    int64   `json:"dt"`
-			Temp  float64 `json:"temp"`
+			Dt     int64   `json:"dt"`
+			Temp   float64 `json:"temp"`
 			Clouds float64 `json:"clouds"` // %
 		} `json:"hourly"`
 	}
@@ -183,15 +194,9 @@ func (o *OpenWeatherProvider) Fetch(ctx context.Context, lat, lon float64) ([]Ra
 
 // ---- Clear-sky + PV estimation ----
 
-// ClearSkyW estimates direct beam solar irradiance on a horizontal surface
-// at (lat, lon, t) in W/m². Uses a simplified Bird-like model — geometric
-// solar elevation angle × atmospheric attenuation.
-//
-// This is NOT a research-grade irradiance model. It's good enough to scale
-// a panel-rated-kW into expected PV output for a given time of day and year,
-// which combined with cloud cover gives directional forecasts that MPC /
-// pre-charge scheduling can use.
-func ClearSkyW(lat, lon float64, t time.Time) float64 {
+// ClearSkyWm2 estimates global-horizontal irradiance at (lat, lon, t)
+// in W/m². Simplified Bird-like model — solar elevation × airmass.
+func ClearSkyWm2(lat, lon float64, t time.Time) float64 {
 	// Day of year
 	doy := float64(t.YearDay())
 	// Solar declination (degrees)
@@ -217,7 +222,9 @@ func ClearSkyW(lat, lon float64, t time.Time) float64 {
 	dni := 1367 * math.Pow(0.7, math.Pow(airmass, 0.678))
 	// Global horizontal ≈ DNI × cos(zenith) + some diffuse. We just use cos component.
 	ghi := dni * sinElev
-	if ghi < 0 { ghi = 0 }
+	if ghi < 0 {
+		ghi = 0
+	}
 	return ghi
 }
 
@@ -228,16 +235,25 @@ func ClearSkyW(lat, lon float64, t time.Time) float64 {
 //
 // Formula: pv_w ≈ rated_w × (clear_sky_w / 1000) × (1 − cloud/100)^1.5
 func EstimatePVW(lat, lon float64, t time.Time, cloudPct *float64, ratedW float64) float64 {
-	if ratedW <= 0 { return 0 }
-	cs := ClearSkyW(lat, lon, t)
-	if cs <= 0 { return 0 }
+	if ratedW <= 0 {
+		return 0
+	}
+	cs := ClearSkyWm2(lat, lon, t)
+	if cs <= 0 {
+		return 0
+	}
 	cloud := 50.0
-	if cloudPct != nil { cloud = *cloudPct }
-	if cloud < 0 { cloud = 0 }
-	if cloud > 100 { cloud = 100 }
-	// Non-linear: heavy clouds attenuate more than linear
+	if cloudPct != nil {
+		cloud = *cloudPct
+	}
+	if cloud < 0 {
+		cloud = 0
+	}
+	if cloud > 100 {
+		cloud = 100
+	}
 	cloudFactor := math.Pow(1-cloud/100.0, 1.5)
-	return ratedW * (cs / 1000.0) * cloudFactor
+	return units.PVFromIrradiance(ratedW, cs) * cloudFactor
 }
 
 // ---- Service ----
@@ -286,7 +302,7 @@ func FromConfig(cfg *config.Weather, ratedPVW float64, st *state.Store, userAgen
 		}
 		if len(arrays) == 0 {
 			arrays = append(arrays, Array{
-				TiltDeg: cfg.PVTiltDeg, AzimuthDeg: cfg.PVAzimuthDeg, KWp: ratedPVW / 1000.0,
+				TiltDeg: cfg.PVTiltDeg, AzimuthDeg: cfg.PVAzimuthDeg, RatedW: ratedPVW,
 			})
 		}
 		p = NewForecastSolarMulti(arrays)
@@ -347,7 +363,9 @@ func (s *Service) fetchAndStore(ctx context.Context) {
 		slog.Warn("forecast fetch failed", "err", err, "provider", s.Provider.Name())
 		return
 	}
-	if len(rows) == 0 { return }
+	if len(rows) == 0 {
+		return
+	}
 	nowMs := time.Now().UnixMilli()
 	points := make([]state.ForecastPoint, 0, len(rows))
 	for _, r := range rows {
@@ -388,6 +406,14 @@ func (s *Service) fetchAndStore(ctx context.Context) {
 		if pvW < 0 {
 			pvW = 0
 		}
+		if capW := s.nameplateW(); capW > 0 {
+			if capped, ok := clampPVToNameplate(pvW, capW); ok {
+				slog.Warn("forecast PV capped to nameplate",
+					"provider", s.Provider.Name(), "slot", r.HourStart,
+					"raw_w", pvW, "capped_w", capped, "nameplate_w", capW)
+				pvW = capped
+			}
+		}
 		pvPtr := &pvW
 		points = append(points, state.ForecastPoint{
 			SlotTsMs:      r.HourStart.UnixMilli(),
@@ -408,11 +434,48 @@ func (s *Service) fetchAndStore(ctx context.Context) {
 }
 
 func arrayFromConfig(a config.PVArray) (Array, bool) {
-	tiltDeg, azimuthDeg, kWp, ok := a.CompleteGeometry()
+	tiltDeg, azimuthDeg, ratedW, ok := a.CompleteGeometry()
 	if !ok {
 		return Array{}, false
 	}
-	return Array{TiltDeg: tiltDeg, AzimuthDeg: azimuthDeg, KWp: kWp}, true
+	return Array{TiltDeg: tiltDeg, AzimuthDeg: azimuthDeg, RatedW: ratedW}, true
+}
+
+func (s *Service) nameplateW() float64 {
+	return NameplateW(s.RatedPVW, s.Arrays)
+}
+
+// NameplateW is the site PV ceiling. Arrays store rated watts; the
+// sum of those is the nameplate. pv_rated_w is the fallback when no
+// complete array geometry exists.
+func NameplateW(ratedPVW float64, arrays []Array) float64 {
+	var sumW float64
+	for _, a := range arrays {
+		if a.RatedW > 0 {
+			sumW += a.RatedW
+		}
+	}
+	switch {
+	case sumW > 0:
+		return sumW
+	case ratedPVW > 0:
+		return ratedPVW
+	default:
+		return 0
+	}
+}
+
+// nameplateHeadroom is 1: a forecast must not exceed the site
+// nameplate. This is a physics gate, not a unit conversion. Core
+// stores rated watts so the gate should rarely fire. 0 nameplate
+// disables the cut.
+const nameplateHeadroom = 1.0
+
+func clampPVToNameplate(pvW, nameplateW float64) (float64, bool) {
+	if nameplateW <= 0 || pvW <= nameplateW*nameplateHeadroom {
+		return pvW, false
+	}
+	return nameplateW * nameplateHeadroom, true
 }
 
 func normalizeIrradiance(ghiWm2 float64) (float64, bool) {
@@ -436,7 +499,7 @@ func pvWFromGHI(lat, lon float64, t time.Time, ghiWm2, ratedPVW float64, arrays 
 	if ratedPVW <= 0 {
 		return 0, true
 	}
-	return ratedPVW * ghiWm2 / 1000.0, true
+	return units.PVFromIrradiance(ratedPVW, ghiWm2), true
 }
 
 // poaPVWattsFromGHI converts a global-horizontal irradiance (W/m², positive)
@@ -452,17 +515,39 @@ func poaPVWattsFromGHI(lat, lon float64, t time.Time, ghiWm2 float64, arrays []A
 	}
 	var total float64
 	for _, a := range arrays {
-		if a.KWp <= 0 {
+		if a.RatedW <= 0 {
 			continue
 		}
 		poa := sunpos.POAFromGHI(t, lat, lon, ghiWm2, a.TiltDeg, a.AzimuthDeg)
-		// kWp×1000 = nameplate W at STC (1000 W/m²); scale by POA/1000.
-		total += a.KWp * 1000.0 * (poa / 1000.0)
+		total += units.PVFromIrradiance(a.RatedW, poa)
 	}
 	return total
 }
 
-// Load returns forecasts in [sinceMs, untilMs].
+// Load returns forecasts in [sinceMs, untilMs]. A last-resort
+// nameplate gate still clips a stored row that exceeds the roof.
 func (s *Service) Load(sinceMs, untilMs int64) ([]state.ForecastPoint, error) {
-	return s.Store.LoadForecasts(sinceMs, untilMs)
+	rows, err := s.Store.LoadForecasts(sinceMs, untilMs)
+	if err != nil {
+		return rows, err
+	}
+	return ClampForecasts(rows, s.nameplateW()), nil
+}
+
+// ClampForecasts copies any estimate above nameplate down onto that
+// ceiling. Physics gate only: stored units are already watts.
+func ClampForecasts(rows []state.ForecastPoint, nameplateW float64) []state.ForecastPoint {
+	if nameplateW <= 0 {
+		return rows
+	}
+	for i := range rows {
+		if rows[i].PVWEstimated == nil {
+			continue
+		}
+		if capped, ok := clampPVToNameplate(*rows[i].PVWEstimated, nameplateW); ok {
+			v := capped
+			rows[i].PVWEstimated = &v
+		}
+	}
+	return rows
 }

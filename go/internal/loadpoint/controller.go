@@ -861,7 +861,7 @@ func (c *Controller) SetBatSoCProvider(f func() (float64, bool)) {
 // threshold AND there's live PV to grab (battery discharge alone is
 // not surplus — that's just self-consumption or arbitrage the planner
 // is already orchestrating). Releases when SoC drops below
-// (threshold − BatSoCUnlockHystPp), or after a sustained run of
+// (threshold − BatSoCUnlockHyst), or after a sustained run of
 // zero/negative live surplus (batSoCPVGoneTicks).
 //
 // Returns false when no threshold is configured or the bat_soc reader
@@ -902,12 +902,11 @@ func (c *Controller) evalBatSoCArm(lpID string, threshold float64) bool {
 	} else {
 		c.batSoCNoPV[lpID] = 0
 	}
-	socPct := soc * 100
 	armed := prev
 	switch {
-	case socPct < threshold-BatSoCUnlockHystPp:
+	case soc < threshold-BatSoCUnlockHyst:
 		armed = false
-	case socPct >= threshold && !pvGone:
+	case soc >= threshold && !pvGone:
 		armed = true
 	case c.batSoCNoPV[lpID] >= batSoCPVGoneTicks:
 		// SoC may still be high but PV has been gone long enough that
@@ -975,13 +974,13 @@ func (c *Controller) surplusActive(lpCfg Config, sched Schedule) bool {
 	// available surplus and the deadline is missed. The explicit SurplusOnly
 	// config above still wins, so a "surplus-preferred with a deadline floor"
 	// combo is unaffected. Operator directive 2026-05-30.
-	if sched.SoCPct > 0 {
+	if sched.SoC > 0 {
 		return false
 	}
 	if c.gridDeferredFor(lpCfg.ID) {
 		return true
 	}
-	return c.evalBatSoCArm(lpCfg.ID, sched.SurplusUnlockBatSoCPct)
+	return c.evalBatSoCArm(lpCfg.ID, sched.SurplusUnlockBatSoC)
 }
 
 // AnyLoadpointSurplusActive reports whether any configured loadpoint
@@ -1005,7 +1004,7 @@ func (c *Controller) AnyLoadpointSurplusActive() bool {
 			return true
 		}
 		sched, _ := c.manager.GetSchedule(cfg.ID)
-		if sched.SurplusUnlockBatSoCPct > 0 {
+		if sched.SurplusUnlockBatSoC > 0 {
 			c.batSoCArmedMu.Lock()
 			armed := c.batSoCArmed[cfg.ID]
 			c.batSoCArmedMu.Unlock()
@@ -1683,7 +1682,7 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config, d
 		// rationale in one testable place. Operator directive 2026-05-30.
 		phaseMode := resolvePhaseMode(
 			lpCfg.PhaseMode,
-			sched.SoCPct > 0,
+			sched.SoC > 0,
 			c.surplusLockedTo1P(lpCfg.ID),
 			surplusOn,
 			c.dwellSelectedPhaseMode(lpCfg.ID),

@@ -238,17 +238,35 @@ func protectedReadPath(path string) bool {
 		"/api/notifications/history",
 		"/api/version/snapshots",
 		"/api/scan",
-		"/api/oauth/myuplink/start":
+		"/api/oauth/myuplink/start",
+		"/api/drivers",
+		"/api/ev/status",
+		"/api/fleet-ping",
+		"/api/notifications/rules",
+		"/api/notifications/defaults",
+		"/api/notifications/vapid",
+		"/api/device_repository/catalog",
+		"/api/app-link/status":
 		return true
 	}
 	if path == "/api/backups" || strings.HasPrefix(path, "/api/backups/") {
 		return true
 	}
+	if path == "/api/series" || strings.HasPrefix(path, "/api/series/") {
+		return true
+	}
+	if path == "/api/mpc/diagnose" || strings.HasPrefix(path, "/api/mpc/diagnose/") {
+		return true
+	}
+	if strings.HasPrefix(path, "/api/device_repository/drivers/") && strings.HasSuffix(path, "/versions") {
+		return true
+	}
 	if rest, ok := strings.CutPrefix(path, "/api/drivers/"); ok {
 		// The detail route includes serial number, MAC address and endpoint.
-		// Nested source and log routes can hold credentials or arbitrary text.
+		// Nested source, log and draft routes can hold credentials or arbitrary text.
 		return (rest != "" && !strings.Contains(rest, "/")) ||
-			strings.HasSuffix(rest, "/source") || strings.HasSuffix(rest, "/logs")
+			strings.HasSuffix(rest, "/source") || strings.HasSuffix(rest, "/logs") ||
+			strings.HasSuffix(rest, "/draft")
 	}
 	return false
 }
@@ -372,11 +390,13 @@ func isLocalAuthority(a authority) bool {
 	if ip := net.ParseIP(host); ip != nil {
 		return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast()
 	}
+	// A name with no dot is not local. `http://intranet` rebound onto
+	// this box would otherwise skip the remote token. Keep `.local` —
+	// that is the documented LAN name (ftw.local).
 	return host == "localhost" ||
 		strings.HasSuffix(host, ".localhost") ||
 		strings.HasSuffix(host, ".local") ||
-		strings.HasSuffix(host, ".home.arpa") ||
-		!strings.Contains(host, ".")
+		strings.HasSuffix(host, ".home.arpa")
 }
 
 func isLocalClient(remoteAddr string) bool {

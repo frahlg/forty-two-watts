@@ -223,3 +223,142 @@ func TestUnreachableMeterStillFailsEveryPoll(t *testing.T) {
 		t.Fatalf("unreachable device stored %d readings", len(readings))
 	}
 }
+
+// probeGiveUpSource is the catalog pattern that took Pixii offline after a
+// network blip: three failed reads permanently skip the register, and a
+// transport outage looks identical to an unimplemented point.
+const probeGiveUpSource = `
+PROTOCOL = "modbus"
+local GIVE_UP_AFTER = 3
+local read_failures = {}
+local function probe_read(addr, count, kind)
+    if (read_failures[addr] or 0) >= GIVE_UP_AFTER then return nil end
+    local ok, regs = pcall(host.modbus_read, addr, count, kind)
+    if ok and regs and regs[1] ~= nil then
+        read_failures[addr] = nil
+        return regs
+    end
+    read_failures[addr] = (read_failures[addr] or 0) + 1
+    return nil
+end
+function driver_init() end
+function driver_poll()
+    local regs = probe_read(10, 1, "holding")
+    probe_read(11, 1, "holding")
+    local watts = 0
+    if regs then watts = regs[1] end
+    host.emit("meter", { w = watts })
+    return 1000
+end
+`
+
+type toggleModbus struct {
+	registers       []uint16
+	errorsByAddress map[uint16]error
+	down            bool
+	reads           map[uint16]int
+}
+
+func (m *toggleModbus) Read(addr, count uint16, _ int32) ([]uint16, error) {
+	if m.reads == nil {
+		m.reads = map[uint16]int{}
+	}
+	m.reads[addr]++
+	if m.down {
+		return nil, fmt.Errorf("%w: no route to host", ErrModbusTransport)
+	}
+	if err := m.errorsByAddress[addr]; err != nil {
+		return nil, err
+	}
+	return m.registers, nil
+}
+func (m *toggleModbus) WriteSingle(uint16, uint16) error  { return nil }
+func (m *toggleModbus) WriteMulti(uint16, []uint16) error { return nil }
+func (m *toggleModbus) Close() error                      { return nil }
+
+func newGiveUpDriver(t *testing.T, tel *telemetry.Store, modbus ModbusCap) *LuaDriver {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "give_up.lua")
+	if err := os.WriteFile(path, []byte(probeGiveUpSource), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	driver, err := NewLuaDriver(path, NewHostEnv("give-up", tel).WithModbus(modbus))
+	if err != nil {
+		t.Fatalf("load driver: %v", err)
+	}
+	t.Cleanup(driver.Cleanup)
+	if err := driver.Init(context.Background(), nil); err != nil {
+		t.Fatalf("init driver: %v", err)
+	}
+	return driver
+}
+
+// A short network blip used to permanently silence every register: three
+// failed polls skip them all, the TCP session comes back, and the driver
+// never asks again. The host must reload and resume on the next poll.
+func TestGiveUpDriverRecoversAfterTransportBlip(t *testing.T) {
+	tel := telemetry.NewStore()
+	bus := &toggleModbus{registers: []uint16{321}}
+	driver := newGiveUpDriver(t, tel, bus)
+
+	if _, err := driver.Poll(context.Background()); err != nil {
+		t.Fatalf("live poll: %v", err)
+	}
+	if reading := tel.Get("give-up", telemetry.DerMeter); reading == nil || reading.RawW != 321 {
+		t.Fatalf("live meter = %+v, want 321 W", reading)
+	}
+
+	bus.down = true
+	for poll := 1; poll <= 3; poll++ {
+		if _, err := driver.Poll(context.Background()); err == nil {
+			t.Fatalf("outage poll %d succeeded", poll)
+		}
+	}
+
+	bus.down = false
+	if _, err := driver.Poll(context.Background()); err != nil {
+		t.Fatalf("recovery poll after the link returned: %v", err)
+	}
+	if driver.reprobes() != 1 {
+		t.Fatalf("reprobes = %d, want 1 reload once the driver had nothing left to ask", driver.reprobes())
+	}
+	reading := tel.Get("give-up", telemetry.DerMeter)
+	if reading == nil || reading.RawW != 321 {
+		t.Fatalf("recovered meter = %+v, want 321 W", reading)
+	}
+	health := tel.DriverHealth("give-up")
+	if health == nil || health.LastSuccess == nil {
+		t.Fatalf("recovery did not advance LastSuccess: %+v", health)
+	}
+}
+
+// An unimplemented register must stay skipped. Reloading would undo the
+// absent-register fix and fail the poll forever on that firmware.
+func TestGiveUpOnAbsentRegisterDoesNotReload(t *testing.T) {
+	tel := telemetry.NewStore()
+	bus := &toggleModbus{
+		registers: []uint16{321},
+		errorsByAddress: map[uint16]error{
+			11: errors.New("modbus exception 2: illegal data address"),
+		},
+	}
+	driver := newGiveUpDriver(t, tel, bus)
+
+	for poll := 1; poll <= 6; poll++ {
+		if _, err := driver.Poll(context.Background()); err != nil {
+			t.Fatalf("poll %d: %v", poll, err)
+		}
+	}
+	if driver.reprobes() != 0 {
+		t.Fatalf("reprobes = %d, want 0: an absent optional register is not a dead link", driver.reprobes())
+	}
+	if bus.reads[11] > 3 {
+		t.Fatalf("absent register 11 was read %d times, want at most 3", bus.reads[11])
+	}
+	if bus.reads[10] < 6 {
+		t.Fatalf("present register 10 was read %d times, want every poll", bus.reads[10])
+	}
+	if reading := tel.Get("give-up", telemetry.DerMeter); reading == nil || reading.RawW != 321 {
+		t.Fatalf("meter = %+v, want 321 W kept while 11 is absent", reading)
+	}
+}
