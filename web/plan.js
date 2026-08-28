@@ -3,6 +3,7 @@
 // the middle, SoC + PV line on bottom. Refreshes every 30s.
 
 import { derivePlanBrief, unavailablePlannerCopy } from "./plan-brief.js";
+import { fillPlanSoC } from "./plan-soc.js";
 import { setActiveCurrency, toDisplay, unitFor } from "./components/price-units.js";
 
 (function () {
@@ -133,7 +134,12 @@ import { setActiveCurrency, toDisplay, unitFor } from "./components/price-units.
     // the labels aren't stuck on Swedish öre.
     state.currency = setActiveCurrency((p && p.currency) || 'SEK');
     state.forecast = (f && f.items) || [];
-    state.plan = (m && m.plan) || null;
+    const planner = (c && c.planner) || {};
+    state.socOpts = {
+      chargeEff: planner.charge_efficiency,
+      dischargeEff: planner.discharge_efficiency,
+    };
+    state.plan = fillPlanSoC((m && m.plan) || null, state.socOpts);
     state.planMeta = (m && m.meta) || null;
     state.fuse = (c && c.fuse) || null;
     // Tariff breakdown pulled from /api/config so the price bars can be
@@ -158,7 +164,7 @@ import { setActiveCurrency, toDisplay, unitFor } from "./components/price-units.
     try {
       const r = await apiFetch('/api/mpc/replan', { method: 'POST' });
       const j = await r.json();
-      if (j && j.plan) state.plan = j.plan;
+      if (j && j.plan) state.plan = fillPlanSoC(j.plan, state.socOpts);
       window.dispatchEvent(new CustomEvent("ftw-plan-data", {
         detail: { plan: state.plan },
       }));
@@ -203,6 +209,7 @@ import { setActiveCurrency, toDisplay, unitFor } from "./components/price-units.
       unavailableReason: (state.enabled && state.enabled.mpcReason) || "",
       plan,
       status: state.status || {},
+      socOpts: state.socOpts,
     });
     applyStateBadge('plan-state-badge', brief.state);
     setText('plan-next-action', brief.next.action);
@@ -644,24 +651,34 @@ import { setActiveCurrency, toDisplay, unitFor } from "./components/price-units.
         ctx.fillStyle = color;
         ctx.fillRect(x0, Math.min(y, powerYCenter), Math.max(1, x1 - x0 - 1), Math.abs(y - powerYCenter));
       }
-      // SoC line
+      // SoC line — clip to the SoC band so a reconstructed point past
+      // 0–100% cannot paint through the power bars.
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(pad.l, socY0, plotW, socH);
+      ctx.clip();
       ctx.strokeStyle = 'rgba(96,165,250,0.95)';
       ctx.lineWidth = 2;
       ctx.beginPath();
       first = true;
-      // Anchor at start SoC at now
-      if (plan.initial_soc != null) {
-        ctx.moveTo(xScale(now), socY(socPercent(plan.initial_soc)));
+      // Anchor at start SoC at now. Skip non-finite points: a missing
+      // soc used to become canvas y=0 (a fake empty battery).
+      const startSoc = socPercent(plan.initial_soc);
+      if (startSoc != null) {
+        ctx.moveTo(xScale(now), socY(startSoc));
         first = false;
       }
       for (const a of plan.actions) {
         if (a.slot_start_ms > tMax) break;
+        const endSoc = socPercent(a.soc);
+        if (endSoc == null) continue;
         const x = xScale(a.slot_start_ms + a.slot_len_min * 60 * 1000);
-        const y = socY(socPercent(a.soc) || 0);
+        const y = socY(endSoc);
         if (first) { ctx.moveTo(x, y); first = false; }
         else ctx.lineTo(x, y);
       }
       ctx.stroke();
+      ctx.restore();
       // SoC axis labels: right-align flush against the plot's right edge
       // so they read as part of the chart frame instead of floating off
       // in whitespace.
@@ -749,11 +766,14 @@ import { setActiveCurrency, toDisplay, unitFor } from "./components/price-units.
             `<span class="s-value">${escapeHTML(comparison)}</span></span>`
           );
         }
-        parts.push(
-          `<span title="Battery state of charge right now — the plan starts from here">` +
-          `<span class="s-label">start SoC </span>` +
-          `<span class="s-value">${(socPercent(plan.initial_soc) || 0).toFixed(0)}%</span></span>`
-        );
+        const startSoc = socPercent(plan.initial_soc);
+        if (startSoc != null) {
+          parts.push(
+            `<span title="Battery state of charge right now — the plan starts from here">` +
+            `<span class="s-label">start SoC </span>` +
+            `<span class="s-value">${startSoc.toFixed(0)}%</span></span>`
+          );
+        }
         parts.push(
           `<span title="Total grid spend the plan expects over the full ${hh.toFixed(0)} h horizon. Negative means the plan expects to earn money (net export).">` +
           `<span class="s-label">${costLabel} </span>` +
