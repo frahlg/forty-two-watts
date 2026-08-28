@@ -81,6 +81,20 @@ describe("plan SoC reconstruction", () => {
     fillPlanSoC(plan, { chargeEff: 0.95, dischargeEff: 0.95 });
     assert.equal(plan.actions[0].soc_pct, 52.7);
   });
+
+  it("clamps reconstructed SoC instead of drawing past 0–100%", () => {
+    const plan = {
+      capacity_wh: 20000,
+      initial_soc_pct: 53.5,
+      actions: Array.from({ length: 40 }, () => ({
+        slot_len_min: 15,
+        battery_w: 10000,
+      })),
+    };
+    fillPlanSoC(plan, { chargeEff: 0.95, dischargeEff: 0.95 });
+    assert.equal(plan.actions[0].soc_pct < 100, true);
+    assert.equal(plan.actions.at(-1).soc_pct, 100);
+  });
 });
 
 describe("plan UI uses reconstructed SoC", () => {

@@ -20,6 +20,11 @@ function storageEnergyWh(action) {
   return any ? sum : null;
 }
 
+function clampPct(pct) {
+  if (!finiteNumber(pct)) return null;
+  return Math.min(100, Math.max(0, pct));
+}
+
 function integrateBatteryWh(batteryW, slotLenMin, chargeEff, dischargeEff) {
   if (!finiteNumber(batteryW) || !finiteNumber(slotLenMin) || slotLenMin <= 0) return 0;
   const hours = slotLenMin / 60;
@@ -39,7 +44,7 @@ export function actionSoCPct(action, {
   if (finiteNumber(action && action.soc_pct)) return action.soc_pct;
   const storedWh = storageEnergyWh(action);
   if (finiteNumber(storedWh) && finiteNumber(capacityWh) && capacityWh > 0) {
-    return storedWh / capacityWh * 100;
+    return clampPct(storedWh / capacityWh * 100);
   }
   if (!finiteNumber(prevSoC) || !finiteNumber(capacityWh) || capacityWh <= 0) return null;
   const deltaWh = integrateBatteryWh(
@@ -48,7 +53,7 @@ export function actionSoCPct(action, {
     chargeEff,
     dischargeEff,
   );
-  return prevSoC + deltaWh / capacityWh * 100;
+  return clampPct(prevSoC + deltaWh / capacityWh * 100);
 }
 
 export function fillPlanSoC(plan, opts = {}) {

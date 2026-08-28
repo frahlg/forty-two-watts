@@ -625,7 +625,12 @@ import { setActiveCurrency, toDisplay, unitFor } from "./components/price-units.
         ctx.fillStyle = color;
         ctx.fillRect(x0, Math.min(y, powerYCenter), Math.max(1, x1 - x0 - 1), Math.abs(y - powerYCenter));
       }
-      // SoC line
+      // SoC line — clip to the SoC band so a reconstructed point past
+      // 0–100% cannot paint through the power bars.
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(pad.l, socY0, plotW, socH);
+      ctx.clip();
       ctx.strokeStyle = 'rgba(96,165,250,0.95)';
       ctx.lineWidth = 2;
       ctx.beginPath();
@@ -645,6 +650,7 @@ import { setActiveCurrency, toDisplay, unitFor } from "./components/price-units.
         else ctx.lineTo(x, y);
       }
       ctx.stroke();
+      ctx.restore();
       // SoC axis labels: right-align flush against the plot's right edge
       // so they read as part of the chart frame instead of floating off
       // in whitespace.
