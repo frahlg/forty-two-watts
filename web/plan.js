@@ -3,6 +3,7 @@
 // the middle, SoC + PV line on bottom. Refreshes every 30s.
 
 import { derivePlanBrief } from "./plan-brief.js";
+import { fillPlanSoC } from "./plan-soc.js";
 import { setActiveCurrency, toDisplay, unitFor } from "./components/price-units.js";
 
 (function () {
@@ -110,7 +111,12 @@ import { setActiveCurrency, toDisplay, unitFor } from "./components/price-units.
     // the labels aren't stuck on Swedish öre.
     state.currency = setActiveCurrency((p && p.currency) || 'SEK');
     state.forecast = (f && f.items) || [];
-    state.plan = (m && m.plan) || null;
+    const planner = (c && c.planner) || {};
+    state.socOpts = {
+      chargeEff: planner.charge_efficiency,
+      dischargeEff: planner.discharge_efficiency,
+    };
+    state.plan = fillPlanSoC((m && m.plan) || null, state.socOpts);
     state.planMeta = (m && m.meta) || null;
     state.fuse = (c && c.fuse) || null;
     // Tariff breakdown pulled from /api/config so the price bars can be
@@ -133,7 +139,7 @@ import { setActiveCurrency, toDisplay, unitFor } from "./components/price-units.
     try {
       const r = await apiFetch('/api/mpc/replan', { method: 'POST' });
       const j = await r.json();
-      if (j && j.plan) state.plan = j.plan;
+      if (j && j.plan) state.plan = fillPlanSoC(j.plan, state.socOpts);
       window.dispatchEvent(new CustomEvent("ftw-plan-data", {
         detail: { plan: state.plan },
       }));
@@ -177,6 +183,7 @@ import { setActiveCurrency, toDisplay, unitFor } from "./components/price-units.
       enabled: !!(state.enabled && state.enabled.mpc),
       plan,
       status: state.status || {},
+      socOpts: state.socOpts,
     });
     applyStateBadge('plan-state-badge', brief.state);
     setText('plan-next-action', brief.next.action);
@@ -623,13 +630,15 @@ import { setActiveCurrency, toDisplay, unitFor } from "./components/price-units.
       ctx.lineWidth = 2;
       ctx.beginPath();
       first = true;
-      // Anchor at start SoC at now
-      if (plan.initial_soc_pct != null) {
+      // Anchor at start SoC at now. Skip non-finite points: a missing
+      // soc_pct used to become canvas y=0 (a fake empty battery).
+      if (Number.isFinite(plan.initial_soc_pct)) {
         ctx.moveTo(xScale(now), socY(plan.initial_soc_pct));
         first = false;
       }
       for (const a of plan.actions) {
         if (a.slot_start_ms > tMax) break;
+        if (!Number.isFinite(a.soc_pct)) continue;
         const x = xScale(a.slot_start_ms + a.slot_len_min * 60 * 1000);
         const y = socY(a.soc_pct);
         if (first) { ctx.moveTo(x, y); first = false; }
@@ -723,11 +732,13 @@ import { setActiveCurrency, toDisplay, unitFor } from "./components/price-units.
             `<span class="s-value">${escapeHTML(comparison)}</span></span>`
           );
         }
-        parts.push(
-          `<span title="Battery state of charge right now — the plan starts from here">` +
-          `<span class="s-label">start SoC </span>` +
-          `<span class="s-value">${plan.initial_soc_pct.toFixed(0)}%</span></span>`
-        );
+        if (Number.isFinite(plan.initial_soc_pct)) {
+          parts.push(
+            `<span title="Battery state of charge right now — the plan starts from here">` +
+            `<span class="s-label">start SoC </span>` +
+            `<span class="s-value">${plan.initial_soc_pct.toFixed(0)}%</span></span>`
+          );
+        }
         parts.push(
           `<span title="Total grid spend the plan expects over the full ${hh.toFixed(0)} h horizon. Negative means the plan expects to earn money (net export).">` +
           `<span class="s-label">${costLabel} </span>` +
@@ -859,7 +870,7 @@ import { setActiveCurrency, toDisplay, unitFor } from "./components/price-units.
         const gdir = a.grid_w > 0 ? 'import' : 'export';
         lines.push(`<div class="tip-row"><span title="Net grid flow the plan expects. Import = buy from grid, export = sell back">Grid</span><b>${(Math.abs(a.grid_w) / 1000).toFixed(1)} kW ${gdir}</b></div>`);
       }
-      if (a.soc_pct != null) lines.push(`<div class="tip-row"><span title="Battery state of charge at the end of this slot">SoC (end)</span><b>${a.soc_pct.toFixed(0)}%</b></div>`);
+      if (Number.isFinite(a.soc_pct)) lines.push(`<div class="tip-row"><span title="Battery state of charge at the end of this slot">SoC (end)</span><b>${a.soc_pct.toFixed(0)}%</b></div>`);
       if (a.battery_w != null) {
         let action, actionHint;
         if (a.battery_w > 100) { action = 'Charging'; actionHint = 'import to cover load + top up battery'; }
