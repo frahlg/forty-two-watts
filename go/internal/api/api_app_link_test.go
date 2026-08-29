@@ -4,9 +4,22 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/srcfl/ftw/go/internal/config"
 )
+
+// lanAuthOnDeps is a box with the house password turned on — the state
+// where owner-making from the LAN goes back behind the password proof.
+func lanAuthOnDeps(enroll *stubEnroller) *Deps {
+	return &Deps{
+		AppEnroll: enroll,
+		Cfg:       &config.Config{API: config.API{LANAuth: true}},
+		CfgMu:     &sync.RWMutex{},
+	}
+}
 
 // A stub enroller. Pairing is the one surface that hands out a credential, so
 // what matters here is who is allowed to ask, not what comes back.
@@ -170,9 +183,28 @@ func TestViewerPairingFromTheLAN(t *testing.T) {
 	}
 }
 
-func TestOwnerPairingFromTheLANIsRefused(t *testing.T) {
+// Operator decision 2026-08-29: with the house password off the whole LAN
+// already holds settings, control and driver install through the open
+// dashboard, so refusing only owner-minting blocked the household without
+// slowing an intruder. The password is the opt-in that closes this door.
+func TestOwnerPairingFromTheLANWithoutHousePassword(t *testing.T) {
 	enroll := &stubEnroller{}
 	s := New(&Deps{AppEnroll: enroll})
+
+	w := httptest.NewRecorder()
+	s.handleAppLinkPairing(w, pairingRequest("192.168.1.1", "192.168.1.5:1234", nil))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200: %s", w.Code, w.Body.String())
+	}
+	if enroll.minted != 1 {
+		t.Fatalf("minted %d codes, want 1", enroll.minted)
+	}
+}
+
+func TestOwnerPairingFromTheLANWithHousePasswordOnIsRefused(t *testing.T) {
+	enroll := &stubEnroller{}
+	s := New(lanAuthOnDeps(enroll))
 
 	w := httptest.NewRecorder()
 	s.handleAppLinkPairing(w, pairingRequest("192.168.1.1", "192.168.1.5:1234", nil))
@@ -181,7 +213,23 @@ func TestOwnerPairingFromTheLANIsRefused(t *testing.T) {
 		t.Fatalf("got %d, want 403: %s", w.Code, w.Body.String())
 	}
 	if enroll.minted != 0 {
-		t.Fatalf("minted %d owner codes from the open LAN", enroll.minted)
+		t.Fatalf("minted %d owner codes past the house password", enroll.minted)
+	}
+}
+
+// A public client never reaches the open-LAN door, password or not.
+func TestOwnerPairingFromAPublicAddressIsRefused(t *testing.T) {
+	enroll := &stubEnroller{}
+	s := New(&Deps{AppEnroll: enroll})
+
+	w := httptest.NewRecorder()
+	s.handleAppLinkPairing(w, pairingRequest("192.168.1.1", "203.0.113.9:1234", nil))
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("got %d, want 403: %s", w.Code, w.Body.String())
+	}
+	if enroll.minted != 0 {
+		t.Fatalf("minted %d owner codes for a public client", enroll.minted)
 	}
 }
 
@@ -200,9 +248,27 @@ func TestOwnerPairingFromLoopback(t *testing.T) {
 	}
 }
 
-func TestViewerPairingFromTheLANOnAnEmptyBoxIsRefused(t *testing.T) {
+// An empty box's first pairing becomes the owner, so it follows the same
+// rule: open from the LAN until a house password exists — this is also the
+// onboarding path — and behind the password once one does.
+func TestViewerPairingFromTheLANOnAnEmptyBoxWithoutHousePassword(t *testing.T) {
 	enroll := &stubEnroller{paired: stubPaired(0)}
 	s := New(&Deps{AppEnroll: enroll})
+
+	w := httptest.NewRecorder()
+	s.handleAppLinkPairing(w, pairingRequestRole("192.168.1.1", "192.168.1.5:1234", nil, "viewer"))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200: %s", w.Code, w.Body.String())
+	}
+	if enroll.minted != 1 {
+		t.Fatalf("minted %d codes, want 1", enroll.minted)
+	}
+}
+
+func TestViewerPairingFromTheLANOnAnEmptyBoxWithHousePasswordOnIsRefused(t *testing.T) {
+	enroll := &stubEnroller{paired: stubPaired(0)}
+	s := New(lanAuthOnDeps(enroll))
 
 	w := httptest.NewRecorder()
 	s.handleAppLinkPairing(w, pairingRequestRole("192.168.1.1", "192.168.1.5:1234", nil, "viewer"))
@@ -211,7 +277,7 @@ func TestViewerPairingFromTheLANOnAnEmptyBoxIsRefused(t *testing.T) {
 		t.Fatalf("got %d, want 403: %s", w.Code, w.Body.String())
 	}
 	if enroll.minted != 0 {
-		t.Fatalf("minted %d viewer codes on an empty box from the open LAN", enroll.minted)
+		t.Fatalf("minted %d viewer codes on an empty box past the house password", enroll.minted)
 	}
 }
 
@@ -230,23 +296,44 @@ func TestViewerPairingFromLoopbackOnAnEmptyBox(t *testing.T) {
 	}
 }
 
-func TestOwnerRolePatchFromTheLANIsRefused(t *testing.T) {
-	enroll := &stubEnroller{}
-	s := New(&Deps{AppEnroll: enroll})
-
-	w := httptest.NewRecorder()
+func ownerRolePatchRequest() *http.Request {
 	r := httptest.NewRequest(http.MethodPatch, "/api/app-link/devices/aaaa1111", strings.NewReader(`{"role":"owner"}`))
 	r.Header.Set("Content-Type", "application/json")
 	r.Host = "192.168.1.1"
 	r.RemoteAddr = "192.168.1.5:1234"
 	r.SetPathValue("id", "aaaa1111")
-	s.handleAppLinkDeviceRole(w, r)
+	return r
+}
+
+// Promotion to owner follows the same rule as minting one: open from the
+// LAN while the house password is off, behind it once it is on.
+func TestOwnerRolePatchFromTheLANWithoutHousePassword(t *testing.T) {
+	enroll := &stubEnroller{}
+	s := New(&Deps{AppEnroll: enroll})
+
+	w := httptest.NewRecorder()
+	s.handleAppLinkDeviceRole(w, ownerRolePatchRequest())
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200: %s", w.Code, w.Body.String())
+	}
+	if enroll.roleSet != "owner" {
+		t.Fatalf("role set to %q, want owner", enroll.roleSet)
+	}
+}
+
+func TestOwnerRolePatchFromTheLANWithHousePasswordOnIsRefused(t *testing.T) {
+	enroll := &stubEnroller{}
+	s := New(lanAuthOnDeps(enroll))
+
+	w := httptest.NewRecorder()
+	s.handleAppLinkDeviceRole(w, ownerRolePatchRequest())
 
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("got %d, want 403: %s", w.Code, w.Body.String())
 	}
 	if enroll.roleSet != "" {
-		t.Fatalf("LAN peer patched a device to owner: %q", enroll.roleSet)
+		t.Fatalf("LAN peer patched a device to owner past the house password: %q", enroll.roleSet)
 	}
 }
 
