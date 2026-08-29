@@ -128,32 +128,87 @@ ocpp:
 **Credentials are mandatory.** FTW refuses to start with `enabled: true` and an
 empty username or password. That is deliberate, and the reason is below.
 
-## Security: the listener is on every interface
+## Security: the socket is on every interface
 
 The OCPP library builds its listen address from the port alone, so the socket
-binds to every interface the host has. There is no bind-address setting, and
-there is no TLS on this path yet.
+is open on every interface the host has and nothing FTW can configure changes
+that. `bind` therefore works one layer up: a connection that arrived on any
+other address is refused at the WebSocket handshake, before it can speak OCPP.
 
-On a Raspberry Pi with one LAN connection that is usually fine. It is not fine
-if the host also has a public interface or a permissive port forward.
+That is an access control, not a smaller attack surface. A port scan still
+finds the port open on every interface; what it cannot do is talk to it.
 
-So:
+```yaml
+ocpp:
+  bind: 192.168.1.10   # only chargers reaching the box this way
+```
+
+On a Raspberry Pi with one LAN connection the default (every interface) is
+usually fine. Set `bind` when the host also has a VPN interface, a second NIC,
+or a public one.
+
+Whatever you set:
 
 - Keep the port closed at your router. Never forward it from the internet.
-- Treat the password as a real secret; it is the only gate in front of the
-  server.
-- Basic auth over `ws://` sends the credential unencrypted. Anyone who can sniff
-  your LAN can read it.
+- Treat the password as a real secret.
 
-Behind the password sits a second gate: a charge point no charger entry names
-stays pending, outside telemetry and dispatch (see above). A stolen password
-gets an attacker a row in the Chargers table, not influence over the site.
-What it does not stop is impersonation — a device that knows the password *and*
-an adopted charger's id can still pose as it, which is what per-charger
-credentials and TLS would fix.
+### The four gates
 
-Credentials being required is a mitigation, not a fix. Binding to one interface
-needs a change to the upstream library.
+1. **Basic auth.** Required — an enabled server without a username and
+   password is refused at startup.
+2. **Identity binding.** A charger listed under `ocpp.chargers` has a password
+   of its own and must present it under its own name. This is what closes
+   impersonation: without it, identity is client-chosen and shared, so a device
+   that knows the password *and* an adopted charger's id can pose as it.
+3. **Bind.** As above.
+4. **Quarantine.** A charge point no charger entry names stays pending, outside
+   telemetry and dispatch. A stolen password gets an attacker a row in the
+   Chargers table, not influence over the site.
+
+### Per-charger credentials
+
+```yaml
+ocpp:
+  username: ftw
+  password: "the-shared-one"
+  chargers:
+    - id: garage
+      password: "a-different-long-random-string"
+```
+
+The `id` is what the charger dials with — the last segment of its URL, and the
+same string a charger entry adopts. On OCPP the basic-auth username *is* that
+identity, so a listed charger presents `garage` / its own password, and the
+shared credential no longer buys its name.
+
+This is opt-in per charger: anything not listed keeps using the shared
+username and password, so adding one entry does not lock the others out. A
+charger you have not listed can still be impersonated by something holding the
+shared password — list the ones that matter.
+
+### TLS
+
+```yaml
+ocpp:
+  tls:
+    cert_file: /etc/ftw/ocpp/server.crt
+    key_file: /etc/ftw/ocpp/server.key
+    client_ca_file: /etc/ftw/ocpp/charger-ca.crt   # optional
+```
+
+Chargers then dial `wss://` instead of `ws://`. Without it, basic auth over
+`ws://` sends the credential unencrypted and anyone who can sniff your LAN can
+read it.
+
+`client_ca_file` additionally requires every charge point to present a
+certificate signed by that CA — OCPP 2.0.1 security profile 3. It is the
+strongest identity available here: unlike a password, it cannot be copied out
+of one charger's configuration and replayed by another device unless the
+private key was copied too.
+
+Half a TLS section is refused at startup rather than quietly serving `ws://`.
+An operator who asked for `wss://` and silently got plaintext would have no way
+to tell the link was never encrypted.
 
 ## Pointing a charger at FTW
 
@@ -327,7 +382,9 @@ car; without it, profiles and `vehicle_capacity_wh` remain the whole story.
 
 ## Current limits
 
-- **No TLS**, and the listener cannot be pinned to one interface.
+- **The socket cannot be pinned to one interface.** `bind` refuses the
+  handshake instead, so the port stays open on every interface even when only
+  one is served.
 - Chargers that also have a native protocol may work better through a driver.
   Easee over Modbus and Zaptec over its cloud API already have drivers; OCPP is
   the option when you want the cloud out of the loop.

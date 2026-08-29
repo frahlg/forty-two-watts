@@ -36,6 +36,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"sync"
 	"time"
 
@@ -79,12 +80,10 @@ func Start(ctx context.Context, cfg *Config, tel *telemetry.Store) (*Server, err
 	}
 	cfg.Defaults()
 
-	wsServer := ws.NewServer()
-	if cfg.Username != "" || cfg.Password != "" {
-		u, p := cfg.Username, cfg.Password
-		wsServer.SetBasicAuthHandler(func(user, pass string) bool {
-			return user == u && pass == p
-		})
+	auth := newAuthorizer(cfg)
+	wsServer, err := newListener(cfg, auth)
+	if err != nil {
+		return nil, err
 	}
 
 	cs := ocpp16.NewCentralSystem(nil, wsServer)
@@ -107,12 +106,9 @@ func Start(ctx context.Context, cfg *Config, tel *telemetry.Store) (*Server, err
 	// OCPP 2.0.1 on its own port, when configured. Same handler and therefore
 	// the same charger state and telemetry — only the message encoding differs.
 	if cfg.PortV201 > 0 {
-		wsServer201 := ws.NewServer()
-		if cfg.Username != "" || cfg.Password != "" {
-			u, p := cfg.Username, cfg.Password
-			wsServer201.SetBasicAuthHandler(func(user, pass string) bool {
-				return user == u && pass == p
-			})
+		wsServer201, err := newListener(cfg, auth)
+		if err != nil {
+			return nil, err
 		}
 		h201 := &handlerV201{Handler: h}
 		csms := ocpp201.NewCSMS(nil, wsServer201)
@@ -140,8 +136,11 @@ func Start(ctx context.Context, cfg *Config, tel *telemetry.Store) (*Server, err
 		go func() {
 			defer close(s.doneV201)
 			slog.Info("OCPP central system listening",
-				"version", Version201, "port", cfg.PortV201, "path", cfg.Path,
-				"basic_auth", cfg.Username != "")
+				"version", Version201, "scheme", cfg.Scheme(),
+				"bind", cfg.Bind, "port", cfg.PortV201, "path", cfg.Path,
+				"basic_auth", auth.requiresCredential(),
+				"per_charger_credentials", len(cfg.ChargerSecrets),
+				"client_certs", cfg.TLS != nil && cfg.TLS.ClientCAFile != "")
 			csms.Start(cfg.PortV201, fmt.Sprintf("%s{ws}", cfg.Path))
 		}()
 	}
@@ -165,16 +164,15 @@ func Start(ctx context.Context, cfg *Config, tel *telemetry.Store) (*Server, err
 	go func() {
 		defer close(s.done)
 		slog.Info("OCPP central system listening",
+			"version", Version16, "scheme", cfg.Scheme(),
 			"bind", cfg.Bind, "port", cfg.Port, "path", cfg.Path,
-			"basic_auth", cfg.Username != "")
-		// TODO: cfg.Bind is not honored here. The ocpp-go library's
-		// CentralSystem.Start(port, path) and ws.Server.Start(port, path)
-		// only accept a port — there is no SetAddr or bind-address parameter.
-		// To support bind-address natively we would need to either:
-		//   (a) upstream a PR to ocpp-go adding a SetListenAddr method, or
-		//   (b) create our own net.Listener bound to cfg.Bind:cfg.Port and
-		//       serve the ws.Server's http.Handler on it.
-		// For now cfg.Bind is advisory-only (documented in Config).
+			"basic_auth", auth.requiresCredential(),
+			"per_charger_credentials", len(cfg.ChargerSecrets),
+			"client_certs", cfg.TLS != nil && cfg.TLS.ClientCAFile != "")
+		// The socket itself is opened on every interface — ws.Server.Start
+		// builds its address from the port alone. cfg.Bind is enforced one
+		// layer up, in authorizer.checkClient, which refuses the handshake
+		// for a connection that arrived somewhere else.
 		// cs.Start blocks until cs.Stop is called.
 		s.cs.Start(cfg.Port, fmt.Sprintf("%s{ws}", cfg.Path))
 	}()
@@ -183,6 +181,59 @@ func Start(ctx context.Context, cfg *Config, tel *telemetry.Store) (*Server, err
 		s.Stop()
 	}()
 	return s, nil
+}
+
+// newListener builds one version's WebSocket server — TLS when configured —
+// with both authorization gates wired.
+//
+// The basic-auth handler is registered only when a credential exists: the
+// library reads a registered handler as "credentials are mandatory" and
+// answers 401 to a charger that sends none, so registering it unconditionally
+// would lock out every charger on a server with no username instead of
+// admitting them all. checkClient is always safe to register; it authorizes
+// everything when nothing is configured.
+func newListener(cfg *Config, auth *authorizer) (ws.WsServer, error) {
+	var srv *ws.Server
+	if cfg.TLS.configured() {
+		// Half a TLS section is an error, not a reason to serve plaintext:
+		// an operator who asked for wss:// and silently got ws:// would
+		// have no way to tell the link was never encrypted.
+		tlsCfg, err := cfg.TLS.serverTLS()
+		if err != nil {
+			return nil, err
+		}
+		srv = ws.NewTLSServer(cfg.TLS.CertFile, cfg.TLS.KeyFile, tlsCfg)
+	} else {
+		srv = ws.NewServer()
+	}
+	if auth.requiresCredential() {
+		srv.SetBasicAuthHandler(auth.basicAuth)
+	}
+	srv.SetCheckClientHandler(auth.checkClient)
+	return &guardedServer{Server: srv, check: auth.checkClient}, nil
+}
+
+// guardedServer keeps our connection check installed.
+//
+// ocppj.Server.Start unconditionally calls SetCheckClientHandler with its own
+// handler, which is nil unless the caller reached past the 1.6/2.0.1 facade to
+// set one. Handing the raw ws.Server to NewCentralSystem therefore discards
+// the bind and identity gates silently at startup — the listener comes up, the
+// logs say the gates are configured, and every impersonation attempt is
+// accepted. This wrapper chains instead of replacing, so ours runs first and
+// the library's own check still runs after.
+type guardedServer struct {
+	*ws.Server
+	check func(id string, r *http.Request) bool
+}
+
+func (g *guardedServer) SetCheckClientHandler(handler func(id string, r *http.Request) bool) {
+	g.Server.SetCheckClientHandler(func(id string, r *http.Request) bool {
+		if !g.check(id, r) {
+			return false
+		}
+		return handler == nil || handler(id, r)
+	})
 }
 
 // Stop closes the WebSocket server and waits for the listener goroutine to exit.
