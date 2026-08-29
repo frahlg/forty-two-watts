@@ -329,12 +329,14 @@
         note.className = "hint";
         note.textContent = expiryText(pairing);
         picture.appendChild(note);
+        if (slot.scrollIntoView) slot.scrollIntoView({ block: "nearest" });
       })
       .catch(function () {
         var err = document.createElement("p");
-        err.className = "hint";
+        err.className = "hint app-link-error";
         err.textContent = "Could not draw the code here — read one out instead.";
         picture.appendChild(err);
+        if (slot.scrollIntoView) slot.scrollIntoView({ block: "nearest" });
       });
   }
 
@@ -362,10 +364,14 @@
       })
       .then(showCode)
       .catch(function (e) {
+        // A refusal is an answer, not background reading: red, and scrolled
+        // into view — the #951 gate's "on the box, or after the house
+        // password is on" is the expected outcome on every LAN browser.
         var err = document.createElement("p");
-        err.className = "hint";
+        err.className = "hint app-link-error";
         err.textContent = e.message || String(e);
         slot.appendChild(err);
+        if (slot.scrollIntoView) slot.scrollIntoView({ block: "nearest" });
       })
       .then(function () {
         button.disabled = false;
@@ -435,6 +441,13 @@
         '<button type="button" id="app-link-pair" disabled>Show pairing code</button>' +
         '<button type="button" id="app-link-share" hidden>Let someone see this home</button>' +
         "</div>" +
+        // The slot sits right under the buttons that fill it. It used to sit
+        // after the hint paragraphs below, which put the answer — QR, spoken
+        // code, or a refusal — some 300 px under the button and usually below
+        // the modal's fold: the operator pressed, the panel "blinked", and
+        // nothing appeared where they were looking (field report 2026-08-29,
+        // the #951 gate refusal was in the DOM the whole time).
+        '<div id="app-link-slot"></div>' +
         '<p class="hint">Scan the code with the FTW app to add a phone. It works ' +
         "once and expires in a few minutes, so ask for a new one when you need it. " +
         "Everything the app needs is in the code itself, which is why the app can " +
@@ -446,7 +459,6 @@
         "carries what it needs to find this box and be sure it is this one. Only " +
         "one code is live at a time, so asking for any of them stops the last " +
         "one.</p>" +
-        '<div id="app-link-slot"></div>' +
         "</fieldset>" +
         fleetPanel(ctx)
       );

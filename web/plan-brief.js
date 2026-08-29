@@ -1,3 +1,5 @@
+import { fillPlanSoC } from "./plan-soc.js";
+
 function formatClock(tsMs) {
   const date = new Date(tsMs);
   return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
@@ -185,7 +187,9 @@ export function derivePlanBrief({
   plan = null,
   status = {},
   now = Date.now(),
+  socOpts = {},
 } = {}) {
+  fillPlanSoC(plan, socOpts);
   const actions = plan && Array.isArray(plan.actions) ? plan.actions : [];
   const hasBattery = batteryIsPresent(status, actions);
   const plannerMode = String(status.mode || "").startsWith("planner_");

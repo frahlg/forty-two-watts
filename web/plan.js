@@ -3,7 +3,16 @@
 // the middle, SoC + PV line on bottom. Refreshes every 30s.
 
 import { derivePlanBrief, unavailablePlannerCopy } from "./plan-brief.js";
+import { fillPlanSoC } from "./plan-soc.js";
 import { setActiveCurrency, toDisplay, unitFor } from "./components/price-units.js";
+import {
+  trustFromSlider,
+  sliderFromTrust,
+  safetyK,
+  hedgeLine,
+  exportSentence,
+  prefsFromStatus,
+} from "./plan-prefs.js";
 
 (function () {
   'use strict';
@@ -121,25 +130,35 @@ import { setActiveCurrency, toDisplay, unitFor } from "./components/price-units.
   }
 
   async function fetchAll() {
-    const [p, f, m, c, s] = await Promise.all([
+    const [p, f, m, c, s, pv] = await Promise.all([
       apiFetch('/api/prices').then(r => r.json()).catch(() => ({})),
       apiFetch('/api/forecast').then(r => r.json()).catch(() => ({})),
       apiFetch('/api/mpc/plan').then(r => r.json()).catch(() => ({})),
       apiFetch('/api/config').then(r => r.json()).catch(() => ({})),
       apiFetch('/api/status').then(r => r.json()).catch(() => ({})),
+      apiFetch('/api/pvmodel').then(r => r.json()).catch(() => ({})),
     ]);
     state.prices = (p && p.items) || [];
     // /api/prices says which currency the stored minor units are in, so
     // the labels aren't stuck on Swedish öre.
     state.currency = setActiveCurrency((p && p.currency) || 'SEK');
     state.forecast = (f && f.items) || [];
-    state.plan = (m && m.plan) || null;
+    const planner = (c && c.planner) || {};
+    state.socOpts = {
+      chargeEff: planner.charge_efficiency,
+      dischargeEff: planner.discharge_efficiency,
+    };
+    state.plan = fillPlanSoC((m && m.plan) || null, state.socOpts);
     state.planMeta = (m && m.meta) || null;
     state.fuse = (c && c.fuse) || null;
     // Tariff breakdown pulled from /api/config so the price bars can be
     // stacked as spot + grid tariff + VAT instead of one opaque number.
     state.priceCfg = (c && c.price) || null;
     state.status = s || {};
+    state.prefs = prefsFromStatus(s);
+    state.pvSigmaW = (pv && typeof pv.pv_residual_std_w === "number")
+      ? pv.pv_residual_std_w
+      : null;
     state.enabled = {
       prices: p && p.enabled,
       forecast: f && f.enabled,
@@ -158,7 +177,7 @@ import { setActiveCurrency, toDisplay, unitFor } from "./components/price-units.
     try {
       const r = await apiFetch('/api/mpc/replan', { method: 'POST' });
       const j = await r.json();
-      if (j && j.plan) state.plan = j.plan;
+      if (j && j.plan) state.plan = fillPlanSoC(j.plan, state.socOpts);
       window.dispatchEvent(new CustomEvent("ftw-plan-data", {
         detail: { plan: state.plan },
       }));
@@ -203,6 +222,7 @@ import { setActiveCurrency, toDisplay, unitFor } from "./components/price-units.
       unavailableReason: (state.enabled && state.enabled.mpcReason) || "",
       plan,
       status: state.status || {},
+      socOpts: state.socOpts,
     });
     applyStateBadge('plan-state-badge', brief.state);
     setText('plan-next-action', brief.next.action);
@@ -219,6 +239,7 @@ import { setActiveCurrency, toDisplay, unitFor } from "./components/price-units.
     setText('plan-expected-soc', brief.soc ? brief.soc.label : '—');
     setText('plan-soc-detail', brief.soc ? brief.soc.detail : '');
     renderOverviewPlanBrief(brief);
+    syncPrefsUI();
   }
 
   function renderOptimizerFallbackAlert(plan) {
@@ -644,24 +665,34 @@ import { setActiveCurrency, toDisplay, unitFor } from "./components/price-units.
         ctx.fillStyle = color;
         ctx.fillRect(x0, Math.min(y, powerYCenter), Math.max(1, x1 - x0 - 1), Math.abs(y - powerYCenter));
       }
-      // SoC line
+      // SoC line — clip to the SoC band so a reconstructed point past
+      // 0–100% cannot paint through the power bars.
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(pad.l, socY0, plotW, socH);
+      ctx.clip();
       ctx.strokeStyle = 'rgba(96,165,250,0.95)';
       ctx.lineWidth = 2;
       ctx.beginPath();
       first = true;
-      // Anchor at start SoC at now
-      if (plan.initial_soc != null) {
-        ctx.moveTo(xScale(now), socY(socPercent(plan.initial_soc)));
+      // Anchor at start SoC at now. Skip non-finite points: a missing
+      // soc used to become canvas y=0 (a fake empty battery).
+      const startSoc = socPercent(plan.initial_soc);
+      if (startSoc != null) {
+        ctx.moveTo(xScale(now), socY(startSoc));
         first = false;
       }
       for (const a of plan.actions) {
         if (a.slot_start_ms > tMax) break;
+        const endSoc = socPercent(a.soc);
+        if (endSoc == null) continue;
         const x = xScale(a.slot_start_ms + a.slot_len_min * 60 * 1000);
-        const y = socY(socPercent(a.soc) || 0);
+        const y = socY(endSoc);
         if (first) { ctx.moveTo(x, y); first = false; }
         else ctx.lineTo(x, y);
       }
       ctx.stroke();
+      ctx.restore();
       // SoC axis labels: right-align flush against the plot's right edge
       // so they read as part of the chart frame instead of floating off
       // in whitespace.
@@ -749,11 +780,14 @@ import { setActiveCurrency, toDisplay, unitFor } from "./components/price-units.
             `<span class="s-value">${escapeHTML(comparison)}</span></span>`
           );
         }
-        parts.push(
-          `<span title="Battery state of charge right now — the plan starts from here">` +
-          `<span class="s-label">start SoC </span>` +
-          `<span class="s-value">${(socPercent(plan.initial_soc) || 0).toFixed(0)}%</span></span>`
-        );
+        const startSoc = socPercent(plan.initial_soc);
+        if (startSoc != null) {
+          parts.push(
+            `<span title="Battery state of charge right now — the plan starts from here">` +
+            `<span class="s-label">start SoC </span>` +
+            `<span class="s-value">${startSoc.toFixed(0)}%</span></span>`
+          );
+        }
         parts.push(
           `<span title="Total grid spend the plan expects over the full ${hh.toFixed(0)} h horizon. Negative means the plan expects to earn money (net export).">` +
           `<span class="s-label">${costLabel} </span>` +
@@ -987,6 +1021,146 @@ import { setActiveCurrency, toDisplay, unitFor } from "./components/price-units.
     canvas.addEventListener('touchcancel', endTouch);
   }
 
+  // Household prefs (forecast trust + battery export) on the Plan card.
+  // The slider POSTs trust only; export is sent unchanged so moving the
+  // slider never turns on battery export.
+  let trustDirty = false;
+  let prefsPosting = false;
+
+  function currentPrefs() {
+    return state.prefs || prefsFromStatus(state.status);
+  }
+
+  function mappedK() {
+    const p = currentPrefs();
+    if (typeof p.mapped_k === "number") return p.mapped_k;
+    return safetyK(p.forecast_trust);
+  }
+
+  function syncPrefsUI() {
+    const p = currentPrefs();
+    const slider = document.getElementById("forecast-trust-slider");
+    if (slider && !trustDirty) {
+      slider.value = String(sliderFromTrust(p.forecast_trust));
+      slider.disabled = !!p.yaml_custom;
+      slider.setAttribute("aria-valuenow", slider.value);
+      slider.setAttribute("aria-valuetext", p.forecast_trust);
+    }
+    const yamlNote = document.getElementById("forecast-trust-yaml");
+    if (yamlNote) yamlNote.hidden = !p.yaml_custom;
+
+    const hedgeEl = document.getElementById("forecast-trust-hedge");
+    if (hedgeEl) {
+      const kUse = p.yaml_custom
+        ? mappedK()
+        : (slider ? safetyK(trustFromSlider(slider.value)) : mappedK());
+      const text = hedgeLine(kUse, state.pvSigmaW);
+      if (text == null) {
+        hedgeEl.hidden = true;
+        hedgeEl.textContent = "";
+      } else {
+        hedgeEl.hidden = false;
+        hedgeEl.textContent = text;
+      }
+    }
+
+    const unknown = p.battery_export === "unknown";
+    const banner = document.getElementById("plan-export-banner");
+    const row = document.getElementById("plan-export-row");
+    const unknownHelp = document.getElementById("plan-export-unknown");
+    const check = document.getElementById("plan-export-check");
+    if (banner) banner.hidden = !unknown;
+    if (row) row.hidden = unknown;
+    if (unknownHelp) unknownHelp.hidden = !unknown;
+    if (check && !unknown) check.checked = p.battery_export === "allowed";
+
+    const sentence = document.getElementById("plan-export-sentence");
+    if (sentence) {
+      const actions = (state.plan && state.plan.actions) || [];
+      sentence.textContent = exportSentence({
+        actions,
+        exportPermission: p.battery_export,
+      });
+    }
+  }
+
+  async function postPlannerPrefs(trust, exportPerm) {
+    if (prefsPosting) return;
+    prefsPosting = true;
+    try {
+      const r = await apiFetch("/api/planner/prefs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          forecast_trust: trust,
+          battery_export: exportPerm,
+        }),
+      });
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      const j = await r.json();
+      state.prefs = {
+        forecast_trust: j.forecast_trust,
+        battery_export: j.battery_export,
+        yaml_custom: !!j.yaml_custom,
+        mapped_k: typeof j.mapped_k === "number" ? j.mapped_k : safetyK(j.forecast_trust),
+      };
+      trustDirty = false;
+      syncPrefsUI();
+      fetchAll();
+    } catch (e) {
+      trustDirty = false;
+      syncPrefsUI();
+    } finally {
+      prefsPosting = false;
+    }
+  }
+
+  function initPrefs() {
+    const slider = document.getElementById("forecast-trust-slider");
+    if (slider) {
+      slider.addEventListener("input", function () {
+        if (slider.disabled) return;
+        trustDirty = true;
+        const hedgeEl = document.getElementById("forecast-trust-hedge");
+        if (hedgeEl) {
+          const text = hedgeLine(safetyK(trustFromSlider(slider.value)), state.pvSigmaW);
+          if (text == null) {
+            hedgeEl.hidden = true;
+          } else {
+            hedgeEl.hidden = false;
+            hedgeEl.textContent = text;
+          }
+        }
+      });
+      slider.addEventListener("change", function () {
+        if (slider.disabled) return;
+        const p = currentPrefs();
+        postPlannerPrefs(trustFromSlider(slider.value), p.battery_export);
+      });
+    }
+    const check = document.getElementById("plan-export-check");
+    if (check) {
+      check.addEventListener("change", function () {
+        const p = currentPrefs();
+        postPlannerPrefs(p.forecast_trust, check.checked ? "allowed" : "not_allowed");
+      });
+    }
+    const allow = document.getElementById("plan-export-allow");
+    if (allow) {
+      allow.addEventListener("click", function () {
+        const p = currentPrefs();
+        postPlannerPrefs(p.forecast_trust, "allowed");
+      });
+    }
+    const deny = document.getElementById("plan-export-deny");
+    if (deny) {
+      deny.addEventListener("click", function () {
+        const p = currentPrefs();
+        postPlannerPrefs(p.forecast_trust, "not_allowed");
+      });
+    }
+  }
+
   // Strategy explanation — surfaces one-sentence logic for the current mode.
   const STRATEGY_DESC = {
     planner_passive_arbitrage: 'Passive arbitrage. Charges the battery from the cheapest available energy each slot — PV when sunny, grid during cheap night hours — for your own use. Never exports from the battery. Subsumes smart self-consumption (summer behavior) and cheap charging (winter behavior); the planner picks per slot.',
@@ -1033,6 +1207,10 @@ import { setActiveCurrency, toDisplay, unitFor } from "./components/price-units.
           el.textContent = copy.action + '. ' + copy.nextStep + '.';
           return;
         }
+        if (plannerMode) {
+          el.textContent = '';
+          return;
+        }
         el.textContent = STRATEGY_DESC[d.mode] || '';
       })
       .catch(function () {});
@@ -1041,6 +1219,7 @@ import { setActiveCurrency, toDisplay, unitFor } from "./components/price-units.
   function init() {
     fetchAll();
     setupHover();
+    initPrefs();
     renderStrategyHint();
     setInterval(fetchAll, PLAN_REFRESH_MS);
     setInterval(renderStrategyHint, 5000);
