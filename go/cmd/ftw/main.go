@@ -1319,16 +1319,26 @@ func main() {
 				approved = append(approved, lp.DriverName)
 			}
 		}
-		srv, err := ocpp.Start(ctx, &ocpp.Config{
+		ocppCfg := &ocpp.Config{
 			Enabled:            cfg.OCPP.Enabled,
+			Bind:               cfg.OCPP.Bind,
 			Port:               cfg.OCPP.Port,
 			PortV201:           cfg.OCPP.PortV201,
 			Path:               cfg.OCPP.Path,
 			Username:           cfg.OCPP.Username,
 			Password:           cfg.OCPP.Password,
 			HeartbeatIntervalS: cfg.OCPP.HeartbeatIntervalS,
+			ChargerSecrets:     cfg.OCPP.ChargerSecrets(),
 			ApprovedIDs:        approved,
-		}, tel)
+		}
+		if t := cfg.OCPP.TLS; t != nil {
+			ocppCfg.TLS = &ocpp.TLSConfig{
+				CertFile:     t.CertFile,
+				KeyFile:      t.KeyFile,
+				ClientCAFile: t.ClientCAFile,
+			}
+		}
+		srv, err := ocpp.Start(ctx, ocppCfg, tel)
 		if err != nil {
 			// A charger that cannot reach us is a missing device, not a
 			// broken site, so keep the rest of the process running.

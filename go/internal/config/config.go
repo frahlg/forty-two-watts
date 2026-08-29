@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -58,20 +59,62 @@ type Config struct {
 // appears as a device the moment it sends its first BootNotification, keyed by
 // the identity segment of the URL it dialled.
 //
-// Disabled by default, and enabling it requires credentials. The listener
-// cannot be restricted to one interface: the OCPP library builds its own
-// listen address from the port alone, so the socket is reachable on every
-// interface the host has. Basic auth is the only thing standing in front of
-// it, which is why an empty Username or Password is rejected rather than
-// silently accepted.
+// Disabled by default, and enabling it requires credentials. The socket cannot
+// be restricted to one interface: the OCPP library builds its own listen
+// address from the port alone, so it is open on every interface the host has.
+// Bind therefore refuses the handshake for a connection that arrived
+// elsewhere, which controls access without shrinking the attack surface — an
+// empty Username or Password is still rejected rather than silently accepted.
 type OCPP struct {
-	Enabled            bool   `yaml:"enabled" json:"enabled"`
+	Enabled bool `yaml:"enabled" json:"enabled"`
+
+	// Bind is the address chargers are served on. Empty or 0.0.0.0 accepts
+	// every interface, which is the default and what a flat home LAN wants.
+	// Set it to one LAN address to refuse chargers reaching the box any
+	// other way — over a VPN interface, say, or a second NIC.
+	Bind string `yaml:"bind,omitempty" json:"bind,omitempty"`
+
 	Port               int    `yaml:"port,omitempty" json:"port,omitempty"`
 	PortV201           int    `yaml:"port_v201,omitempty" json:"port_v201,omitempty"`
 	Path               string `yaml:"path,omitempty" json:"path,omitempty"`
 	Username           string `yaml:"username,omitempty" json:"username,omitempty"`
 	Password           string `yaml:"password,omitempty" json:"password,omitempty"`
 	HeartbeatIntervalS int    `yaml:"heartbeat_interval_s,omitempty" json:"heartbeat_interval_s,omitempty"`
+
+	// TLS serves wss:// instead of ws://. Optional, and worth the
+	// certificate management on any site where the charger and the box are
+	// not on the same trusted wire.
+	TLS *OCPPTLS `yaml:"tls,omitempty" json:"tls,omitempty"`
+
+	// Chargers gives named charge points a credential of their own, so the
+	// shared password stops being enough to claim their identity. Optional
+	// and per charger: anything not listed keeps using Username/Password.
+	Chargers []OCPPCharger `yaml:"chargers,omitempty" json:"chargers,omitempty"`
+}
+
+// OCPPTLS points at the certificate the OCPP listener presents, and optionally
+// at the CA that signs the charge points allowed to connect.
+type OCPPTLS struct {
+	CertFile string `yaml:"cert_file,omitempty" json:"cert_file,omitempty"`
+	KeyFile  string `yaml:"key_file,omitempty" json:"key_file,omitempty"`
+
+	// ClientCAFile turns on mutual TLS: every charge point must present a
+	// certificate signed by this CA. That is OCPP 2.0.1 security profile 3,
+	// and the only identity here that cannot be copied out of one charger's
+	// configuration and replayed by another device.
+	ClientCAFile string `yaml:"client_ca_file,omitempty" json:"client_ca_file,omitempty"`
+}
+
+// OCPPCharger is one charge point's own credential.
+//
+// The ID is the identity the charger dials with — the last segment of its URL,
+// and the same string a loadpoint's driver_name uses to adopt it. On OCPP the
+// basic-auth username is that identity, so a charger listed here must present
+// both, and a device holding only the shared password can no longer connect
+// under its name.
+type OCPPCharger struct {
+	ID       string `yaml:"id" json:"id"`
+	Password string `yaml:"password,omitempty" json:"password,omitempty"`
 }
 
 // Validate rejects an enabled server that would accept anonymous charge
@@ -96,7 +139,65 @@ func (o *OCPP) Validate() error {
 	if o.HeartbeatIntervalS < 0 {
 		return fmt.Errorf("ocpp.heartbeat_interval_s must be >= 0, got %d", o.HeartbeatIntervalS)
 	}
+	// A bind address that does not parse would silently fall back to "every
+	// interface" — the opposite of what the operator asked for.
+	if o.Bind != "" && net.ParseIP(o.Bind) == nil {
+		return fmt.Errorf("ocpp.bind must be an IP address, got %q", o.Bind)
+	}
+	if err := o.TLS.validate(); err != nil {
+		return err
+	}
+	seen := make(map[string]bool, len(o.Chargers))
+	for i, c := range o.Chargers {
+		if c.ID == "" {
+			return fmt.Errorf("ocpp.chargers[%d].id is required", i)
+		}
+		if seen[c.ID] {
+			return fmt.Errorf("ocpp.chargers has two entries for %q", c.ID)
+		}
+		seen[c.ID] = true
+		// An entry with no password would quietly fall back to the shared
+		// one, leaving the operator believing this charger was pinned to a
+		// credential of its own.
+		if c.Password == "" {
+			return fmt.Errorf("ocpp.chargers[%d] (%s) needs a password; remove the entry to use the shared one", i, c.ID)
+		}
+	}
 	return nil
+}
+
+// validate checks the TLS section without touching the filesystem — the paths
+// are read when the listener starts, which is where a missing file is
+// reported. A nil section means plaintext ws://, which is the default.
+func (t *OCPPTLS) validate() error {
+	if t == nil {
+		return nil
+	}
+	if t.CertFile == "" && t.KeyFile == "" {
+		if t.ClientCAFile != "" {
+			return errors.New("ocpp.tls.client_ca_file needs cert_file and key_file: client certificates are only verified on a TLS listener")
+		}
+		return nil
+	}
+	if t.CertFile == "" || t.KeyFile == "" {
+		return errors.New("ocpp.tls needs both cert_file and key_file")
+	}
+	return nil
+}
+
+// ChargerSecrets is the per-charger credential map, keyed by charge point
+// identity. Empty when none are configured.
+func (o *OCPP) ChargerSecrets() map[string]string {
+	if o == nil || len(o.Chargers) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(o.Chargers))
+	for _, c := range o.Chargers {
+		if c.ID != "" && c.Password != "" {
+			out[c.ID] = c.Password
+		}
+	}
+	return out
 }
 
 // AppLink controls the outbound connection the FTW app reaches this box
@@ -1336,9 +1437,20 @@ func (c Config) MaskSecrets() Config {
 	}
 	// The OCPP password is the only thing standing in front of a listener that
 	// is reachable on every interface, so it must never leave over the API.
+	// The per-charger passwords are the same secret with a narrower blast
+	// radius, and the slice has to be copied rather than blanked in place —
+	// the struct copy above shares its backing array with the live config.
 	if out.OCPP != nil {
 		cp := *out.OCPP
 		cp.Password = ""
+		if len(cp.Chargers) > 0 {
+			chargers := make([]OCPPCharger, len(cp.Chargers))
+			for i, c := range cp.Chargers {
+				c.Password = ""
+				chargers[i] = c
+			}
+			cp.Chargers = chargers
+		}
 		out.OCPP = &cp
 	}
 	if out.Price != nil {
@@ -1416,8 +1528,23 @@ func (incoming *Config) PreserveMaskedSecrets(existing *Config) {
 	// Masked out on the way to the UI, so an unchanged password comes back
 	// empty. Without this a save from the settings tab would blank it, and an
 	// enabled server would then fail validation on the next reload.
-	if incoming.OCPP != nil && existing.OCPP != nil && incoming.OCPP.Password == "" {
-		incoming.OCPP.Password = existing.OCPP.Password
+	if incoming.OCPP != nil && existing.OCPP != nil {
+		if incoming.OCPP.Password == "" {
+			incoming.OCPP.Password = existing.OCPP.Password
+		}
+		// Per-charger passwords are masked the same way, and are matched by
+		// charger id rather than position: the settings UI can reorder the
+		// list or drop an entry, and restoring by index would then hand one
+		// charger another's credential.
+		if len(incoming.OCPP.Chargers) > 0 {
+			stored := existing.OCPP.ChargerSecrets()
+			for i := range incoming.OCPP.Chargers {
+				c := &incoming.OCPP.Chargers[i]
+				if c.Password == "" {
+					c.Password = stored[c.ID]
+				}
+			}
+		}
 	}
 	if incoming.HomeAssistant != nil && existing.HomeAssistant != nil && incoming.HomeAssistant.Password == "" {
 		incoming.HomeAssistant.Password = existing.HomeAssistant.Password
