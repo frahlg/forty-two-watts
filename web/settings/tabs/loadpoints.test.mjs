@@ -5,8 +5,8 @@ import assert from "node:assert/strict";
 
 globalThis.window = {};
 await import("./loadpoints.js");
-const { evDriverNames, ocppChargerIds, ocppStateLabel, ocppSection, steerLabel,
-  vehiclesSection, vehicleForIdentifier, parseIdentifiers } =
+const { evDriverNames, ocppChargerIds, ocppStateLabel, ocppSection, ocppServerForm,
+  steerLabel, vehiclesSection, vehicleForIdentifier, parseIdentifiers } =
   globalThis.window.FTWSettings.tabs.loadpoints._pure;
 
 const escHtml = (s) =>
@@ -126,10 +126,22 @@ describe("charger state labels", () => {
 });
 
 describe("OCPP section", () => {
-  it("tells the operator how to enable a disabled server", () => {
-    const html = ocppSection({ enabled: false, chargers: [] }, "192.168.1.209", escHtml);
-    assert.match(html, /enabled: true/);
+  it("lets the operator turn a disabled server on, rather than sending them to config.yaml", () => {
+    const html = ocppSection({ enabled: false, chargers: [] }, "192.168.1.209", escHtml, [], {});
+    assert.match(html, /data-checkbox-path="ocpp\.enabled"/);
+    assert.match(html, /data-path="ocpp\.password"/);
     assert.match(html, /ws:\/\/192\.168\.1\.209:8887/);
+  });
+
+  it("offers the server settings when it is already on", () => {
+    const html = ocppSection(
+      { enabled: true, port: 8887, path: "/", chargers: [] },
+      "ftw.lan", escHtml, [],
+      { ocpp: { enabled: true, port: 8887, port_v201: 8888, username: "ftw" } },
+    );
+    assert.match(html, /data-checkbox-path="ocpp\.enabled"[^>]*checked/);
+    assert.match(html, /data-path="ocpp\.port_v201" value="8888"/);
+    assert.match(html, /data-path="ocpp\.username" value="ftw"/);
   });
 
   it("shows the dial-in URL and the DHCP reservation advice when enabled", () => {
@@ -174,5 +186,34 @@ describe("OCPP section", () => {
     assert.match(html, /7\.4 kW/);
     assert.match(html, /1\.50 kWh/);
     assert.match(html, /2\.0\.1: port 8888/);
+  });
+});
+
+describe("OCPP server form", () => {
+  it("creates the fields even when the config has never had an ocpp section", () => {
+    const html = ocppServerForm({}, escHtml);
+    assert.match(html, /data-checkbox-path="ocpp\.enabled"/);
+    // Defaults an operator would otherwise have to go and look up.
+    assert.match(html, /data-path="ocpp\.port" value="8887"/);
+    assert.match(html, /data-path="ocpp\.path" value="\/"/);
+  });
+
+  it("never renders the stored password back into the page", () => {
+    const html = ocppServerForm({ ocpp: { password: "the-real-secret" } }, escHtml);
+    assert.doesNotMatch(html, /the-real-secret/);
+    // Blank means "keep the stored one", so the placeholder has to say so.
+    assert.match(html, /data-path="ocpp\.password" value=""/);
+    assert.match(html, /placeholder="unchanged"/);
+  });
+
+  it("shows an empty bind as every interface rather than inventing 0.0.0.0", () => {
+    const html = ocppServerForm({ ocpp: {} }, escHtml);
+    assert.match(html, /data-path="ocpp\.bind" value=""/);
+    assert.match(html, /placeholder="every interface"/);
+  });
+
+  it("escapes values it puts back into the page", () => {
+    const html = ocppServerForm({ ocpp: { username: '"><script>x</script>' } }, escHtml);
+    assert.doesNotMatch(html, /<script>/);
   });
 });
