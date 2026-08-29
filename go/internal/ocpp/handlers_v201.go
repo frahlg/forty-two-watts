@@ -56,8 +56,13 @@ func (h *handlerV201) OnBootNotification(id string, req *provisioning.BootNotifi
 	h.mu.Lock()
 	s.vendor = vendor
 	s.model = model
+	s.serial = serial
+	if req != nil && req.ChargingStation.FirmwareVersion != "" {
+		s.firmware = req.ChargingStation.FirmwareVersion
+	}
 	h.mu.Unlock()
 	h.setVersion(id, Version201)
+	h.noteIdentity(id)
 	h.telSuccess(id)
 
 	return provisioning.NewBootNotificationResponse(

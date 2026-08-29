@@ -102,7 +102,61 @@
   // The OCPP block of the Chargers tab: what the server is, where a charger
   // should dial, and the live list of charge points it has seen. vehicles
   // (config.vehicles) resolves each session's identity to a profile name.
-  function ocppSection(status, host, escHtml, vehicles) {
+  // The OCPP server's own settings, editable here rather than only in
+  // config.yaml. The Settings shell's generic capture pass writes these back
+  // by data-path, and creates the ocpp object when the config has none —
+  // which is the case on a box that has never turned OCPP on.
+  //
+  // TLS paths and per-charger credentials stay in config.yaml on purpose:
+  // they are host filesystem paths and one secret per charger, and both are
+  // set once at commissioning by someone with a shell. See docs/ocpp.md.
+  function ocppServerForm(config, escHtml, help) {
+    var h = typeof help === "function" ? help : function () { return ""; };
+    var o = (config && config.ocpp) || {};
+    return (
+      '<div class="field-row">' +
+      '<div>' +
+      '<label><input type="checkbox" data-checkbox-path="ocpp.enabled"' + (o.enabled ? ' checked' : '') + '> Run the OCPP server ' +
+      h("Chargers dial FTW, so there is no driver to add. Turning this on opens a WebSocket port they connect to.") + '</label>' +
+      '</div>' +
+      '<div>' +
+      '<label>Bind address ' +
+      h("Which of this machine's addresses chargers may reach the server on. Blank means every interface, which is what a normal home LAN wants. The port itself stays open on every interface either way — the setting refuses the connection, it does not close the port.") + '</label>' +
+      '<input type="text" data-path="ocpp.bind" value="' + escHtml(o.bind || "") + '" placeholder="every interface">' +
+      '</div>' +
+      '</div>' +
+      '<div class="field-row">' +
+      '<div>' +
+      '<label>Port (OCPP 1.6J) ' + h("The port 1.6 chargers connect to. 8887 is the usual choice.") + '</label>' +
+      '<input type="number" min="0" max="65535" step="1" data-path="ocpp.port" value="' + (o.port || 8887) + '">' +
+      '</div>' +
+      '<div>' +
+      '<label>Port (OCPP 2.0.1) ' + h("A charger picks its dialect during the connection handshake, so each version needs its own port. 0 turns 2.0.1 off.") + '</label>' +
+      '<input type="number" min="0" max="65535" step="1" data-path="ocpp.port_v201" value="' + (o.port_v201 || 0) + '">' +
+      '</div>' +
+      '</div>' +
+      '<div class="field-row">' +
+      '<div>' +
+      '<label>Path ' + h("URL prefix chargers dial, before the charger name. Usually just /.") + '</label>' +
+      '<input type="text" data-path="ocpp.path" value="' + escHtml(o.path || "/") + '" placeholder="/">' +
+      '</div>' +
+      '<div>' +
+      '<label>Username ' + h("The username every charger presents, unless it has a credential of its own in config.yaml.") + '</label>' +
+      '<input type="text" data-path="ocpp.username" value="' + escHtml(o.username || "") + '" placeholder="ftw">' +
+      '</div>' +
+      '</div>' +
+      '<div class="field-row">' +
+      '<div>' +
+      '<label>Password ' +
+      h("Required. Use a long random string: this is the gate in front of a port that is open on every interface. Leave blank to keep the stored one.") + '</label>' +
+      '<input type="password" data-path="ocpp.password" value="" placeholder="' + (o.password ? "unchanged" : "a long random string") + '">' +
+      '</div>' +
+      '<div></div>' +
+      '</div>'
+    );
+  }
+
+  function ocppSection(status, host, escHtml, vehicles, config, help) {
     var html = '<fieldset><legend>OCPP chargers</legend>';
 
     if (!status) {
@@ -114,22 +168,20 @@
       html +=
         '<p style="color:var(--text-dim);font-size:0.8rem;margin:0 0 8px">' +
         'An EV charger that speaks <b>OCPP</b> needs no driver: FTW has a built-in OCPP 1.6J + 2.0.1 server, ' +
-        'and the charger connects to it and registers itself. The server is currently <b>off</b>. ' +
-        'Enable it in <code>config.yaml</code>:' +
+        'and the charger connects to it and registers itself. The server is currently <b>off</b> — ' +
+        'turn it on here, set a password, and save.' +
         '</p>' +
-        '<pre style="font-size:0.75rem;margin:0 0 8px">ocpp:\n' +
-        '    enabled: true\n' +
-        '    port: 8887          # OCPP 1.6J\n' +
-        '    port_v201: 8888     # OCPP 2.0.1, omit to disable\n' +
-        '    username: ftw\n' +
-        '    password: &lt;a long random string&gt;</pre>' +
-        '<p style="color:var(--text-dim);font-size:0.8rem;margin:0">' +
+        ocppServerForm(config, escHtml, help) +
+        '<p style="color:var(--text-dim);font-size:0.8rem;margin:8px 0 0">' +
         'Then point the charger at <code>ws://' + escHtml(host) + ':8887/&lt;charger-name&gt;</code> ' +
-        'and it appears here. See <b>docs/ocpp.md</b> for per-vendor steps.' +
+        'and it appears here. See <b>docs/ocpp.md</b> for per-vendor steps, and for TLS and ' +
+        'per-charger credentials, which are set in <code>config.yaml</code>.' +
         '</p>';
       html += '</fieldset>';
       return html;
     }
+
+    html += ocppServerForm(config, escHtml, help);
 
     var port = status.port || 8887;
     var path = status.path || "/";
@@ -328,7 +380,7 @@
         'pick it here and set the electrical envelope. (Config files call this binding a <code>loadpoint</code>.)' +
         '</p>';
 
-      html += ocppSection(S.ocppStatus, (window.location && window.location.hostname) || "<ftw-host>", escHtml, config.vehicles);
+      html += ocppSection(S.ocppStatus, (window.location && window.location.hostname) || "<ftw-host>", escHtml, config.vehicles, config, help);
 
       if (!drivers.length) {
         html +=
@@ -583,6 +635,7 @@
       ocppChargerIds: ocppChargerIds,
       ocppStateLabel: ocppStateLabel,
       ocppSection: ocppSection,
+      ocppServerForm: ocppServerForm,
       steerLabel: steerLabel,
       vehiclesSection: vehiclesSection,
       vehicleForIdentifier: vehicleForIdentifier,

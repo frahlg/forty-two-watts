@@ -43,6 +43,11 @@ type Handler struct {
 	// never fire it, for the same reason they never fire the one above.
 	chargingNeeds func(chargerID string, needs ChargingNeeds)
 
+	// identityReported, when set, fires when an APPROVED charger says what
+	// it is (BootNotification) — main.go writes its row in the device
+	// registry from it. See identity.go.
+	identityReported func(ChargerIdentity)
+
 	// capabilityProbe, set by the Server, asks a charger which feature
 	// profiles it supports (see capabilities.go). Fired from OnConnect and
 	// OnBootNotification until the charger answers, then never again.
@@ -78,8 +83,13 @@ type chargerState struct {
 	transactionRef string
 	// vendor and model come from BootNotification and exist so the UI can
 	// label a charger with what it actually is rather than its URL segment.
-	vendor string
-	model  string
+	// serial is the hardware-stable half of its identity — what the device
+	// row is keyed on, when the charger reports one at all. firmware is
+	// shown next to them and is otherwise unused.
+	vendor   string
+	model    string
+	serial   string
+	firmware string
 	// vehicleID is the identity presented when the current/last transaction
 	// started: the RFID idTag on 1.6, or a 2.0.1 idToken — where the token
 	// type MacAddress (autocharge) or eMAID (ISO 15118) names the actual
@@ -279,6 +289,8 @@ func (h *Handler) Snapshot() map[string]ChargerView {
 			LastAmps:        s.lastAmps,
 			Vendor:          s.vendor,
 			Model:           s.model,
+			Serial:          s.serial,
+			Firmware:        s.firmware,
 			Pending:         !h.approved[id],
 			VehicleID:       s.vehicleID,
 			VehicleIDSource: s.vehicleIDSource,
@@ -314,6 +326,11 @@ type ChargerView struct {
 	LastAmps float64 `json:"last_amps,omitempty"`
 	Vendor   string  `json:"vendor,omitempty"`
 	Model    string  `json:"model,omitempty"`
+	// Serial is the hardware-stable half of the charger's identity, and
+	// what its /api/devices row is keyed on. Empty when the charger
+	// reports none — plenty do not.
+	Serial   string `json:"serial,omitempty"`
+	Firmware string `json:"firmware,omitempty"`
 	// Pending is set when no charger entry (loadpoint) names this id. A
 	// pending charger is visible here but quarantined from the site: its
 	// telemetry is withheld from dispatch until an operator adopts it.
@@ -373,16 +390,28 @@ func (h *Handler) OnDisconnect(id string) {
 // ---- core.CentralSystemHandler ----
 
 func (h *Handler) OnBootNotification(id string, req *core.BootNotificationRequest) (*core.BootNotificationConfirmation, error) {
+	// 1.6 has two serial fields. chargePointSerialNumber is the current
+	// one; chargeBoxSerialNumber is deprecated in the spec and still what
+	// a good deal of shipped firmware fills in, so fall back to it rather
+	// than lose the only hardware-stable identity a charger will give us.
+	serial := req.ChargePointSerialNumber
+	if serial == "" {
+		serial = req.ChargeBoxSerialNumber
+	}
 	slog.Info("OCPP boot",
 		"charger", id,
 		"vendor", req.ChargePointVendor,
 		"model", req.ChargePointModel,
+		"serial", serial,
 		"fw", req.FirmwareVersion)
 	s := h.state(id)
 	h.mu.Lock()
 	s.vendor = req.ChargePointVendor
 	s.model = req.ChargePointModel
+	s.serial = serial
+	s.firmware = req.FirmwareVersion
 	h.mu.Unlock()
+	h.noteIdentity(id)
 	h.telSuccess(id)
 	h.maybeProbeCapability(id)
 	return core.NewBootNotificationConfirmation(

@@ -1013,6 +1013,10 @@ func main() {
 				}
 			}
 			ocppSrv.Handler().SetApprovedIDs(approved)
+			// A charger adopted by this save booted long ago and will not
+			// boot again just because we changed our mind, so its device
+			// row has to be written here rather than waiting for one.
+			registerOCPPDevices(st, ocppSrv)
 		}
 
 		// Notifications: rebuild the provider from fresh config
@@ -1330,6 +1334,11 @@ func main() {
 			// profile's charging policy. An identity matching no profile
 			// changes nothing (the visitor default); it still shows in the
 			// Chargers panel so the operator can paste it into a profile.
+			// An adopted charger becomes a device the moment it says what
+			// it is, keyed on vendor+serial like any driver-backed one.
+			ocppSrv.Handler().SetIdentityReported(func(ident ocpp.ChargerIdentity) {
+				registerOCPPDevice(st, ident)
+			})
 			ocppSrv.Handler().SetVehicleIdentified(func(chargerID, vehicleID, source string) {
 				cfgMu.RLock()
 				lpID := ""
@@ -3405,6 +3414,49 @@ func doRolloff(ctx context.Context, st *state.Store, coldDir string) {
 	if dRows > 0 {
 		slog.Info("diagnostics parquet rolloff",
 			"rows", dRows, "files", len(dFiles))
+	}
+}
+
+// registerOCPPDevice writes one charge point's row in the device registry.
+//
+// A charger is not in the driver registry — it dialled us, so there is no
+// driver, no endpoint we chose and no HostEnv identity to read. What it does
+// have is a BootNotification, and vendor+serial out of that is a
+// hardware-stable key exactly like a driver's. The name it dialled with is
+// not: an installer typed it and the charger's own web page can change it, so
+// it is recorded as the endpoint and only becomes the key when the charger
+// reports no serial at all.
+func registerOCPPDevice(st *state.Store, ident ocpp.ChargerIdentity) {
+	if st == nil || ident.ID == "" {
+		return
+	}
+	dev := state.Device{
+		DriverName: ident.ID,
+		Make:       ident.Vendor,
+		Serial:     ident.Serial,
+		Endpoint:   "ocpp://" + ident.ID,
+	}
+	id, err := st.RegisterDevice(dev)
+	if err != nil {
+		slog.Warn("ocpp: could not register charger as a device",
+			"charger", ident.ID, "err", err)
+		return
+	}
+	slog.Info("ocpp: charger registered as a device",
+		"charger", ident.ID, "device_id", id,
+		"vendor", ident.Vendor, "model", ident.Model, "serial", ident.Serial)
+}
+
+// registerOCPPDevices catches up every adopted charger that has already
+// booted. Adoption usually happens long after a BootNotification — an
+// operator sees a pending charger in the UI and binds it to a loadpoint — and
+// the charger will not boot again just because we changed our mind about it.
+func registerOCPPDevices(st *state.Store, srv *ocpp.Server) {
+	if st == nil || srv == nil {
+		return
+	}
+	for _, ident := range srv.Handler().Identities() {
+		registerOCPPDevice(st, ident)
 	}
 }
 

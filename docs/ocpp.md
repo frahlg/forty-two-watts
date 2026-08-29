@@ -45,7 +45,20 @@ turns *seen* into *trusted*.
 
 Once adopted it behaves like any other EV reading: `MeterValues` and
 `StatusNotification` become telemetry, and dispatch stops the home battery
-discharging into an active EV charge.
+discharging into an active EV charge. It also gets a row in `/api/devices`
+alongside the driver-backed hardware, under **Settings → Devices**.
+
+That row is keyed on the vendor and serial from `BootNotification`, not on the
+name above — a name an installer typed and the charger's own web page can
+change is not hardware identity, and state keyed on it would not survive a
+re-commissioning. Rename a charger and its row follows it; the persistent
+state stays attached to the box on the wall. A charger that reports no serial
+(plenty do not) falls back to the dialled name, recorded as an endpoint so it
+reads as what it is: stable only until someone changes it.
+
+Pending chargers get no row. A device row says this hardware is part of the
+site, and quarantine says an unadopted charge point is not; it gets one on the
+save that adopts it.
 
 ## Protocol versions
 
