@@ -321,6 +321,28 @@ would strand a driver with an uncharged car because the EMS went down, and the
 last limit was already judged safe for the site. This matches what every EV
 driver in FTW already does.
 
+### How the profile is shaped, and why
+
+The limit goes out as a `TxDefaultProfile` with one schedule period at second
+zero and no end: *hold this until I send another*. Two details of that are
+load-bearing, and both come from chargers disagreeing with the specification
+in ways that fail silently:
+
+- **The profile kind is `Relative`, not `Absolute`.** An absolute schedule
+  states when it starts; FTW's has no start, and the specification says an
+  absolute schedule without one is relative to the start of charging anyway.
+  A charger that instead reads the missing timestamp as "not valid yet"
+  answers **Accepted** and charges on at full rate — the worst failure
+  available here, because FTW logs a limit it never imposed. Relative carries
+  no timestamp to misread, and does not depend on the charger's clock agreeing
+  with ours.
+- **Connector 0, then connector 1.** A profile on connector 0 applies to every
+  connector, which avoids depending on per-connector ids — unreliable on
+  dual-socket units such as the Charge Amps Aura. Some chargers read the
+  connector-0 rule as `ChargePointMaxProfile`-only and reject it, so a refusal
+  is retried once on connector 1. Refusing both is reported as an error: a
+  charger FTW cannot steer must not look like one it can.
+
 ## One capacity, several cars: vehicle profiles
 
 `vehicle_capacity_wh` on a charger entry describes the **one** car the charger

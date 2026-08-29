@@ -1828,6 +1828,25 @@ func main() {
 	// driver_failure_default.go.
 	actuation := newDriverActuationTracker(tel)
 
+	// An OCPP charge point is not in the driver registry — it connected to us
+	// rather than being dialled — so route by name: if an online charger
+	// answers to it, command it over OCPP, otherwise fall through to the Lua
+	// driver registry. Everything above stays unaware of the difference.
+	//
+	// Hoisted out of the loadpoint controller below because the API needs the
+	// same routing: the dashboard's Pause / Resume / Force start post to
+	// /api/ev/command, and sending those straight to the registry finds no
+	// driver for a charger that has none.
+	evSend := reg.Send
+	if ocppSrv != nil {
+		evSend = func(ctx context.Context, name string, payload []byte) error {
+			if ocppSrv.Handler().IsOnline(name) {
+				return ocppSrv.Command(ctx, name, payload)
+			}
+			return reg.Send(ctx, name, payload)
+		}
+	}
+
 	// ---- EV loadpoint controller ----
 	// loadpoint.Controller owns per-tick EV dispatch, including the
 	// energy-allocation contract, snapping and phase transitions.
@@ -1875,20 +1894,9 @@ func main() {
 				RequestActive: reqActive,
 			}, true
 		}
-		// An OCPP charge point is not in the driver registry — it connected to
-		// us rather than being dialled — so route by name: if an online charger
-		// answers to it, command it over OCPP, otherwise fall through to the
-		// Lua driver registry. Loadpoints stay unaware of the difference.
-		send := reg.Send
-		if ocppSrv != nil {
-			send = func(ctx context.Context, name string, payload []byte) error {
-				if ocppSrv.Handler().IsOnline(name) {
-					return ocppSrv.Command(ctx, name, payload)
-				}
-				return reg.Send(ctx, name, payload)
-			}
-		}
-		lpController = loadpoint.NewController(lpMgr, planAdapter, telAdapter, send)
+		// evSend routes OCPP chargers past the driver registry; loadpoints
+		// stay unaware of the difference.
+		lpController = loadpoint.NewController(lpMgr, planAdapter, telAdapter, evSend)
 		// A charger that answers every poll and refuses every setpoint is
 		// the storage bug of #800 on the EV wire: it holds its last
 		// current and the plan keeps counting the load. Only the periodic
@@ -2559,6 +2567,7 @@ func main() {
 		Loadpoints:       lpMgr,
 		LoadpointCtrl:    lpController,
 		OCPPChargers:     ocppChargersFn,
+		EVSend:           evSend,
 		CalDAV:           calSvc,
 		HA:               haBridge,
 		Registry:         reg,

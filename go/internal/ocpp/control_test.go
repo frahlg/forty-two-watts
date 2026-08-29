@@ -22,6 +22,9 @@ type fakeCharger struct {
 	mu       sync.Mutex
 	status   smartcharging.ChargingProfileStatus
 	profiles []*smartcharging.SetChargingProfileRequest
+	// statusFn, when set, decides per request instead of status — for
+	// chargers that accept some profiles and refuse others.
+	statusFn func(*smartcharging.SetChargingProfileRequest) smartcharging.ChargingProfileStatus
 }
 
 func newFakeCharger() *fakeCharger {
@@ -32,6 +35,9 @@ func (f *fakeCharger) OnSetChargingProfile(req *smartcharging.SetChargingProfile
 	f.mu.Lock()
 	f.profiles = append(f.profiles, req)
 	status := f.status
+	if f.statusFn != nil {
+		status = f.statusFn(req)
+	}
 	f.mu.Unlock()
 	return smartcharging.NewSetChargingProfileConfirmation(status), nil
 }
