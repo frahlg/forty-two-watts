@@ -58,6 +58,13 @@ const (
 	// The 2.0.1 equivalent: EVSE 0 addresses the whole charging station.
 	allEVSEs = 0
 
+	// Where a limit goes when the charger refuses a charge-point-wide one.
+	// OCPP 1.6 permits a TxDefaultProfile on connector 0 — it is how a
+	// profile is applied to every connector — but some chargers read the
+	// connector-0 rule as ChargePointMaxProfile-only and reject it. On a
+	// single-socket unit connector 1 means the same thing.
+	firstConnector = 1
+
 	// A single, stable profile id and stack level means each new limit
 	// replaces the previous one instead of stacking on top of it.
 	ftwProfileID = 1
@@ -66,6 +73,26 @@ const (
 	ftwScheduleID  = 1
 	ftwStackLevel  = 0
 	scheduleStartS = 0
+)
+
+// The profile is Relative, not Absolute.
+//
+// FTW's schedule has one period at second 0 and no end: "hold this limit until
+// I send another". Absolute expresses that only with a startSchedule
+// timestamp, and the specification says an absolute schedule with none is
+// relative to the start of charging anyway — so the two spellings mean the
+// same thing here, and only one of them can be misread.
+//
+// It is misread in practice. A charger that parses the missing timestamp
+// strictly finds no valid start, treats the profile as not yet active, and
+// answers Accepted while charging on at full rate. That is the worst failure
+// this layer has: FTW logs a limit it never imposed, and the planner counts
+// energy the site is not saving. Relative needs no timestamp, so there is
+// nothing to misparse — and it does not depend on the charger's clock
+// agreeing with ours, which on EV chargers is not a safe assumption.
+const (
+	profileKind16  = types.ChargingProfileKindRelative
+	profileKind201 = types201.ChargingProfileKindRelative
 )
 
 // command is the JSON payload the loadpoint controller sends to EV drivers.
@@ -184,6 +211,53 @@ func (s *Server) setLimit(ctx context.Context, id string, amps float64, numberPh
 		amps = 0
 	}
 
+	r, err := s.attemptLimit(ctx, id, amps, numberPhases, allConnectors)
+	if err != nil {
+		return err
+	}
+	// A charger that answers Rejected to a charge-point-wide profile usually
+	// reads OCPP 1.6 as allowing connector 0 for ChargePointMaxProfile alone.
+	// The specification does permit a TxDefaultProfile there — it is how a
+	// profile is applied to every connector — but a charger that disagrees
+	// otherwise accepts no limit at all, which is a charger FTW meters and
+	// cannot steer. Retrying on the first connector costs one message and
+	// covers the single-socket units this matters for.
+	if r.answered && !r.accepted {
+		slog.Info("ocpp: charger refused a charge-point-wide profile, retrying on connector 1",
+			"charger", id, "status", r.status)
+		retry, retryErr := s.attemptLimit(ctx, id, amps, numberPhases, firstConnector)
+		if retryErr != nil {
+			return retryErr
+		}
+		r = retry
+	}
+
+	if r.err != nil {
+		return fmt.Errorf("ocpp: %s rejected charging profile: %w", id, r.err)
+	}
+	if !r.answered {
+		return fmt.Errorf("ocpp: %s returned no charging profile confirmation", id)
+	}
+	if !r.accepted {
+		return fmt.Errorf("ocpp: %s answered %s to charging profile", id, r.status)
+	}
+	// Only a real charging rate is worth remembering. Recording the zero
+	// from a pause would erase the rate a later resume is supposed to
+	// restore, and the charger would come back at the fallback ceiling
+	// instead of where it left off.
+	if amps > 0 {
+		s.handler.SetLastAmps(id, amps)
+	}
+	slog.Info("ocpp: charging limit applied", "charger", id, "amps", amps)
+	return nil
+}
+
+// attemptLimit sends one charging profile and waits for the charger's answer.
+//
+// The returned profileResult carries the charger's verdict, including a
+// refusal; the error is reserved for the cases where no verdict exists —
+// transport failure, cancellation, silence.
+func (s *Server) attemptLimit(ctx context.Context, id string, amps float64, numberPhases *int, connectorID int) (profileResult, error) {
 	// Buffered: the library's callback must never block if we have already
 	// stopped waiting.
 	done := make(chan profileResult, 1)
@@ -193,12 +267,12 @@ func (s *Server) setLimit(ctx context.Context, id string, amps float64, numberPh
 	var err error
 	switch version, _ := s.handler.Version(id); version {
 	case Version201:
-		err = s.sendProfileV201(id, amps, numberPhases, done)
+		err = s.sendProfileV201(id, amps, numberPhases, connectorID, done)
 	default:
-		err = s.sendProfileV16(id, amps, numberPhases, done)
+		err = s.sendProfileV16(id, amps, numberPhases, connectorID, done)
 	}
 	if err != nil {
-		return fmt.Errorf("ocpp: send charging profile to %s: %w", id, err)
+		return profileResult{}, fmt.Errorf("ocpp: send charging profile to %s: %w", id, err)
 	}
 
 	timeout := time.NewTimer(commandTimeout)
@@ -206,30 +280,11 @@ func (s *Server) setLimit(ctx context.Context, id string, amps float64, numberPh
 
 	select {
 	case r := <-done:
-		if r.err != nil {
-			return fmt.Errorf("ocpp: %s rejected charging profile: %w", id, r.err)
-		}
-		if !r.answered {
-			return fmt.Errorf("ocpp: %s returned no charging profile confirmation", id)
-		}
-		if !r.accepted {
-			return fmt.Errorf("ocpp: %s answered %s to charging profile", id, r.status)
-		}
-		// Only a real charging rate is worth remembering. Recording the zero
-		// from a pause would erase the rate a later resume is supposed to
-		// restore, and the charger would come back at the fallback ceiling
-		// instead of where it left off.
-		if amps > 0 {
-			s.handler.SetLastAmps(id, amps)
-		}
-		slog.Info("ocpp: charging limit applied", "charger", id, "amps", amps)
-		return nil
-
+		return r, nil
 	case <-ctx.Done():
-		return fmt.Errorf("ocpp: charging profile for %s cancelled: %w", id, ctx.Err())
-
+		return profileResult{}, fmt.Errorf("ocpp: charging profile for %s cancelled: %w", id, ctx.Err())
 	case <-timeout.C:
-		return fmt.Errorf("ocpp: %s did not confirm charging profile within %s", id, commandTimeout)
+		return profileResult{}, fmt.Errorf("ocpp: %s did not confirm charging profile within %s", id, commandTimeout)
 	}
 }
 
@@ -243,7 +298,7 @@ type profileResult struct {
 }
 
 // sendProfileV16 issues the limit as an OCPP 1.6 TxDefaultProfile.
-func (s *Server) sendProfileV16(id string, amps float64, numberPhases *int, done chan<- profileResult) error {
+func (s *Server) sendProfileV16(id string, amps float64, numberPhases *int, connectorID int, done chan<- profileResult) error {
 	period := types.NewChargingSchedulePeriod(scheduleStartS, amps)
 	// Declared only when the loadpoint pinned single-phase charging. Left
 	// unset otherwise so a charger that can switch phases keeps deciding.
@@ -253,7 +308,7 @@ func (s *Server) sendProfileV16(id string, amps float64, numberPhases *int, done
 		ftwProfileID,
 		ftwStackLevel,
 		types.ChargingProfilePurposeTxDefaultProfile,
-		types.ChargingProfileKindAbsolute,
+		profileKind16,
 		schedule,
 	)
 
@@ -265,7 +320,7 @@ func (s *Server) sendProfileV16(id string, amps float64, numberPhases *int, done
 			r.accepted = conf.Status == smartcharging.ChargingProfileStatusAccepted
 		}
 		done <- r
-	}, allConnectors, profile)
+	}, connectorID, profile)
 }
 
 // sendProfileV201 issues the same limit as an OCPP 2.0.1 TxDefaultProfile.
@@ -273,7 +328,7 @@ func (s *Server) sendProfileV16(id string, amps float64, numberPhases *int, done
 // 2.0.1 carries a list of schedules rather than one, and each schedule needs
 // its own id; a single-entry list with a stable id keeps the meaning identical
 // to the 1.6 request.
-func (s *Server) sendProfileV201(id string, amps float64, numberPhases *int, done chan<- profileResult) error {
+func (s *Server) sendProfileV201(id string, amps float64, numberPhases *int, evseID int, done chan<- profileResult) error {
 	if s.csms == nil {
 		return fmt.Errorf("ocpp: %s speaks %s but no %s listener is configured", id, Version201, Version201)
 	}
@@ -285,7 +340,7 @@ func (s *Server) sendProfileV201(id string, amps float64, numberPhases *int, don
 		ftwProfileID,
 		ftwStackLevel,
 		types201.ChargingProfilePurposeTxDefaultProfile,
-		types201.ChargingProfileKindAbsolute,
+		profileKind201,
 		[]types201.ChargingSchedule{*schedule},
 	)
 
@@ -297,7 +352,7 @@ func (s *Server) sendProfileV201(id string, amps float64, numberPhases *int, don
 			r.accepted = conf.Status == smartcharging201.ChargingProfileStatusAccepted
 		}
 		done <- r
-	}, allEVSEs, profile)
+	}, evseID, profile)
 }
 
 // DefaultMode is what a charger is left in when FTW stops steering it, and

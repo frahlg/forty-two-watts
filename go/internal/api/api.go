@@ -162,6 +162,13 @@ type Deps struct {
 	// failed to start; the endpoint then reports an empty list.
 	OCPPChargers func() map[string]ocpp.ChargerView
 
+	// EVSend delivers a command to an EV charger by name, routing an OCPP
+	// charge point past the driver registry it is not in. Nil falls back to
+	// Registry.Send, which is correct for a build with no OCPP server and
+	// wrong for one with a charger that has no driver — the dashboard's
+	// Pause / Resume / Force start would find no such driver and fail.
+	EVSend func(ctx context.Context, name string, payload []byte) error
+
 	// Optional: CalDAV calendar-constraints client (#498). Nil when the
 	// feature is disabled; GET /api/caldav/status then reports disabled.
 	CalDAV *calendar.Service
@@ -3042,7 +3049,10 @@ func (s *Server) handleEVCommand(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if s.deps.Registry == nil {
+	// An OCPP-only site has chargers and no Lua driver behind them, so the
+	// registry being absent is not by itself a reason to refuse: EVSend can
+	// still deliver. Both missing is.
+	if s.deps.Registry == nil && s.deps.EVSend == nil {
 		writeJSON(w, 503, map[string]string{"error": "driver registry not available"})
 		return
 	}
@@ -3060,11 +3070,22 @@ func (s *Server) handleEVCommand(w http.ResponseWriter, r *http.Request) {
 		applyManualEVHold(s.deps, driverName, req.Action)
 	}
 	payload, _ := json.Marshal(map[string]any{"action": req.Action})
-	if err := s.deps.Registry.Send(r.Context(), driverName, payload); err != nil {
+	if err := s.sendEV(r.Context(), driverName, payload); err != nil {
 		writeJSON(w, 500, map[string]string{"error": err.Error()})
 		return
 	}
 	writeJSON(w, 200, map[string]string{"status": "ok"})
+}
+
+// sendEV delivers an EV command, routing an OCPP charge point past the driver
+// registry it is not in. Without this an OCPP charger answers telemetry and
+// automatic dispatch but refuses every manual control on the dashboard, which
+// reads as the charger being broken rather than unrouted.
+func (s *Server) sendEV(ctx context.Context, driverName string, payload []byte) error {
+	if s.deps.EVSend != nil {
+		return s.deps.EVSend(ctx, driverName, payload)
+	}
+	return s.deps.Registry.Send(ctx, driverName, payload)
 }
 
 var validV2XActions = map[string]bool{
