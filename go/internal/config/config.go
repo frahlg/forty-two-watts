@@ -42,6 +42,13 @@ type Config struct {
 	FleetPing        *FleetPing         `yaml:"fleet_ping,omitempty" json:"fleet_ping,omitempty"`
 	Nova             *Nova              `yaml:"nova,omitempty" json:"nova,omitempty"`
 	DeviceRepository *DeviceRepository  `yaml:"device_repository,omitempty" json:"device_repository,omitempty"`
+
+	// LoadWarnings collects recoverable problems Parse repaired instead of
+	// refusing the file: an on-disk config an older version accepted must
+	// still boot, or the operator loses the UI they would fix it with. The
+	// write path (Settings save, bootstrap) never populates this — it calls
+	// Validate directly and stays strict. Never serialized.
+	LoadWarnings []string `yaml:"-" json:"-"`
 }
 
 // AppLink controls the outbound connection the FTW app reaches this box
@@ -323,14 +330,14 @@ type V2XPolicy struct {
 // handler on POST /api/config. Providers that don't need auth (e.g. local
 // Modbus) leave Username + Password empty.
 type EVCharger struct {
-	Provider string `yaml:"provider" json:"provider"` // "easee" | "ctek"
+	Provider string `yaml:"provider" json:"provider"` // "easee" | "zaptec" | "ctek"
 
 	// Connection — populate the block matching the provider's transport.
 	HTTP   *EVChargerHTTP   `yaml:"http,omitempty" json:"http,omitempty"`
 	Modbus *EVChargerModbus `yaml:"modbus,omitempty" json:"modbus,omitempty"`
 
-	// Optional auth — required by cloud HTTP providers like Easee,
-	// unused by local Modbus providers like CTEK.
+	// Optional auth — required by cloud HTTP providers like Easee and
+	// Zaptec, unused by local Modbus providers like CTEK.
 	Username string `yaml:"username,omitempty" json:"username,omitempty"`
 	Password string `yaml:"-" json:"password,omitempty"` // persisted in state.db, not YAML
 
@@ -522,15 +529,15 @@ func (e *EVCharger) Validate() error {
 	switch e.Provider {
 	case "":
 		return errors.New("ev_charger.provider: required")
-	case "easee":
-		// Username/Password are NOT enforced here. The runtime easee
+	case "easee", "zaptec":
+		// Username/Password are NOT enforced here. The runtime cloud
 		// driver logs + idles when creds are missing, and the API picker
-		// requires both before calling Easee Cloud. Letting a partial
+		// requires both before calling the vendor cloud. Letting a partial
 		// ev_charger block load is the original contract — the wizard
 		// writes provider intent first, then captures creds in a second
 		// API call.
 		if e.Modbus != nil {
-			return errors.New("ev_charger.modbus: not valid for provider easee (HTTP transport)")
+			return fmt.Errorf("ev_charger.modbus: not valid for provider %s (HTTP transport)", e.Provider)
 		}
 	case "ctek":
 		if e.Modbus == nil || e.Modbus.Host == "" {
@@ -549,7 +556,7 @@ func (e *EVCharger) Validate() error {
 			return errors.New("ev_charger: username/password not valid for provider ctek")
 		}
 	default:
-		return fmt.Errorf("ev_charger.provider %q: not supported (valid: easee, ctek)", e.Provider)
+		return fmt.Errorf("ev_charger.provider %q: not supported (valid: easee, zaptec, ctek)", e.Provider)
 	}
 	return nil
 }
@@ -1318,11 +1325,43 @@ func Parse(data []byte, baseDir string) (*Config, error) {
 		c.AppLink = &AppLink{Enabled: false}
 	}
 	applyDefaults(&c)
+	c.demoteExtraSiteMeters()
 	if err := c.Validate(); err != nil {
 		return nil, err
 	}
 	c.ResolveDriverPaths(baseDir)
 	return &c, nil
+}
+
+// demoteExtraSiteMeters keeps the first declared is_site_meter driver and
+// clears the flag on the rest, recording a LoadWarning per demotion.
+//
+// Load-time only. Duplicate site meters are an operator mistake Validate
+// rejects on the write path, but a file already on disk was often written
+// by an older version that silently used the first match
+// (SiteMeterDriver's order) — refusing it at boot crash-loops the process
+// before the HTTP listener binds, and the operator loses the very UI they
+// would fix the config with (field incident 2026-08-29: a driver install
+// on v1.15.0 left two site meters; the box updated to v2.3.0 and went
+// dark until SSH). Demoting reproduces exactly what the older version
+// dispatched against, and the warning makes the ambiguity visible where
+// silence caused it to be missed.
+func (c *Config) demoteExtraSiteMeters() {
+	kept := ""
+	for i := range c.Drivers {
+		d := &c.Drivers[i]
+		if !d.IsSiteMeter {
+			continue
+		}
+		if kept == "" {
+			kept = d.Name
+			continue
+		}
+		d.IsSiteMeter = false
+		c.LoadWarnings = append(c.LoadWarnings, fmt.Sprintf(
+			"config: drivers %q and %q both set is_site_meter: true; keeping %q as the site meter and ignoring the flag on %q — fix config.yaml so exactly one driver has it",
+			kept, d.Name, kept, d.Name))
+	}
 }
 
 func topLevelYAMLNull(doc *yaml.Node, key string) bool {

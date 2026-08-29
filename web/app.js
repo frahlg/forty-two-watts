@@ -5,21 +5,10 @@
 
   const POLL_INTERVAL = 2000;        // status poll cadence — snappier cards
 
-  // FLOW_IDLE_KW — magnitude below which a planet is treated as
-  // "idle / balanced" for label + colour purposes. Mirror of
-  // ftw-energy-flow.js's FLOW_IDLE_W (which sets window.FTW_FLOW_IDLE_W
-  // when its module loads). Read at use-time so the module-set value
-  // wins; literal `42` is the no-modules fallback. Inclusive
-  // comparison everywhere: |kW| <= threshold ⇒ idle.
-  function flowIdleKw() {
-    const w = (typeof window !== "undefined" && window.FTW_FLOW_IDLE_W) || 42;
-    return w / 1000;
-  }
-  function isFlowIdle(kw) { return Math.abs(kw) <= flowIdleKw(); }
   // Prices arrive as minor units per kWh; what to call them depends on the
   // configured currency. window.FTWUnits is set when
   // components/price-units.js loads — same read-at-use-time pattern as
-  // flowIdleKw above, with öre as the no-modules fallback.
+  // the energy-flow idle threshold, with öre as the no-modules fallback.
   function fmtPricePerKwh(minorPerKwh) {
     const u = typeof window !== "undefined" && window.FTWUnits;
     if (!u) return minorPerKwh.toFixed(0) + " öre/kWh";
@@ -471,8 +460,9 @@
     }
     if (out.grid_w != null) {
       out.load_w = Math.max(0, (out.grid_w || 0) - (out.bat_w || 0) - (out.pv_w || 0) - (out.ev_w || 0));
-    } else if (data.load_w != null) {
-      out.load_w = smoothDisplayNumber("site:load_w", data.load_w, now);
+    } else {
+      // No live meter: do not keep a previous load or treat JSON null as 0 W.
+      out.load_w = null;
     }
     return out;
   }
@@ -496,17 +486,6 @@
     return out;
   }
 
-  // Compact kWh — bubble lines that pack two arrows ("↓ 5.2 ↑ 12") need
-  // tighter formatting than the standalone tile reading. Drops the "kWh"
-  // unit (already implied by the bubble label "kWh today" elsewhere).
-  function fmtKwhShort(kwh) {
-    if (kwh == null || !isFinite(kwh)) return "—";
-    var v = Math.abs(kwh);
-    if (v >= 100) return kwh.toFixed(0);
-    if (v >= 10)  return kwh.toFixed(1);
-    return kwh.toFixed(2);
-  }
-
   function statusClass(status) {
     if (!status) return "status-offline";
     const s = status.toLowerCase();
@@ -518,10 +497,73 @@
   // The component registry loads as a deferred module while this classic
   // dashboard script starts immediately at the end of the document. A fast
   // first /api/status response can therefore arrive before <ftw-energy-flow>
-  // has upgraded. Cache the derived payload and replay it when the element is
-  // ready so switching to Flow never reveals placeholders for one poll cycle.
+  // has upgraded, and before energy-flow-readings.js has assigned the
+  // mapper. Cache the raw payload (not only the derived readings) and
+  // replay when either the mapper or the element is ready, so the hero
+  // does not sit in its loading skeleton until the next two-second poll.
+  var lastFlowStatus = null;
   var lastFlowReadings = null;
   var flowUpgradeReplayQueued = false;
+
+  window.ftwOnFlowMapperReady = function () {
+    if (lastFlowStatus) paintEnergyFlow(lastFlowStatus);
+  };
+
+  function energyFlowOpts(data) {
+    var byDriver = {};
+    (data.dispatch || []).forEach(function (d) {
+      if (d && d.driver) byDriver[d.driver] = Number(d.target_w) || 0;
+    });
+    return {
+      idleW: (typeof window.FTW_FLOW_IDLE_W === "number" && window.FTW_FLOW_IDLE_W) || 42,
+      batterySub: function (name, d) {
+        if (d.observe_only) return "observe only";
+        return batteryTargetLine(byDriver[name]);
+      },
+    };
+  }
+
+  function queueFlowReplay() {
+    if (flowUpgradeReplayQueued) return;
+    flowUpgradeReplayQueued = true;
+    if (window.customElements && typeof window.customElements.whenDefined === "function") {
+      window.customElements.whenDefined("ftw-energy-flow").then(function () {
+        if (lastFlowStatus) paintEnergyFlow(lastFlowStatus);
+      });
+    }
+  }
+
+  function paintEnergyFlow(data) {
+    lastFlowStatus = data;
+    var flowEl = document.getElementById("energy-flow");
+    if (!flowEl) return;
+    if (typeof window.ftwFlowReadingsFromStatus !== "function") {
+      queueFlowReplay();
+      return;
+    }
+    lastFlowReadings = window.ftwFlowReadingsFromStatus(data, energyFlowOpts(data));
+    (lastFlowReadings.planets || []).forEach(function (p) {
+      if (p.role !== "ev" || p.placeholder || !p.name) return;
+      var lpEv = loadpointsByDriver && loadpointsByDriver[p.name];
+      if (!lpEv) return;
+      if (lpEv.vehicle_soc > 0) {
+        p.soc = lpEv.vehicle_soc * 100;
+        p.socSource = "vehicle";
+      } else if (lpEv.current_soc > 0) {
+        p.soc = lpEv.current_soc * 100;
+        p.socSource = lpEv.soc_source || "inferred";
+      }
+      if (lpEv.vehicle_charge_limit > 0) {
+        p.chargeLimit = lpEv.vehicle_charge_limit * 100;
+      }
+      p.socStale = !!lpEv.vehicle_stale;
+    });
+    if (typeof flowEl.setReadings === "function") {
+      flowEl.setReadings(lastFlowReadings);
+    } else {
+      queueFlowReplay();
+    }
+  }
 
   // ---- Render ----
   function render(data) {
@@ -582,17 +624,25 @@
     if (versionEl && data.version) {
       versionEl.textContent = data.version;
     }
-    // Grid + target indicator
-    gridW.textContent = formatW(data.grid_w);
-    if (data.grid_w > 10) {
-      gridDir.textContent = "importing";
-      gridW.className = "card-value val-import";
-    } else if (data.grid_w < -10) {
-      gridDir.textContent = "exporting";
-      gridW.className = "card-value val-export";
-    } else {
-      gridDir.textContent = "balanced";
+    // Grid + target indicator. A stale meter arrives as JSON null, not 0 —
+    // 0 W is a real balanced house and must not be used as a missing-data
+    // stand-in.
+    if (data.grid_w == null || !isFinite(data.grid_w)) {
+      gridW.textContent = "—";
+      gridDir.textContent = "no data";
       gridW.className = "card-value val-neutral";
+    } else {
+      gridW.textContent = formatW(data.grid_w);
+      if (data.grid_w > 10) {
+        gridDir.textContent = "importing";
+        gridW.className = "card-value val-import";
+      } else if (data.grid_w < -10) {
+        gridDir.textContent = "exporting";
+        gridW.className = "card-value val-export";
+      } else {
+        gridDir.textContent = "balanced";
+        gridW.className = "card-value val-neutral";
+      }
     }
     var targetDisp = document.getElementById("grid-target-display");
     if (targetDisp) {
@@ -621,12 +671,35 @@
     // PV — stored as negative (site convention) but displayed positive
     // so "SOLAR 5.3 kW" reads as generation magnitude without the minus.
     // Internal data (chart history, hero setReadings, plan math) stays
-    // on site convention — flip is for this tile only.
-    pvW.textContent = formatW(-data.pv_w);
-    pvW.className = "card-value val-generation";
+    // on site convention — flip is for this tile only. Configured-but-
+    // offline solar is "—", not a pretend 0 W of generation.
+    var pvLive = Object.keys(data.drivers || {}).some(function (name) {
+      var d = data.drivers[name] || {};
+      var online = window.ftwDriverOnline
+        ? window.ftwDriverOnline(d)
+        : d.status !== "offline" && d.status !== "disabled" && !d.not_running;
+      return online && d.pv_w != null;
+    });
+    var pvConfigured = Object.keys(data.drivers || {}).some(function (name) {
+      return (data.drivers[name] || {}).pv_w != null;
+    });
+    var pvDir = document.getElementById("pv-dir");
+    if (pvConfigured && !pvLive) {
+      pvW.textContent = "—";
+      pvW.className = "card-value val-neutral";
+      if (pvDir) pvDir.textContent = "no data";
+    } else {
+      pvW.textContent = formatW(-(data.pv_w || 0));
+      pvW.className = "card-value val-generation";
+      if (pvDir) pvDir.textContent = "generating";
+    }
 
     // Load
-    loadW.textContent = formatW(data.load_w || 0);
+    loadW.textContent = formatW(data.load_w);
+    var loadDir = document.getElementById("load-dir");
+    if (loadDir) {
+      loadDir.textContent = data.load_w == null || !isFinite(data.load_w) ? "no data" : "using now";
+    }
 
     // EV tile (tile-mode parity with the energy-flow's EV planet).
     // Reads ev_charging_w (post sub-watt floor in /api/status); the
@@ -641,22 +714,39 @@
       if (cardEvSubEl) cardEvSubEl.textContent = evWNow > 1 ? "charging" : "charger";
     }
 
-    // Battery — positive=charge, negative=discharge
-    batW.textContent = formatW(data.bat_w);
-    if (data.bat_w > 10) {
-      batDir.textContent = "charging";
-      batW.className = "card-value val-charging";
-    } else if (data.bat_w < -10) {
-      batDir.textContent = "discharging";
-      batW.className = "card-value val-discharging";
-    } else {
-      batDir.textContent = "idle";
+    // Battery — positive=charge, negative=discharge. Same honesty as solar:
+    // a configured pack that is not reporting is "—", not idle at 0 W.
+    var batLive = Object.keys(data.drivers || {}).some(function (name) {
+      var d = data.drivers[name] || {};
+      var online = window.ftwDriverOnline
+        ? window.ftwDriverOnline(d)
+        : d.status !== "offline" && d.status !== "disabled" && !d.not_running;
+      return online && d.bat_w != null;
+    });
+    var batConfigured = Object.keys(data.drivers || {}).some(function (name) {
+      return (data.drivers[name] || {}).bat_w != null;
+    });
+    if (batConfigured && !batLive) {
+      batW.textContent = "—";
+      batDir.textContent = "no data";
       batW.className = "card-value val-neutral";
+    } else {
+      batW.textContent = formatW(data.bat_w);
+      if (data.bat_w > 10) {
+        batDir.textContent = "charging";
+        batW.className = "card-value val-charging";
+      } else if (data.bat_w < -10) {
+        batDir.textContent = "discharging";
+        batW.className = "card-value val-discharging";
+      } else {
+        batDir.textContent = "idle";
+        batW.className = "card-value val-neutral";
+      }
     }
     if (batSoc) {
-      batSoc.textContent = Number.isFinite(data.bat_soc)
-        ? Math.round(data.bat_soc * 100) + "% SoC"
-        : "—";
+      batSoc.textContent = (batConfigured && !batLive) || !Number.isFinite(data.bat_soc)
+        ? "—"
+        : Math.round(data.bat_soc * 100) + "% SoC";
     }
     var batTargetDisp = document.getElementById("bat-target-display");
     if (batTargetDisp) {
@@ -668,197 +758,24 @@
     // the Plan card's information density. Each cell colours by sign
     // / direction so an operator scans the row and immediately sees
     // who's importing, exporting, charging, or idle.
+    // Same honesty as the Values tiles: site-level pv_w / bat_w / bat_soc
+    // become 0 when every reporter of that role is offline. 0 W here would
+    // undo the "—" those tiles just drew.
+    var pvStat = pvConfigured && !pvLive ? null : -(data.pv_w || 0);
+    var batStat = batConfigured && !batLive ? null : data.bat_w;
+    var socStat = batConfigured && !batLive ? null : data.bat_soc;
     updateLiveStat("grid", data.grid_w, signClass("grid", data.grid_w));
-    updateLiveStat("pv", -data.pv_w, "is-export"); // PV is site-signed negative; show as positive generation
+    updateLiveStat("pv", pvStat, pvStat == null ? "is-neutral" : "is-export");
     updateLiveStat("load", data.load_w, "is-neutral");
-    updateLiveStat("bat", data.bat_w, signClass("bat", data.bat_w));
-    updateLiveSocStat(data.bat_soc);
+    updateLiveStat("bat", batStat, batStat == null ? "is-neutral" : signClass("bat", batStat));
+    updateLiveSocStat(socStat);
 
-    // Hero energy-flow diagram — build a flat "planets" list where each
-    // entry declares which corner it orbits (top-left=PV, top-right=
-    // battery, bottom-left=grid, bottom-right=EV). The component knows
-    // nothing about driver roles — all role→color/sub-text/direction
-    // mapping lives here so the four corners stay a caller concern.
-    // setReadings() replaces `planets` atomically, so a transient
-    // /api/status error preserves the last good layout if we skip it.
-    var flowEl = document.getElementById("energy-flow");
-    if (flowEl) {
-      var planets = [];
-
-      // Today's totals are aggregate across all drivers; per-driver kWh split
-      // is not in the API. Mark them as aggregate-only so the energy-flow
-      // component can show them on folded bubbles without duplicating the
-      // same total on every individual inverter.
-      var todayE = (data.energy && data.energy.today) || {};
-      var importKwh   = (todayE.import_wh || 0) / 1000;
-      var exportKwh   = (todayE.export_wh || 0) / 1000;
-      var pvKwhTotal  = (todayE.pv_wh || 0) / 1000;
-      var loadKwhTotal = (todayE.load_wh || 0) / 1000;
-      var batChargedKwh    = (todayE.bat_charged_wh || 0) / 1000;
-      var batDischargedKwh = (todayE.bat_discharged_wh || 0) / 1000;
-      // Solar only flows one direction (production); the arrow would
-      // be redundant. Use the kWh unit instead so the line reads as
-      // a standalone total.
-      var pvDailyStr   = fmtKwhShort(pvKwhTotal) + " kWh";
-      // Grid daily totals are colour-coded: import red, export green,
-      // both bold so the polarity reads at a glance against the dark
-      // bubble. Other planets stay on the plain dimmed text style.
-      var gridDailyParts = [
-        { text: "↓ " + fmtKwhShort(importKwh), color: "var(--red-e)",   bold: true },
-        { text: "↑ " + fmtKwhShort(exportKwh), color: "var(--green-e)", bold: true },
-      ];
-      // Battery daily totals share the grid's colour discipline:
-      // charge (energy stored) green, discharge (energy spent) red.
-      // Reads at a glance whether the day was a net-fill or net-drain.
-      var batDailyParts = [
-        { text: "↑ " + fmtKwhShort(batChargedKwh),    color: "var(--green-e)", bold: true },
-        { text: "↓ " + fmtKwhShort(batDischargedKwh), color: "var(--red-e)",   bold: true },
-      ];
-
-      // Grid — single utility, bottom-left corner. Import = toward house.
-      var gkw = (data.grid_w || 0) / 1000;
-      var gIdle = isFlowIdle(gkw);
-      planets.push({
-        id: "grid", corner: "bottom-left", title: "GRID", role: "grid",
-        kw: gkw, toHub: gkw >= 0,
-        color: gIdle ? "var(--fg-muted)" :
-               (gkw >= 0 ? "var(--red-e)" : "var(--green-e)"),
-        sub: gIdle ? "balanced" :
-             (gkw >= 0 ? "importing" : "exporting"),
-        dailyKwhParts: gridDailyParts,
-      });
-
-      var drvs = data.drivers || {};
-      var pvDailyMembers = 0;
-      var batDailyMembers = 0;
-      Object.keys(drvs).forEach(function (name) {
-        var d = drvs[name] || {};
-        if (d.pv_w != null) pvDailyMembers++;
-        if (d.bat_w != null) batDailyMembers++;
-      });
-      Object.keys(drvs).forEach(function (name) {
-        var d = drvs[name] || {};
-        var online = d.status !== "offline" && d.status !== "disabled" && !d.not_running;
-        if (!online) return;
-        // Solar — display positive kW when generating (site convention
-        // has pv_w negative for export into the house). All internal
-        // state (chart history, math) stays on site convention; the
-        // sign flip is display-only and lives in this function.
-        if (d.pv_w != null) {
-          var pvKw = -d.pv_w / 1000;
-          var pvGen = !isFlowIdle(pvKw);
-          planets.push({
-            id: "pv-" + name, corner: "top-left", title: "SOLAR", name: name, role: "pv",
-            kw: pvKw, toHub: true,
-            color: pvGen ? "var(--amber)" : "var(--fg-muted)",
-            // Solar is one-directional: the power value alone already
-            // shows whether it's generating or idle. The sub-label
-            // would just repeat the same fact in words.
-            sub: "",
-            dailyKwh: pvDailyStr,
-            dailyScope: "aggregate",
-            dailyAggregateMembers: pvDailyMembers,
-          });
-        }
-        // Battery — sign shows charge/discharge. Discharge flows toward
-        // the house; charge flows away from it.
-        if (d.bat_w != null) {
-          var bKw = d.bat_w / 1000;
-          var bIdle = isFlowIdle(bKw);
-          // Direction conveyed by colour of the power value: charge
-          // green (filling), discharge red (draining), idle stays
-          // neutral cyan (the battery's identity hue). Drops the
-          // wordy charging/discharging sub-label.
-          var bColor = bIdle ? "var(--cyan)" :
-                       (bKw >= 0 ? "var(--green-e)" : "var(--red-e)");
-          var bTargetLine = d.observe_only
-            ? "observe only"
-            : batteryTargetLine(batteryTargetsByDriver[name]);
-          planets.push({
-            id: "bat-" + name, corner: "top-right", title: "BATTERY", name: name, role: "battery",
-            kw: bKw, toHub: bKw < 0,
-            color: bColor,
-            sub: bTargetLine,
-            soc: d.bat_soc != null ? Math.round(d.bat_soc * 100) : null,
-            dailyKwhParts: batDailyParts,
-            dailyScope: "aggregate",
-            dailyAggregateMembers: batDailyMembers,
-            clickable: !d.observe_only,
-          });
-        }
-        // EV — always consumes from the house side. When a loadpoint
-        // maps to this driver AND a vehicle telemetry source is
-        // reporting (DerVehicle), inject the vehicle's own SoC +
-        // charge-limit so the bubble renders "24 / 50 %" — measured
-        // truth instead of session-Wh estimate.
-        if (d.ev_w != null) {
-          var eKw = d.ev_w / 1000;
-          var eActive = !isFlowIdle(eKw);
-          var lpEv = loadpointsByDriver && loadpointsByDriver[name];
-          var evSoc = null;
-          var evLimit = null;
-          var evSocStale = false;
-          var evSocSource = null;
-          if (lpEv) {
-            // Prefer vehicle-reported when present; fall back to
-            // the inferred SoC the manager computed from session_wh.
-            if (lpEv.vehicle_soc > 0) {
-              evSoc = lpEv.vehicle_soc * 100;
-              evSocSource = "vehicle";
-            } else if (lpEv.current_soc > 0) {
-              evSoc = lpEv.current_soc * 100;
-              evSocSource = lpEv.soc_source || "inferred";
-            }
-            if (lpEv.vehicle_charge_limit > 0) {
-              evLimit = lpEv.vehicle_charge_limit * 100;
-            }
-            evSocStale = !!lpEv.vehicle_stale;
-          }
-          planets.push({
-            id: "ev-" + name, corner: "bottom-right", title: "EV CHARGER", name: name, role: "ev",
-            kw: eKw, toHub: false,
-            color: eActive ? "var(--green-e)" : "var(--white-s)",
-            sub: eActive ? "charging" : "idle",
-            soc: evSoc,
-            chargeLimit: evLimit,
-            socStale: evSocStale,
-            socSource: evSocSource,
-          });
-        }
-      });
-
-      // Self-powered today: share of recorded house consumption sourced
-      // from PV/battery over the whole day. Daily EV energy is not split
-      // into this aggregate yet, while the realtime component includes
-      // active EV load because it is visible in the live balance.
-      // Clamped 0..100 because metering glitches can briefly report
-      // import > load.
-      var selfPoweredPctToday = null;
-      if (loadKwhTotal > 0.001) {
-        selfPoweredPctToday = Math.max(0, Math.min(100,
-          (1 - importKwh / loadKwhTotal) * 100));
-      }
-      lastFlowReadings = {
-        load:    (data.load_w || 0) / 1000,
-        planets: planets,
-        selfPoweredPctToday: selfPoweredPctToday,
-      };
-      if (typeof flowEl.setReadings === "function") {
-        flowEl.setReadings(lastFlowReadings);
-      } else if (!flowUpgradeReplayQueued &&
-                 window.customElements &&
-                 typeof window.customElements.whenDefined === "function") {
-        flowUpgradeReplayQueued = true;
-        window.customElements.whenDefined("ftw-energy-flow").then(function () {
-          var readyFlow = document.getElementById("energy-flow");
-          if (readyFlow &&
-              typeof readyFlow.setReadings === "function" &&
-              lastFlowReadings) {
-            readyFlow.setReadings(lastFlowReadings);
-          }
-        });
-      }
-    }
+    // Hero energy-flow diagram. Mapping lives in energy-flow-readings.js
+    // so a stale meter cannot be drawn as 0 W "balanced" and a quiet
+    // hybrid inverter cannot vanish from the X. EV SoC is overlayed in
+    // paintEnergyFlow because it comes from the loadpoint table, not
+    // /api/status.
+    paintEnergyFlow(data);
 
     // Mode buttons — primary (strategy) + advanced (manual)
     currentMode = data.mode;
@@ -1097,7 +1014,7 @@
 
     chartHistory.grid.push(data.grid_w);
     chartHistory.pv.push(data.pv_w);
-    chartHistory.load.push(data.load_w || 0);
+    chartHistory.load.push(data.load_w);
     chartHistory.timestamps.push(now);
     chartHistory.e_import.push(t.import_wh || 0);
     chartHistory.e_export.push(t.export_wh || 0);

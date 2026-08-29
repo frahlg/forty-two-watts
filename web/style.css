@@ -1845,6 +1845,11 @@ footer {
   gap: 8px;
   margin: 12px 0 8px;
 }
+/* A refused code is an answer to the press, not one more line of the help
+   text around it. Red separates it from the hint paragraphs it sits among. */
+.app-link-error {
+  color: var(--red-e);
+}
 /* The box code is read out loud, so it is set large and spaced: somebody is
    reading it off this screen while talking into a phone. */
 .app-box-code {

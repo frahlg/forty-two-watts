@@ -1154,13 +1154,11 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"planner_mapped_mode":   mappedMode,
 		"troubleshooting_mode":  troubleshootingMode,
 		"plan_stale":            ctrl.PlanStale,
-		"grid_w":                gridW,
 		"pv_w":                  pvW,
 		"pv_w_predicted":        pvPredictW,
 		"bat_w":                 batW,
 		"ev_w":                  evW,
 		"v2x_w":                 v2xW,
-		"load_w":                loadW,
 		"load_w_predicted":      loadPredictW,
 		"bat_soc":               avgSoC,
 		"grid_target_w":         ctrl.GridTargetW,
@@ -1189,6 +1187,18 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		// from the plan's BatteryEnergyWh by > 50 % (over) or < 50 %
 		// (under). Idle slots (|planned| ≤ 50 Wh) are ignored.
 		"slot_delivery_stats": ctrl.SlotDeliveryStats,
+	}
+	// A stale or missing site meter is not 0 W. Publishing zero made the
+	// dashboard and the FTW app draw "balanced" / "0 W" as if the house
+	// were idle. JSON null is what the flow mapping already treats as
+	// "no data". Development setups with no configured meter keep the
+	// historical zero (haveGrid is forced true above).
+	if haveGrid {
+		resp["grid_w"] = gridW
+		resp["load_w"] = loadW
+	} else {
+		resp["grid_w"] = nil
+		resp["load_w"] = nil
 	}
 	if energyToday != nil || energyCurrentSlot != nil {
 		energy := map[string]any{}

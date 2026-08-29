@@ -2,7 +2,9 @@ package api
 
 import (
 	"errors"
+	"net"
 	"net/http"
+	"net/netip"
 	"strings"
 	"time"
 
@@ -454,12 +456,21 @@ func (s *Server) appLinkRoleAllowed(w http.ResponseWriter, r *http.Request, aske
 	return true
 }
 
-// appLinkOwnerMintAllowed refuses an owner-making action on the open LAN.
+// appLinkOwnerMintAllowed gates owner-making actions.
 //
-// Presence on a private address is not enough. That is how a guest or a
-// ZeroTier peer turns "I can reach :8080" into a Noise owner that works
-// from anywhere. Loopback is the box itself. A house-password proof is
-// the other door, and it only exists when api.lan_auth is on.
+// When the house password is on, presence on a private address is not
+// enough — that is how a guest or a ZeroTier peer turns "I can reach
+// :8080" into a Noise owner that works from anywhere. Loopback is the box
+// itself; the house-password proof is the LAN door.
+//
+// When the house password is off, the gate admits private-address
+// clients. Operator decision 2026-08-29: with lan_auth off the whole
+// dashboard and API already accept every LAN client — settings, control,
+// driver install — so refusing only this endpoint blocked the household
+// on their own sofa while an actual LAN intruder kept doors that persist
+// just as well. The trade is stated plainly: with the password off, LAN
+// reach can become a remote owner, as it could before #951. Turning the
+// house password on restores the strict gate; that is what it is for.
 //
 // The first enrollee is an owner whatever the code said (appenroll.Authorise),
 // so a viewer mint on an empty box is the same power and uses the same gate.
@@ -476,9 +487,39 @@ func (s *Server) appLinkOwnerMintAllowed(w http.ResponseWriter, r *http.Request,
 	if checked && houseOK {
 		return true
 	}
+	if !s.lanAuthEnabled() && isPrivateClient(r.RemoteAddr) && !appLinkOverSession(r) {
+		return true
+	}
 	writeAppLinkError(w, http.StatusForbidden,
 		"making another owner is done on the box, or after the house password is on.")
 	return false
+}
+
+// lanAuthEnabled mirrors handleAuthStatus's read of api.lan_auth: absent
+// config reads as off, the state every box without the opt-in is in.
+func (s *Server) lanAuthEnabled() bool {
+	if s.deps == nil || s.deps.Cfg == nil || s.deps.CfgMu == nil {
+		return false
+	}
+	s.deps.CfgMu.RLock()
+	defer s.deps.CfgMu.RUnlock()
+	return s.deps.Cfg.API.LANAuth
+}
+
+// isPrivateClient reports whether remoteAddr is a directly connected
+// private-network peer: RFC 1918, IPv6 ULA, link-local, or loopback.
+// Deliberately excludes CGNAT (100.64/10) — some ISPs put whole
+// neighbourhoods there, and this check widens an owner-minting door.
+func isPrivateClient(remoteAddr string) bool {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		host = remoteAddr
+	}
+	addr, err := netip.ParseAddr(host)
+	if err != nil {
+		return false
+	}
+	return addr.IsPrivate() || addr.IsLoopback() || addr.IsLinkLocalUnicast()
 }
 
 func (s *Server) appLinkHasNoPairedDevice() bool {

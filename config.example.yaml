@@ -81,9 +81,10 @@ drivers:
   #       port: 1883
 
   # Sourceful Zap — P1/HAN site meter via the official local API.
-  # This driver is the meter only. If Zap also lists an inverter, battery
-  # or charger, add that device in FTW with its own driver. See
-  # docs/sourceful-zap.md.
+  # Default is the meter only. If Zap also lists an inverter or battery,
+  # add that device in FTW with its own driver when you can. Set read_pv
+  # / read_battery only when Zap is the only reader (closed Modbus, or
+  # an RS-485 bus Zap already owns). See docs/sourceful-zap.md.
   #
   # - name: sourceful-zap
   #   lua: drivers/zap.lua
@@ -98,6 +99,8 @@ drivers:
   #   config:
   #     host: zap.local
   #     # meter_serial: p1m-...          # optional; P1/HAN is auto-selected
+  #     # read_pv: true                  # opt-in; default is P1/HAN only
+  #     # read_battery: true             # opt-in; telemetry only
 
   # NIBE S-series heat pump — read-only telemetry over the on-prem Local
   # REST API (HTTPS + Basic auth). The pump presents a SELF-SIGNED cert, so

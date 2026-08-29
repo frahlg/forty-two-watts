@@ -1058,7 +1058,19 @@
             '<label>Host / IP ' + help('Hostname (e.g. zap.local) or IP address of the device. Prefer the device\'s mDNS (.local) name when it broadcasts one — it survives DHCP lease changes. If you use a raw IP, reserve it for the device in your router\'s DHCP settings so it can\'t change.') + '</label>' +
             '<input type="text" data-path="drivers.' + idx + '.config.host" value="' + escHtml(lcfg.host || '') + '" placeholder="zap.local">' +
             ((d.lua || '').indexOf('zap.lua') >= 0
-              ? '<p class="zap-p1-note" style="margin:8px 0 0;font-size:0.82rem;color:var(--text-dim);line-height:1.45">This driver is the P1/HAN site meter. If the Zap also lists an inverter, battery or charger, add that device here with its own driver. Do not use Zap as a proxy for those.</p>'
+              ? '<p class="zap-p1-note" style="margin:8px 0 0;font-size:0.82rem;color:var(--text-dim);line-height:1.45">This driver is the P1/HAN site meter by default. Prefer a native driver for inverters and batteries. Turn on a read below only when Zap is the only reader — a SolarEdge whose Modbus is closed, or an inverter on RS-485 that Zap already owns. Zap never writes.</p>' +
+                '<label class="drv-read-pv" style="margin-top:8px;display:flex;align-items:center;gap:6px;font-weight:normal">' +
+                '<input type="checkbox" data-checkbox-path="drivers.' + idx + '.config.read_pv"' +
+                (lcfg.read_pv ? ' checked' : '') + '>' +
+                'Read PV from devices on this Zap ' +
+                help('Pull generation from inverters Zap already talks to. Leave this off when a native inverter driver owns PV, so Combined does not count the same array twice.') +
+                '</label>' +
+                '<label class="drv-read-battery" style="margin-top:8px;display:flex;align-items:center;gap:6px;font-weight:normal">' +
+                '<input type="checkbox" data-checkbox-path="drivers.' + idx + '.config.read_battery"' +
+                (lcfg.read_battery ? ' checked' : '') + '>' +
+                'Read battery from devices on this Zap ' +
+                help('Telemetry only. Zap never writes a setpoint. Leave this off when a native battery driver owns the same pack.') +
+                '</label>'
               : '') +
             '<div class="drv-local-creds" data-drv-lua="' + escHtml(d.lua || '') + '"' + (localCreds ? '' : ' hidden') + '>' +
               '<label style="margin-top:8px">Username ' + help('Username for the device\'s local API (HTTP Basic auth). For NIBE this is the account the pump generates on its own screen when you enable the Local REST API (installer menu 7.5) — no myUplink account and no app are involved.') + '</label>' +
@@ -1600,7 +1612,8 @@
           fillWriteSlot(slot, d, byLua[d.lua], {idx: dIdx, help: help, escHtml: escHtml});
         });
         bodyEl.querySelectorAll(".drv-disable-pv").forEach(function (lbl) {
-          var lua = lbl.getAttribute("data-drv-lua");
+          var lua = lbl.getAttribute("data-drv-lua") || "";
+          if (lua.indexOf("zap.lua") >= 0) return;
           var entry = lua && byLua[lua];
           if (!entry) return;
           var caps = entry.capabilities || [];
@@ -1609,7 +1622,8 @@
           }
         });
         bodyEl.querySelectorAll(".drv-disable-battery").forEach(function (lbl) {
-          var lua = lbl.getAttribute("data-drv-lua");
+          var lua = lbl.getAttribute("data-drv-lua") || "";
+          if (lua.indexOf("zap.lua") >= 0) return;
           var entry = lua && byLua[lua];
           if (!entry) return;
           var caps = entry.capabilities || [];

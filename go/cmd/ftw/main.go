@@ -397,6 +397,11 @@ func main() {
 		os.Exit(1)
 	}
 	slog.Info("config loaded", "site", cfg.Site.Name, "drivers", len(cfg.Drivers))
+	// Repaired-but-wrong config: ERROR so it reaches the log ring and the
+	// support report, without stopping a boot the repair made safe.
+	for _, w := range cfg.LoadWarnings {
+		slog.Error(w)
+	}
 
 	// ---- Open persistent state (SQLite) ----
 	statePath := "state.db"
