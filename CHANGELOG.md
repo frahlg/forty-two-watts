@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.3.1
+
+### Patch Changes
+
+- 203e8ca: A config with two `is_site_meter: true` drivers no longer stops the box from starting. The box boots with the first declared driver as the site meter — the same one older versions silently used — ignores the flag on the rest, and logs a clear error naming both drivers so the mistake is visible in the log and the help report. Saving such a config from Settings is still rejected. A driver install that accidentally added a second site meter used to crash-loop the box before the web UI came up, leaving SSH as the only way back in.
+- 931ed6a: The pairing code — and the reason you cannot have one — now appears directly under the button that asked for it. Both used to render below the help paragraphs, usually under the settings window's fold, so pressing "Show pairing code" on a LAN browser looked like nothing happened while the answer ("making another owner is done on the box, or after the house password is on") sat unseen further down, styled like help text. Refusals are now red and the window scrolls the result into view.
+- 0b85747: FTW now holds at most one Modbus TCP connection per device. Many inverters accept a single session and drop the old one on every new connect, so a second driver on the same gateway, a driver test, or a fingerprint probe used to knock the live driver's session out mid-control; they now share the one session, each with its own unit id, and the socket closes only when the last user is gone. When something outside FTW keeps taking the device's only session, the box now says so — a rate-limited warning names the likely cause instead of flooding the log with a reconnect line per poll.
+
 ## 2.3.0
 
 ### Minor Changes
