@@ -142,6 +142,10 @@ type Deps struct {
 	// Optional: MPC planner. Nil if disabled or a buildMPC gate skipped it.
 	MPC *mpc.Service
 
+	// PlannerPrefs is the live household planner object (forecast trust +
+	// battery export). Nil treats GET as balanced + unknown.
+	PlannerPrefs *config.PlannerPrefs
+
 	// Optional: PV digital-twin self-learner.
 	PVModel *pvmodel.Service
 
@@ -405,6 +409,8 @@ func (s *Server) routes() {
 	s.handle("PATCH  /api/app-link/devices/{id}", Configure, s.handleAppLinkDeviceRole)
 	s.handle("GET  /api/fleet-ping", Read, s.handleFleetPing)
 	s.handle("POST /api/mode", Actuate, s.handleSetMode, Via(appproto.OpSetMode))
+	s.handle("GET  /api/planner/prefs", Read, s.handleGetPlannerPrefs)
+	s.handle("POST /api/planner/prefs", Actuate, s.handleSetPlannerPrefs)
 	s.handle("GET  /api/modes", Read, s.handleModes)
 	s.handle("POST /api/target", Actuate, s.handleSetTarget)
 	s.handle("POST /api/peak_limit", Actuate, s.handleSetPeakLimit)
@@ -1143,18 +1149,23 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	v2xPolicy := s.v2xPolicyStatus(v2xGridW)
 
+	trust, export, yamlCustom, mappedK, mappedMode := s.plannerPrefsSnapshot()
+
 	resp := map[string]any{
 		"version":               s.deps.Version,
 		"mode":                  ctrl.Mode,
+		"forecast_trust":        trust,
+		"battery_export":        export,
+		"planner_yaml_custom":   yamlCustom,
+		"planner_mapped_k":      mappedK,
+		"planner_mapped_mode":   mappedMode,
 		"troubleshooting_mode":  troubleshootingMode,
 		"plan_stale":            ctrl.PlanStale,
-		"grid_w":                gridW,
 		"pv_w":                  pvW,
 		"pv_w_predicted":        pvPredictW,
 		"bat_w":                 batW,
 		"ev_w":                  evW,
 		"v2x_w":                 v2xW,
-		"load_w":                loadW,
 		"load_w_predicted":      loadPredictW,
 		"bat_soc":               avgSoC,
 		"grid_target_w":         ctrl.GridTargetW,
@@ -1183,6 +1194,18 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		// from the plan's BatteryEnergyWh by > 50 % (over) or < 50 %
 		// (under). Idle slots (|planned| ≤ 50 Wh) are ignored.
 		"slot_delivery_stats": ctrl.SlotDeliveryStats,
+	}
+	// A stale or missing site meter is not 0 W. Publishing zero made the
+	// dashboard and the FTW app draw "balanced" / "0 W" as if the house
+	// were idle. JSON null is what the flow mapping already treats as
+	// "no data". Development setups with no configured meter keep the
+	// historical zero (haveGrid is forced true above).
+	if haveGrid {
+		resp["grid_w"] = gridW
+		resp["load_w"] = loadW
+	} else {
+		resp["grid_w"] = nil
+		resp["load_w"] = nil
 	}
 	if energyToday != nil || energyCurrentSlot != nil {
 		energy := map[string]any{}
@@ -1668,6 +1691,9 @@ func (s *Server) handleSetMode(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.deps.State.SaveConfig("mode", req.Mode); err != nil {
 		slog.Warn("failed to persist mode", "err", err)
+	}
+	if s.deps.PlannerPrefs != nil && s.deps.State != nil {
+		s.deps.PlannerPrefs.ApplyExportFromMode(req.Mode, s.deps.State.SaveConfig)
 	}
 	// Propagate to MPC if switching to a planner mode and force an
 	// immediate replan. control.PlannerMPCMode is the single source of the

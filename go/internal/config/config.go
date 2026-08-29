@@ -44,6 +44,13 @@ type Config struct {
 	Nova             *Nova              `yaml:"nova,omitempty" json:"nova,omitempty"`
 	DeviceRepository *DeviceRepository  `yaml:"device_repository,omitempty" json:"device_repository,omitempty"`
 	OCPP             *OCPP              `yaml:"ocpp,omitempty" json:"ocpp,omitempty"`
+
+	// LoadWarnings collects recoverable problems Parse repaired instead of
+	// refusing the file: an on-disk config an older version accepted must
+	// still boot, or the operator loses the UI they would fix it with. The
+	// write path (Settings save, bootstrap) never populates this — it calls
+	// Validate directly and stays strict. Never serialized.
+	LoadWarnings []string `yaml:"-" json:"-"`
 }
 
 // OCPP configures the built-in OCPP 1.6J and 2.0.1 Central System. Chargers connect to
@@ -462,14 +469,14 @@ type V2XPolicy struct {
 // handler on POST /api/config. Providers that don't need auth (e.g. local
 // Modbus) leave Username + Password empty.
 type EVCharger struct {
-	Provider string `yaml:"provider" json:"provider"` // "easee" | "zaptec" | "ctek"
+	Provider string `yaml:"provider" json:"provider"` // "easee" | "zaptec" | "tesla-wc" | "ctek"
 
 	// Connection — populate the block matching the provider's transport.
 	HTTP   *EVChargerHTTP   `yaml:"http,omitempty" json:"http,omitempty"`
 	Modbus *EVChargerModbus `yaml:"modbus,omitempty" json:"modbus,omitempty"`
 
 	// Optional auth — required by cloud HTTP providers like Easee and
-	// Zaptec, unused by local Modbus providers like CTEK.
+	// Zaptec, unused by local providers (CTEK Modbus, Tesla Wall Connector).
 	Username string `yaml:"username,omitempty" json:"username,omitempty"`
 	Password string `yaml:"-" json:"password,omitempty"` // persisted in state.db, not YAML
 
@@ -671,6 +678,19 @@ func (e *EVCharger) Validate() error {
 		if e.Modbus != nil {
 			return fmt.Errorf("ev_charger.modbus: not valid for provider %s (HTTP transport)", e.Provider)
 		}
+	case "tesla-wc":
+		// Local HTTP: LAN origin in http.base_url, no cloud account.
+		// Empty base_url is allowed so the wizard can write provider
+		// intent before the host is filled in.
+		if e.Modbus != nil {
+			return errors.New("ev_charger.modbus: not valid for provider tesla-wc (HTTP transport)")
+		}
+		// Switching from Easee/Zaptec leaves username/password on the
+		// posted document, and POST /api/config restores ev_charger_password
+		// from state.db. Drop them so the provider switch can save.
+		e.Username = ""
+		e.Password = ""
+		e.EmailLegacy = ""
 	case "ctek":
 		if e.Modbus == nil || e.Modbus.Host == "" {
 			return errors.New("ev_charger.modbus.host: required for provider ctek")
@@ -688,7 +708,7 @@ func (e *EVCharger) Validate() error {
 			return errors.New("ev_charger: username/password not valid for provider ctek")
 		}
 	default:
-		return fmt.Errorf("ev_charger.provider %q: not supported (valid: easee, zaptec, ctek)", e.Provider)
+		return fmt.Errorf("ev_charger.provider %q: not supported (valid: easee, zaptec, tesla-wc, ctek)", e.Provider)
 	}
 	return nil
 }
@@ -718,6 +738,12 @@ type OptimizerMultistage struct {
 type Planner struct {
 	Enabled bool   `yaml:"enabled" json:"enabled"`
 	Mode    string `yaml:"mode,omitempty" json:"mode,omitempty"`
+	// ForecastTrust is the first-boot household slider: cautious | balanced | bold.
+	// After first boot the live value lives in SQLite (forecast_trust), like mode.
+	ForecastTrust string `yaml:"forecast_trust,omitempty" json:"forecast_trust,omitempty"`
+	// BatteryExport is the first-boot battery-sale permission:
+	// unknown | not_allowed | allowed. Live value is SQLite battery_export.
+	BatteryExport string `yaml:"battery_export,omitempty" json:"battery_export,omitempty"`
 	// Engine selects the primary optimizer: "python" (default) runs the
 	// CVXPY/HiGHS worker; "dp" is the legacy in-process rollback engine.
 	Engine string `yaml:"engine,omitempty" json:"engine,omitempty"`
@@ -1464,11 +1490,43 @@ func Parse(data []byte, baseDir string) (*Config, error) {
 		c.AppLink = &AppLink{Enabled: false}
 	}
 	applyDefaults(&c)
+	c.demoteExtraSiteMeters()
 	if err := c.Validate(); err != nil {
 		return nil, err
 	}
 	c.ResolveDriverPaths(baseDir)
 	return &c, nil
+}
+
+// demoteExtraSiteMeters keeps the first declared is_site_meter driver and
+// clears the flag on the rest, recording a LoadWarning per demotion.
+//
+// Load-time only. Duplicate site meters are an operator mistake Validate
+// rejects on the write path, but a file already on disk was often written
+// by an older version that silently used the first match
+// (SiteMeterDriver's order) — refusing it at boot crash-loops the process
+// before the HTTP listener binds, and the operator loses the very UI they
+// would fix the config with (field incident 2026-08-29: a driver install
+// on v1.15.0 left two site meters; the box updated to v2.3.0 and went
+// dark until SSH). Demoting reproduces exactly what the older version
+// dispatched against, and the warning makes the ambiguity visible where
+// silence caused it to be missed.
+func (c *Config) demoteExtraSiteMeters() {
+	kept := ""
+	for i := range c.Drivers {
+		d := &c.Drivers[i]
+		if !d.IsSiteMeter {
+			continue
+		}
+		if kept == "" {
+			kept = d.Name
+			continue
+		}
+		d.IsSiteMeter = false
+		c.LoadWarnings = append(c.LoadWarnings, fmt.Sprintf(
+			"config: drivers %q and %q both set is_site_meter: true; keeping %q as the site meter and ignoring the flag on %q — fix config.yaml so exactly one driver has it",
+			kept, d.Name, kept, d.Name))
+	}
 }
 
 func topLevelYAMLNull(doc *yaml.Node, key string) bool {
@@ -2069,6 +2127,16 @@ func (c *Config) Validate() error {
 	}
 	if c.Planner != nil {
 		p := c.Planner
+		if p.ForecastTrust != "" {
+			if _, ok := ParseForecastTrust(p.ForecastTrust); !ok {
+				return fmt.Errorf("planner.forecast_trust must be cautious, balanced, or bold, got %q", p.ForecastTrust)
+			}
+		}
+		if p.BatteryExport != "" {
+			if _, ok := ParseBatteryExport(p.BatteryExport); !ok {
+				return fmt.Errorf("planner.battery_export must be unknown, not_allowed, or allowed, got %q", p.BatteryExport)
+			}
+		}
 		switch p.Engine {
 		case "", "python", "dp":
 		default:

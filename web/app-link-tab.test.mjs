@@ -127,3 +127,26 @@ describe("the app tab", () => {
     assert.match(index, /settings\/tabs\/fleet\.js/);
   });
 });
+
+// The slot receives the answer to the pairing buttons — QR, spoken code, or
+// the #951 refusal. It once rendered after the hint paragraphs, ~300 px below
+// the buttons and usually under the modal's fold, so the operator pressed and
+// saw nothing (field report 2026-08-29). The answer belongs where the press
+// happened.
+describe("the pairing-code slot", () => {
+  it("renders directly under the pairing buttons, before the hints", () => {
+    const html = render({});
+    const actions = html.indexOf('class="app-link-actions"');
+    const slot = html.indexOf('id="app-link-slot"');
+    const scanHint = html.indexOf("Scan the code with the FTW app");
+    assert.ok(actions >= 0 && slot >= 0 && scanHint >= 0, "expected markup missing");
+    assert.ok(actions < slot, "slot must come after the buttons that fill it");
+    assert.ok(slot < scanHint, "slot must come before the hint paragraphs, not after them");
+  });
+
+  it("marks a refusal as an error, not a hint", () => {
+    // requestCode's catch styles the message; the class carries the red. A
+    // rename here silently turns refusals back into invisible help text.
+    assert.match(source, /app-link-error/);
+  });
+});

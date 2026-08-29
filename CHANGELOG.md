@@ -1,5 +1,37 @@
 # Changelog
 
+## 2.3.2
+
+### Patch Changes
+
+- 0bcb0ed: "Show pairing code" works from a LAN browser again when no house password is set. The gate that sent owners to the box made sense only alongside the password: with the password off, the whole dashboard already accepts every LAN client, so the refusal blocked the household without slowing anyone else. Turning the house password on restores the strict rule — owner codes then require the password or the box itself. Promoting a phone to owner and the first pairing on an empty box follow the same rule.
+
+## 2.3.1
+
+### Patch Changes
+
+- 203e8ca: A config with two `is_site_meter: true` drivers no longer stops the box from starting. The box boots with the first declared driver as the site meter — the same one older versions silently used — ignores the flag on the rest, and logs a clear error naming both drivers so the mistake is visible in the log and the help report. Saving such a config from Settings is still rejected. A driver install that accidentally added a second site meter used to crash-loop the box before the web UI came up, leaving SSH as the only way back in.
+- 931ed6a: The pairing code — and the reason you cannot have one — now appears directly under the button that asked for it. Both used to render below the help paragraphs, usually under the settings window's fold, so pressing "Show pairing code" on a LAN browser looked like nothing happened while the answer ("making another owner is done on the box, or after the house password is on") sat unseen further down, styled like help text. Refusals are now red and the window scrolls the result into view.
+- 0b85747: FTW now holds at most one Modbus TCP connection per device. Many inverters accept a single session and drop the old one on every new connect, so a second driver on the same gateway, a driver test, or a fingerprint probe used to knock the live driver's session out mid-control; they now share the one session, each with its own unit id, and the socket closes only when the last user is gone. When something outside FTW keeps taking the device's only session, the box now says so — a rate-limited warning names the likely cause instead of flooding the log with a reconnect line per poll.
+
+## 2.3.0
+
+### Minor Changes
+
+- 7ac7be9: The phone app can now notify you when a device goes quiet or the house draws more than the fuse allows. Same thresholds as before (ten minutes of silence, thirty seconds over the rating) so a blip is not a lock-screen.
+- 54f0163: Sourceful Zap can again read PV and battery from devices it already talks to, as an opt-in under Settings → Devices. The default stays P1/HAN only. The driver never writes.
+- 53ca4ae: Zaptec Go, Go 2 and Pro can be added as a cloud EV charger. The setup wizard and Settings → EV offer Zaptec next to Easee; the same email and password list chargers on the account and drive current, pause and resume through Zaptec Cloud. The integration is experimental until a live charger has been exercised.
+
+### Patch Changes
+
+- 31742d7: Harden SI units and charging identities: SoC doors fold NaN/overflow instead of leaking percent or Inf, HA discovery slugs illegal driver names with a collision tag while leaving already-legal mixed-case ids unchanged, and synthetic history stores 0–1 SoC.
+- bab685a: Modbus give-up recovery no longer reload-loops a missing driver file or a device that never answered, and a failed `driver_init` during that reload keeps the previous VM so default-mode still works.
+- 33bd6ca: The weather location map loads again. OpenStreetMap's volunteer tiles now require a Referer, and the box was sending none.
+- 983c7ab: A short Modbus network blip no longer leaves a battery or meter offline until the box is restarted. Drivers that skip a register after a few failed reads used to skip every register after a "no route to host" moment; the host now reloads that driver and resumes polling once the link is back.
+- 5caddc1: The Plan chart reconstructs battery SoC from stored energy or battery power when a slot omits soc, instead of drawing a flat 0% line.
+- db39491: The live stats strip and today's self-powered share stay honest when a meter or inverter is offline: no fake 0 W, and a day that already happened still shows its percentage.
+- b1384b3: A meter that has stopped reporting no longer shows as 0 W balanced. Grid and house load go blank, and solar or battery that went quiet with it stay on the diagram as no data instead of vanishing.
+
 ## 2.2.1
 
 ### Patch Changes

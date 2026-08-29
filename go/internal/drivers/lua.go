@@ -80,6 +80,18 @@ type LuaDriver struct {
 
 	mu sync.Mutex
 	L  *lua.LState
+
+	restricted bool
+	initConfig map[string]any
+	// sawModbusRead is true only after a poll that successfully read a
+	// register. Failed attempts do not count: a device that never answered
+	// is not reloaded every time its give-up tables go quiet.
+	sawModbusRead bool
+	// skipReprobe latches after a failed reload, or after a reload whose
+	// immediate retry still made zero reads, so a missing file or a driver
+	// that legitimately stops probing is not reloaded on every poll.
+	skipReprobe  bool
+	reprobeCount int
 }
 
 // NewLuaDriver loads the file at path and runs it in a fresh Lua VM.
@@ -108,7 +120,7 @@ func NewLuaDriverWithPolicy(path string, env *HostEnv, policy *RuntimePolicy) (*
 	if restricted {
 		openRestrictedLibraries(L)
 	}
-	d := &LuaDriver{Env: env, Path: path, L: L}
+	d := &LuaDriver{Env: env, Path: path, L: L, restricted: restricted}
 	registerHost(L, env)
 	var loadCancel context.CancelFunc
 	if restricted {
@@ -189,13 +201,18 @@ func driverDeclaresReadOnlyBattery(L *lua.LState) bool {
 func (d *LuaDriver) Init(ctx context.Context, config map[string]any) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	d.initConfig = cloneStringAnyMap(config)
+	return d.callInitLocked(ctx)
+}
+
+func (d *LuaDriver) callInitLocked(ctx context.Context) error {
 	fn := d.L.GetGlobal("driver_init")
 	if fn == lua.LNil {
 		return nil
 	}
 	var arg lua.LValue = lua.LNil
-	if config != nil {
-		arg = goToLua(d.L, config)
+	if d.initConfig != nil {
+		arg = goToLua(d.L, d.initConfig)
 	}
 	cleanup := d.setLifecycleContext(ctx, 10*time.Second)
 	defer cleanup()
@@ -207,6 +224,38 @@ func (d *LuaDriver) Init(ctx context.Context, config map[string]any) error {
 func (d *LuaDriver) Poll(ctx context.Context) (time.Duration, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	interval, err := d.pollLocked(ctx)
+	if err != nil || !d.shouldReprobe() {
+		return interval, err
+	}
+	// Several catalog drivers (pixii, solis, huawei, ...) permanently skip a
+	// register after three failed reads so an unimplemented point does not
+	// fail every poll. A network blip makes every register look absent, and
+	// the driver then has nothing left to ask — the TCP session can come
+	// back while telemetry stays offline until process restart. The give-up
+	// tables are Lua locals the host cannot see; reloading the file resets
+	// them. driver_cleanup is intentionally not called: that path writes
+	// the hardware default (setpoint 0 on a battery) and this is a probe
+	// retry, not a shutdown.
+	d.Env.Logger.Info("modbus driver stopped probing registers; reloading to retry")
+	if rerr := d.reprobeLocked(ctx); rerr != nil {
+		d.skipReprobe = true
+		return 0, fmt.Errorf("reprobe: %w", rerr)
+	}
+	d.reprobeCount++
+	interval, err = d.pollLocked(ctx)
+	if d.Env.lastPollEvidence.Attempts == 0 {
+		d.skipReprobe = true
+	}
+	return interval, err
+}
+
+func (d *LuaDriver) shouldReprobe() bool {
+	return d.Env.requiresFreshModbusRead && d.sawModbusRead && !d.skipReprobe &&
+		d.Env.lastPollEvidence.Attempts == 0
+}
+
+func (d *LuaDriver) pollLocked(ctx context.Context) (time.Duration, error) {
 	fn := d.L.GetGlobal("driver_poll")
 	if fn == lua.LNil {
 		return 0, nil
@@ -216,11 +265,13 @@ func (d *LuaDriver) Poll(ctx context.Context) (time.Duration, error) {
 	d.Env.beginPollEvidence()
 	if err := d.L.CallByParam(lua.P{Fn: fn, NRet: 1, Protect: true}); err != nil {
 		_, _, _ = d.Env.endPollEvidence(false)
+		d.notePollModbusActivity()
 		return 0, err
 	}
 	ret := d.L.Get(-1)
 	d.L.Pop(1)
 	_, _, emitErr := d.Env.endPollEvidence(true)
+	d.notePollModbusActivity()
 	if emitErr != nil {
 		return 0, emitErr
 	}
@@ -228,7 +279,8 @@ func (d *LuaDriver) Poll(ctx context.Context) (time.Duration, error) {
 	// a driver may skip its reads during warmup, or hold off while a
 	// command is in flight. Its telemetry is already withheld by
 	// endPollEvidence; raising an error here would mark the driver failed
-	// for staying quiet on purpose.
+	// for staying quiet on purpose. If this follows earlier successful
+	// reads, Poll() reloads the VM once and retries — see shouldReprobe.
 	if ev := d.Env.lastPollEvidence; d.Env.requiresFreshModbusRead &&
 		ev.Attempts > 0 && !ev.fresh() {
 		return 0, fmt.Errorf("driver_poll: %s", ev.describe())
@@ -238,6 +290,82 @@ func (d *LuaDriver) Poll(ctx context.Context) (time.Duration, error) {
 		return time.Duration(n) * time.Millisecond, nil
 	}
 	return 0, nil
+}
+
+func (d *LuaDriver) notePollModbusActivity() {
+	if !d.Env.requiresFreshModbusRead {
+		return
+	}
+	if d.Env.lastPollEvidence.Successes > 0 {
+		d.sawModbusRead = true
+		d.skipReprobe = false
+	}
+}
+
+// reprobeLocked re-executes the driver file in a new VM and re-runs
+// driver_init. Caller holds d.mu. The previous VM is closed without
+// driver_cleanup so a live setpoint is not cleared.
+//
+// The file is read from disk so a hot-edited driver is what we retry
+// with; catalog drivers are already hot-editable, and this path is a
+// probe retry rather than a process restart. The new VM is initialized
+// before the swap: a failed driver_init keeps the previous state so
+// default-mode still has its locals.
+func (d *LuaDriver) reprobeLocked(ctx context.Context) error {
+	src, err := os.ReadFile(d.Path)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", d.Path, err)
+	}
+	L := lua.NewState(lua.Options{SkipOpenLibs: d.restricted})
+	if d.restricted {
+		openRestrictedLibraries(L)
+	}
+	registerHost(L, d.Env)
+	var loadCancel context.CancelFunc
+	if d.restricted {
+		loadCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		loadCancel = cancel
+		L.SetContext(loadCtx)
+	}
+	err = L.DoString(string(src))
+	if d.restricted {
+		L.RemoveContext()
+		loadCancel()
+	}
+	if err != nil {
+		L.Close()
+		return fmt.Errorf("execute %s: %w", d.Path, err)
+	}
+	old := d.L
+	d.L = L
+	if err := d.callInitLocked(ctx); err != nil {
+		d.L = old
+		L.Close()
+		return err
+	}
+	old.Close()
+	d.Env.requiresFreshModbusRead = driverRequiresFreshModbusRead(L, d.Env.Modbus != nil)
+	if driverDeclaresReadOnlyBattery(L) {
+		d.Env.BatteryTelemetryOnly = true
+	}
+	return nil
+}
+
+func (d *LuaDriver) reprobes() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.reprobeCount
+}
+
+func cloneStringAnyMap(in map[string]any) map[string]any {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]any, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }
 
 func driverRequiresFreshModbusRead(L *lua.LState, hasModbusCapability bool) bool {

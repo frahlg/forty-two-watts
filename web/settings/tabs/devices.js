@@ -1761,7 +1761,8 @@
 			  driver.config = { client_id: "", client_secret: "" };
 		  } else if (entryCaps.indexOf("meter") >= 0 ||
                      entryCaps.indexOf("pv") >= 0 ||
-                     entryCaps.indexOf("battery") >= 0) {
+                     entryCaps.indexOf("battery") >= 0 ||
+                     (entryCaps.indexOf("ev") >= 0 && hosts.length === 0)) {
             // Local-HTTP meter / PV / battery driver without a canned
             // hostname in connection_defaults (typical for generic
             // ESPHome / DSMR firmwares — every install picks its own
