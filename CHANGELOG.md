@@ -1,5 +1,95 @@
 # Changelog
 
+## 2.4.0
+
+### Minor Changes
+
+- bf2c142: Rename the Loadpoints tab and dashboard section to Chargers, and give it an
+  OCPP panel: the exact backend URL to enter on a charger, live state for every
+  connected charge point (vendor, dialect, vehicle, power, session energy), and
+  the connected charge points offered in the charger-driver dropdown so an OCPP
+  charger can be bound to the planner without editing YAML. Backed by a new
+  GET /api/ocpp/chargers endpoint. Docs now recommend a DHCP reservation for the
+  FTW host before commissioning chargers.
+- c1bf48c: The planner now has a household preference object on the Plan card: follow-the-forecast (cautious / balanced / bold) and a battery-export permission (unknown / not allowed / allowed). Balanced is today's default. Unknown export does not sell from the battery. Sites that were on Active arbitrage must confirm before selling again. Settings keep house reserve on top and bury engine knobs; weather no longer asks for array orientation on the normal path.
+- bf2c142: FTW now asks each OCPP charger whether it can be steered, and says so. Shortly
+  after a charger connects, core reads its `SupportedFeatureProfiles` (1.6) or
+  `SmartChargingCtrlr.Available` (2.0.1), records the raw answer, and shows a
+  Control column on Settings → Chargers: "smart charging", "telemetry only" (with
+  a warning explaining the charger will meter but never plan), or "not reported"
+  for a charger that stayed silent. Also exposed as `steerable` and
+  `feature_profiles` on `GET /api/ocpp/chargers`. The verdict is advisory —
+  commands are still attempted, so a charger that under-reports its own
+  capabilities is never locked out of control.
+- bf2c142: Add OCPP 1.6J support so EV chargers connect to FTW directly instead of through
+  a vendor cloud. An OCPP charger needs no driver: the protocol is vendor-neutral,
+  so one server in core handles every charger that speaks it.
+  
+  Chargers dial FTW rather than the other way round, so there is nothing to add
+  under `drivers:`. A charge point becomes a device on its first BootNotification,
+  keyed by the last segment of the URL it connected to, and dispatch treats it
+  like any other EV reading.
+  
+  This reinstates `go/internal/ocpp`, retired as unused in #578, and wires it into
+  the process behind a new `ocpp` config section. It matters because Charge Amps
+  has no FTW driver at all and every current model speaks OCPP, while Easee and
+  Zaptec can be commissioned once through their vendor portal and then run with no
+  cloud in the runtime path.
+  
+  FTW throttles, pauses and resumes an OCPP charger like any other EV charger.
+  Every command is a current limit rather than a remote start or stop, because
+  `RemoteStopTransaction` is unreliable on Charge Amps hardware — units
+  acknowledge the stop and resume charging on their own, while a 0 A charging
+  profile is honoured consistently and keeps the session meter intact across a
+  pause. Below the IEC 61851 minimum of 6 A the charger is told 0 A rather than
+  being rounded up to current the site fuse was not asked to carry.
+  
+  The server is off by default. Enabling it requires a username and password, and
+  FTW refuses to start without them: the OCPP library builds its listen address
+  from the port alone, so the socket is reachable on every interface and basic
+  auth is the only gate. Keep the port closed at your router.
+- bf2c142: OCPP charge points now start quarantined. A charge point that no charger entry
+  (loadpoint) names connects as "pending": it shows on Settings → Chargers with
+  its vendor, dialect and live state so it can be adopted, but its telemetry is
+  withheld from the site — no DerEV reading, no driver health, no metrics — and
+  it is never commanded. This stops any device that merely knows the shared OCPP
+  password from fabricating EV load and steering dispatch (the DerEV sum
+  suppresses home-battery discharge). Adopting a charger = adding a charger
+  entry with its id as the charger driver and saving — charger entries
+  hot-reload, so adoption and un-adoption take effect on the save.
+- bf2c142: Serve OCPP 2.0.1 alongside 1.6J, so newer chargers connect without a driver too.
+  
+  Each version listens on its own port. A charger picks its dialect during the
+  WebSocket handshake, before any message is sent, and the underlying library
+  keeps one message handler per listener — so a single port cannot serve both.
+  Set `ocpp.port_v201` to enable 2.0.1; leaving it unset keeps 1.6J only.
+  
+  Only the message encoding differs. Both dialects share one charger map, one
+  telemetry path and one control path, so a 2.0.1 charger is metered, throttled
+  and paused exactly like a 1.6 one, and dispatch cannot tell them apart.
+  
+  2.0.1 restructures the messages more than the names suggest: StartTransaction
+  and StopTransaction collapse into a single TransactionEvent, transaction ids
+  become strings, connector status loses its charging meaning, and meter samples
+  arrive inside transaction events as well as on their own. The new handler
+  normalises all of that back to the same charger state.
+  
+  OCPP 2.1 is not supported. No production-grade Go implementation of it exists:
+  the library FTW uses covers 1.6 and 2.0.1 and has no 2.1 support, and the Go
+  projects that do claim 2.1 are early-stage validators and emulators rather than
+  servers. Adding it later is one more handler and one more listener; the
+  version-neutral core does not change.
+- a95a971: Tesla Wall Connector Gen 3 can be added as a local EV charger. The setup wizard and Settings → EV take the box's LAN address; FTW reads plug state, power and session energy over HTTP with no Tesla account. The wall connector cannot take a current setpoint — steer a Tesla through tesla_vehicle. Experimental until a live Gen 3 has been exercised.
+- bf2c142: Vehicle profiles for chargers shared by several cars. A new `vehicles:` config
+  list (also editable under Settings → Chargers → Vehicles) holds each car's
+  battery capacity, identifiers and charging policy — PV-surplus-only and/or a
+  target SoC the planner fills toward in the cheapest tariff hours. When an OCPP
+  charging session identifies the car (the RFID idTag on 1.6, a MacAddress or
+  eMAID idToken on 2.0.1), the charger switches to that car's capacity and
+  policy for the session; capacity reverts on plug-out. A session matching no
+  profile changes nothing — the visitor default — and the identity it presented
+  is shown in the Chargers tab so it can be pasted into a profile.
+
 ## 2.3.2
 
 ### Patch Changes
