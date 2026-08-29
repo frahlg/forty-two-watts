@@ -280,6 +280,14 @@ type loadpointRuntime struct {
 	vehicleName    string
 	baseCapacityWh float64
 
+	// capacityFromCar is set when the vehicle itself reported its battery
+	// capacity (OCPP 2.0.1 NotifyEVChargingNeeds), which outranks both the
+	// configured value and a profile's — one is measured, the others are
+	// an operator's estimate of the car that usually parks here. It shares
+	// baseCapacityWh with vehicleName: whichever arrives first snapshots
+	// the configured capacity, and plug-out restores it either way.
+	capacityFromCar bool
+
 	// schedule carries the operator's persistent intent. Empty when
 	// none is set. Survives config hot-reload because Load() copies
 	// it across from the previous runtime row.
@@ -404,7 +412,8 @@ func (m *Manager) Load(cfgs []Config) {
 			lp.stoppedSince = existing.stoppedSince
 			lp.steadyRunArmed = existing.steadyRunArmed
 			lp.vehicleName = existing.vehicleName
-			if existing.vehicleName != "" {
+			lp.capacityFromCar = existing.capacityFromCar
+			if existing.vehicleName != "" || existing.capacityFromCar {
 				// An identified car survives config hot-reload: keep the
 				// session's applied capacity, but re-base the plug-out
 				// restore on the NEW config's value.
@@ -536,11 +545,12 @@ func (m *Manager) Observe(id string, pluggedIn bool, powerW, deliveredWh float64
 		lp.notRequestingSince = time.Time{}
 		lp.sessionComplete = false
 		lp.socSource = ""
-		if lp.vehicleName != "" {
+		if lp.vehicleName != "" || lp.capacityFromCar {
 			// The identified car left with its session — the next one may
 			// be different, so restore the loadpoint's own capacity.
 			lp.VehicleCapacityWh = lp.baseCapacityWh
 			lp.vehicleName = ""
+			lp.capacityFromCar = false
 			lp.baseCapacityWh = 0
 		}
 	}
@@ -767,13 +777,44 @@ func (m *Manager) ApplyVehicleProfile(id, vehicleName string, capacityWh float64
 	if !ok {
 		return false
 	}
-	if lp.vehicleName == "" {
+	if lp.vehicleName == "" && !lp.capacityFromCar {
 		lp.baseCapacityWh = lp.VehicleCapacityWh
 	}
 	lp.vehicleName = vehicleName
-	if capacityWh > 0 {
+	// A capacity the car measured for this session outranks the profile's
+	// configured guess, whichever arrived first.
+	if capacityWh > 0 && !lp.capacityFromCar {
 		lp.VehicleCapacityWh = capacityWh
 	}
+	lp.updatedAtMs = m.now().UnixMilli()
+	return true
+}
+
+// SetSessionCapacityWh overrides the vehicle capacity for the rest of the
+// session with a figure the car itself reported — OCPP 2.0.1
+// NotifyEVChargingNeeds carries the EV's own battery capacity.
+//
+// Measured outranks configured, so this wins over both vehicle_capacity_wh and
+// a vehicle profile applied for the same session, in either order. It shares
+// the profile's session scope: plug-out restores the loadpoint's own value,
+// because the next car may be a different one.
+//
+// Returns false for an unknown loadpoint id or a non-positive capacity.
+func (m *Manager) SetSessionCapacityWh(id string, capacityWh float64) bool {
+	if capacityWh <= 0 {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	lp, ok := m.byID[id]
+	if !ok {
+		return false
+	}
+	if lp.vehicleName == "" && !lp.capacityFromCar {
+		lp.baseCapacityWh = lp.VehicleCapacityWh
+	}
+	lp.capacityFromCar = true
+	lp.VehicleCapacityWh = capacityWh
 	lp.updatedAtMs = m.now().UnixMilli()
 	return true
 }

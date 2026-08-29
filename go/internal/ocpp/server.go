@@ -121,6 +121,12 @@ func Start(ctx context.Context, cfg *Config, tel *telemetry.Store) (*Server, err
 		csms.SetTransactionsHandler(h201)
 		csms.SetMeterHandler(h201)
 		csms.SetAuthorizationHandler(h201)
+		// Smart charging is registered for what the car reports, not for
+		// what we send: charging profiles go out through control.go. The
+		// one message here that changes behaviour is
+		// NotifyEVChargingNeeds; the rest of the profile is acknowledged
+		// and dropped. See charging_needs.go.
+		csms.SetSmartChargingHandler(h201)
 		csms.SetNewChargingStationHandler(func(cs ocpp201.ChargingStationConnection) {
 			h.setVersion(cs.ID(), Version201)
 			h.OnConnect(cs.ID())
