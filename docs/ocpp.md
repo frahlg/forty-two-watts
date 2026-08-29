@@ -288,15 +288,42 @@ What "identifies" means depends on the dialect:
   card, not the car — profiles work when each card lives permanently in one
   car.
 - **OCPP 2.0.1**: idTokens can name the actual vehicle — `MacAddress`
-  (autocharge) or `eMAID` (ISO 15118 Plug & Charge) — no card involved. With
-  ISO 15118 hardware, `NotifyEVChargingNeeds` can additionally state the
-  energy the car actually wants; consuming that is future work, tracked with
-  OCPP 2.1 in issue #835.
+  (autocharge) or `eMAID` (ISO 15118 Plug & Charge) — no card involved.
 
 A wrong or missing capacity skews planning accuracy only, never safety — the
 car's own BMS always protects it. An unprofiled car larger than the configured
 capacity makes the SoC estimate rise too fast, so a target charge can stop
 early; correct the SoC in the dashboard EV modal, or use Force start.
+
+## When the car speaks for itself
+
+With ISO 15118 hardware on OCPP 2.0.1 the car states its own needs, and the
+charger forwards them as `NotifyEVChargingNeeds`. That outranks every figure
+above: a profile and `vehicle_capacity_wh` are both an operator's estimate of
+the car that usually parks here, this is the car actually plugged in.
+
+What FTW takes from it, for the session only:
+
+| The car says | FTW does |
+|---|---|
+| battery capacity (DC) | replaces the session capacity, over a profile's too |
+| present state of charge (DC) | re-anchors the session SoC estimate |
+| energy requested | with the two above, derives the target the planner fills to |
+| departure time | becomes the loadpoint's target time |
+
+All of it reverts on plug-out, exactly like a profile. A departure time the car
+does not state never erases one the operator set.
+
+An **AC** session states energy without a battery size, so there is no fraction
+to derive and the target is left alone — a guess there would feed the planner a
+number the car never claimed. A departure time still applies.
+
+The last report is shown in the Chargers tab and on `GET /api/ocpp/chargers` as
+`charging_needs`. Quarantine applies as everywhere else: a pending charge
+point's needs are visible so you can see what asked, and reach no loadpoint.
+
+Most chargers never send this. It needs ISO 15118 on both the charger and the
+car; without it, profiles and `vehicle_capacity_wh` remain the whole story.
 
 ## Current limits
 

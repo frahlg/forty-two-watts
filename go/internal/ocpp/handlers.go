@@ -37,6 +37,12 @@ type Handler struct {
 	// Pending chargers never fire it: quarantine means no influence.
 	vehicleIdentified func(chargerID, vehicleID, source string)
 
+	// chargingNeeds, when set, fires on every NotifyEVChargingNeeds an
+	// APPROVED charger reports — main.go uses it to size the session on
+	// what the car asked for (see charging_needs.go). Pending chargers
+	// never fire it, for the same reason they never fire the one above.
+	chargingNeeds func(chargerID string, needs ChargingNeeds)
+
 	// capabilityProbe, set by the Server, asks a charger which feature
 	// profiles it supports (see capabilities.go). Fired from OnConnect and
 	// OnBootNotification until the charger answers, then never again.
@@ -88,6 +94,10 @@ type chargerState struct {
 	// answered, false = telemetry only, true = accepts charging profiles.
 	featureProfiles string
 	steerable       *bool
+	// needs is the last NotifyEVChargingNeeds this charger's car reported
+	// (2.0.1 only), nil until one arrives. Kept after the session ends so
+	// the UI can show what the last car asked for.
+	needs *ChargingNeeds
 }
 
 // NewHandler returns a Handler ready to register with a CentralSystem.
@@ -278,6 +288,10 @@ func (h *Handler) Snapshot() map[string]ChargerView {
 			b := *s.steerable
 			v.Steerable = &b
 		}
+		if s.needs != nil {
+			n := *s.needs
+			v.ChargingNeeds = &n
+		}
 		out[id] = v
 	}
 	return out
@@ -315,6 +329,10 @@ type ChargerView struct {
 	// profiles.
 	FeatureProfiles string `json:"feature_profiles,omitempty"`
 	Steerable       *bool  `json:"steerable,omitempty"`
+	// ChargingNeeds is the last thing the car itself asked for, when it
+	// said (2.0.1 NotifyEVChargingNeeds). Absent on 1.6, which has no such
+	// message, and on any session the EV did not negotiate.
+	ChargingNeeds *ChargingNeeds `json:"charging_needs,omitempty"`
 }
 
 // OnConnect / OnDisconnect are wired by the Server to the OCPP library's

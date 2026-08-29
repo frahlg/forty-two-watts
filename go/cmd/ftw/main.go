@@ -1383,6 +1383,60 @@ func main() {
 					"surplus_only", vehicle.SurplusOnly,
 					"target_soc", vehicle.TargetSoC)
 			})
+			// Charging needs: on an ISO 15118 session the car states what
+			// it wants — energy, departure, and on DC its own capacity and
+			// state of charge. That is the car actually plugged in rather
+			// than an operator's estimate of it, so it takes precedence for
+			// the session and reverts on plug-out with everything else.
+			ocppSrv.Handler().SetChargingNeeds(func(chargerID string, needs ocpp.ChargingNeeds) {
+				cfgMu.RLock()
+				lpID := ""
+				for _, lp := range cfg.Loadpoints {
+					if lp.DriverName == chargerID {
+						lpID = lp.ID
+						break
+					}
+				}
+				cfgMu.RUnlock()
+				if lpID == "" {
+					return
+				}
+				// Capacity first: the SoC anchor below divides delivered
+				// energy by it, so anchoring against a stale capacity would
+				// re-base the session estimate on the wrong battery.
+				if needs.CapacityWh > 0 {
+					lpMgr.SetSessionCapacityWh(lpID, needs.CapacityWh)
+				}
+				if needs.PresentSoC != nil {
+					lpMgr.AnchorVehicleSoC(lpID, *needs.PresentSoC)
+				}
+				target, haveTarget := needs.TargetSoC()
+				switch {
+				case haveTarget:
+					// A departure the car did not state must not erase one
+					// the operator did.
+					when := needs.DepartureTime
+					if when.IsZero() {
+						if st, ok := lpMgr.State(lpID); ok {
+							when = st.TargetTime
+						}
+					}
+					lpMgr.SetTarget(lpID, target, when)
+				case !needs.DepartureTime.IsZero():
+					// AC states energy without a battery size, so there is
+					// no fraction to derive — but the deadline is still the
+					// car's, and it belongs on the operator's own target.
+					if st, ok := lpMgr.State(lpID); ok && st.TargetSoC > 0 {
+						lpMgr.SetTarget(lpID, st.TargetSoC, needs.DepartureTime)
+					}
+				}
+				slog.Info("ocpp: charging needs applied",
+					"charger", chargerID, "lp", lpID,
+					"mode", needs.TransferMode, "energy_wh", needs.EnergyWh,
+					"capacity_wh", needs.CapacityWh,
+					"departure", needs.DepartureTime,
+					"target_soc", target, "target_derived", haveTarget)
+			})
 			slog.Info("ocpp: central system started",
 				"port", ocppSrv.Port(),
 				"port_v201", cfg.OCPP.PortV201,
