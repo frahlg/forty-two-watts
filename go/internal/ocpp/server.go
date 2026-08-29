@@ -33,6 +33,7 @@ package ocpp
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -81,10 +82,7 @@ func Start(ctx context.Context, cfg *Config, tel *telemetry.Store) (*Server, err
 
 	wsServer := ws.NewServer()
 	if cfg.Username != "" || cfg.Password != "" {
-		u, p := cfg.Username, cfg.Password
-		wsServer.SetBasicAuthHandler(func(user, pass string) bool {
-			return user == u && pass == p
-		})
+		wsServer.SetBasicAuthHandler(basicAuthCheck(cfg.Username, cfg.Password))
 	}
 
 	cs := ocpp16.NewCentralSystem(nil, wsServer)
@@ -109,10 +107,7 @@ func Start(ctx context.Context, cfg *Config, tel *telemetry.Store) (*Server, err
 	if cfg.PortV201 > 0 {
 		wsServer201 := ws.NewServer()
 		if cfg.Username != "" || cfg.Password != "" {
-			u, p := cfg.Username, cfg.Password
-			wsServer201.SetBasicAuthHandler(func(user, pass string) bool {
-				return user == u && pass == p
-			})
+			wsServer201.SetBasicAuthHandler(basicAuthCheck(cfg.Username, cfg.Password))
 		}
 		h201 := &handlerV201{Handler: h}
 		csms := ocpp201.NewCSMS(nil, wsServer201)
@@ -224,4 +219,18 @@ func (s *Server) Path() string {
 		return ""
 	}
 	return s.cfg.Path
+}
+
+// basicAuthCheck compares credentials in constant time. This is the only
+// gate in front of a 0.0.0.0 listener, so a timing oracle on the string
+// compare is worth closing even though the shared-secret-without-TLS
+// boundary is soft to begin with.
+func basicAuthCheck(username, password string) func(string, string) bool {
+	u := []byte(username)
+	p := []byte(password)
+	return func(user, pass string) bool {
+		userOK := subtle.ConstantTimeCompare([]byte(user), u) == 1
+		passOK := subtle.ConstantTimeCompare([]byte(pass), p) == 1
+		return userOK && passOK
+	}
 }
