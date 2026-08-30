@@ -191,12 +191,24 @@ See [docs/ocpp.md](docs/ocpp.md).
 
 There are two channels:
 
-- **beta** receives new release candidates for real-site validation;
+- **beta** receives every merged change, usually within days;
 - **stable** promotes the exact commit already published and tested as beta.
 
-There is no edge channel. Changesets produce versions and changelog entries;
-GitHub Actions builds the binaries, containers and installer assets. Details
-for operators and maintainers are in [docs/self-update.md](docs/self-update.md).
+There is no edge channel. Beta is the shared playground: run it on a real
+site and report what you find as an issue naming the beta version you saw it
+on. An issue marked `release-blocker` stops that line from promoting. A beta
+promotes to stable once it has run clean on the validation sites for a few
+days — there is no release calendar, but beta and stable stay weeks apart at
+most. A critical bug in stable while beta is ahead is fixed on a short-lived
+`hotfix/vX.Y` branch cut from the stable tag, never by promoting the moving
+beta line.
+
+Changesets produce versions and changelog entries; GitHub Actions builds the
+binaries, containers and installer assets. The repository owner cuts every
+release. Details for operators are in
+[docs/self-update.md](docs/self-update.md); the full maintainer rules,
+including the stable-hotfix runbook, are in the Releases section of
+[AGENTS.md](AGENTS.md).
 
 ## Documentation
 

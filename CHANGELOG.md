@@ -1,5 +1,56 @@
 # Changelog
 
+## 2.6.0
+
+### Minor Changes
+
+- 87136d2: The EV modal names the exact clamp behind a paused charger instead of
+  the generic "paused by the box": main-fuse protection (with automatic
+  resume), waiting for PV surplus, stale site-meter safety hold — and an
+  ongoing charge says when the main fuse is limiting its rate. Every
+  dispatch branch now records why it chose the commanded watts, exposed
+  as `commanded_reason` on GET /api/loadpoints ("plan", "no_plan_budget",
+  "pv_surplus", "pv_surplus_pause", "fuse_limit", "fuse_cooldown",
+  "site_meter_stale", "manual_hold", "wake_kick"). Prompted by a field
+  report where the plan showed charging while the box sent 0 A and the
+  operator spent the evening debugging cable and charger.
+
+## 2.5.0
+
+### Minor Changes
+
+- 4082a64: The EV modal's Start button becomes "Charge now → target": the manual
+  hold charges at the slider's amps and releases itself once the car's
+  estimated state of charge reaches the schedule's target (80 % when no
+  schedule is set), falling straight back to planned dispatch — pressing
+  Start no longer overrides the planner for the rest of the session. The
+  release target survives restarts with the hold, holds without a target
+  keep the old pin-until-Stop-or-unplug contract, and
+  POST /api/loadpoints/{id}/manual_hold accepts the new
+  `release_at_soc_pct` field.
+- 3d99dd8: The EV modal now says why the charger is or is not charging, and when it
+  will: the next planned charge window from the active plan ("Charging
+  planned 02:15–06:30, ~18 kWh"), an explicit "waiting for tomorrow's
+  prices — PV surplus only until then" state when grid-funded planning is
+  deferred past the published price horizon, "charger offers X kW but the
+  car isn't drawing" with the charger's own reason when the vehicle
+  declines, and a plain warning when nothing (schedule, PV-only, Start)
+  will ever start a charge. GET /api/loadpoints carries the new fields:
+  `plan_next_start_ms` / `plan_next_end_ms` / `plan_next_wh` /
+  `plan_total_wh`, `grid_deferred`, and `commanded_w` / `commanded_known`.
+
+### Patch Changes
+
+- 940783e: Bundle easee_cloud 1.2.0 (srcfl/device-drivers#103): the driver now
+  emits `request_active`, so Core can tell "the car has stopped
+  requesting current" (Easee reason 50 / charging completed) from "the
+  box paused it". This turns on three existing protections for Easee
+  sites: the session-completion latch stops the planner allocating
+  energy to a full car, a manual Start hold auto-releases instead of
+  offering power all night, and the charging-interrupted notification
+  stops firing on the car's own renegotiation bursts. The driver's HTTP
+  transport is also pcall-hardened.
+
 ## 2.4.0
 
 ### Minor Changes

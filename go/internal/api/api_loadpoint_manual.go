@@ -34,6 +34,12 @@ type manualHoldRequest struct {
 	MaxAmpsPerPhase float64 `json:"max_amps_per_phase,omitempty"`
 	SitePhases      int     `json:"site_phases,omitempty"`
 	HoldS           int     `json:"hold_s"`
+
+	// ReleaseAtSoCPct (0–100) turns the hold into "charge now → target,
+	// then back to the plan": the controller releases it once the
+	// loadpoint's estimated SoC reaches the target. 0 keeps the legacy
+	// pin-until-Stop-or-unplug contract.
+	ReleaseAtSoCPct float64 `json:"release_at_soc_pct,omitempty"`
 }
 
 // manualHoldResponse mirrors the active hold so the operator can
@@ -48,6 +54,7 @@ type manualHoldResponse struct {
 	MaxAmpsPerPhase float64 `json:"max_amps_per_phase,omitempty"`
 	SitePhases      int     `json:"site_phases,omitempty"`
 	ExpiresAtMs     int64   `json:"expires_at_ms,omitempty"`
+	ReleaseAtSoCPct float64 `json:"release_at_soc_pct,omitempty"`
 }
 
 // maxManualHoldS bounds the hold duration so a forgotten hold can't
@@ -107,6 +114,12 @@ func (s *Server) handleLoadpointManualHold(w http.ResponseWriter, r *http.Reques
 		})
 		return
 	}
+	if req.ReleaseAtSoCPct < 0 || req.ReleaseAtSoCPct > 100 {
+		writeJSON(w, 400, map[string]string{
+			"error": "release_at_soc_pct must be between 0 and 100",
+		})
+		return
+	}
 
 	// hold_s == 0 → persistent override (no time expiry); hold_s > 0 →
 	// bounded diagnostic hold expiring at now+hold_s.
@@ -125,6 +138,7 @@ func (s *Server) handleLoadpointManualHold(w http.ResponseWriter, r *http.Reques
 		SitePhases:      req.SitePhases,
 		ExpiresAt:       expires,
 		Persistent:      persistent,
+		ReleaseAtSoC:    req.ReleaseAtSoCPct / 100,
 	}
 	s.deps.LoadpointCtrl.SetManualHold(id, hold)
 	writeJSON(w, 200, manualHoldResponseFrom(hold, true))
@@ -223,6 +237,7 @@ func (s *Server) decorateLoadpointsWithManual(states []loadpoint.State) {
 			if h, ok := s.deps.LoadpointCtrl.GetManualHold(states[i].ID, now); ok {
 				states[i].ManualActive = true
 				states[i].ManualChargeW = h.PowerW
+				states[i].ManualReleaseSoC = h.ReleaseAtSoC
 			}
 		}
 	}
@@ -243,5 +258,6 @@ func manualHoldResponseFrom(h loadpoint.ManualHold, active bool) manualHoldRespo
 	if !h.ExpiresAt.IsZero() {
 		resp.ExpiresAtMs = h.ExpiresAt.UnixMilli()
 	}
+	resp.ReleaseAtSoCPct = h.ReleaseAtSoC * 100
 	return resp
 }

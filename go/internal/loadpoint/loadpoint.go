@@ -161,10 +161,13 @@ type State struct {
 
 	// ManualActive is true when an operator manual hold ("Start" / amp
 	// slider) is pinned on this loadpoint, overriding surplus/plan.
-	// ManualChargeW is the held setpoint in watts. Populated by the API
-	// layer from the loadpoint controller.
-	ManualActive  bool    `json:"manual_active"`
-	ManualChargeW float64 `json:"manual_charge_w,omitempty"`
+	// ManualChargeW is the held setpoint in watts. ManualReleaseSoC
+	// (0–1), when non-zero, is the "charge now" target at which the
+	// controller releases the hold back to the plan. Populated by the
+	// API layer from the loadpoint controller.
+	ManualActive     bool    `json:"manual_active"`
+	ManualChargeW    float64 `json:"manual_charge_w,omitempty"`
+	ManualReleaseSoC float64 `json:"manual_release_soc,omitempty"`
 
 	// BatteryBoost is the explicit, bounded home-battery-to-EV permission
 	// for this loadpoint. Populated by the API layer from Controller state.
@@ -181,6 +184,39 @@ type State struct {
 	// zero fields) so the UI can rely on a stable shape — clients
 	// detect "no schedule" via Schedule.Empty() / soc_pct === 0.
 	Schedule Schedule `json:"schedule"`
+
+	// CommandedW is what the controller last ordered this loadpoint to
+	// deliver, after every clamp. CommandedKnown separates "ordered
+	// zero" from "no dispatch tick has run yet". The UI reads the pair
+	// to tell "the box is offering power the car is not taking" from
+	// "the box is pausing on purpose".
+	CommandedW     float64 `json:"commanded_w"`
+	CommandedKnown bool    `json:"commanded_known"`
+
+	// CommandedReason names the dispatch branch that decided CommandedW:
+	// "plan", "no_plan_budget", "pv_surplus", "pv_surplus_pause",
+	// "fuse_limit", "fuse_cooldown", "site_meter_stale", "manual_hold",
+	// "wake_kick". Empty until the first dispatch tick. The UI renders
+	// the specific cause instead of a generic "paused by the box".
+	CommandedReason string `json:"commanded_reason,omitempty"`
+
+	// GridDeferred is true while MPC has deferred grid-funded planning
+	// because the target deadline lies past the published price
+	// horizon — the loadpoint behaves surplus-only until tomorrow's
+	// prices land. Without this flag that deferral is invisible and
+	// reads as "PV only that nobody chose". Populated by the API layer
+	// from the loadpoint controller.
+	GridDeferred bool `json:"grid_deferred"`
+
+	// PlanNextStartMs/PlanNextEndMs/PlanNextWh describe the next
+	// window in which the active plan allocates charge energy to this
+	// loadpoint; PlanTotalWh is everything the plan still intends to
+	// deliver over the horizon. All zero when the planner has no
+	// allocation. Populated by the API layer from the MPC plan.
+	PlanNextStartMs int64   `json:"plan_next_start_ms,omitempty"`
+	PlanNextEndMs   int64   `json:"plan_next_end_ms,omitempty"`
+	PlanNextWh      float64 `json:"plan_next_wh,omitempty"`
+	PlanTotalWh     float64 `json:"plan_total_wh,omitempty"`
 }
 
 // Manager holds the running set of loadpoints. Thread-safe.
@@ -334,8 +370,11 @@ type loadpointRuntime struct {
 	// ordering". The interruption latch reads it: a charger at 0 W because
 	// the plan parked it in an expensive hour, or an operator pressed
 	// Stop, is the box doing its job, not a charge that failed.
-	commandedW     float64
-	commandedKnown bool
+	// commandedReason names the dispatch branch that decided the value —
+	// see Manager.SetCommanded for the token set.
+	commandedW      float64
+	commandedKnown  bool
+	commandedReason string
 
 	// The interruption hysteresis state. chargingSteadySince anchors the
 	// current continuous above-floor run; steadyRunArmed latches once that
@@ -366,11 +405,25 @@ func (m *Manager) SetBus(bus *events.Bus) {
 // "the box paused it on purpose" — a plan parking the car through expensive
 // hours must never page anyone. No-op for an unknown id.
 func (m *Manager) SetCommandedW(id string, w float64) {
+	m.SetCommanded(id, w, "")
+}
+
+// SetCommanded records the ordered watts together with the reason the
+// dispatch branch chose that value — the fact operators were left to
+// reverse-engineer from amp readings (#1009). Reasons are short stable
+// tokens: "plan", "no_plan_budget", "pv_surplus", "pv_surplus_pause",
+// "fuse_limit", "fuse_cooldown", "site_meter_stale", "manual_hold",
+// "wake_kick". Empty keeps whatever was recorded before (used by the
+// legacy SetCommandedW wrapper). No-op for an unknown id.
+func (m *Manager) SetCommanded(id string, w float64, reason string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if lp, ok := m.byID[id]; ok {
 		lp.commandedW = w
 		lp.commandedKnown = true
+		if reason != "" {
+			lp.commandedReason = reason
+		}
 	}
 }
 
@@ -407,6 +460,7 @@ func (m *Manager) Load(cfgs []Config) {
 			lp.sessionComplete = existing.sessionComplete
 			lp.socSource = existing.socSource
 			lp.commandedW = existing.commandedW
+			lp.commandedReason = existing.commandedReason
 			lp.commandedKnown = existing.commandedKnown
 			lp.chargingSteadySince = existing.chargingSteadySince
 			lp.stoppedSince = existing.stoppedSince
@@ -913,6 +967,9 @@ func (lp *loadpointRuntime) snapshot() State {
 		Schedule:           lp.schedule,
 		SoCSource:          lp.socSource,
 		VehicleName:        lp.vehicleName,
+		CommandedW:         lp.commandedW,
+		CommandedReason:    lp.commandedReason,
+		CommandedKnown:     lp.commandedKnown,
 	}
 }
 
