@@ -2622,6 +2622,9 @@
       text = winActive
         ? "Charging on plan until " + evFmtClock(lp.plan_next_end_ms) + "." + kwPlanned
         : "Charging.";
+      if (lp.commanded_reason === "fuse_limit") {
+        text += " Rate is limited by the main fuse right now.";
+      }
     } else if (lp.commanded_known && lp.commanded_w > 0) {
       text = "Charger offers " + formatW(lp.commanded_w) +
         " but the car isn't drawing — it may be full or at its own charge limit.";
@@ -2629,10 +2632,24 @@
         text += " Charger reports: " + d.reason_no_current_label + ".";
       }
       tone = "var(--text)";
+    } else if (lp.commanded_known && !lp.commanded_w &&
+        (lp.commanded_reason === "fuse_cooldown" || lp.commanded_reason === "fuse_limit")) {
+      // The specific pauses beat the generic branches — this is the
+      // line that stops an operator debugging cable and charger while
+      // the box is protecting the main fuse (#1009).
+      text = "Paused: main-fuse protection — the house is using the headroom; charging resumes on its own." + kwPlanned;
+      tone = "var(--text)";
+    } else if (lp.commanded_known && !lp.commanded_w && lp.commanded_reason === "site_meter_stale") {
+      text = "Paused for safety: site-meter data is stale — charging resumes when telemetry recovers.";
+      tone = "var(--text)";
     } else if (lp.grid_deferred) {
+      // Richer than the pv_surplus_pause reason it usually co-occurs
+      // with: it also says when normal planning resumes.
       text = "Waiting for tomorrow's electricity prices — until they arrive (~13:00) the car charges from PV surplus only.";
+    } else if (lp.commanded_known && !lp.commanded_w && lp.commanded_reason === "pv_surplus_pause") {
+      text = "Paused: waiting for PV surplus — solar is below the charger's minimum step right now." + kwPlanned;
     } else if (winActive) {
-      text = "Paused by the box (fuse protection or PV clamp) — charging resumes on its own." + kwPlanned;
+      text = "Paused by the box — charging resumes on its own." + kwPlanned;
     } else if (lp.plan_next_start_ms > Date.now()) {
       text = "Charging planned " + evFmtClock(lp.plan_next_start_ms) + "–" +
         evFmtClock(lp.plan_next_end_ms) + "." + kwPlanned +

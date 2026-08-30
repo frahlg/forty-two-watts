@@ -193,6 +193,13 @@ type State struct {
 	CommandedW     float64 `json:"commanded_w"`
 	CommandedKnown bool    `json:"commanded_known"`
 
+	// CommandedReason names the dispatch branch that decided CommandedW:
+	// "plan", "no_plan_budget", "pv_surplus", "pv_surplus_pause",
+	// "fuse_limit", "fuse_cooldown", "site_meter_stale", "manual_hold",
+	// "wake_kick". Empty until the first dispatch tick. The UI renders
+	// the specific cause instead of a generic "paused by the box".
+	CommandedReason string `json:"commanded_reason,omitempty"`
+
 	// GridDeferred is true while MPC has deferred grid-funded planning
 	// because the target deadline lies past the published price
 	// horizon — the loadpoint behaves surplus-only until tomorrow's
@@ -355,8 +362,11 @@ type loadpointRuntime struct {
 	// ordering". The interruption latch reads it: a charger at 0 W because
 	// the plan parked it in an expensive hour, or an operator pressed
 	// Stop, is the box doing its job, not a charge that failed.
-	commandedW     float64
-	commandedKnown bool
+	// commandedReason names the dispatch branch that decided the value —
+	// see Manager.SetCommanded for the token set.
+	commandedW      float64
+	commandedKnown  bool
+	commandedReason string
 
 	// The interruption hysteresis state. chargingSteadySince anchors the
 	// current continuous above-floor run; steadyRunArmed latches once that
@@ -387,11 +397,25 @@ func (m *Manager) SetBus(bus *events.Bus) {
 // "the box paused it on purpose" — a plan parking the car through expensive
 // hours must never page anyone. No-op for an unknown id.
 func (m *Manager) SetCommandedW(id string, w float64) {
+	m.SetCommanded(id, w, "")
+}
+
+// SetCommanded records the ordered watts together with the reason the
+// dispatch branch chose that value — the fact operators were left to
+// reverse-engineer from amp readings (#1009). Reasons are short stable
+// tokens: "plan", "no_plan_budget", "pv_surplus", "pv_surplus_pause",
+// "fuse_limit", "fuse_cooldown", "site_meter_stale", "manual_hold",
+// "wake_kick". Empty keeps whatever was recorded before (used by the
+// legacy SetCommandedW wrapper). No-op for an unknown id.
+func (m *Manager) SetCommanded(id string, w float64, reason string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if lp, ok := m.byID[id]; ok {
 		lp.commandedW = w
 		lp.commandedKnown = true
+		if reason != "" {
+			lp.commandedReason = reason
+		}
 	}
 }
 
@@ -428,6 +452,7 @@ func (m *Manager) Load(cfgs []Config) {
 			lp.sessionComplete = existing.sessionComplete
 			lp.socSource = existing.socSource
 			lp.commandedW = existing.commandedW
+			lp.commandedReason = existing.commandedReason
 			lp.commandedKnown = existing.commandedKnown
 			lp.chargingSteadySince = existing.chargingSteadySince
 			lp.stoppedSince = existing.stoppedSince
@@ -902,6 +927,7 @@ func (lp *loadpointRuntime) snapshot() State {
 		SoCSource:          lp.socSource,
 		VehicleName:        lp.vehicleName,
 		CommandedW:         lp.commandedW,
+		CommandedReason:    lp.commandedReason,
 		CommandedKnown:     lp.commandedKnown,
 	}
 }
