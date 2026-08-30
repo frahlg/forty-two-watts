@@ -145,11 +145,16 @@ func (c *Capability) Close() error {
 
 // Read — implements drivers.ModbusCap. Reconnects once on transport error.
 func (c *Capability) Read(addr, count uint16, kind int32) ([]uint16, error) {
+	return c.readAs(c.unitID, addr, count, kind)
+}
+
+func (c *Capability) readAs(unitID int, addr, count uint16, kind int32) ([]uint16, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if err := c.ensureClient(); err != nil {
 		return nil, err
 	}
+	c.applyUnit(unitID)
 	var fc byte
 	switch kind {
 	case drivers.ModbusInput:
@@ -171,6 +176,7 @@ func (c *Capability) Read(addr, count uint16, kind int32) ([]uint16, error) {
 	if rerr := c.prepareTransportRetry(); rerr != nil {
 		return nil, fmt.Errorf("read after reconnect: %w (original: %v)", rerr, err)
 	}
+	c.applyUnit(unitID)
 	regs, err = c.client.ReadRegisters(addr, count, fc)
 	c.finishRequest(err)
 	return regs, markTransport(err)
@@ -192,11 +198,16 @@ func markTransport(err error) error {
 
 // WriteSingle — implements drivers.ModbusCap. Reconnects once on transport error.
 func (c *Capability) WriteSingle(addr, value uint16) error {
+	return c.writeSingleAs(c.unitID, addr, value)
+}
+
+func (c *Capability) writeSingleAs(unitID int, addr, value uint16) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if err := c.ensureClient(); err != nil {
 		return err
 	}
+	c.applyUnit(unitID)
 	err := c.client.WriteRegister(addr, value)
 	if err == nil {
 		c.noteLiveResponse()
@@ -209,6 +220,7 @@ func (c *Capability) WriteSingle(addr, value uint16) error {
 	if rerr := c.prepareTransportRetry(); rerr != nil {
 		return fmt.Errorf("write after reconnect: %w (original: %v)", rerr, err)
 	}
+	c.applyUnit(unitID)
 	err = c.client.WriteRegister(addr, value)
 	c.finishRequest(err)
 	return err
@@ -216,11 +228,16 @@ func (c *Capability) WriteSingle(addr, value uint16) error {
 
 // WriteMulti — implements drivers.ModbusCap. Reconnects once on transport error.
 func (c *Capability) WriteMulti(addr uint16, values []uint16) error {
+	return c.writeMultiAs(c.unitID, addr, values)
+}
+
+func (c *Capability) writeMultiAs(unitID int, addr uint16, values []uint16) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if err := c.ensureClient(); err != nil {
 		return err
 	}
+	c.applyUnit(unitID)
 	err := c.client.WriteRegisters(addr, values)
 	if err == nil {
 		c.noteLiveResponse()
@@ -233,9 +250,43 @@ func (c *Capability) WriteMulti(addr uint16, values []uint16) error {
 	if rerr := c.prepareTransportRetry(); rerr != nil {
 		return fmt.Errorf("write-multi after reconnect: %w (original: %v)", rerr, err)
 	}
+	c.applyUnit(unitID)
 	err = c.client.WriteRegisters(addr, values)
 	c.finishRequest(err)
 	return err
+}
+
+func (c *Capability) applyUnit(unitID int) {
+	if c.client == nil || unitID <= 0 {
+		return
+	}
+	c.client.SetUnitId(uint8(unitID))
+}
+
+// executePDU runs one raw PDU on this connection. Exception PDUs are
+// returned as data so a proxy can forward them. Transport errors follow
+// the same reconnect-once policy as Read.
+func (c *Capability) executePDU(unitID uint8, pdu []byte) ([]byte, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err := c.ensureClient(); err != nil {
+		return nil, err
+	}
+	res, err := c.client.roundTrip(unitID, pdu)
+	if err == nil {
+		c.noteLiveResponse()
+		return res, nil
+	}
+	if !isTransportError(err) {
+		c.noteLiveResponse()
+		return res, err
+	}
+	if rerr := c.prepareTransportRetry(); rerr != nil {
+		return nil, fmt.Errorf("pdu after reconnect: %w (original: %v)", rerr, err)
+	}
+	res, err = c.client.roundTrip(unitID, pdu)
+	c.finishRequest(err)
+	return res, markTransport(err)
 }
 
 func (c *Capability) ensureClient() error {
