@@ -57,20 +57,9 @@ func loadDiagnosticBlob(data []byte) (*Diagnostic, error) {
 	return &d, nil
 }
 
-// terminalCorrectedOre nets the terminal-SoC credit out of a raw grid
-// cost so two plans ending at different SoC compare honestly. Same
-// formula as the DP's terminal value (mpc.go) and the stateful shadow's
-// valued cost (shadow_evaluator.go).
-func terminalCorrectedOre(rawCostOre, endSoC float64, p Params) float64 {
-	return rawCostOre - p.TerminalSoCPrice*(endSoC*p.CapacityWh)/1000.0
-}
-
-func planEndSoC(plan *Plan) float64 {
-	if plan == nil || len(plan.Actions) == 0 {
-		return 0
-	}
-	return plan.Actions[len(plan.Actions)-1].SoC
-}
+// terminalCorrectedOre and planEndSoC now live in mpc.go: the Python
+// field shadow reports the same correction every replan, so the bench
+// and the running planner must not drift apart on the formula.
 
 // TestReplayBenchSnapshots is the A/B instrument. Skipped without
 // FTW_MPC_SNAPSHOT_DIR. Optional knobs:

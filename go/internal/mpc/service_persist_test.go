@@ -526,7 +526,7 @@ func TestPrimaryOptimizerKeepsDPAsDiagnosticShadow(t *testing.T) {
 	if plan == nil || plan.Solver == nil || plan.Solver.Engine != "cvxpy" {
 		t.Fatalf("primary plan not active: %+v", plan)
 	}
-	if plan.DPShadow == nil || plan.DPShadow.Solver == nil || plan.DPShadow.Solver.Engine != "go-dp" {
+	if plan.DPShadow == nil || plan.DPShadow.Solver == nil || plan.DPShadow.Solver.Engine != "core" {
 		t.Fatalf("DP shadow missing: %+v", plan.DPShadow)
 	}
 	if plan.DPShadow.ComparedSlots != len(plan.Actions) || plan.DPShadow.FirstAction == nil {

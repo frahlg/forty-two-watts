@@ -39,13 +39,27 @@ describe("optimizerStatus", () => {
     assert.match(got.warning, /optimizer socket unavailable/);
   });
 
-  it("keeps explicit Go DP free of optimizer warnings", () => {
+  it("keeps a Core-only planner free of optimizer warnings", () => {
     assert.deepEqual(optimizerStatus({ configured: false }), {
-      label: "Go DP only",
+      label: "Core planner",
       degraded: false,
       warning: "",
       lastPlanAtMs: 0,
     });
+  });
+
+  it("treats a healthy Python shadow behind a Core plan as normal", () => {
+    const got = optimizerStatus({
+      configured: true,
+      role: "shadow",
+      healthy: true,
+      runtime: { version: "v2.3.0", transport: "unix" },
+      active_solver: { engine: "core", backend: "dp", status: "optimal" },
+      last_plan_at_ms: 99,
+    });
+    assert.equal(got.degraded, false);
+    assert.equal(got.warning, "");
+    assert.match(got.label, /shadow/);
   });
 });
 

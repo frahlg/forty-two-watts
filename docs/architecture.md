@@ -96,13 +96,21 @@ artifact, while activation remains explicit and atomic. See
 
 ## Optimizer
 
-The Python/CVXPY optimizer is optional and separately deployable. Core sends a
-versioned planning request and accepts only a complete, valid trajectory. The
-optimizer does not read hardware or issue commands.
+Core plans. Its DP solves the same problem the Python/CVXPY optimizer does, in
+process, against the per-slot PV downside — measured within öre per plan of the
+external MILP on replayed site snapshots (#1020).
 
-If the socket/process fails, times out or returns invalid output, core falls
-back to its Go planner. Optimizer deployment and dependency churn therefore do
-not enlarge the safety-critical runtime.
+The Python/CVXPY optimizer is optional and separately deployable. By default it
+runs behind Core as a comparison shadow: after each replan it solves the same
+inputs, and the terminal-corrected cost difference is logged and recorded on
+the diagnostic. Shadow output never reaches dispatch, never delays a replan and
+cannot fail one. `planner.engine: python` restores it as the champion during
+the transition; then core sends a versioned planning request, accepts only a
+complete valid trajectory, and falls back to its own DP if the socket/process
+fails, times out or returns invalid output.
+
+The optimizer never reads hardware or issues commands, so its deployment and
+dependency churn do not enlarge the safety-critical runtime.
 
 ## Versioning a module contract
 

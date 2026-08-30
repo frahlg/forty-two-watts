@@ -94,11 +94,18 @@ type Service struct {
 	// forecasts are hard-cut to this so a wild twin cannot plan 50 kW
 	// of house load. 0 disables the upper cut.
 	LoadMaxW float64
-	// Optimizer is the primary mathematical planning engine. Nil selects the
-	// legacy in-process Go DP explicitly. When non-nil, any engine/process/
-	// validation failure falls back to the DP for this replan and is recorded
-	// in Plan.Solver.
+	// Optimizer is the external mathematical planning engine. Nil — the
+	// default since #1020 — makes the in-process Go DP the champion. When
+	// non-nil, any engine/process/validation failure falls back to the DP for
+	// this replan and is recorded in Plan.Solver.
 	Optimizer PlanOptimizer
+	// ShadowOptimizer runs the external optimizer AFTER a Core plan is
+	// published, on the same slots and params, and records the
+	// terminal-corrected cost difference. It is never consulted for dispatch,
+	// never promoted to champion, and never allowed to fail or delay a replan.
+	// Ignored while Optimizer is set — the external engine cannot shadow
+	// itself.
+	ShadowOptimizer PlanOptimizer
 	// EnableRecourseShadow runs a storage-only stochastic recourse challenger
 	// after each successful champion solve. It shares the primary worker and is
 	// diagnostic-only: no challenger action is ever read by SlotDirectiveAt.
@@ -238,6 +245,17 @@ type Service struct {
 	lastParams      Params // params that went into the most recent Optimize call
 	lastLoadpointID string // ID of the loadpoint active in the most recent plan (empty = none)
 	shadowEvaluator *StatefulShadowEvaluator
+
+	// Python field shadow, all guarded by mu. lastPythonShadow belongs to the
+	// decision named by lastPythonShadowFor and is dropped once a newer plan
+	// takes over; shadowBusy keeps at most one challenger solve in flight so a
+	// slow worker cannot pile up behind a 15-minute replan interval.
+	shadowBusy          bool
+	shadowCancel        context.CancelFunc
+	shadowWG            sync.WaitGroup
+	lastPythonShadow    *ShadowPlan
+	lastPythonShadowFor string
+	shadowErrWindows    map[string]shadowErrWindow
 
 	stop chan struct{}
 	done chan struct{}
@@ -756,16 +774,48 @@ func (s *Service) Stop() {
 	if s.activeReplanCancel != nil {
 		s.activeReplanCancel()
 	}
+	if s.shadowCancel != nil {
+		s.shadowCancel()
+	}
 	s.mu.Unlock()
 	close(s.stop)
 	<-s.done
 	// beginReplanLocked performs Add while holding the same lock that set
 	// stopping, so no new Add can race with this Wait.
 	s.replanWG.Wait()
+	// startPythonShadow adds under the same lock that set stopping, so no new
+	// challenger can start after this point; closing the worker before its
+	// in-flight call returned would only manufacture a shadow error.
+	s.shadowWG.Wait()
 	if s.Optimizer != nil {
 		_ = s.Optimizer.Close()
 	}
+	if s.ShadowOptimizer != nil {
+		_ = s.ShadowOptimizer.Close()
+	}
 	close(s.stopped)
+}
+
+// ConfiguredOptimizer returns the external optimizer attached to this service
+// in either role, champion or shadow. Health, version and update surfaces use
+// it: the sidecar has to stay visible and updatable while it runs as a
+// measurement, or the soak that justifies retiring it cannot be maintained.
+// Which engine actually produced the active plan is a separate question, and
+// Plan.Solver answers it.
+func (s *Service) ConfiguredOptimizer() PlanOptimizer {
+	if s == nil {
+		return nil
+	}
+	if s.Optimizer != nil {
+		return s.Optimizer
+	}
+	return s.ShadowOptimizer
+}
+
+// OptimizerIsChampion reports whether the external optimizer produces the
+// active plan, as opposed to shadowing the Core planner.
+func (s *Service) OptimizerIsChampion() bool {
+	return s != nil && s.Optimizer != nil
 }
 
 func (s *Service) loop(ctx context.Context) {
@@ -1386,11 +1436,28 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 	}
 	recoveryRequired := planningParamsRequireRecovery(p)
 	if recoveryRequired && s.Optimizer == nil {
-		slog.Error("mpc: battery state requires operating-bound recovery that Go DP cannot model; keeping previous plan",
-			"soc_start", p.InitialSoC,
-			"soc_min", p.SoCMin,
-			"soc_max", p.SoCMax)
-		return s.Latest()
+		// Core is the planner, so this state has to produce a plan. Clamp onto
+		// the band edge and record the real reading; the argument for clamping
+		// over refusing is in clampParamsIntoOperatingBand.
+		clamped, ok := clampParamsIntoOperatingBand(&p)
+		if !ok {
+			slog.Error("mpc: battery state is not physically possible; keeping previous plan",
+				"soc_start", p.InitialSoC,
+				"soc_min", p.SoCMin,
+				"soc_max", p.SoCMax)
+			return s.Latest()
+		}
+		if clamped {
+			slog.Warn("mpc: planning from clamped SoC",
+				"soc_real", p.InitialSoCUnclamped,
+				"soc_clamped", p.InitialSoC,
+				"delta_wh", (p.InitialSoC-p.InitialSoCUnclamped)*p.CapacityWh,
+				"soc_min", p.SoCMin,
+				"soc_max", p.SoCMax)
+		}
+		// The state is inside the band now, so this is an ordinary solve:
+		// baselines and shadows apply as usual.
+		recoveryRequired = false
 	}
 
 	slog.Info("mpc: optimize params",
@@ -1412,13 +1479,15 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 	var shadowRecoursePlan *Plan
 	var shadowError string
 	publishShadow := false
-	if s.Optimizer == nil {
+	coreChampion := s.Optimizer == nil
+	if coreChampion {
+		// Core is the planner. It solves the downside-PV slots — forecast
+		// minus k·σ per slot — so the plan it publishes is the one that does
+		// not bet on sun that may not arrive.
 		slots = fallbackSlots
+		solveStart := time.Now()
 		plan = Optimize(slots, p)
-		plan.Solver = &SolverInfo{
-			Engine: "go-dp", Backend: "bellman", Status: "optimal-grid",
-			Formulation: "discrete-dp",
-		}
+		plan.Solver = coreSolverInfo(p, msSince(solveStart))
 	} else {
 		candidate, err := s.Optimizer.Optimize(ctx, slots, p)
 		if request.wasCanceledByService() {
@@ -1434,11 +1503,9 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 					"soc_min", p.SoCMin,
 					"soc_max", p.SoCMax)
 			} else {
+				evaluationStart := time.Now()
 				dpEvaluation := Optimize(slots, p)
-				dpEvaluation.Solver = &SolverInfo{
-					Engine: "go-dp", Backend: "bellman", Status: "optimal-grid",
-					Formulation: "discrete-dp",
-				}
+				dpEvaluation.Solver = coreSolverInfo(p, msSince(evaluationStart))
 				candidate.DPEvaluationShadow = compareDPShadow(candidate, dpEvaluation)
 				candidate.DPEvaluationShadow.ForecastBasis = "same base forecast input"
 				candidate.DPEvaluationShadow.Solver = dpEvaluation.Solver
@@ -1449,11 +1516,9 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 					candidate.DPEvaluationShadow.FirstAction.EMSMode = mode
 				}
 
+				downsideStart := time.Now()
 				dpShadow := Optimize(fallbackSlots, p)
-				dpShadow.Solver = &SolverInfo{
-					Engine: "go-dp", Backend: "bellman", Status: "optimal-grid",
-					Formulation: "discrete-dp",
-				}
+				dpShadow.Solver = coreSolverInfo(p, msSince(downsideStart))
 				candidate.DPShadow = compareDPShadow(candidate, dpShadow)
 				candidate.DPShadow.ForecastBasis = "downside-pv fallback input"
 				candidate.DPShadow.Solver = dpShadow.Solver
@@ -1547,14 +1612,17 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 					"soc_max", p.SoCMax)
 				return s.Latest()
 			}
-			slog.Error("mpc: primary optimizer failed; using Go DP fallback", "err", err)
+			slog.Error("mpc: primary optimizer failed; using Core DP fallback", "err", err)
 			slots = fallbackSlots
+			solveStart := time.Now()
 			plan = Optimize(slots, p)
-			plan.Solver = &SolverInfo{
-				Engine: "go-dp", Backend: "bellman", Status: "fallback",
-				Formulation: "discrete-dp", Fallback: true,
-				FallbackReason: err.Error(),
-			}
+			plan.Solver = coreSolverInfo(p, msSince(solveStart))
+			// Same solver, different standing: the operator asked for the
+			// external planner and did not get it. Everything that warns about
+			// a degraded optimizer keys on this flag, not on the engine name.
+			plan.Solver.Status = "fallback"
+			plan.Solver.Fallback = true
+			plan.Solver.FallbackReason = err.Error()
 		}
 	}
 	if err := validatePlanSlotAlignment(slots, plan.Actions); err != nil {
@@ -1680,7 +1748,34 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 			}
 		}
 	}
+	// The plan is published and persisted before the challenger starts, so the
+	// shadow can only ever add a measurement to it. `plan` is copied by value
+	// and its actions are read-only from here on.
+	if coreChampion {
+		s.startPythonShadow(plan, slots, p, reason, replanAtMs)
+	}
 	return &plan
+}
+
+// msSince reports elapsed milliseconds with sub-millisecond resolution — a DP
+// solve on a small grid finishes in a fraction of a millisecond and must not
+// report as zero.
+func msSince(start time.Time) float64 {
+	return float64(time.Since(start).Microseconds()) / 1000.0
+}
+
+// coreSolverInfo labels a plan the in-process Go DP produced. The grid travels
+// with it because the discretization is what bounds the DP's distance from a
+// continuous optimum: at 201×401 the terminal-corrected replay bench put it
+// within 12.7 öre per plan of the external MILP across 12 site snapshots.
+func coreSolverInfo(p Params, solveMs float64) *SolverInfo {
+	return &SolverInfo{
+		Engine: "core", Backend: "dp", Status: "optimal",
+		Formulation:  "discrete-dp",
+		SoCLevels:    p.SoCLevels,
+		ActionLevels: p.ActionLevels,
+		SolveMs:      solveMs,
+	}
 }
 
 // nextDecisionIDLocked returns an opaque ID for a plan that has passed the

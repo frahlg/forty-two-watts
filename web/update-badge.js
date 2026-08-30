@@ -705,7 +705,10 @@
       const showOptimizerWarning = !!(optimizer && optimizer.configured && (optimizer.degraded === true || optimizer.healthy === false)) && this._phase !== "updating";
       const showBadge = showDot || showOptimizerWarning;
       const activeSolver = optimizer && optimizer.active_solver;
-      const optimizerFallbackActive = !!(activeSolver && (activeSolver.fallback || activeSolver.engine === "go-dp"));
+      // Core producing the plan is the default, so the engine name says
+      // nothing about health; only the fallback flag means the operator asked
+      // for the external planner and did not get it.
+      const optimizerFallbackActive = !!(activeSolver && activeSolver.fallback);
       const optimizerReason = optimizer && (optimizer.fallback_reason || optimizer.health_error || optimizer.error);
       const warningTitle = (optimizerFallbackActive ? "Planner fallback active" : "Optimizer unavailable") + (optimizerReason ? ": " + optimizerReason : "");
       const updateTitle = pending.core && info.latest
@@ -1032,7 +1035,7 @@
         ? `<button class="btn btn-ghost btn-small" data-action="optimizer-rollback" title="Restore the previous optimizer image">Roll back</button>`
         : "";
       const activeSolver = optimizer.active_solver || {};
-      const optimizerFallbackActive = activeSolver.fallback || activeSolver.engine === "go-dp";
+      const optimizerFallbackActive = !!activeSolver.fallback;
       const optimizerReason = optimizer.fallback_reason || optimizer.health_error || optimizer.error || "";
       const optimizerWarning = optimizer.degraded === true || optimizer.healthy === false
         ? `<p class="component-warning" role="alert"><strong>${optimizerFallbackActive ? "Planner fallback active." : "Optimizer unavailable."}</strong>${optimizerFallbackActive ? " Core is using the built-in Go planner." : " The current plan stays active until the next replan."}${optimizerReason ? " " + escapeHTML(optimizerReason) : ""}</p>`

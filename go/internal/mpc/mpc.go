@@ -145,6 +145,11 @@ type Params struct {
 	SoCMin     float64 // hardware/chemistry floor — DP feasibility check refuses to land below this
 	SoCMax     float64 // e.g. 95
 	InitialSoC float64
+	// InitialSoCUnclamped records the SoC the site actually reported when it
+	// had drifted outside SoCMin…SoCMax and InitialSoC was pulled onto the
+	// band edge so Core could plan at all. Zero when no clamp was needed. It
+	// is a record, not an input: nothing solves from it.
+	InitialSoCUnclamped float64
 
 	// Forecast-risk reserve is handled outside the DP cost now: the planner
 	// optimises against downside PV (forecast − k·σ) via
@@ -376,9 +381,9 @@ type Plan struct {
 	OptimizerInput json.RawMessage `json:"-"`
 }
 
-// ShadowPlan is a Go-DP candidate calculated alongside an active mathematical
-// plan. It is diagnostic only and is never read by dispatch.
-// ActiveMinusShadowOre is negative when the Python plan has lower raw cost.
+// ShadowPlan is a challenger candidate calculated alongside the active plan.
+// It is diagnostic only and is never read by dispatch. ActiveMinusShadowOre is
+// negative when the challenger has lower raw cost.
 type ShadowPlan struct {
 	TotalCostOre           float64     `json:"total_cost_ore"`
 	ActiveMinusShadowOre   float64     `json:"active_minus_shadow_ore"`
@@ -389,17 +394,48 @@ type ShadowPlan struct {
 	ComparedSlots          int         `json:"compared_slots"`
 	FirstAction            *Action     `json:"first_action,omitempty"`
 	Solver                 *SolverInfo `json:"solver,omitempty"`
+
+	// Terminal-corrected costs net out the terminal-SoC credit both solvers
+	// optimize with but neither reports. Two plans that park the horizon at
+	// different SoC are not comparable on raw cost: the fuller one is storing
+	// value, not overspending, and on a 9.6 kWh pack that artifact is worth up
+	// to ~21 SEK. Filled by the Python field shadow; zero on blocks written
+	// before it existed.
+	ActiveTerminalCorrectedOre            float64 `json:"active_terminal_corrected_ore,omitempty"`
+	TerminalCorrectedOre                  float64 `json:"terminal_corrected_ore,omitempty"`
+	ActiveMinusShadowTerminalCorrectedOre float64 `json:"active_minus_shadow_terminal_corrected_ore,omitempty"`
+}
+
+// terminalCorrectedOre nets the terminal-SoC credit out of a raw grid cost so
+// two plans ending at different SoC compare honestly. Same formula as the DP's
+// terminal value (Optimize) and the stateful shadow's valued cost.
+func terminalCorrectedOre(rawCostOre, endSoC float64, p Params) float64 {
+	return rawCostOre - p.TerminalSoCPrice*(endSoC*p.CapacityWh)/1000.0
+}
+
+// planEndSoC is the SoC the plan parks the horizon at.
+func planEndSoC(plan *Plan) float64 {
+	if plan == nil || len(plan.Actions) == 0 {
+		return 0
+	}
+	return plan.Actions[len(plan.Actions)-1].SoC
 }
 
 // SolverInfo identifies the engine that produced a plan and records enough
-// detail to audit optimizer fallbacks. The Go DP remains available as an
-// emergency fallback when the external mathematical planner is unavailable or
-// returns a plan that fails the Go-side physics validator.
+// detail to audit which planner ran. Engine "core" / Backend "dp" is the
+// in-process Go DP; Fallback separates "core is the configured planner" from
+// "the external planner failed and the DP caught it".
 type SolverInfo struct {
-	Engine                 string   `json:"engine"`
-	Backend                string   `json:"backend,omitempty"`
-	Status                 string   `json:"status"`
-	Formulation            string   `json:"formulation,omitempty"`
+	Engine      string `json:"engine"`
+	Backend     string `json:"backend,omitempty"`
+	Status      string `json:"status"`
+	Formulation string `json:"formulation,omitempty"`
+	// SoCLevels and ActionLevels are the DP's discretization grid — the
+	// dimension that bounds how close it lands to a continuous optimum, and
+	// the one derated when a loadpoint joins the state space. Empty for
+	// solvers that do not discretize.
+	SoCLevels              int      `json:"soc_levels,omitempty"`
+	ActionLevels           int      `json:"action_levels,omitempty"`
 	ObjectiveOre           float64  `json:"objective_ore,omitempty"`
 	ServiceSlack           float64  `json:"service_slack,omitempty"`
 	SolveMs                float64  `json:"solve_ms,omitempty"`

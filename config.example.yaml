@@ -269,12 +269,17 @@ fleet_ping:
 #         ftw-drivers-2026-01: MX+j27UBkyM099hTyJlmMLK9qlTTDUJsaK/vH12fFKc=
 # Refresh only updates the signed catalog. Install and activation stay explicit.
 
-# Mathematical MPC optimizer. Official Compose runs it as the independently
-# updatable ftw-optimizer service; native installs can point optimizer_command
-# at their venv's Python executable.
+# The planner. Core solves it in process; the Python/HiGHS optimizer is the
+# legacy external engine, still shipped as the independently updatable
+# ftw-optimizer service (native installs point optimizer_command at their
+# venv's Python executable). Every optimizer_* setting below applies to that
+# worker in either role, champion or shadow.
 # planner:
 #   enabled: true
-#   engine: python
+#   engine: core        # core (default) | python (legacy external champion)
+#   shadow_python: true # run the external optimizer after each Core replan on
+#                       # the same inputs and log the terminal-corrected cost
+#                       # difference. Measurement only — never dispatched.
 #   mode: passive_arbitrage
 #   forecast_trust: balanced   # cautious | balanced | bold (first boot; live value is SQLite)
 #   battery_export: unknown    # unknown | not_allowed | allowed (unknown = no battery sale)

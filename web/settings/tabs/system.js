@@ -33,13 +33,16 @@
     var solver = optimizer.active_solver || {};
     var degraded = optimizer.degraded === true || optimizer.healthy === false || solver.fallback === true;
     if (!optimizer.configured) {
-      return { label: "Go DP only", degraded: false, warning: "", lastPlanAtMs: 0 };
+      return { label: "Core planner", degraded: false, warning: "", lastPlanAtMs: 0 };
     }
     var runtimeLabel = (runtime.version || "unknown") + " · " + (runtime.transport || "unknown");
+    if (optimizer.role === "shadow") runtimeLabel += " · shadow";
     var solverLabel = [solver.engine, solver.backend].filter(Boolean).join(" / ");
     var reason = optimizer.fallback_reason || solver.fallback_reason || optimizer.health_error || optimizer.error || "";
     var warning = "";
-    if (solver.fallback || solver.engine === "go-dp") {
+    // Only the fallback flag means a failure: under the default engine the
+    // sidecar is attached as a shadow and Core plans on purpose.
+    if (solver.fallback) {
       warning = "Planner fallback active" + (solverLabel ? " — " + solverLabel : "") + (reason ? ". " + reason : "");
     } else if (degraded) {
       warning = "Optimizer unavailable" + (reason ? " — " + reason : "");

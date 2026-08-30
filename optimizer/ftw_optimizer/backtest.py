@@ -388,7 +388,9 @@ def dp_evaluation_reference(
     solver = diagnostic.get("solver")
     engine = str(solver.get("engine", "")) if isinstance(solver, dict) else ""
     slots = diagnostic.get("slots", [])
-    if engine in {"", "go-dp"} and not diagnostic.get("optimizer_input") and slots:
+    # "core" is the current label for the in-process DP; "go-dp" is what
+    # snapshots written before #1020 carry.
+    if engine in {"", "core", "go-dp"} and not diagnostic.get("optimizer_input") and slots:
         return float(diagnostic.get("total_cost_ore", 0)), slots[0]
     raise SnapshotSkip("missing same-input DP evaluation shadow")
 

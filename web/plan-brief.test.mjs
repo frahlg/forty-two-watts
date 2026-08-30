@@ -112,6 +112,29 @@ describe("plan brief normalization", () => {
     assert.match(brief.constraint, /schedule is old/);
   });
 
+  it("shows the Core planner as an ordinary active plan, not a fallback", () => {
+    const brief = derivePlanBrief({
+      enabled: true,
+      plan: {
+        actions: [slot(-7, { battery_w: 2400, soc: 0.48 }), slot(8)],
+        solver: {
+          engine: "core",
+          backend: "dp",
+          status: "optimal",
+          soc_levels: 201,
+          action_levels: 401,
+        },
+      },
+      status: { mode: "planner_arbitrage", bat_soc: 0.46 },
+      now,
+    });
+
+    assert.equal(brief.state.key, "active");
+    assert.equal(brief.state.label, "Plan active");
+    assert.equal(brief.planner.label, "core / dp");
+    assert.equal(brief.planner.detail, "Plan result: Optimal");
+  });
+
   it("names the built-in solver fallback without losing its reason", () => {
     const brief = derivePlanBrief({
       enabled: true,

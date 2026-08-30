@@ -736,10 +736,13 @@ func TestReplanRecoveryKeepsPreviousPlanWhenDPWouldBeRequired(t *testing.T) {
 		wantFailCalls int32
 		setupRecovery func(*Service)
 	}{
-		{name: "aggregate go only", setupRecovery: func(svc *Service) { svc.Defaults.InitialSoC = 0.05 }},
+		// Only the external-champion path still refuses: its operating-band
+		// recovery ratchet is what the DP cannot represent, so a failed primary
+		// must not silently become a DP plan solved from a snapped SoC. With
+		// Core as the configured planner the same state is clamped and planned
+		// — see TestCoreChampionClampsOutOfBandSoC.
 		{name: "aggregate failed primary", baseline: &physicsGateCountingOptimizer{}, recovery: &physicsGateFailingOptimizer{}, wantFailCalls: 1,
 			setupRecovery: func(svc *Service) { svc.Defaults.InitialSoC = 0.05 }},
-		{name: "storage member go only", setupRecovery: func(svc *Service) { configurePhysicsGateFleet(svc, 0.05, 0.55) }},
 		{name: "storage member failed primary", baseline: &physicsGateCountingOptimizer{}, recovery: &physicsGateFailingOptimizer{}, wantFailCalls: 1,
 			setupRecovery: func(svc *Service) { configurePhysicsGateFleet(svc, 0.05, 0.55) }},
 	}

@@ -77,10 +77,11 @@ func validateBatteryFleetMembers(fleet []BatteryFleetMember) error {
 	return nil
 }
 
-// planningParamsRequireRecovery marks states the external model can replay but
-// the discrete Go DP cannot yet represent. The DP snaps its initial SoC onto
-// the operating grid, so using it here would plan from energy the site does not
-// have (or discard energy it does have).
+// planningParamsRequireRecovery marks states the external model represents
+// directly, with an operating-band recovery ratchet, and the discrete Go DP
+// does not: the DP snaps its initial SoC onto the operating grid, so solving
+// from an out-of-band start plans from energy the site does not have (or
+// discards energy it does have).
 func planningParamsRequireRecovery(p Params) bool {
 	if p.InitialSoC < p.SoCMin || p.InitialSoC > p.SoCMax {
 		return true
@@ -91,6 +92,66 @@ func planningParamsRequireRecovery(p Params) bool {
 		}
 	}
 	return false
+}
+
+// clampParamsIntoOperatingBand pulls a battery that has drifted outside
+// soc_min…soc_max back onto the nearest band edge so the Core planner can plan
+// at all, and records the real reading in InitialSoCUnclamped. It reports
+// whether anything moved, and whether the state was recoverable.
+//
+// Why clamping beats refusing, which is what a reviewer will ask. The clamp
+// overstates available energy by at most (soc_min − real)·capacity — on the
+// site that reported this, ~1 % ≈ 96 Wh. A plan that then asks for energy the
+// pack does not have is stopped by the layers below: the dispatch clamp and
+// the driver's own discharge floor, which exist because planner output is
+// never sent directly to hardware. Refusing leaves the site executing a stale
+// plan for hours and then falling back to live balancing, which is the worse
+// failure. That was tolerable only while reaching this path required a missing
+// optimizer; Core is the planner now. The field case is a Ferroamp driver
+// floor at 0.10 with the pack settling at 0.09 overnight.
+//
+// Non-finite or physically impossible readings — SoC outside 0..1, storage
+// energy outside 0..capacity — are broken telemetry rather than a recoverable
+// state, and are refused. Callers keep the previous plan for those.
+func clampParamsIntoOperatingBand(p *Params) (clamped, ok bool) {
+	if p == nil {
+		return false, false
+	}
+	if !finite(p.InitialSoC) || p.InitialSoC < 0 || p.InitialSoC > 1 {
+		return false, false
+	}
+	if !finite(p.SoCMin) || !finite(p.SoCMax) || p.SoCMin > p.SoCMax || p.CapacityWh <= 0 {
+		return false, false
+	}
+	for i := range p.Storages {
+		s := p.Storages[i]
+		if !finite(s.InitialEnergyWh) || s.InitialEnergyWh < 0 || s.InitialEnergyWh > s.CapacityWh {
+			return false, false
+		}
+		if !finite(s.MinEnergyWh) || !finite(s.MaxEnergyWh) || s.MinEnergyWh > s.MaxEnergyWh {
+			return false, false
+		}
+	}
+
+	unclamped := p.InitialSoC
+	// Clamp each battery first and re-derive the aggregate from the clamped
+	// fleet: validateStorageSpecs requires Σ initial_energy_wh to equal
+	// capacity × initial_soc, and the Python shadow receives both.
+	if len(p.Storages) > 0 {
+		totalWh := 0.0
+		for i := range p.Storages {
+			s := &p.Storages[i]
+			s.InitialEnergyWh = math.Min(math.Max(s.InitialEnergyWh, s.MinEnergyWh), s.MaxEnergyWh)
+			totalWh += s.InitialEnergyWh
+		}
+		p.InitialSoC = totalWh / p.CapacityWh
+	}
+	p.InitialSoC = math.Min(math.Max(p.InitialSoC, p.SoCMin), p.SoCMax)
+	if p.InitialSoC == unclamped {
+		return false, true
+	}
+	p.InitialSoCUnclamped = unclamped
+	return true, true
 }
 
 // validatePlanningParams checks the effective inputs that both planning

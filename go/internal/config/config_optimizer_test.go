@@ -81,3 +81,54 @@ func TestPlannerOptimizerConfigValidation(t *testing.T) {
 		})
 	}
 }
+
+// TestPlannerEngineDefaultsToCore pins the #1020 flip at the configuration
+// boundary: an unset engine is Core, "python" is the explicit legacy opt-out,
+// and the spellings existing configs already carry still resolve.
+func TestPlannerEngineDefaultsToCore(t *testing.T) {
+	tests := map[string]string{
+		"":       PlannerEngineCore,
+		"core":   PlannerEngineCore,
+		"go":     PlannerEngineCore,
+		"dp":     PlannerEngineCore,
+		"Core":   PlannerEngineCore,
+		"python": PlannerEnginePython,
+		"PYTHON": PlannerEnginePython,
+	}
+	for value, want := range tests {
+		p := &Planner{Enabled: true, Engine: value}
+		if got := p.EngineName(); got != want {
+			t.Errorf("engine %q resolved to %q, want %q", value, got, want)
+		}
+		cfg := Config{Site: Site{SmoothingAlpha: 0.3},
+			Fuse: Fuse{MaxAmps: 16, Phases: 3, Voltage: 230}, Planner: p}
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("engine %q rejected: %v", value, err)
+		}
+	}
+	if got := (*Planner)(nil).EngineName(); got != PlannerEngineCore {
+		t.Errorf("nil planner engine = %q, want core", got)
+	}
+}
+
+// TestPlannerShadowPythonDefaultsOn — the soak measurement is on unless an
+// operator turns it off, and "off" survives being written down.
+func TestPlannerShadowPythonDefaultsOn(t *testing.T) {
+	if !(&Planner{}).ShadowPythonEnabled() {
+		t.Error("unset shadow_python should default on")
+	}
+	if !(*Planner)(nil).ShadowPythonEnabled() {
+		t.Error("nil planner should default on")
+	}
+	off := false
+	if (&Planner{ShadowPython: &off}).ShadowPythonEnabled() {
+		t.Error("explicit shadow_python: false was ignored")
+	}
+	cfg, err := Parse([]byte(minimalYAML+"\nplanner:\n  enabled: true\n  shadow_python: false\n"), "/tmp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Planner.ShadowPythonEnabled() {
+		t.Error("shadow_python: false did not survive parsing")
+	}
+}

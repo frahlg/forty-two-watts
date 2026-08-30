@@ -67,6 +67,11 @@ type DiagnosticSlot struct {
 type DiagnosticParams struct {
 	Mode                Mode     `json:"mode"`
 	InitialSoC       float64  `json:"initial_soc"`
+	// InitialSoCUnclamped is the SoC the site reported when it sat outside
+	// soc_min…soc_max and InitialSoC above was pulled onto the band edge to
+	// let Core plan. Absent on every ordinary replan. The solve used
+	// InitialSoC; this is what the battery actually read.
+	InitialSoCUnclamped float64 `json:"initial_soc_unclamped,omitempty"`
 	SoCMin           float64  `json:"soc_min"`
 	SoCMax           float64  `json:"soc_max"`
 	PVChargeBonusOreKwh float64  `json:"pv_charge_bonus_ore_kwh,omitempty"`
@@ -115,6 +120,12 @@ type Diagnostic struct {
 	LoadpointID           string            `json:"loadpoint_id,omitempty"`
 	LastReplanAtMs        int64             `json:"last_replan_at_ms"`
 	LastReason            string            `json:"last_reason"`
+
+	// PythonShadow is the external optimizer solved on the inputs a Core
+	// champion planned from. It arrives after the replan returns, so a
+	// snapshot written before the challenger finished — or on a site with no
+	// worker — carries the plan without it.
+	PythonShadow *ShadowPlan `json:"python_shadow,omitempty"`
 }
 
 // Diagnose returns the inputs + outputs of the most recent Optimize
@@ -135,8 +146,15 @@ func (s *Service) Diagnose() *Diagnostic {
 	if s.last == nil || len(s.lastSlots) == 0 {
 		return nil
 	}
-	return buildDiagnostic(s.last, s.lastSlots, s.lastParams, s.Zone,
+	d := buildDiagnostic(s.last, s.lastSlots, s.lastParams, s.Zone,
 		s.lastReplanAt.UnixMilli(), s.lastReason)
+	// The Python field shadow lands after its replan returned, so it is held
+	// beside the plan rather than on it — a published Plan is read without
+	// this lock and must not be written to afterwards.
+	if d != nil && s.lastPythonShadow != nil && s.lastPythonShadowFor == d.DecisionID {
+		d.PythonShadow = s.lastPythonShadow
+	}
+	return d
 }
 
 // buildDiagnostic assembles a Diagnostic from explicit inputs — no
@@ -211,6 +229,7 @@ func buildDiagnostic(plan *Plan, slots []Slot, p Params, zone string,
 		Params: DiagnosticParams{
 			Mode:                       p.Mode,
 			InitialSoC:              p.InitialSoC,
+			InitialSoCUnclamped:        p.InitialSoCUnclamped,
 			SoCMin:                  p.SoCMin,
 			SoCMax:                  p.SoCMax,
 			PVChargeBonusOreKwh:        p.PVChargeBonusOreKwh,
@@ -303,6 +322,10 @@ func (s *Service) RestoreDiagnostic(d *Diagnostic, now time.Time, reason string)
 	s.lastLoadpointID = d.LoadpointID
 	s.lastReplanAt = replanAt
 	s.lastReason = reason
+	if d.PythonShadow != nil && d.DecisionID != "" {
+		s.lastPythonShadow = d.PythonShadow
+		s.lastPythonShadowFor = d.DecisionID
+	}
 	if s.EnableRecourseShadow && d.ShadowEvaluation != nil {
 		if s.shadowEvaluator == nil {
 			s.shadowEvaluator = newStatefulShadowEvaluator()
@@ -337,6 +360,7 @@ func planFromDiagnostic(d *Diagnostic) (*Plan, []Slot, Params, time.Time, bool) 
 	params := Params{
 		Mode:                d.Params.Mode,
 		InitialSoC:       d.Params.InitialSoC,
+		InitialSoCUnclamped: d.Params.InitialSoCUnclamped,
 		SoCMin:           d.Params.SoCMin,
 		SoCMax:           d.Params.SoCMax,
 		PVChargeBonusOreKwh: d.Params.PVChargeBonusOreKwh,

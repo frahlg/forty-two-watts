@@ -845,9 +845,17 @@ type Planner struct {
 	// BatteryExport is the first-boot battery-sale permission:
 	// unknown | not_allowed | allowed. Live value is SQLite battery_export.
 	BatteryExport string `yaml:"battery_export,omitempty" json:"battery_export,omitempty"`
-	// Engine selects the primary optimizer: "python" (default) runs the
-	// CVXPY/HiGHS worker; "dp" is the legacy in-process rollback engine.
+	// Engine selects the planner that produces the active plan: "core"
+	// (default) solves in process with the Go DP; "python" hands the
+	// champion role to the CVXPY/HiGHS worker. "go" and "dp" are accepted
+	// spellings of "core". Read it through EngineName.
 	Engine string `yaml:"engine,omitempty" json:"engine,omitempty"`
+	// ShadowPython runs the Python/HiGHS worker after each Core replan, on
+	// the inputs the champion solved, and records the terminal-corrected
+	// cost difference. Shadow output never reaches dispatch. Pointer so an
+	// unset field keeps the default (on) and an explicit false turns the
+	// comparison off. Ignored when Engine is python.
+	ShadowPython *bool `yaml:"shadow_python,omitempty" json:"shadow_python,omitempty"`
 	// OptimizerCommand is the Python executable used for the local worker.
 	// It is an executable path, not a shell command. The module invocation is
 	// fixed by the host to avoid shell parsing and configuration injection.
@@ -937,6 +945,36 @@ type Planner struct {
 	// to the energy path on upgrade. Honored with a startup WARN
 	// and will be removed after one release.
 	UseEnergyDispatch *bool `yaml:"use_energy_dispatch,omitempty" json:"use_energy_dispatch,omitempty"`
+}
+
+// PlannerEngineCore and PlannerEnginePython are the two planners that can hold
+// the champion role.
+const (
+	PlannerEngineCore   = "core"
+	PlannerEnginePython = "python"
+)
+
+// EngineName resolves planner.engine to one of the two champions. Unset means
+// core: the Go DP measured within öre of the external MILP on replayed site
+// snapshots, and it needs no sidecar to be running to produce a plan.
+func (p *Planner) EngineName() string {
+	if p == nil {
+		return PlannerEngineCore
+	}
+	if strings.EqualFold(strings.TrimSpace(p.Engine), PlannerEnginePython) {
+		return PlannerEnginePython
+	}
+	return PlannerEngineCore
+}
+
+// ShadowPythonEnabled reports whether the external optimizer runs behind a Core
+// champion as a comparison shadow. Default on: the per-replan cost difference
+// it records is the field evidence for retiring the external stack.
+func (p *Planner) ShadowPythonEnabled() bool {
+	if p == nil || p.ShadowPython == nil {
+		return true
+	}
+	return *p.ShadowPython
 }
 
 // OptimizerTimeout returns the runtime contract value for an unset timeout.
@@ -2259,10 +2297,11 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("planner.battery_export must be unknown, not_allowed, or allowed, got %q", p.BatteryExport)
 			}
 		}
-		switch p.Engine {
-		case "", "python", "dp":
+		switch strings.ToLower(strings.TrimSpace(p.Engine)) {
+		case "", PlannerEngineCore, "go", "dp", PlannerEnginePython:
 		default:
-			return fmt.Errorf("planner.engine must be \"python\" or \"dp\", got %q", p.Engine)
+			return fmt.Errorf("planner.engine must be %q or %q, got %q",
+				PlannerEngineCore, PlannerEnginePython, p.Engine)
 		}
 		switch strings.ToUpper(p.OptimizerSolver) {
 		case "", "HIGHS", "CLARABEL":

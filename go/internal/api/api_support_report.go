@@ -568,18 +568,25 @@ func writeDeviceSection(b *strings.Builder, health map[string]telemetry.DriverHe
 func (s *Server) writeComponentSection(b *strings.Builder, ctx context.Context, plan *mpc.Plan) {
 	b.WriteString("## Versions\n\n")
 	fmt.Fprintf(b, "- Core **%s**\n", s.deps.Version)
-	if s.deps.MPC == nil || s.deps.MPC.Optimizer == nil {
-		b.WriteString("- Optimizer **not configured** — every plan comes from " +
-			"the built-in Go fallback\n")
-	} else if h, ok := s.deps.MPC.Optimizer.(optimizerHealth); ok {
+	// The optimizer answers two questions for support: is it attached, and is
+	// it planning. Under the default engine it is attached as a measurement
+	// while Core plans — that is not a degraded site.
+	worker := s.deps.MPC.ConfiguredOptimizer()
+	role := "comparison shadow"
+	if s.deps.MPC.OptimizerIsChampion() {
+		role = "champion"
+	}
+	if worker == nil {
+		b.WriteString("- Optimizer **not attached** — Core plans on its own\n")
+	} else if h, ok := worker.(optimizerHealth); ok {
 		hctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 		info, err := h.Health(hctx)
 		cancel()
 		if err != nil {
-			fmt.Fprintf(b, "- Optimizer **unreachable**: %s\n", err.Error())
+			fmt.Fprintf(b, "- Optimizer **unreachable** (%s): %s\n", role, err.Error())
 		} else {
-			fmt.Fprintf(b, "- Optimizer **%s** (protocol %d)\n",
-				info.Version, info.ProtocolVersion)
+			fmt.Fprintf(b, "- Optimizer **%s** (protocol %d, %s)\n",
+				info.Version, info.ProtocolVersion, role)
 		}
 	}
 	if plan != nil && plan.Solver != nil && plan.Solver.Fallback {

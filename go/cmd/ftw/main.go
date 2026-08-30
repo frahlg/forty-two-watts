@@ -2412,8 +2412,8 @@ func main() {
 		// release and light the update badge on an up-to-date stable site.
 		// /api/components calls SetCurrentVersion once a handshake succeeds.
 		optimizerCurrent := ""
-		if mpcSvc != nil && mpcSvc.Optimizer != nil {
-			if health, ok := mpcSvc.Optimizer.(interface {
+		if worker := mpcSvc.ConfiguredOptimizer(); worker != nil {
+			if health, ok := worker.(interface {
 				Health(context.Context) (mpc.OptimizerRuntimeInfo, error)
 			}); ok {
 				healthCtx, healthCancel := context.WithTimeout(ctx, 2*time.Second)
@@ -4068,11 +4068,11 @@ func buildMPC(cfg *config.Config, st *state.Store, tel *telemetry.Store, capacit
 	}
 	svc := mpc.New(st, tel, zone, params)
 	svc.UpdateBatteryFleet(fleet, totalCap, maxChg, maxDis)
-	engine := pl.Engine
-	if engine == "" {
-		engine = "python"
-	}
-	if engine == "python" {
+	// Core is the champion (#1020). The external optimizer keeps two roles:
+	// planner.engine: python restores it as champion for the transition, and
+	// planner.shadow_python runs it behind Core as a measurement.
+	engine := pl.EngineName()
+	if engine == config.PlannerEnginePython || pl.ShadowPythonEnabled() {
 		transportMode := pl.OptimizerTransport
 		if fromEnv := os.Getenv("FTW_OPTIMIZER_TRANSPORT"); fromEnv != "" {
 			transportMode = fromEnv
@@ -4130,9 +4130,13 @@ func buildMPC(cfg *config.Config, st *state.Store, tel *telemetry.Store, capacit
 			IdleTimeout: idleTimeout,
 			Multistage:  multistage,
 		})
-		if err != nil {
-			slog.Error("mpc: configure primary optimizer failed; using Go DP", "err", err)
-		} else {
+		switch {
+		case err != nil && engine == config.PlannerEnginePython:
+			slog.Error("mpc: configure primary optimizer failed; using Core DP", "err", err)
+		case err != nil:
+			slog.Info("mpc: python shadow unavailable; Core plans without a comparison",
+				"err", err)
+		case engine == config.PlannerEnginePython:
 			svc.Optimizer = ext
 			svc.EnableRecourseShadow = pl.OptimizerRecourseShadow
 			svc.RecourseNonAnticipativeSlots = pl.OptimizerRecourseNonAnticipativeSlots
@@ -4143,15 +4147,24 @@ func buildMPC(cfg *config.Config, st *state.Store, tel *telemetry.Store, capacit
 			if svc.RecourseNonAnticipativeSlots <= 0 {
 				svc.RecourseNonAnticipativeSlots = 1
 			}
-			slog.Info("mpc: Python optimizer configured", "python", python,
+			slog.Warn("mpc: Python optimizer holds the champion role (planner.engine: python)",
+				"python", python,
 				"module_dir", moduleDir, "transport", transportMode, "socket", socketPath,
 				"timeout", timeout, "idle_timeout", idleTimeout,
 				"recourse_shadow", svc.EnableRecourseShadow,
 				"challenger_policy", svc.ChallengerPolicy,
 				"recourse_non_anticipative_slots", svc.RecourseNonAnticipativeSlots)
+		default:
+			// Shadow only. The recourse/multistage challengers stay off: they
+			// exist to challenge the external champion, and there isn't one.
+			svc.ShadowOptimizer = ext
+			slog.Info("mpc: Core planner with Python comparison shadow",
+				"python", python, "module_dir", moduleDir,
+				"transport", transportMode, "socket", socketPath,
+				"timeout", timeout, "idle_timeout", idleTimeout)
 		}
 	} else {
-		slog.Warn("mpc: legacy Go DP selected explicitly", "engine", engine)
+		slog.Info("mpc: Core planner, no comparison shadow (planner.shadow_python: false)")
 	}
 	svc.BaseLoad = pl.BaseLoadW
 	if pl.HorizonHours > 0 {

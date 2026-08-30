@@ -25,13 +25,22 @@ func (s *Server) handleComponents(w http.ResponseWriter, r *http.Request) {
 		},
 		"drivers": map[string]any{"host_api": components.DriverHostAPIVersion},
 	}
-	if s.deps.MPC != nil && s.deps.MPC.Optimizer != nil {
+	if worker := s.deps.MPC.ConfiguredOptimizer(); worker != nil {
+		// "configured" means the sidecar is attached, not that it plans:
+		// under planner.engine: core it runs as a comparison shadow and still
+		// needs its health, version and update controls. `role` says which,
+		// and `active_solver` reports who actually produced the plan.
+		role := "shadow"
+		if s.deps.MPC.OptimizerIsChampion() {
+			role = "champion"
+		}
 		optimizer := map[string]any{
 			"configured":           true,
+			"role":                 role,
 			"protocol_version":     components.OptimizerProtocolVersion,
 			"protocol_min_version": components.OptimizerProtocolMinVersion,
 		}
-		if health, ok := s.deps.MPC.Optimizer.(optimizerHealth); ok {
+		if health, ok := worker.(optimizerHealth); ok {
 			ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 			info, err := health.Health(ctx)
 			cancel()
@@ -84,7 +93,10 @@ func applyLatestOptimizerPlanStatus(status map[string]any, plan *mpc.Plan) {
 	}
 	status["active_solver"] = plan.Solver
 	status["last_plan_at_ms"] = plan.GeneratedAtMs
-	if !plan.Solver.Fallback && plan.Solver.Engine != "go-dp" {
+	// Core producing the plan is the default arrangement, not a degradation.
+	// Only the fallback flag — set when the operator asked for the external
+	// planner and did not get it — means the optimizer is failing.
+	if !plan.Solver.Fallback {
 		return
 	}
 	status["healthy"] = false
@@ -222,10 +234,11 @@ func (s *Server) handleOptimizerComponentRollback(w http.ResponseWriter, r *http
 }
 
 func (s *Server) optimizerCurrentVersion(ctx context.Context) string {
-	if s.deps.MPC == nil || s.deps.MPC.Optimizer == nil {
+	worker := s.deps.MPC.ConfiguredOptimizer()
+	if worker == nil {
 		return ""
 	}
-	health, ok := s.deps.MPC.Optimizer.(optimizerHealth)
+	health, ok := worker.(optimizerHealth)
 	if !ok {
 		return ""
 	}
