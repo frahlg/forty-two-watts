@@ -2923,6 +2923,7 @@ func (s *Server) handlePVModel(w http.ResponseWriter, r *http.Request) {
 		"enabled":                    true,
 		"samples":                    m.Samples,
 		"mae_w":                      m.MAE,
+		"rel_mae":                    m.RelMAE,
 		"rated_w":                    m.RatedW,
 		"quality":                    m.Quality(),
 		"last_ms":                    m.LastMs,

@@ -487,3 +487,21 @@ func (s *Service) ResidualDiagSnapshot() ResidualDiag {
 func (s *Service) ResidualStdW() float64 {
 	return s.ResidualDiagSnapshot().StdW
 }
+
+// RelativeUncertainty returns the twin's learned relative forecast error
+// (0..1): mean |error| as a share of the prediction it belongs to. The MPC
+// uses it to size each slot's downside against that slot's own expected
+// generation, so the hedge is large on a variable cloudy day and vanishes at
+// night and on a clear one. 0 means the twin has not learned it yet — the
+// planner then keeps the flat k·σ haircut.
+func (s *Service) RelativeUncertainty() float64 {
+	if s == nil {
+		return 0
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.model == nil {
+		return 0
+	}
+	return s.model.RelMAE
+}

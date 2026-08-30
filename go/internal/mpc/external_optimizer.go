@@ -474,19 +474,28 @@ func (o *ExternalOptimizer) buildRequest(slots []Slot, p Params) externalRequest
 			SurplusOnly: lp.SurplusOnly, NoStorageToLoad: lp.blocksBatteryToEV(),
 		})
 	}
-	if p.PVUncertaintyW > 0 && p.PVForecastSafetyK > 0 {
+	if (p.PVUncertaintyW > 0 || p.PVRelativeUncertainty > 0) && p.PVForecastSafetyK > 0 {
 		downsidePV := make([]float64, len(slots))
 		upsidePV := make([]float64, len(slots))
 		loads := make([]float64, len(slots))
 		basePV := make([]float64, len(slots))
 		hasDaylight := false
-		spread := p.PVUncertaintyW * p.PVForecastSafetyK
+		// The champion's scenarios and the Go fallback's downside slots must
+		// describe the same physics, so this mirrors applyPVDownsidePerSlot:
+		// a share of each slot's own generation once the twin has learned its
+		// relative error, the flat watt spread until then.
+		flatSpread := p.PVUncertaintyW * p.PVForecastSafetyK
+		relSpread := p.PVRelativeUncertainty * p.PVForecastSafetyK
 		for i, slot := range slots {
 			loads[i] = slot.LoadW
 			basePV[i] = slot.PVW
 			if slot.PVW < 0 {
 				hasDaylight = true
 				generation := -slot.PVW
+				spread := flatSpread
+				if p.PVRelativeUncertainty > 0 {
+					spread = relSpread * generation
+				}
 				downsidePV[i] = -math.Max(0, generation-spread)
 				upsidePV[i] = -(generation + spread)
 			}

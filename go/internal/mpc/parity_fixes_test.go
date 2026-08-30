@@ -186,6 +186,7 @@ func TestDiagnosticPersistsReplayEconomics(t *testing.T) {
 		TerminalSoCPrice:         100,
 		MinArbitrageSpreadOreKwh: 30,
 		PVUncertaintyW:           1891,
+		PVRelativeUncertainty:    0.28,
 		PVForecastSafetyK:        1,
 	}
 	plan := Optimize(slots, p)
@@ -220,6 +221,9 @@ func TestDiagnosticPersistsReplayEconomics(t *testing.T) {
 	}
 	if got.PVUncertaintyW != 1891 {
 		t.Errorf("PVUncertaintyW = %v, want 1891", got.PVUncertaintyW)
+	}
+	if got.PVRelativeUncertainty != 0.28 {
+		t.Errorf("PVRelativeUncertainty = %v, want 0.28", got.PVRelativeUncertainty)
 	}
 	if got.PVForecastSafetyK != 1 {
 		t.Errorf("PVForecastSafetyK = %v, want 1", got.PVForecastSafetyK)

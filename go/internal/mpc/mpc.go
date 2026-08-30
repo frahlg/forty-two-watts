@@ -233,8 +233,11 @@ type Params struct {
 
 	// PV scenario inputs are consumed by the mathematical optimizer. The Go DP
 	// fallback still receives downside-adjusted slots directly from Service.
-	PVUncertaintyW    float64
-	PVForecastSafetyK float64
+	// PVRelativeUncertainty (0..1) sizes the spread per slot against that
+	// slot's own generation; 0 keeps the flat PVUncertaintyW watt figure.
+	PVUncertaintyW        float64
+	PVRelativeUncertainty float64
+	PVForecastSafetyK     float64
 }
 
 // StorageAssetSpec is one independently constrained home battery in the

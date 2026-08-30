@@ -112,6 +112,11 @@ type Service struct {
 	// the pvmodel residual std. Drives downside-PV safety planning (Alt 2).
 	// Optional; nil → no downside haircut.
 	PVUncertaintyW func() float64
+	// PVRelativeUncertainty returns the PV twin's learned relative forecast
+	// error (0..1) — wired to pvmodel.Service.RelativeUncertainty. When > 0
+	// the haircut is sized per slot against that slot's own generation;
+	// 0 or nil keeps the flat k·σ form.
+	PVRelativeUncertainty func() float64
 	// PVForecastSafetyK scales the downside-PV haircut: the DP plans against
 	// forecast PV minus k·σ. 0 = raw forecast (no hedge). main.go defaults the
 	// unset config to 1.0.
@@ -1237,13 +1242,17 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 	// a separate downside copy for the emergency Go-DP path, preserving the
 	// previous safety behavior if the worker is unavailable.
 	fallbackSlots := append([]Slot(nil), slots...)
-	var pvUncertaintyW float64
+	var pvUncertaintyW, pvRelativeUncertainty float64
 	pvUncertainty := s.PVUncertaintyW
+	pvRelative := s.PVRelativeUncertainty
 	if pvUncertainty != nil {
 		// One replan must use one uncertainty snapshot. Reading the live model
 		// twice could give the external scenarios and Go fallback different
 		// physics for the same request.
 		pvUncertaintyW = pvUncertainty()
+	}
+	if pvRelative != nil {
+		pvRelativeUncertainty = pvRelative()
 	}
 
 	// Plumb the site fuse + export ceiling into per-slot limits so the DP
@@ -1291,7 +1300,11 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 	if pvUncertainty != nil {
 		p.PVUncertaintyW = pvUncertaintyW
 	}
-	applyPVDownside(fallbackSlots, p.PVForecastSafetyK, p.PVUncertaintyW)
+	if pvRelative != nil {
+		p.PVRelativeUncertainty = pvRelativeUncertainty
+	}
+	applyPVDownsidePerSlot(fallbackSlots, p.PVForecastSafetyK,
+		p.PVRelativeUncertainty, p.PVUncertaintyW)
 
 	// Default terminal valuation. Mode-dependent because self-consumption
 	// is a constrained game: the battery can only offset local load, not
@@ -1925,27 +1938,64 @@ func buildSlots(prices []state.PricePoint, forecasts []state.ForecastPoint, base
 	return out
 }
 
-// applyPVDownside reduces each slot's planned PV generation by k·σ (the recent
-// PV forecast error std, in W), flooring at zero. Planning the DP against this
-// downside is the Alt-2 safety mechanism: the optimizer won't run the battery
-// down betting on PV that may not arrive, so a reserve emerges from the
-// forecast uncertainty itself — sized to the real risk, not a flat SoC %.
-// On a clear, stable day σ is small (use the battery freely); on a variable
-// cloudy day σ grows (keep more reserve). k=0 or σ=0 → raw forecast (no hedge,
-// e.g. operators who want "use the battery you have"). Night slots (PVW=0) are
-// unaffected — the haircut only ever shaves real generation.
-// applyPVDownsideToSlots is the Service-level seam over applyPVDownside: it
-// reads the live σ from the PVUncertaintyW hook and the configured k, and
-// applies the downside haircut to the plan's slots. No-op when the hook is
-// unwired (PVUncertaintyW nil) or on a nil Service — the planner then runs
+// applyPVDownsideToSlots is the Service-level seam over the haircut: it reads
+// the live uncertainties from the PVUncertaintyW / PVRelativeUncertainty hooks
+// and the configured k, and applies the downside to the plan's slots. No-op
+// when both hooks are unwired or on a nil Service — the planner then runs
 // against the raw forecast.
 func (s *Service) applyPVDownsideToSlots(slots []Slot) {
-	if s == nil || s.PVUncertaintyW == nil {
+	if s == nil || (s.PVUncertaintyW == nil && s.PVRelativeUncertainty == nil) {
 		return
 	}
-	applyPVDownside(slots, s.PVForecastSafetyK, s.PVUncertaintyW())
+	var sigmaAbsW, sigmaRel float64
+	if s.PVUncertaintyW != nil {
+		sigmaAbsW = s.PVUncertaintyW()
+	}
+	if s.PVRelativeUncertainty != nil {
+		sigmaRel = s.PVRelativeUncertainty()
+	}
+	applyPVDownsidePerSlot(slots, s.PVForecastSafetyK, sigmaRel, sigmaAbsW)
 }
 
+// applyPVDownsidePerSlot is the proportional form: each slot loses k·σ_rel of
+// its OWN expected generation rather than one flat watt figure repeated across
+// the horizon. The flat form erased the morning and evening shoulders outright
+// and hedged a possibly-clear tomorrow with today's cloudy-sky σ; on real
+// snapshots that cost 25-65 SEK per 48 h plan.
+//
+// sigmaRel ≤ 0 means the twin has not learned its relative error yet (or the
+// value is not finite) — fall back to the flat haircut so a fresh site is
+// never less hedged than before.
+func applyPVDownsidePerSlot(slots []Slot, k, sigmaRel, sigmaAbsW float64) {
+	if !(sigmaRel > 0) {
+		applyPVDownside(slots, k, sigmaAbsW)
+		return
+	}
+	if k <= 0 {
+		return
+	}
+	for i := range slots {
+		gen := -slots[i].PVW // PVW is site-signed (≤ 0); -PVW is generation
+		if gen <= 0 {
+			continue // night: nothing to shave, and never add generation
+		}
+		gen -= k * sigmaRel * gen
+		if gen < 0 {
+			gen = 0 // k·σ_rel may exceed 1; negative generation is not physical
+		}
+		slots[i].PVW = -gen
+	}
+}
+
+// applyPVDownside is the flat fallback: it reduces every slot's planned PV
+// generation by the same k·σ (the recent PV forecast error std, in W),
+// flooring at zero. Planning the DP against a downside is the Alt-2 safety
+// mechanism — the optimizer won't run the battery down betting on PV that may
+// not arrive, so a reserve emerges from the forecast uncertainty itself rather
+// than from a flat SoC %. k=0 or σ=0 → raw forecast (no hedge, e.g. operators
+// who want "use the battery you have"). Night slots (PVW=0) are unaffected —
+// the haircut only ever shaves real generation. Prefer applyPVDownsidePerSlot;
+// this form only runs where the twin has no relative error yet.
 func applyPVDownside(slots []Slot, k, sigmaW float64) {
 	if k <= 0 || sigmaW <= 0 {
 		return

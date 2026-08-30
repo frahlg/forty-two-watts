@@ -1501,6 +1501,7 @@ func main() {
 			mpcSvc.PV = pvSvc.PredictStructural
 			mpcSvc.PVResidualCorrect = pvSvc.ResidualCorrect
 			mpcSvc.PVUncertaintyW = pvSvc.ResidualStdW
+			mpcSvc.PVRelativeUncertainty = pvSvc.RelativeUncertainty
 		}
 		// Downside-PV safety planning (forecast − k·σ) — replaces the old SoC
 		// safety floor. Unset config → default 1.0; explicit 0 → raw forecast.

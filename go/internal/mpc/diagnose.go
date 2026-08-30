@@ -87,6 +87,7 @@ type DiagnosticParams struct {
 	// the site's spread by hand (#1020).
 	MinArbitrageSpreadOreKwh float64 `json:"min_arbitrage_spread_ore_kwh,omitempty"`
 	PVUncertaintyW           float64 `json:"pv_uncertainty_w,omitempty"`
+	PVRelativeUncertainty    float64 `json:"pv_relative_uncertainty,omitempty"`
 	PVForecastSafetyK        float64 `json:"pv_forecast_safety_k,omitempty"`
 
 	LoadpointSurplusOnly       bool `json:"loadpoint_surplus_only"`
@@ -226,6 +227,7 @@ func buildDiagnostic(plan *Plan, slots []Slot, p Params, zone string,
 			ExportFloorOreKwh:          p.ExportFloorOreKwh,
 			MinArbitrageSpreadOreKwh:   p.MinArbitrageSpreadOreKwh,
 			PVUncertaintyW:             p.PVUncertaintyW,
+			PVRelativeUncertainty:      p.PVRelativeUncertainty,
 			PVForecastSafetyK:          p.PVForecastSafetyK,
 			LoadpointSurplusOnly:       p.Loadpoint != nil && p.Loadpoint.SurplusOnly,
 			LoadpointNoBatteryToEV:     p.Loadpoint != nil && p.Loadpoint.NoBatteryToEV,
@@ -352,6 +354,7 @@ func planFromDiagnostic(d *Diagnostic) (*Plan, []Slot, Params, time.Time, bool) 
 
 		MinArbitrageSpreadOreKwh: d.Params.MinArbitrageSpreadOreKwh,
 		PVUncertaintyW:           d.Params.PVUncertaintyW,
+		PVRelativeUncertainty:    d.Params.PVRelativeUncertainty,
 		PVForecastSafetyK:        d.Params.PVForecastSafetyK,
 	}
 	if params.Mode == "" {

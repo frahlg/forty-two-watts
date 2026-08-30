@@ -379,6 +379,99 @@ func TestServiceApplyPVDownsideToSlotsNilServiceNoPanic(t *testing.T) {
 	}
 }
 
+// applyPVDownsidePerSlot sizes the hedge against each slot's own generation.
+// The flat form subtracted the same watt figure everywhere, which erased the
+// morning and evening shoulders outright and hedged a possibly-clear tomorrow
+// with today's cloudy-sky σ.
+func TestApplyPVDownsidePerSlotShavesAShareOfEachSlot(t *testing.T) {
+	// A day curve: night, shoulders, midday peak, shoulders, night.
+	gen := []float64{0, 500, 3000, 6000, 3000, 500, 0}
+	slots := make([]Slot, len(gen))
+	for i, g := range gen {
+		slots[i].PVW = -g
+	}
+
+	applyPVDownsidePerSlot(slots, 1.0, 0.3, 0) // σ_rel = 30 %, k = 1
+
+	for i, g := range gen {
+		want := -(g * 0.7)
+		if math.Abs(slots[i].PVW-want) > 1e-9 {
+			t.Errorf("slot %d: PVW = %v, want %v (30 %% off %v W of generation)",
+				i, slots[i].PVW, want, g)
+		}
+		if slots[i].PVW > 0 {
+			t.Errorf("slot %d: PVW = %v — the haircut must never add generation", i, slots[i].PVW)
+		}
+	}
+	if slots[0].PVW != 0 || slots[6].PVW != 0 {
+		t.Errorf("night slots must stay 0, got %v and %v", slots[0].PVW, slots[6].PVW)
+	}
+}
+
+// k·σ_rel above 1 is arithmetically possible (k=2, σ_rel=0.6). Generation is
+// floored at zero rather than turning into a phantom load.
+func TestApplyPVDownsidePerSlotFloorsAtZero(t *testing.T) {
+	slots := []Slot{{PVW: -4000}, {PVW: -100}}
+	applyPVDownsidePerSlot(slots, 2.0, 0.6, 0) // k·σ_rel = 1.2
+	for i, s := range slots {
+		if s.PVW != 0 {
+			t.Errorf("slot %d: PVW = %v, want 0", i, s.PVW)
+		}
+	}
+}
+
+// Until the twin has learned its relative error the site must keep exactly the
+// hedge it had before — bit for bit, not merely "about the same".
+func TestApplyPVDownsidePerSlotFallsBackToFlatWhenUnlearned(t *testing.T) {
+	base := []Slot{{PVW: -6000}, {PVW: -3000}, {PVW: -400}, {PVW: 0}}
+	for _, k := range []float64{0, 1, 2} {
+		flat := append([]Slot(nil), base...)
+		perSlot := append([]Slot(nil), base...)
+		applyPVDownside(flat, k, 1891)
+		applyPVDownsidePerSlot(perSlot, k, 0, 1891)
+		for i := range flat {
+			if flat[i].PVW != perSlot[i].PVW {
+				t.Errorf("k=%v slot %d: per-slot with σ_rel=0 gave %v, flat gave %v",
+					k, i, perSlot[i].PVW, flat[i].PVW)
+			}
+		}
+	}
+}
+
+func TestApplyPVDownsidePerSlotNoOpWhenDisabled(t *testing.T) {
+	slots := []Slot{{PVW: -3000}}
+	applyPVDownsidePerSlot(slots, 0, 0.3, 0) // k=0 → raw forecast
+	if slots[0].PVW != -3000 {
+		t.Errorf("k=0 must be a no-op, got %v", slots[0].PVW)
+	}
+	applyPVDownsidePerSlot(slots, -1, 0.3, 0) // negative k must not amplify PV
+	if slots[0].PVW != -3000 {
+		t.Errorf("negative k must be a no-op, got %v", slots[0].PVW)
+	}
+}
+
+// The Service seam prefers the relative hook and keeps the absolute one as the
+// fallback, so one replan cannot mix the two forms.
+func TestServiceApplyPVDownsideToSlotsPrefersRelative(t *testing.T) {
+	s := &Service{
+		PVForecastSafetyK:     1.0,
+		PVUncertaintyW:        func() float64 { return 1891 },
+		PVRelativeUncertainty: func() float64 { return 0.25 },
+	}
+	slots := []Slot{{PVW: -6000}, {PVW: -400}, {PVW: 0}}
+	s.applyPVDownsideToSlots(slots)
+	if slots[0].PVW != -4500 {
+		t.Errorf("PVW[0] = %v, want -4500 (6000 − 25 %%)", slots[0].PVW)
+	}
+	if slots[1].PVW != -300 {
+		t.Errorf("PVW[1] = %v, want -300 — a flat 1891 W cut would have zeroed this shoulder",
+			slots[1].PVW)
+	}
+	if slots[2].PVW != 0 {
+		t.Errorf("night slot must stay 0, got %v", slots[2].PVW)
+	}
+}
+
 // TestBuildSlots_AppliesPVResidualCorrection: a non-nil
 // PVResidualCorrector adds an additive bias to the twin's per-slot
 // prediction BEFORE selectPlannerPVW blends with the forecast. We mock

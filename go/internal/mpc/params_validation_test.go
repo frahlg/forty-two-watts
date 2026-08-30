@@ -223,6 +223,8 @@ func TestValidatePlanningParamsRejectsInvalidAggregateValues(t *testing.T) {
 		{"negative pv bonus", "pv_charge_bonus", func(p *Params) { p.PVChargeBonusOreKwh = -1 }},
 		{"negative spread", "min_arbitrage_spread", func(p *Params) { p.MinArbitrageSpreadOreKwh = -1 }},
 		{"negative uncertainty", "pv_uncertainty", func(p *Params) { p.PVUncertaintyW = -1 }},
+		{"negative relative uncertainty", "pv_relative_uncertainty", func(p *Params) { p.PVRelativeUncertainty = -1 }},
+		{"nan relative uncertainty", "pv_relative_uncertainty", func(p *Params) { p.PVRelativeUncertainty = math.NaN() }},
 		{"nan safety", "pv_forecast_safety", func(p *Params) { p.PVForecastSafetyK = math.NaN() }},
 	}
 	for _, tc := range tests {
@@ -809,15 +811,22 @@ func TestReplanSnapshotsPVUncertaintyOnce(t *testing.T) {
 	svc.BaseLoad = 500
 	svc.PVForecastSafetyK = 1
 	svc.Optimizer = &physicsGateCountingOptimizer{}
-	var calls atomic.Int32
+	var calls, relCalls atomic.Int32
 	svc.PVUncertaintyW = func() float64 {
 		calls.Add(1)
 		return 300
+	}
+	svc.PVRelativeUncertainty = func() float64 {
+		relCalls.Add(1)
+		return 0.2
 	}
 	if plan := svc.Replan(context.Background()); plan == nil {
 		t.Fatal("Replan returned nil")
 	}
 	if calls.Load() != 1 {
 		t.Fatalf("PV uncertainty sampled %d times, want exactly 1", calls.Load())
+	}
+	if relCalls.Load() != 1 {
+		t.Fatalf("PV relative uncertainty sampled %d times, want exactly 1", relCalls.Load())
 	}
 }

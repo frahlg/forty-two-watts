@@ -157,6 +157,7 @@ func validatePlanningParams(p Params) error {
 		{"pv_charge_bonus_ore_kwh", p.PVChargeBonusOreKwh},
 		{"min_arbitrage_spread_ore_kwh", p.MinArbitrageSpreadOreKwh},
 		{"pv_uncertainty_w", p.PVUncertaintyW},
+		{"pv_relative_uncertainty", p.PVRelativeUncertainty},
 		{"pv_forecast_safety_k", p.PVForecastSafetyK},
 	} {
 		if err := requireNonNegativePlanningValue(value.name, value.v); err != nil {

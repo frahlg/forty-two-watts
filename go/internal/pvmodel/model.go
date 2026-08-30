@@ -51,8 +51,19 @@ type Model struct {
 	Samples    int64                  `json:"samples"`
 	LastMs     int64                  `json:"last_ms"`
 	MAE        float64                `json:"mae"`        // EMA of |err| (W)
-	RatedW     float64                `json:"rated_w"`    // nominal plate rating (prior)
+	// RelMAE is MAE expressed as a share of the prediction it belongs to
+	// (0..1), over the same EMA window. The planner sizes each slot's PV
+	// downside against that slot's own expected generation, which a watt
+	// figure cannot do. Absent from state persisted before #1020; 0 there
+	// reads as "not learned yet" and the planner keeps the flat haircut.
+	RelMAE float64 `json:"rel_mae"`
+	RatedW float64 `json:"rated_w"` // nominal plate rating (prior)
 }
+
+// relMAEMinPredictedW gates the relative-error EMA. Below it the denominator
+// is small enough that ordinary watt-level noise yields ratios of several
+// hundred percent, and the average would report a storm on a clear morning.
+const relMAEMinPredictedW = 500.0
 
 // NewModel returns a model anchored on the naive clear-sky prior.
 func NewModel(ratedW float64) *Model {
@@ -307,6 +318,23 @@ func (m *Model) Update(clearSkyW, cloudPct float64, t time.Time, actualPVW float
 		m.MAE = math.Abs(err)
 	} else {
 		m.MAE = 0.99*m.MAE + 0.01*math.Abs(err)
+	}
+	// Relative twin of the MAE EMA, same window. The ratio is clamped at 1
+	// because a 3× miss and a 1× miss both mean "the forecast was worthless",
+	// while an unclamped outlier would hold the average up for days. RelMAE
+	// == 0 means unseeded — the first qualifying sample sets it outright, so a
+	// site that has just learned its error is hedged immediately rather than
+	// ramping up from nothing over a hundred samples.
+	if yHat >= relMAEMinPredictedW {
+		ratio := math.Abs(err) / yHat
+		if ratio > 1 {
+			ratio = 1
+		}
+		if m.RelMAE == 0 {
+			m.RelMAE = ratio
+		} else {
+			m.RelMAE = 0.99*m.RelMAE + 0.01*ratio
+		}
 	}
 	// Self-heal the intercept: Features[0] is pinned to 0 (see Features
 	// doc), but off-diagonal covariance can still nudge Beta[0] via K[0]
