@@ -1046,6 +1046,11 @@ body.ftw-app .forecast-trust-labels {
   font-family: var(--sans);
   font-size: 12px;
 }
+body.ftw-app .forecast-trust-labels #forecast-trust-value {
+  color: var(--fg);
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
 body.ftw-app .forecast-trust-hedge {
   margin-top: 8px;
   color: var(--fg-dim);
@@ -1445,6 +1450,19 @@ body.ftw-app .plan-summary {
 body.ftw-app .plan-summary .s-sep { opacity: 0.45; margin: 0 4px; }
 body.ftw-app .plan-summary .s-label { color: var(--fg-muted); opacity: 0.75; }
 body.ftw-app .plan-summary .s-value { color: var(--fg-dim); }
+/* Held only while a prefs change is waiting for its plan. */
+body.ftw-app .plan-summary .plan-replanning .s-value {
+  color: var(--accent-e);
+}
+@media (prefers-reduced-motion: no-preference) {
+  body.ftw-app .plan-summary.is-replanning .plan-replanning {
+    animation: ftw-replan-pulse 1.1s ease-in-out infinite;
+  }
+}
+@keyframes ftw-replan-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
 body.ftw-app .plan-now {
   overflow: hidden;
   margin: 10px 0 12px;

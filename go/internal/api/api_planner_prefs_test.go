@@ -23,7 +23,7 @@ func plannerPrefsServer(t *testing.T, mode control.Mode) (*Server, *control.Stat
 	t.Cleanup(func() { _ = st.Close() })
 	ctrl := control.NewState(0, 50, "meter")
 	ctrl.Mode = mode
-	prefs := config.NewPlannerPrefs(config.ForecastTrustBalanced, config.BatteryExportUnknown)
+	prefs := config.NewPlannerPrefs(config.ForecastTrustBalanced, config.BatteryExportUnknown, 1)
 	srv := New(&Deps{
 		Ctrl:         ctrl,
 		CtrlMu:       &sync.Mutex{},
@@ -59,6 +59,80 @@ func TestGetPlannerPrefsDefaults(t *testing.T) {
 	if got["mapped_k"] != 1.0 {
 		t.Errorf("mapped_k=%v, want 1", got["mapped_k"])
 	}
+	if got["safety_k"] != 1.0 {
+		t.Errorf("safety_k=%v, want 1", got["safety_k"])
+	}
+}
+
+func TestPostPlannerPrefsSafetyKIsStoredVerbatim(t *testing.T) {
+	srv, _, st := plannerPrefsServer(t, control.ModePlannerPassiveArbitrage)
+	req := httptest.NewRequest(http.MethodPost, "/api/planner/prefs",
+		strings.NewReader(`{"safety_k":0.85,"battery_export":"not_allowed"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if v, _ := st.LoadConfig(config.StateKeySafetyK); v != "0.85" {
+		t.Errorf("stored safety_k=%q, want 0.85", v)
+	}
+	// The enum stays a derived compatibility surface, written alongside.
+	if v, _ := st.LoadConfig(config.StateKeyForecastTrust); v != "balanced" {
+		t.Errorf("stored trust=%q, want balanced", v)
+	}
+	req = httptest.NewRequest(http.MethodGet, "/api/planner/prefs", nil)
+	rr = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	var got map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["safety_k"] != 0.85 || got["mapped_k"] != 0.85 {
+		t.Errorf("safety_k=%v mapped_k=%v, want 0.85", got["safety_k"], got["mapped_k"])
+	}
+	if got["forecast_trust"] != "balanced" {
+		t.Errorf("forecast_trust=%v, want balanced (derived from 0.85)", got["forecast_trust"])
+	}
+}
+
+func TestPostPlannerPrefsClampsSafetyK(t *testing.T) {
+	srv, _, st := plannerPrefsServer(t, control.ModePlannerPassiveArbitrage)
+	req := httptest.NewRequest(http.MethodPost, "/api/planner/prefs",
+		strings.NewReader(`{"safety_k":7,"battery_export":"not_allowed"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if v, _ := st.LoadConfig(config.StateKeySafetyK); v != "2" {
+		t.Errorf("stored safety_k=%q, want 2", v)
+	}
+}
+
+func TestPostPlannerPrefsOldClientEnumSetsK(t *testing.T) {
+	// A client that only speaks forecast_trust still moves the primitive,
+	// so the two never disagree.
+	srv, _, st := plannerPrefsServer(t, control.ModePlannerPassiveArbitrage)
+	req := httptest.NewRequest(http.MethodPost, "/api/planner/prefs",
+		strings.NewReader(`{"forecast_trust":"cautious","battery_export":"not_allowed"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if v, _ := st.LoadConfig(config.StateKeySafetyK); v != "2" {
+		t.Errorf("stored safety_k=%q, want 2", v)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["safety_k"] != 2.0 || got["forecast_trust"] != "cautious" {
+		t.Errorf("safety_k=%v trust=%v", got["safety_k"], got["forecast_trust"])
+	}
 }
 
 func TestPostPlannerPrefsUnknownNeverArbitrage(t *testing.T) {
@@ -76,6 +150,9 @@ func TestPostPlannerPrefsUnknownNeverArbitrage(t *testing.T) {
 	}
 	if v, _ := st.LoadConfig(config.StateKeyForecastTrust); v != "bold" {
 		t.Errorf("stored trust=%q", v)
+	}
+	if v, _ := st.LoadConfig(config.StateKeySafetyK); v != "0" {
+		t.Errorf("stored safety_k=%q, want 0", v)
 	}
 	if v, _ := st.LoadConfig(config.StateKeyBatteryExport); v != "unknown" {
 		t.Errorf("stored export=%q", v)

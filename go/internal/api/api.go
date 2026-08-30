@@ -1156,14 +1156,15 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	v2xPolicy := s.v2xPolicyStatus(v2xGridW)
 
-	trust, export, mappedK, mappedMode := s.plannerPrefsSnapshot()
+	trust, export, safetyK, mappedMode := s.plannerPrefsSnapshot()
 
 	resp := map[string]any{
 		"version":               s.deps.Version,
 		"mode":                  ctrl.Mode,
 		"forecast_trust":        trust,
 		"battery_export":        export,
-		"planner_mapped_k":      mappedK,
+		"safety_k":              safetyK,
+		"planner_mapped_k":      safetyK,
 		"planner_mapped_mode":   mappedMode,
 		"troubleshooting_mode":  troubleshootingMode,
 		"plan_stale":            ctrl.PlanStale,

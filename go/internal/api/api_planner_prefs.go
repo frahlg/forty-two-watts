@@ -8,69 +8,92 @@ import (
 	"github.com/srcfl/ftw/go/internal/control"
 )
 
-func (s *Server) plannerPrefsSnapshot() (trust config.ForecastTrust, export config.BatteryExport, mappedK float64, mappedMode string) {
-	trust, export = s.deps.PlannerPrefs.Get()
+// plannerPrefsSnapshot answers with the resolved numeric k and the enum
+// derived from it. The enum is never read back from storage here: k is the
+// single source of truth, so an old client polling forecast_trust always sees
+// the step the slider actually sits nearest.
+func (s *Server) plannerPrefsSnapshot() (trust config.ForecastTrust, export config.BatteryExport, safetyK float64, mappedMode string) {
+	_, export, storedK := s.deps.PlannerPrefs.Get()
 	var planner *config.Planner
 	if s.deps.Cfg != nil {
 		s.deps.CfgMu.RLock()
 		planner = s.deps.Cfg.Planner
 		s.deps.CfgMu.RUnlock()
 	}
-	mappedK = planner.EffectiveSafetyK(trust)
+	safetyK = planner.EffectiveSafetyK(storedK)
+	trust = config.TrustFromSafetyK(safetyK)
 	mappedMode = export.PlannerModeKey()
 	return
 }
 
 func (s *Server) handleGetPlannerPrefs(w http.ResponseWriter, r *http.Request) {
-	trust, export, mappedK, mappedMode := s.plannerPrefsSnapshot()
+	trust, export, safetyK, mappedMode := s.plannerPrefsSnapshot()
 	writeJSON(w, 200, map[string]any{
 		"forecast_trust": trust,
 		"battery_export": export,
-		"mapped_k":       mappedK,
+		"safety_k":       safetyK,
+		"mapped_k":       safetyK,
 		"mapped_mode":    mappedMode,
 	})
 }
 
 func (s *Server) handleSetPlannerPrefs(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		ForecastTrust string `json:"forecast_trust"`
-		BatteryExport string `json:"battery_export"`
+		ForecastTrust string   `json:"forecast_trust"`
+		BatteryExport string   `json:"battery_export"`
+		SafetyK       *float64 `json:"safety_k"`
 	}
 	if err := readJSON(r, &req); err != nil {
 		writeJSON(w, 400, map[string]string{"error": err.Error()})
 		return
 	}
-	trust, ok := config.ParseForecastTrust(req.ForecastTrust)
-	if !ok || req.ForecastTrust == "" {
-		writeJSON(w, 400, map[string]string{"error": "forecast_trust must be cautious, balanced, or bold"})
-		return
+	var safetyK float64
+	if req.SafetyK != nil {
+		// New client: k wins and forecast_trust is whatever k derives to,
+		// so the two can never be posted into disagreement.
+		safetyK = config.ClampSafetyK(*req.SafetyK)
+	} else {
+		trust, ok := config.ParseForecastTrust(req.ForecastTrust)
+		if !ok || req.ForecastTrust == "" {
+			writeJSON(w, 400, map[string]string{"error": "forecast_trust must be cautious, balanced, or bold, or send safety_k"})
+			return
+		}
+		safetyK = trust.SafetyK()
 	}
 	export, ok := config.ParseBatteryExport(req.BatteryExport)
 	if !ok {
 		writeJSON(w, 400, map[string]string{"error": "battery_export must be unknown, not_allowed, or allowed"})
 		return
 	}
-	if err := s.applyPlannerPrefs(r.Context(), trust, export); err != nil {
+	if err := s.applyPlannerPrefs(r.Context(), safetyK, export); err != nil {
 		writeJSON(w, 400, map[string]string{"error": err.Error()})
 		return
 	}
-	_, _, mappedK, mappedMode := s.plannerPrefsSnapshot()
+	trust, _, resolvedK, mappedMode := s.plannerPrefsSnapshot()
 	writeJSON(w, 200, map[string]any{
 		"status":         "ok",
 		"forecast_trust": trust,
 		"battery_export": export,
-		"mapped_k":       mappedK,
+		"safety_k":       resolvedK,
+		"mapped_k":       resolvedK,
 		"mapped_mode":    mappedMode,
 	})
 }
 
-func (s *Server) applyPlannerPrefs(ctx context.Context, trust config.ForecastTrust, export config.BatteryExport) error {
+func (s *Server) applyPlannerPrefs(ctx context.Context, safetyK float64, export config.BatteryExport) error {
+	safetyK = config.ClampSafetyK(safetyK)
+	trust := config.TrustFromSafetyK(safetyK)
 	if s.deps.PlannerPrefs == nil {
-		s.deps.PlannerPrefs = config.NewPlannerPrefs(trust, export)
+		s.deps.PlannerPrefs = config.NewPlannerPrefs(trust, export, safetyK)
 	} else {
-		s.deps.PlannerPrefs.Set(trust, export)
+		s.deps.PlannerPrefs.Set(trust, export, safetyK)
 	}
 	if s.deps.State != nil {
+		// Both keys are written on every change: the float is the truth, the
+		// enum keeps a downgrade to an older Core reading the nearest step.
+		if err := s.deps.State.SaveConfig(config.StateKeySafetyK, config.FormatSafetyK(safetyK)); err != nil {
+			return err
+		}
 		if err := s.deps.State.SaveConfig(config.StateKeyForecastTrust, string(trust)); err != nil {
 			return err
 		}
@@ -105,7 +128,7 @@ func (s *Server) applyPlannerPrefs(ctx context.Context, trust config.ForecastTru
 			planner = s.deps.Cfg.Planner
 			s.deps.CfgMu.RUnlock()
 		}
-		s.deps.MPC.SetSafetyK(ctx, planner.EffectiveSafetyK(trust))
+		s.deps.MPC.SetSafetyK(ctx, planner.EffectiveSafetyK(safetyK))
 	}
 	return nil
 }

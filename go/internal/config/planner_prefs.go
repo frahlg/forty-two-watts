@@ -1,14 +1,31 @@
 package config
 
-import "sync"
+import (
+	"math"
+	"strconv"
+	"strings"
+	"sync"
+)
 
 const (
 	StateKeyForecastTrust = "forecast_trust"
 	StateKeyBatteryExport = "battery_export"
+	StateKeySafetyK       = "planner_safety_k"
+)
+
+// SafetyK bounds. 0 plans against the raw forecast; 2 holds back twice each
+// slot's own forecast error. Above 2 the haircut erases the sunny shoulders
+// outright, which is a worse plan, not a safer one.
+const (
+	SafetyKMin     = 0.0
+	SafetyKMax     = 2.0
+	SafetyKDefault = 1.0
 )
 
 // ForecastTrust is how hard the planner bets the PV/price forecast is right.
 // cautious holds reserve (high k). bold follows the raw forecast (k=0).
+// The stored primitive is the numeric safety_k; this enum survives as the
+// compatibility surface older clients read and write.
 type ForecastTrust string
 
 const (
@@ -59,6 +76,38 @@ func (t ForecastTrust) SafetyK() float64 {
 	}
 }
 
+// ClampSafetyK holds a proposed haircut scale inside the slider's range.
+// NaN is a failed parse rather than a choice, so it falls back to the
+// balanced default instead of poisoning the DP's arithmetic.
+func ClampSafetyK(v float64) float64 {
+	if math.IsNaN(v) {
+		return SafetyKDefault
+	}
+	if v < SafetyKMin {
+		return SafetyKMin
+	}
+	if v > SafetyKMax {
+		return SafetyKMax
+	}
+	return v
+}
+
+// ParseSafetyK reads a stored safety_k. ok=false when the row is absent or
+// not a finite number, which sends the caller down the legacy enum path.
+func ParseSafetyK(s string) (float64, bool) {
+	v, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
+	if err != nil || math.IsInf(v, 0) || math.IsNaN(v) {
+		return 0, false
+	}
+	return ClampSafetyK(v), true
+}
+
+// FormatSafetyK renders k for SQLite without exponent notation or trailing
+// zeros, so 0.85 round-trips as "0.85".
+func FormatSafetyK(k float64) string {
+	return strconv.FormatFloat(ClampSafetyK(k), 'f', -1, 64)
+}
+
 // PlannerModeKey is the control/MPC planner mode that matches this permission.
 // unknown and not_allowed both stay on passive (no battery export).
 func (e BatteryExport) PlannerModeKey() string {
@@ -95,9 +144,10 @@ func DeriveBatteryExport(persistedMode string) BatteryExport {
 	}
 }
 
-// TrustFromSafetyK maps an explicit numeric haircut scale onto the nearest
-// trust step. Used only to seed a first boot from a legacy
-// pv_forecast_safety_k in YAML — after that the slider owns the value.
+// TrustFromSafetyK maps a numeric haircut scale onto the nearest trust step.
+// k is the stored primitive; this is the derivation every enum answer comes
+// from, so an old client that only speaks forecast_trust reads a sane step
+// whatever the slider was set to.
 func TrustFromSafetyK(k float64) ForecastTrust {
 	switch {
 	case k <= 0.25:
@@ -110,20 +160,38 @@ func TrustFromSafetyK(k float64) ForecastTrust {
 }
 
 // ResolvePlannerPrefs builds the live household object from SQLite, then YAML
-// (forecast_trust, or a legacy pv_forecast_safety_k mapped to the nearest
-// step), then the persisted control mode. missingStored is true when either
-// SQLite key was absent so the caller should persist the result.
-func ResolvePlannerPrefs(storedTrust, storedExport, persistedMode, yamlTrust, yamlExport string, yamlK *float64) (trust ForecastTrust, export BatteryExport, missingStored bool) {
+// (forecast_trust, or a legacy pv_forecast_safety_k), then the persisted
+// control mode. missingStored is true when any SQLite key was absent so the
+// caller should persist the result.
+//
+// safetyK is the stored primitive and wins outright when present. A site that
+// only ever stored the enum resolves to that step's k, so its plan does not
+// move on the upgrade; the caller then writes the float and the slider owns it
+// from there. A legacy pv_forecast_safety_k seeds the float exactly — 0.7 stays
+// 0.7 rather than snapping to a step — and the nearest step alongside it.
+func ResolvePlannerPrefs(storedTrust, storedExport, storedK, persistedMode, yamlTrust, yamlExport string, yamlK *float64) (trust ForecastTrust, export BatteryExport, safetyK float64, missingStored bool) {
+	seededK := false
 	if t, ok := ParseForecastTrust(storedTrust); ok && storedTrust != "" {
 		trust = t
 	} else if t, ok := ParseForecastTrust(yamlTrust); ok && yamlTrust != "" {
 		trust = t
 		missingStored = true
 	} else if yamlK != nil {
-		trust = TrustFromSafetyK(*yamlK)
+		safetyK = ClampSafetyK(*yamlK)
+		trust = TrustFromSafetyK(safetyK)
+		seededK = true
 		missingStored = true
 	} else {
 		trust = ForecastTrustBalanced
+		missingStored = true
+	}
+	if k, ok := ParseSafetyK(storedK); ok {
+		safetyK = k
+		trust = TrustFromSafetyK(k)
+	} else {
+		if !seededK {
+			safetyK = trust.SafetyK()
+		}
 		missingStored = true
 	}
 	if e, ok := ParseBatteryExport(storedExport); ok {
@@ -135,48 +203,52 @@ func ResolvePlannerPrefs(storedTrust, storedExport, persistedMode, yamlTrust, ya
 		export = DeriveBatteryExport(persistedMode)
 		missingStored = true
 	}
-	return trust, export, missingStored
+	return trust, export, safetyK, missingStored
 }
 
-// EffectiveSafetyK maps the household's trust step to the haircut scale.
-// An explicit pv_forecast_safety_k in YAML no longer wins over the
-// slider: it seeds the first boot (ResolvePlannerPrefs) and nothing
-// else — the Plan card's slider owns the live value, the same
-// stored-wins contract forecast_trust itself has. The old precedence
-// rendered the slider permanently disabled with a "config.yaml wins"
-// note, which is a config file acting as a user interface.
-func (p *Planner) EffectiveSafetyK(trust ForecastTrust) float64 {
-	return trust.SafetyK()
+// EffectiveSafetyK is the haircut scale the planner runs with, clamped to the
+// slider's range. An explicit pv_forecast_safety_k in YAML does not win here:
+// it seeds the first boot (ResolvePlannerPrefs) and nothing else — the Plan
+// card's slider owns the live value, the same stored-wins contract
+// forecast_trust itself has. The old precedence rendered the slider
+// permanently disabled with a "config.yaml wins" note, which is a config file
+// acting as a user interface. The receiver stays so call sites still ask the
+// config and get the same answer.
+func (p *Planner) EffectiveSafetyK(k float64) float64 {
+	return ClampSafetyK(k)
 }
 
 // PlannerPrefs is the in-memory household planner object. SQLite is the
-// durable copy; this is what /api/status reads on every poll.
+// durable copy; this is what /api/status reads on every poll. SafetyK is the
+// primitive; Trust is kept in step with it via TrustFromSafetyK.
 type PlannerPrefs struct {
-	mu     sync.Mutex
-	Trust  ForecastTrust
-	Export BatteryExport
+	mu      sync.Mutex
+	Trust   ForecastTrust
+	Export  BatteryExport
+	SafetyK float64
 }
 
-func NewPlannerPrefs(trust ForecastTrust, export BatteryExport) *PlannerPrefs {
-	return &PlannerPrefs{Trust: trust, Export: export}
+func NewPlannerPrefs(trust ForecastTrust, export BatteryExport, safetyK float64) *PlannerPrefs {
+	return &PlannerPrefs{Trust: trust, Export: export, SafetyK: ClampSafetyK(safetyK)}
 }
 
-func (p *PlannerPrefs) Get() (ForecastTrust, BatteryExport) {
+func (p *PlannerPrefs) Get() (ForecastTrust, BatteryExport, float64) {
 	if p == nil {
-		return ForecastTrustBalanced, BatteryExportUnknown
+		return ForecastTrustBalanced, BatteryExportUnknown, SafetyKDefault
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.Trust, p.Export
+	return p.Trust, p.Export, p.SafetyK
 }
 
-func (p *PlannerPrefs) Set(trust ForecastTrust, export BatteryExport) {
+func (p *PlannerPrefs) Set(trust ForecastTrust, export BatteryExport, safetyK float64) {
 	if p == nil {
 		return
 	}
 	p.mu.Lock()
 	p.Trust = trust
 	p.Export = export
+	p.SafetyK = ClampSafetyK(safetyK)
 	p.mu.Unlock()
 }
 
@@ -185,8 +257,8 @@ func (p *PlannerPrefs) ApplyExportFromMode(mode string, save func(key, value str
 	if !ok || p == nil {
 		return
 	}
-	trust, _ := p.Get()
-	p.Set(trust, export)
+	trust, _, k := p.Get()
+	p.Set(trust, export, k)
 	if save != nil {
 		_ = save(StateKeyBatteryExport, string(export))
 	}

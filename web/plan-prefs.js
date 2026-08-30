@@ -1,34 +1,63 @@
-// Household planner prefs for the Plan card: forecast trust slider,
+// Household planner prefs for the Plan card: the safety-k slider,
 // battery-export permission, and the four export sentences.
 // Pure helpers — plan.js owns DOM and POST /api/planner/prefs.
+//
+// The stored primitive is safety_k, the share of each slot's own forecast
+// uncertainty the plan holds back. forecast_trust is the derived enum older
+// clients read; it never drives anything here.
 
 export const TRUST_STEPS = ["cautious", "balanced", "bold"];
 
+export const SAFETY_K_MIN = 0;
+export const SAFETY_K_MAX = 2;
+export const SAFETY_K_STEP = 0.05;
+
 const SALE_W = 100;
 
-export function sliderFromTrust(trust) {
-  const i = TRUST_STEPS.indexOf(trust);
-  return i >= 0 ? i : 1;
-}
-
-export function trustFromSlider(value) {
-  const n = Number(value);
-  return TRUST_STEPS[n] || "balanced";
-}
-
+// safetyK is the legacy enum→k mapping, kept for servers that answer with
+// forecast_trust and no safety_k.
 export function safetyK(trust) {
   if (trust === "cautious") return 2;
   if (trust === "bold") return 0;
   return 1;
 }
 
-export function hedgeLine(k, sigmaW) {
+// trustFromSafetyK mirrors config.TrustFromSafetyK so the label under the
+// slider matches the enum the box would report.
+export function trustFromSafetyK(k) {
+  const n = clampSafetyK(k);
+  if (n <= 0.25) return "bold";
+  if (n < 1.5) return "balanced";
+  return "cautious";
+}
+
+export function clampSafetyK(v) {
+  const n = typeof v === "number" ? v : parseFloat(v);
+  if (isNaN(n)) return 1;
+  if (n < SAFETY_K_MIN) return SAFETY_K_MIN;
+  if (n > SAFETY_K_MAX) return SAFETY_K_MAX;
+  return n;
+}
+
+// formatSafetyK renders the slider's position at its own resolution: 0.05
+// steps need two decimals, and trailing zeros make the number look stuck.
+export function formatSafetyK(k) {
+  return String(Math.round(clampSafetyK(k) * 100) / 100);
+}
+
+// hedgeLine says what the current k costs in watts. sigmaRel (the PV twin's
+// rel_mae) is the same number the per-slot haircut uses, so when it is known
+// the line can name the share of every sunny slot held in reserve.
+export function hedgeLine(k, sigmaW, sigmaRel) {
   if (sigmaW == null || typeof sigmaW !== "number" || isNaN(sigmaW) || sigmaW < 0) return null;
   const sigma = Math.round(sigmaW);
   if (sigma < 1) return "σ right now ≈ 0 W — no hedge";
-  let kn = parseFloat(k);
-  if (isNaN(kn) || kn < 0) kn = 0;
-  return "σ right now ≈ " + sigma + " W → hedge = k·σ ≈ " + Math.round(kn * sigma) + " W";
+  const kn = clampSafetyK(k);
+  const line = "σ right now ≈ " + sigma + " W → hedge = k·σ ≈ " + Math.round(kn * sigma) + " W";
+  const rel = typeof sigmaRel === "number" && !isNaN(sigmaRel) && sigmaRel > 0 ? sigmaRel : null;
+  if (rel == null) return line;
+  const share = Math.min(100, Math.round(kn * rel * 100));
+  return line + " · holds back " + share + "% of each sunny slot";
 }
 
 export function isBatterySale(action) {
@@ -87,13 +116,17 @@ export function prefsFromStatus(status) {
   const s = status || {};
   const trust = TRUST_STEPS.includes(s.forecast_trust) ? s.forecast_trust : "balanced";
   const exp = s.battery_export;
+  // safety_k is the primitive; planner_mapped_k carries the same number for
+  // servers that predate the rename, and the enum mapping covers a box older
+  // than both.
+  let k = s.safety_k;
+  if (typeof k !== "number" || isNaN(k)) k = s.planner_mapped_k;
+  if (typeof k !== "number" || isNaN(k)) k = safetyK(trust);
   return {
     forecast_trust: trust,
     battery_export: (exp === "allowed" || exp === "not_allowed" || exp === "unknown")
       ? exp
       : "unknown",
-    mapped_k: typeof s.planner_mapped_k === "number" && !isNaN(s.planner_mapped_k)
-      ? s.planner_mapped_k
-      : safetyK(trust),
+    safety_k: clampSafetyK(k),
   };
 }

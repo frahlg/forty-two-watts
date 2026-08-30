@@ -25,23 +25,23 @@ api:
   port: 8080
 `
 
-func TestPlannerSafetyKFollowsTrustNotYAML(t *testing.T) {
-	// pv_forecast_safety_k seeds the first boot (TrustFromSafetyK) and
-	// never wins over the slider afterwards — EffectiveSafetyK is the
-	// trust mapping regardless of what YAML says.
+func TestPlannerSafetyKFollowsSliderNotYAML(t *testing.T) {
+	// pv_forecast_safety_k seeds the first boot and never wins over the
+	// slider afterwards — EffectiveSafetyK is the stored k regardless of
+	// what YAML says.
 	quarter := 0.25
 	p := &Planner{PVForecastSafetyK: &quarter}
-	if got := p.EffectiveSafetyK(ForecastTrustCautious); got != 2.0 {
-		t.Errorf("cautious → 2.0 despite YAML k, got %v", got)
+	if got := p.EffectiveSafetyK(2.0); got != 2.0 {
+		t.Errorf("stored 2.0 despite YAML k, got %v", got)
 	}
 	if got := TrustFromSafetyK(0); got != ForecastTrustBold {
-		t.Errorf("k=0 seeds bold, got %v", got)
+		t.Errorf("k=0 derives bold, got %v", got)
 	}
-	if got := TrustFromSafetyK(1); got != ForecastTrustBalanced {
-		t.Errorf("k=1 seeds balanced, got %v", got)
+	if got := TrustFromSafetyK(0.85); got != ForecastTrustBalanced {
+		t.Errorf("k=0.85 derives balanced, got %v", got)
 	}
 	if got := TrustFromSafetyK(2); got != ForecastTrustCautious {
-		t.Errorf("k=2 seeds cautious, got %v", got)
+		t.Errorf("k=2 derives cautious, got %v", got)
 	}
 }
 
@@ -81,8 +81,8 @@ planner:
 	if c0.Planner.PVForecastSafetyK == nil || *c0.Planner.PVForecastSafetyK != 0 {
 		t.Errorf("explicit 0 must parse to *0, got %v", c0.Planner.PVForecastSafetyK)
 	}
-	// The live value always follows the trust step, never the YAML k.
-	if got := c0.Planner.EffectiveSafetyK(ForecastTrustBalanced); got != 1.0 {
+	// The live value always follows the stored k, never the YAML k.
+	if got := c0.Planner.EffectiveSafetyK(1.0); got != 1.0 {
 		t.Errorf("EffectiveSafetyK ignores YAML k: want 1.0, got %v", got)
 	}
 }

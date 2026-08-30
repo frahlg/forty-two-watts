@@ -68,7 +68,7 @@
           "How much the planner trusts the solar forecast. It plans against forecast − k×σ, where σ is the live PV-forecast error. Higher k = trust the forecast less: the battery holds more reserve and charges earlier, drifting toward self-consumption behaviour. 0 = trust the forecast fully (no hedge). On clear, stable days σ shrinks toward zero and k has little effect.") +
           '<div id="planner-hedge-line" style="display:none;color:var(--text-dim);font-size:0.8rem;margin-top:4px"></div>';
       } else {
-        kHtml = '<p style="color:var(--text-dim);font-size:0.8rem;margin:4px 0 8px">PV forecast safety k is not set in YAML. The Plan card slider maps cautious / balanced / bold to 2 / 1 / 0.</p>' +
+        kHtml = '<p style="color:var(--text-dim);font-size:0.8rem;margin:4px 0 8px">PV forecast safety k is not set in YAML. The Plan card slider owns it, anywhere from 0 to 2 in steps of 0.05.</p>' +
           '<div id="planner-hedge-line" style="display:none;color:var(--text-dim);font-size:0.8rem;margin-top:4px"></div>';
       }
       return '<fieldset><legend>MPC Planner</legend>' +

@@ -6,9 +6,9 @@ import { derivePlanBrief, unavailablePlannerCopy } from "./plan-brief.js";
 import { fillPlanSoC } from "./plan-soc.js";
 import { setActiveCurrency, toDisplay, unitFor } from "./components/price-units.js";
 import {
-  trustFromSlider,
-  sliderFromTrust,
-  safetyK,
+  clampSafetyK,
+  formatSafetyK,
+  trustFromSafetyK,
   hedgeLine,
   exportSentence,
   prefsFromStatus,
@@ -158,6 +158,11 @@ import {
     state.prefs = prefsFromStatus(s);
     state.pvSigmaW = (pv && typeof pv.pv_residual_std_w === "number")
       ? pv.pv_residual_std_w
+      : null;
+    // rel_mae is the σ_rel the per-slot PV haircut multiplies by k, so the
+    // hedge line can quote the share of each sunny slot, not only watts.
+    state.pvSigmaRel = (pv && typeof pv.rel_mae === "number")
+      ? pv.rel_mae
       : null;
     state.enabled = {
       prices: p && p.enabled,
@@ -804,7 +809,14 @@ import {
             `<span class="s-label"> (${reason})</span></span>`
           );
         }
+        if (replanPending) {
+          parts.push(
+            `<span class="plan-replanning" title="A new plan was requested and has not come back yet">` +
+            `<span class="s-value">Replanning…</span></span>`
+          );
+        }
         summary.innerHTML = parts.join('<span class="s-sep">·</span>');
+        summary.classList.toggle('is-replanning', replanPending);
       }
     }
 
@@ -1021,43 +1033,82 @@ import {
     canvas.addEventListener('touchcancel', endTouch);
   }
 
-  // Household prefs (forecast trust + battery export) on the Plan card.
-  // The slider POSTs trust only; export is sent unchanged so moving the
+  // Household prefs (safety k + battery export) on the Plan card.
+  // The slider POSTs safety_k only; export is sent unchanged so moving the
   // slider never turns on battery export.
   let trustDirty = false;
   let prefsPosting = false;
+  let replanPending = false;
 
   function currentPrefs() {
     return state.prefs || prefsFromStatus(state.status);
   }
 
-  function mappedK() {
-    const p = currentPrefs();
-    if (typeof p.mapped_k === "number") return p.mapped_k;
-    return safetyK(p.forecast_trust);
+  function sliderK() {
+    const slider = document.getElementById("forecast-trust-slider");
+    if (slider) return clampSafetyK(slider.value);
+    return clampSafetyK(currentPrefs().safety_k);
+  }
+
+  // The replan a prefs POST triggers takes a moment; without a marker the
+  // card looks inert between release and the next poll. Appended here rather
+  // than left to the next summary render, which is skipped entirely when
+  // there is no plan yet — exactly the case the marker has to cover.
+  function setReplanPending(on) {
+    replanPending = on;
+    const summary = document.getElementById("plan-summary");
+    if (!summary) return;
+    summary.classList.toggle("is-replanning", on);
+    const existing = summary.querySelector(".plan-replanning");
+    if (on && !existing) {
+      const el = document.createElement("span");
+      el.className = "plan-replanning";
+      el.title = "A new plan was requested and has not come back yet";
+      el.innerHTML = '<span class="s-value">Replanning…</span>';
+      if (summary.childNodes.length) {
+        const sep = document.createElement("span");
+        sep.className = "s-sep";
+        sep.textContent = "·";
+        summary.appendChild(sep);
+      }
+      summary.appendChild(el);
+    } else if (!on && existing) {
+      const sep = existing.previousElementSibling;
+      if (sep && sep.classList.contains("s-sep")) sep.remove();
+      existing.remove();
+    }
+  }
+
+  function renderHedge(k) {
+    const hedgeEl = document.getElementById("forecast-trust-hedge");
+    if (!hedgeEl) return;
+    const text = hedgeLine(k, state.pvSigmaW, state.pvSigmaRel);
+    if (text == null) {
+      hedgeEl.hidden = true;
+      hedgeEl.textContent = "";
+    } else {
+      hedgeEl.hidden = false;
+      hedgeEl.textContent = text;
+    }
+  }
+
+  function renderSliderValue(k) {
+    const el = document.getElementById("forecast-trust-value");
+    if (el) el.textContent = "k " + formatSafetyK(k);
   }
 
   function syncPrefsUI() {
     const p = currentPrefs();
     const slider = document.getElementById("forecast-trust-slider");
     if (slider && !trustDirty) {
-      slider.value = String(sliderFromTrust(p.forecast_trust));
-      slider.setAttribute("aria-valuenow", slider.value);
-      slider.setAttribute("aria-valuetext", p.forecast_trust);
+      const k = clampSafetyK(p.safety_k);
+      slider.value = String(k);
+      slider.setAttribute("aria-valuenow", String(k));
+      slider.setAttribute("aria-valuetext", "k " + formatSafetyK(k) + ", " + trustFromSafetyK(k));
     }
-
-    const hedgeEl = document.getElementById("forecast-trust-hedge");
-    if (hedgeEl) {
-      const kUse = slider ? safetyK(trustFromSlider(slider.value)) : mappedK();
-      const text = hedgeLine(kUse, state.pvSigmaW);
-      if (text == null) {
-        hedgeEl.hidden = true;
-        hedgeEl.textContent = "";
-      } else {
-        hedgeEl.hidden = false;
-        hedgeEl.textContent = text;
-      }
-    }
+    const kNow = trustDirty ? sliderK() : clampSafetyK(p.safety_k);
+    renderSliderValue(kNow);
+    renderHedge(kNow);
 
     const unknown = p.battery_export === "unknown";
     const banner = document.getElementById("plan-export-banner");
@@ -1079,15 +1130,16 @@ import {
     }
   }
 
-  async function postPlannerPrefs(trust, exportPerm) {
+  async function postPlannerPrefs(k, exportPerm) {
     if (prefsPosting) return;
     prefsPosting = true;
+    setReplanPending(true);
     try {
       const r = await apiFetch("/api/planner/prefs", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          forecast_trust: trust,
+          safety_k: clampSafetyK(k),
           battery_export: exportPerm,
         }),
       });
@@ -1096,16 +1148,17 @@ import {
       state.prefs = {
         forecast_trust: j.forecast_trust,
         battery_export: j.battery_export,
-        mapped_k: typeof j.mapped_k === "number" ? j.mapped_k : safetyK(j.forecast_trust),
+        safety_k: clampSafetyK(typeof j.safety_k === "number" ? j.safety_k : j.mapped_k),
       };
       trustDirty = false;
       syncPrefsUI();
-      fetchAll();
+      await fetchAll();
     } catch (e) {
       trustDirty = false;
       syncPrefsUI();
     } finally {
       prefsPosting = false;
+      setReplanPending(false);
     }
   }
 
@@ -1115,42 +1168,35 @@ import {
       slider.addEventListener("input", function () {
         if (slider.disabled) return;
         trustDirty = true;
-        const hedgeEl = document.getElementById("forecast-trust-hedge");
-        if (hedgeEl) {
-          const text = hedgeLine(safetyK(trustFromSlider(slider.value)), state.pvSigmaW);
-          if (text == null) {
-            hedgeEl.hidden = true;
-          } else {
-            hedgeEl.hidden = false;
-            hedgeEl.textContent = text;
-          }
-        }
+        const k = clampSafetyK(slider.value);
+        slider.setAttribute("aria-valuenow", String(k));
+        slider.setAttribute("aria-valuetext", "k " + formatSafetyK(k) + ", " + trustFromSafetyK(k));
+        renderSliderValue(k);
+        renderHedge(k);
       });
       slider.addEventListener("change", function () {
         if (slider.disabled) return;
         const p = currentPrefs();
-        postPlannerPrefs(trustFromSlider(slider.value), p.battery_export);
+        postPlannerPrefs(clampSafetyK(slider.value), p.battery_export);
       });
     }
     const check = document.getElementById("plan-export-check");
     if (check) {
       check.addEventListener("change", function () {
         const p = currentPrefs();
-        postPlannerPrefs(p.forecast_trust, check.checked ? "allowed" : "not_allowed");
+        postPlannerPrefs(p.safety_k, check.checked ? "allowed" : "not_allowed");
       });
     }
     const allow = document.getElementById("plan-export-allow");
     if (allow) {
       allow.addEventListener("click", function () {
-        const p = currentPrefs();
-        postPlannerPrefs(p.forecast_trust, "allowed");
+        postPlannerPrefs(currentPrefs().safety_k, "allowed");
       });
     }
     const deny = document.getElementById("plan-export-deny");
     if (deny) {
       deny.addEventListener("click", function () {
-        const p = currentPrefs();
-        postPlannerPrefs(p.forecast_trust, "not_allowed");
+        postPlannerPrefs(currentPrefs().safety_k, "not_allowed");
       });
     }
   }

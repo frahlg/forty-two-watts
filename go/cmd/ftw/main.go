@@ -541,6 +541,7 @@ func main() {
 	}
 	storedTrust, _ := st.LoadConfig(config.StateKeyForecastTrust)
 	storedExport, _ := st.LoadConfig(config.StateKeyBatteryExport)
+	storedSafetyK, _ := st.LoadConfig(config.StateKeySafetyK)
 	yamlTrust, yamlExport := "", ""
 	var yamlK *float64
 	if cfg.Planner != nil {
@@ -548,9 +549,12 @@ func main() {
 		yamlExport = cfg.Planner.BatteryExport
 		yamlK = cfg.Planner.PVForecastSafetyK
 	}
-	trust, export, missingPrefs := config.ResolvePlannerPrefs(storedTrust, storedExport, string(ctrl.Mode), yamlTrust, yamlExport, yamlK)
-	plannerPrefs := config.NewPlannerPrefs(trust, export)
+	trust, export, safetyK, missingPrefs := config.ResolvePlannerPrefs(storedTrust, storedExport, storedSafetyK, string(ctrl.Mode), yamlTrust, yamlExport, yamlK)
+	plannerPrefs := config.NewPlannerPrefs(trust, export, safetyK)
 	if missingPrefs {
+		if err := st.SaveConfig(config.StateKeySafetyK, config.FormatSafetyK(safetyK)); err != nil {
+			slog.Warn("failed to persist planner_safety_k", "err", err)
+		}
 		if err := st.SaveConfig(config.StateKeyForecastTrust, string(trust)); err != nil {
 			slog.Warn("failed to persist forecast_trust", "err", err)
 		}
@@ -1504,8 +1508,9 @@ func main() {
 			mpcSvc.PVRelativeUncertainty = pvSvc.RelativeUncertainty
 		}
 		// Downside-PV safety planning (forecast − k·σ) — replaces the old SoC
-		// safety floor. Unset config → default 1.0; explicit 0 → raw forecast.
-		mpcSvc.PVForecastSafetyK = cfg.Planner.EffectiveSafetyK(trust)
+		// safety floor. k comes from the Plan card's slider (resolved above);
+		// nothing stored → 1.0, k=0 → raw forecast.
+		mpcSvc.PVForecastSafetyK = cfg.Planner.EffectiveSafetyK(safetyK)
 		if cfg.Planner != nil {
 			mpcSvc.MinArbitrageSpreadOreKwh = cfg.Planner.MinArbitrageSpreadOreKwh
 		}

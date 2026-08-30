@@ -892,9 +892,9 @@ type Planner struct {
 	// SoC %. Pointer so unset is distinct from an explicit 0.
 	//
 	// FIRST-BOOT SEED ONLY. The live value follows the Plan card's
-	// forecast-trust slider (SQLite, same stored-wins contract as
-	// forecast_trust); this field maps to the nearest trust step once
-	// when nothing is stored and never overrides the slider — the old
+	// slider (SQLite key planner_safety_k, same stored-wins contract as
+	// forecast_trust); this field seeds that float verbatim once when
+	// nothing is stored, and never overrides the slider — the old
 	// precedence disabled the slider for as long as the field existed.
 	PVForecastSafetyK *float64 `yaml:"pv_forecast_safety_k,omitempty" json:"pv_forecast_safety_k,omitempty"`
 

@@ -535,16 +535,20 @@
              those keys). Manual fallbacks stay behind Manual…. -->
         <div class="plan-strategy">
           <span class="card-label plan-strategy-label">Follow the forecast</span>
+          <!-- The slider's value IS the planner's safety factor k, so the
+               position and the number the plan runs on can never drift
+               apart. Left is k=0 (raw forecast); right is k=2. -->
           <div class="forecast-trust">
-            <input type="range" id="forecast-trust-slider" min="0" max="2" step="1" value="1"
+            <input type="range" id="forecast-trust-slider" min="0" max="2" step="0.05" value="1"
                    aria-valuemin="0" aria-valuemax="2" aria-valuenow="1"
-                   aria-label="Follow the forecast">
+                   aria-label="Share of the PV forecast uncertainty held in reserve">
             <div class="forecast-trust-labels">
-              <span>Hold reserve</span>
               <span>Trust forecast</span>
+              <span id="forecast-trust-value" class="slider-current">k 1</span>
+              <span>Hold reserve</span>
             </div>
             <div id="forecast-trust-hedge" class="forecast-trust-hedge" hidden></div>
-            <p class="forecast-trust-help">Left keeps more in the battery if the sun might miss — closer to using the battery only for the house. Right follows the forecast fully. If the forecast is right, right earns more.</p>
+            <p class="forecast-trust-help">Left follows the forecast fully — if it is right, that earns more. Right keeps more in the battery in case the sun misses, closer to using the battery only for the house. Every notch changes how much of each slot's own forecast error the plan holds back.</p>
           </div>
           <div class="plan-export">
             <div id="plan-export-banner" class="plan-export-banner" hidden>
