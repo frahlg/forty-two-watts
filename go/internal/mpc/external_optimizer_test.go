@@ -170,6 +170,58 @@ func TestValidatePlanModeErrorIncludesPowerValues(t *testing.T) {
 	}
 }
 
+// gridLimitFixture builds a single arbitrage slot whose baseline grid flow is
+// exactly gridW, under an 11 040 W fuse (16 A x 3 x 230 V) and an 8 000 W
+// export cap, plus the matching zero-battery plan. Grid balance, mode and cost
+// all reconcile, so only the grid-limit check can reject it.
+func gridLimitFixture(gridW float64) ([]Slot, Params, Plan) {
+	slot := Slot{
+		StartMs: 1, LenMin: 15, PriceOre: 100, SpotOre: 80, Confidence: 1,
+		Limits: PowerLimits{MaxImportW: 11040, MaxExportW: 8000},
+	}
+	if gridW >= 0 {
+		slot.LoadW = gridW
+	} else {
+		slot.PVW = gridW
+	}
+	p := Params{
+		Mode: ModeArbitrage, CapacityWh: 10000,
+		SoCMin: 0.1, SoCMax: 0.95, InitialSoC: 0.5,
+		MaxChargeW: 5000, MaxDischargeW: 5000,
+		ChargeEfficiency: 1, DischargeEfficiency: 1,
+	}
+	costOre := SlotGridCostOre(slot, gridW*0.25/1000, p)
+	plan := Plan{TotalCostOre: costOre, Actions: []Action{{
+		SlotStartMs: 1, SlotLenMin: 15, BatteryW: 0, GridW: gridW,
+		SoC: p.InitialSoC, CostOre: costOre,
+	}}}
+	return []Slot{slot}, p, plan
+}
+
+func TestValidatePlanAcceptsGridFlowRidingTheLimit(t *testing.T) {
+	slots, p, plan := gridLimitFixture(11040 + 1e-9)
+	if err := ValidatePlan(slots, p, &plan); err != nil {
+		t.Fatalf("ValidatePlan rejected solver residue at the import limit: %v", err)
+	}
+	slots, p, plan = gridLimitFixture(-8000 - 1e-9)
+	if err := ValidatePlan(slots, p, &plan); err != nil {
+		t.Fatalf("ValidatePlan rejected solver residue at the export limit: %v", err)
+	}
+}
+
+func TestValidatePlanRejectsGridFlowPastTheLimit(t *testing.T) {
+	slots, p, plan := gridLimitFixture(11040 + 5)
+	err := ValidatePlan(slots, p, &plan)
+	if err == nil || !strings.Contains(err.Error(), "violates grid limits") {
+		t.Fatalf("ValidatePlan 5 W over the import limit = %v, want a grid-limit rejection", err)
+	}
+	slots, p, plan = gridLimitFixture(-8000 - 5)
+	err = ValidatePlan(slots, p, &plan)
+	if err == nil || !strings.Contains(err.Error(), "violates grid limits") {
+		t.Fatalf("ValidatePlan 5 W past the export limit = %v, want a grid-limit rejection", err)
+	}
+}
+
 func TestExternalOptimizerStopsWorkerAfterIdleTimeout(t *testing.T) {
 	if len(os.Args) > 0 && os.Args[len(os.Args)-1] == "external-worker-helper" {
 		time.Sleep(10 * time.Second)

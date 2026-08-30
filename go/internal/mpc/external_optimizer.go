@@ -713,7 +713,17 @@ func ValidatePlan(slots []Slot, p Params, plan *Plan) error {
 			return fmt.Errorf("slot %d violates mode %s: baseline_grid_w=%.9f grid_w=%.9f battery_w=%.9f",
 				i, p.Mode, baseGridW, a.GridW, a.BatteryW)
 		}
-		if !slot.Limits.allowsImport(a.GridW) || !slot.Limits.allowsExport(a.GridW) {
+		// gridLimitTolW gives the limit check the same ±2 W slack the
+		// battery-power, grid-balance and aggregate-storage checks
+		// carry. A MILP constrained to import ≤ limit legitimately
+		// returns a plan riding the cap, and solver float noise lands
+		// it ~1e-9 W over. Rejection discards the whole plan and
+		// silently degrades the site to the fallback planner — seen in
+		// the field as "slot 34 grid_w 11040.000 violates grid limits"
+		// on an 11 040 W fuse. Validation only: the DP's feasibility
+		// loop generates its own actions and keeps the exact bound.
+		const gridLimitTolW = 2.0
+		if !slot.Limits.allowsImport(a.GridW-gridLimitTolW) || !slot.Limits.allowsExport(a.GridW+gridLimitTolW) {
 			return fmt.Errorf("slot %d grid_w %.3f violates grid limits", i, a.GridW)
 		}
 		gridKWh := a.GridW * dtH / 1000
