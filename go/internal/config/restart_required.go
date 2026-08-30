@@ -77,6 +77,14 @@ func RestartRequiredFor(oldCfg, newCfg *Config) []string {
 	if oldCfg.FleetPing.Resolved() != newCfg.FleetPing.Resolved() {
 		reasons = append(reasons, "fleet_ping.endpoint — the sender resolves its endpoint at startup")
 	}
+	// The OCPP central system is started once in main.go; the config
+	// applier neither starts, stops nor re-arms it. Without this entry
+	// the Chargers panel's enable toggle saved cleanly, reported no
+	// restart needed, and the listener never opened — the exact silent
+	// failure the comment at the top of this file warns about.
+	if !pointerEqual(oldCfg.OCPP, newCfg.OCPP) {
+		reasons = append(reasons, "ocpp — the central system listener is started at startup")
+	}
 	if !pointerEqual(oldCfg.EVCharger, newCfg.EVCharger) {
 		reasons = append(reasons, "ev_charger — EV charger client is constructed once at startup")
 	}

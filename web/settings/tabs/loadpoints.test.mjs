@@ -196,6 +196,10 @@ describe("OCPP server form", () => {
     // Defaults an operator would otherwise have to go and look up.
     assert.match(html, /data-path="ocpp\.port" value="8887"/);
     assert.match(html, /data-path="ocpp\.path" value="\/"/);
+    // The username default is a real value, not a placeholder: validation
+    // requires it when the server is enabled, so a field that only hinted
+    // "ftw" made every first enable fail with a 400.
+    assert.match(html, /data-path="ocpp\.username" value="ftw"/);
   });
 
   it("never renders the stored password back into the page", () => {

@@ -142,7 +142,7 @@
       '</div>' +
       '<div>' +
       '<label>Username ' + h("The username every charger presents, unless it has a credential of its own in config.yaml.") + '</label>' +
-      '<input type="text" data-path="ocpp.username" value="' + escHtml(o.username || "") + '" placeholder="ftw">' +
+      '<input type="text" data-path="ocpp.username" value="' + escHtml(o.username || "ftw") + '">' +
       '</div>' +
       '</div>' +
       '<div class="field-row">' +

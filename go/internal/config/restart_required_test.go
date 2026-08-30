@@ -83,6 +83,9 @@ func TestRestartRequiredFor_BootSections(t *testing.T) {
 		{"ev_charger added", func(c *Config) {
 			c.EVCharger = &EVCharger{Provider: "easee", Username: "a@b.c"}
 		}, "ev_charger"},
+		{"ocpp enabled", func(c *Config) {
+			c.OCPP = &OCPP{Enabled: true, Port: 8887, Username: "ftw", Password: "long-random-string"}
+		}, "ocpp"},
 		{"caldav credentials changed", func(c *Config) {
 			c.CalDAV = &CalDAV{Enabled: true, Username: "calendar-user", Password: "rotated"}
 		}, "caldav"},
