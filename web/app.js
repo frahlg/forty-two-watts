@@ -2590,7 +2590,10 @@
   }
 
   function evFmtClock(ms) {
-    return new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    // 24-hour clock, matching plan-brief.js's formatClock — the rest of
+    // the plan UI speaks 24 h regardless of browser locale.
+    var d = new Date(ms);
+    return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
   }
 
   // renderEvPlanStatus answers the question the status table can't:
