@@ -1,5 +1,105 @@
 # Changelog
 
+## 2.7.0
+
+### Minor Changes
+
+- b824000: FTW now listens to what the car itself asks for. On an ISO 15118 session an
+  OCPP 2.0.1 charger forwards the vehicle's own `NotifyEVChargingNeeds` —
+  the energy it wants, when it expects to leave, and on DC its battery capacity
+  and present state of charge. Core takes that as the session's truth: the
+  reported capacity replaces the configured `vehicle_capacity_wh` (measured beats
+  an operator's estimate of the car that usually parks here), the reported SoC
+  re-anchors the session estimate, and the two together with the requested energy
+  derive the target the planner sizes on. A departure time the car states becomes
+  the loadpoint's target time, and one it does not state never erases the
+  operator's own. Everything is session-scoped and reverts on plug-out, like an
+  identified vehicle profile. The report is visible on `GET /api/ocpp/chargers`
+  as `charging_needs`, and quarantine still applies — a pending charge point's
+  needs are shown but never reach a loadpoint.
+  
+  An AC session states energy without a battery size, so no target fraction is
+  derived from it; guessing one would feed the planner a number the car never
+  claimed.
+- b824000: An adopted OCPP charger is now a device like any other. It gets a row in
+  `/api/devices` and under Settings → Devices, keyed on the vendor and serial
+  from its `BootNotification` rather than on the name it dialled with — that
+  name is one an installer typed and the charger's own web page can change, so
+  persistent state keyed on it would not survive a re-commissioning. Rename a
+  charger and the row follows it. A charger that reports no serial falls back to
+  the dialled name, recorded as an endpoint so it reads as stable-until-changed.
+  Pending chargers get no row: a device row says this hardware is part of the
+  site, and quarantine says an unadopted charge point is not.
+  
+  `GET /api/ocpp/chargers` now also reports each charger's `serial` and
+  `firmware`, and OCPP 1.6's deprecated `chargeBoxSerialNumber` is read when the
+  current field is empty — shipped firmware disagrees about which to fill, and
+  losing it loses the only stable identity some chargers ever report.
+  
+  The OCPP server's own settings — on/off, bind address, both ports, path,
+  username and password — are editable under Settings → Chargers instead of
+  only in `config.yaml`. TLS paths and per-charger credentials stay in the file:
+  they are host filesystem paths and one secret per charger, set once at
+  commissioning.
+- b824000: The OCPP listener can now be pinned to one interface, served over TLS, and
+  given a credential per charger.
+  
+  `ocpp.bind` finally does something. The library builds its listen address from
+  the port alone, so the socket is unavoidably open on every interface; FTW now
+  refuses the WebSocket handshake for a connection that arrived on any other
+  address. That is an access control rather than a smaller attack surface — the
+  port still answers a scan — and the docs say so.
+  
+  `ocpp.tls` serves `wss://` instead of `ws://`, ending the plaintext basic auth
+  anyone on the LAN could sniff. `client_ca_file` additionally requires every
+  charge point to present a certificate signed by that CA (OCPP 2.0.1 security
+  profile 3). Half a TLS section is refused at startup rather than quietly
+  serving plaintext.
+  
+  `ocpp.chargers` gives a named charge point a password of its own. On OCPP the
+  basic-auth username is the charge point identity, so a listed charger must
+  present both, and the shared password stops being enough to connect under its
+  name — the impersonation hole the pending-charger quarantine could not close.
+  It is opt-in per charger; anything unlisted keeps using the shared credential.
+  Per-charger passwords are masked out of `GET /api/config` and survive a
+  settings save, matched by charger id rather than position.
+
+### Patch Changes
+
+- b824000: Three fixes from running the OCPP central system against Sourceful's device
+  simulator. Each one let FTW report a limit it had not actually imposed, or
+  refuse a control that should have worked.
+  
+  **Charging profiles are sent as Relative, not Absolute.** FTW's schedule is a
+  single period at second 0 with no end — "hold this limit until I say
+  otherwise". Absolute expresses that only with a `startSchedule` timestamp, and
+  while the specification says an absolute schedule without one is relative to
+  the start of charging anyway, a charger that parses the missing timestamp
+  strictly finds no valid start, treats the profile as not yet active, and
+  answers **Accepted** while charging on at full rate. Relative carries no
+  timestamp, so there is nothing to misparse — and nothing that depends on the
+  charger's clock agreeing with ours.
+  
+  **A charger that refuses a charge-point-wide profile is retried on connector
+  1.** OCPP 1.6 permits a `TxDefaultProfile` on connector 0 — it is how a profile
+  applies to every connector — but some chargers read the connector-0 rule as
+  `ChargePointMaxProfile`-only and reject it. Rejecting means no limit at all, so
+  one retry on the first connector is the difference between a charger FTW steers
+  and one it can only meter.
+  
+  **Manual EV controls reach an OCPP charger.** Pause, Resume, Force start and
+  set-current posted to `/api/ev/command` went straight to the Lua driver
+  registry, which an OCPP charge point is not in — it dialled us rather than
+  being dialled. They failed with `driver "<id>" not found` while automatic
+  dispatch steered the same charger correctly.
+- 4f6060d: Enabling the OCPP server from the Chargers panel now works on the first
+  try: the username field carries the real default ("ftw") instead of a
+  placeholder that validation then rejected, and saving an OCPP change
+  honestly reports that a restart is required — the central system
+  listener only starts at boot, so the previous "no restart needed"
+  answer left the port silently closed after an apparently successful
+  save.
+
 ## 2.6.0
 
 ### Minor Changes
