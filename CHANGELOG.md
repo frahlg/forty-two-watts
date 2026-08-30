@@ -1,5 +1,34 @@
 # Changelog
 
+## 2.8.0
+
+### Minor Changes
+
+- 44c62d1: The Plan card's forecast-trust slider always works now. An explicit
+  `pv_forecast_safety_k` in config.yaml used to win over it and render it
+  permanently disabled with a "config.yaml wins" note; the field is now a
+  first-boot seed only — it maps to the nearest trust step once when no
+  preference is stored, and the slider owns the live value from then on,
+  the same stored-wins contract `forecast_trust` already had.
+
+### Patch Changes
+
+- 8f0c2f9: Planner parity fixes ported from the MILP formulation (#1020): the
+  strict self-consumption bias clamps at zero price instead of
+  inverting into an import bonus on negative-price slots; the PV-charge
+  bonus applies in every mode (still bounded by live PV surplus);
+  horizon mean prices are length-weighted for mixed slot lengths; the
+  simulated plan starts at the battery's real state of charge instead
+  of the nearest grid point; and replan diagnostics persist the
+  arbitrage spread and PV-uncertainty inputs so a snapshot re-solves
+  under the exact economics the replan used.
+- 2a21b7f: The planner's DP grid resolution rises from 41 SoC × 81 action levels
+  to 201 × 401 (about 0.4 % SoC and 24 W steps), closing most of the
+  measured discretization gap to the external MILP; replans with an
+  active EV loadpoint automatically derate to 101 × 201 to keep the
+  extended state space near one second. Solve budgets were measured on
+  the snapshot replay bench before raising the defaults.
+
 ## 2.7.0
 
 ### Minor Changes
