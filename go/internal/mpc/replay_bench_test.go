@@ -76,11 +76,11 @@ func planEndSoC(plan *Plan) float64 {
 // FTW_MPC_SNAPSHOT_DIR. Optional knobs:
 //
 //	FTW_TEST_OPTIMIZER_PYTHON  — adds the Python champion leg
-//	FTW_MPC_BENCH_SPREAD_ORE   — MinArbitrageSpreadOreKwh for the
-//	                             re-solve; the diagnostic blob does not
-//	                             persist it yet, so a site running a
-//	                             spread must supply it for a faithful
-//	                             replay (Fredrik's site: 30)
+//	FTW_MPC_BENCH_SPREAD_ORE   — MinArbitrageSpreadOreKwh fallback for
+//	                             blobs written before the diagnostic
+//	                             persisted it. A spread carried by the
+//	                             snapshot always wins: it is what the
+//	                             replan actually solved under.
 //
 // Run with -v; the verdict is the table, not a pass/fail.
 func TestReplayBenchSnapshots(t *testing.T) {
@@ -94,10 +94,10 @@ func TestReplayBenchSnapshots(t *testing.T) {
 	}
 	sort.Strings(paths)
 
-	spreadOre := 0.0
+	fallbackSpreadOre := 0.0
 	if v := os.Getenv("FTW_MPC_BENCH_SPREAD_ORE"); v != "" {
 		if f, err := strconv.ParseFloat(v, 64); err == nil {
-			spreadOre = f
+			fallbackSpreadOre = f
 		}
 	}
 
@@ -142,7 +142,9 @@ func TestReplayBenchSnapshots(t *testing.T) {
 			t.Logf("%-15s SKIP: not rehydratable", filepath.Base(path))
 			continue
 		}
-		params.MinArbitrageSpreadOreKwh = spreadOre
+		if params.MinArbitrageSpreadOreKwh == 0 {
+			params.MinArbitrageSpreadOreKwh = fallbackSpreadOre
+		}
 
 		recCorr := terminalCorrectedOre(recorded.TotalCostOre, planEndSoC(recorded), params)
 

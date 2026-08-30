@@ -82,6 +82,13 @@ type DiagnosticParams struct {
 	ExportFeeOreKwh     float64  `json:"export_fee_ore_kwh"`
 	ExportFloorOreKwh   *float64 `json:"export_floor_ore_kwh,omitempty"`
 
+	// Persisted so a snapshot re-solves under the exact economics the
+	// replan used — before these fields the replay bench had to be told
+	// the site's spread by hand (#1020).
+	MinArbitrageSpreadOreKwh float64 `json:"min_arbitrage_spread_ore_kwh,omitempty"`
+	PVUncertaintyW           float64 `json:"pv_uncertainty_w,omitempty"`
+	PVForecastSafetyK        float64 `json:"pv_forecast_safety_k,omitempty"`
+
 	LoadpointSurplusOnly       bool `json:"loadpoint_surplus_only"`
 	LoadpointNoBatteryToEV     bool `json:"loadpoint_no_battery_to_ev"`
 	LoadpointBlocksBatteryToEV bool `json:"loadpoint_blocks_battery_to_ev"`
@@ -217,6 +224,9 @@ func buildDiagnostic(plan *Plan, slots []Slot, p Params, zone string,
 			ExportBonusOreKwh:          p.ExportBonusOreKwh,
 			ExportFeeOreKwh:            p.ExportFeeOreKwh,
 			ExportFloorOreKwh:          p.ExportFloorOreKwh,
+			MinArbitrageSpreadOreKwh:   p.MinArbitrageSpreadOreKwh,
+			PVUncertaintyW:             p.PVUncertaintyW,
+			PVForecastSafetyK:          p.PVForecastSafetyK,
 			LoadpointSurplusOnly:       p.Loadpoint != nil && p.Loadpoint.SurplusOnly,
 			LoadpointNoBatteryToEV:     p.Loadpoint != nil && p.Loadpoint.NoBatteryToEV,
 			LoadpointBlocksBatteryToEV: p.Loadpoint != nil && p.Loadpoint.blocksBatteryToEV(),
@@ -339,6 +349,10 @@ func planFromDiagnostic(d *Diagnostic) (*Plan, []Slot, Params, time.Time, bool) 
 		ExportBonusOreKwh:   d.Params.ExportBonusOreKwh,
 		ExportFeeOreKwh:     d.Params.ExportFeeOreKwh,
 		ExportFloorOreKwh:   d.Params.ExportFloorOreKwh,
+
+		MinArbitrageSpreadOreKwh: d.Params.MinArbitrageSpreadOreKwh,
+		PVUncertaintyW:           d.Params.PVUncertaintyW,
+		PVForecastSafetyK:        d.Params.PVForecastSafetyK,
 	}
 	if params.Mode == "" {
 		params.Mode = ModeSelfConsumption
