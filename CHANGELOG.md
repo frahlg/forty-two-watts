@@ -1,5 +1,28 @@
 # Changelog
 
+## 2.9.0
+
+### Minor Changes
+
+- 5658cf3: The planner's PV-forecast hedge is now proportional per slot instead of
+  one flat watt figure across the whole horizon: the PV model learns the
+  relative forecast error online, and each slot's downside is that share
+  of its own expected generation — large on variable cloudy days, zero at
+  night, no longer erasing morning and evening shoulders or hedging a
+  clear tomorrow with today's uncertainty. Measured against real
+  snapshots the flat haircut cost 25–65 SEK per 48 h plan. Sites where
+  the model has not yet learned the relative error keep the previous
+  flat behavior.
+
+### Patch Changes
+
+- 1887965: A plan that rides the site's grid limit exactly is no longer rejected
+  for solver float noise: the external-plan validator's grid-limits
+  check gains the same ±2 W tolerance every other power check already
+  had. Rejection discarded the whole plan and silently degraded the
+  site to the fallback planner — observed in the field as
+  "slot 34 grid_w 11040.000 violates grid limits" on an 11 040 W fuse.
+
 ## 2.8.0
 
 ### Minor Changes
