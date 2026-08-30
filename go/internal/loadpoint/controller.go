@@ -399,6 +399,15 @@ type ManualHold struct {
 	// the flag is what distinguishes it from the zero-ExpiresAt "clear"
 	// sentinel that SetManualHold honours.
 	Persistent bool
+
+	// ReleaseAtSoC (0–1) turns the hold into "charge now, then back to
+	// the plan": once the loadpoint's estimated (or BMS-anchored) SoC
+	// reaches this fraction, the controller clears the hold and the
+	// same tick falls through to automatic surplus/plan dispatch.
+	// Zero keeps the legacy contract — pinned until Stop or unplug.
+	// Persisted with the hold, so a restart mid-boost keeps the
+	// release target.
+	ReleaseAtSoC float64
 }
 
 // Directive is the loadpoint-relevant slice of mpc.SlotDirective.
@@ -1522,6 +1531,19 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config, d
 			}
 		} else {
 			c.resetManualIdle(lpCfg.ID)
+		}
+	}
+
+	// Release a "charge now" hold at its target SoC. The operator asked
+	// for immediate charge up to a level, not a pin-forever: clearing
+	// here lets this same tick fall straight through to automatic
+	// surplus/plan dispatch instead of holding the wallbox at a fixed
+	// amperage the rest of the session.
+	if hold, held := c.GetManualHold(lpCfg.ID, now); held && hold.ReleaseAtSoC > 0 {
+		if st, ok := c.manager.State(lpCfg.ID); ok && st.CurrentSoC >= hold.ReleaseAtSoC {
+			slog.Info("loadpoint manual hold released — charge-now target reached",
+				"lp", lpCfg.ID, "soc", st.CurrentSoC, "release_at_soc", hold.ReleaseAtSoC)
+			c.ClearManualHold(lpCfg.ID)
 		}
 	}
 

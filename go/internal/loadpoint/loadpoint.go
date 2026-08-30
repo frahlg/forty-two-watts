@@ -161,10 +161,13 @@ type State struct {
 
 	// ManualActive is true when an operator manual hold ("Start" / amp
 	// slider) is pinned on this loadpoint, overriding surplus/plan.
-	// ManualChargeW is the held setpoint in watts. Populated by the API
-	// layer from the loadpoint controller.
-	ManualActive  bool    `json:"manual_active"`
-	ManualChargeW float64 `json:"manual_charge_w,omitempty"`
+	// ManualChargeW is the held setpoint in watts. ManualReleaseSoC
+	// (0–1), when non-zero, is the "charge now" target at which the
+	// controller releases the hold back to the plan. Populated by the
+	// API layer from the loadpoint controller.
+	ManualActive     bool    `json:"manual_active"`
+	ManualChargeW    float64 `json:"manual_charge_w,omitempty"`
+	ManualReleaseSoC float64 `json:"manual_release_soc,omitempty"`
 
 	// BatteryBoost is the explicit, bounded home-battery-to-EV permission
 	// for this loadpoint. Populated by the API layer from Controller state.

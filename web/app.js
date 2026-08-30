@@ -2613,8 +2613,11 @@
     var charging = (lp.current_power_w || 0) >= 100;
     var hasSchedule = lp.schedule && lp.schedule.soc > 0;
     if (lp.manual_active) {
-      text = "Manual charge pinned at " + formatW(lp.manual_charge_w || 0) +
-        " — plan and PV logic are off until Stop or unplug.";
+      text = lp.manual_release_soc > 0
+        ? "Charging now at " + formatW(lp.manual_charge_w || 0) + " → returns to plan at " +
+          Math.round(lp.manual_release_soc * 100) + " %."
+        : "Manual charge pinned at " + formatW(lp.manual_charge_w || 0) +
+          " — plan and PV logic are off until Stop or unplug.";
     } else if (charging) {
       text = winActive
         ? "Charging on plan until " + evFmtClock(lp.plan_next_end_ms) + "." + kwPlanned
@@ -2843,6 +2846,12 @@
     if (curA < minA) { curA = minA; }
     if (curA > maxA) { curA = maxA; }
 
+    // "Charge now" stops at the schedule's target SoC when one is set
+    // (80 % default otherwise), then hands back to the plan — pressing
+    // Start no longer kills the planner for the rest of the session.
+    var releasePct = (lp && lp.schedule && lp.schedule.soc > 0)
+      ? Math.round(lp.schedule.soc * 100) : 80;
+
     var box = document.createElement("div");
     box.style.marginTop = "0.75rem";
     box.style.paddingTop = "0.6rem";
@@ -2897,8 +2906,10 @@
     status.style.marginTop = "0.35rem";
     status.style.minHeight = "1em";
     status.textContent = active
-      ? "Manual override active — overriding PV surplus (fuse still limits)."
-      : "Stopped = automatic (PV-surplus-only if enabled below). Start overrides it.";
+      ? (lp && lp.manual_release_soc > 0
+        ? "Charging now → stops at " + Math.round(lp.manual_release_soc * 100) + " %, then back to the plan (fuse still limits)."
+        : "Manual override active — overriding PV surplus (fuse still limits).")
+      : "Charge now runs at the slider's amps until " + releasePct + " %, then hands back to the plan.";
     box.appendChild(status);
 
     // Start / Stop buttons.
@@ -2909,7 +2920,7 @@
 
     var startBtn = document.createElement("button");
     startBtn.type = "button";
-    startBtn.textContent = active ? "Update" : "Start";
+    startBtn.textContent = active ? "Update" : "Charge now → " + releasePct + " %";
     startBtn.style.flex = "1";
     startBtn.style.padding = "0.4rem 0.6rem";
     startBtn.style.border = "none";
@@ -2948,9 +2959,10 @@
           power_w: aToW(a),
           hold_s: 0,
           phase_mode: phases === 1 ? "1p" : "3p",
+          release_at_soc_pct: releasePct,
         }),
       }).then(function () {
-        status.textContent = "Charging at " + a + " A — overriding PV surplus.";
+        status.textContent = "Charging at " + a + " A → stops at " + releasePct + " %, then back to the plan.";
         manualNeedsRebuild = true; // reflect active state on next poll
       }).catch(function () {
         startBtn.disabled = false;
