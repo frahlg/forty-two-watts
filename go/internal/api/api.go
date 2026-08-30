@@ -3482,6 +3482,7 @@ func (s *Server) handleLoadpoints(w http.ResponseWriter, r *http.Request) {
 	}
 	s.decorateLoadpointsWithManual(states)
 	s.decorateLoadpointsWithBatteryBoost(states)
+	s.decorateLoadpointsWithPlan(states)
 	writeJSON(w, 200, map[string]any{
 		"enabled":    true,
 		"loadpoints": states,

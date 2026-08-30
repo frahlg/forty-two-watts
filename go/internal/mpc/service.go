@@ -505,6 +505,71 @@ func (s *Service) SlotDirectiveAt(now time.Time) (SlotDirective, bool) {
 	return SlotDirective{}, false
 }
 
+// PlanWindow is one contiguous run of plan slots in which the active
+// plan allocates charge energy to a loadpoint. Exposed so the API can
+// answer the operator's first question at plug-in — "when will it
+// charge?" — without the UI re-deriving the plan's loadpoint columns.
+type PlanWindow struct {
+	Start    time.Time
+	End      time.Time
+	EnergyWh float64
+}
+
+// LoadpointPlanWindows returns the contiguous windows, ending after
+// `now`, in which the active plan allocates charge energy to loadpoint
+// `id`, plus the total Wh the plan still intends to deliver across the
+// horizon. A window already underway is included with its full slot
+// bounds. At most `max` windows are returned (0 = unlimited); the Wh
+// total always covers every remaining slot. Returns (nil, 0) when
+// there is no fresh plan — same MaxPlanAge cutoff as SlotDirectiveAt,
+// because a stale plan must not promise start times.
+func (s *Service) LoadpointPlanWindows(id string, now time.Time, max int) ([]PlanWindow, float64) {
+	if s == nil || id == "" {
+		return nil, 0
+	}
+	s.mu.RLock()
+	p := s.last
+	legacyID := s.lastLoadpointID
+	s.mu.RUnlock()
+	if p == nil || time.Since(time.UnixMilli(p.GeneratedAtMs)) > MaxPlanAge {
+		return nil, 0
+	}
+	nowMs := now.UnixMilli()
+	var windows []PlanWindow
+	var totalWh float64
+	for _, a := range p.Actions {
+		endMs := a.SlotStartMs + int64(a.SlotLenMin)*60*1000
+		if endMs <= nowMs {
+			continue
+		}
+		powerW := 0.0
+		if len(a.LoadpointPowerW) > 0 {
+			powerW = a.LoadpointPowerW[id]
+		} else if id == legacyID {
+			powerW = a.LoadpointW
+		}
+		if powerW <= 0 {
+			continue
+		}
+		wh := powerW * float64(a.SlotLenMin) / 60.0
+		totalWh += wh
+		start := time.UnixMilli(a.SlotStartMs)
+		end := time.UnixMilli(endMs)
+		if n := len(windows); n > 0 && windows[n-1].End.Equal(start) {
+			windows[n-1].End = end
+			windows[n-1].EnergyWh += wh
+			continue
+		}
+		if max > 0 && len(windows) == max {
+			// Window cap reached: keep accumulating the Wh total,
+			// just stop growing the list.
+			continue
+		}
+		windows = append(windows, PlanWindow{Start: start, End: end, EnergyWh: wh})
+	}
+	return windows, totalWh
+}
+
 // livePVSurplusSoCCap returns a quantified ceiling for moving later
 // grid-funded charging into live PV in the current slot. This is deliberately
 // derived from decisions already present in the plan rather than a blanket

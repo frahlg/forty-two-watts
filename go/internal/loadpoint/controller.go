@@ -941,6 +941,14 @@ func (c *Controller) SetGridDeferred(lpID string, deferred bool) {
 	}
 }
 
+// GridDeferred reports whether MPC has deferred grid-funded planning
+// for this loadpoint (target deadline past the published price
+// horizon). Read by the API layer so the deferral is visible to the
+// operator instead of looking like a PV-only mode nobody chose.
+func (c *Controller) GridDeferred(lpID string) bool {
+	return c.gridDeferredFor(lpID)
+}
+
 // gridDeferredFor reads the per-LP deferral flag set by main.go's MPC
 // spec builder. Read-only accessor used inside surplusActive.
 func (c *Controller) gridDeferredFor(lpID string) bool {

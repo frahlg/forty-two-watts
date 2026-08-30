@@ -181,6 +181,32 @@ type State struct {
 	// zero fields) so the UI can rely on a stable shape — clients
 	// detect "no schedule" via Schedule.Empty() / soc_pct === 0.
 	Schedule Schedule `json:"schedule"`
+
+	// CommandedW is what the controller last ordered this loadpoint to
+	// deliver, after every clamp. CommandedKnown separates "ordered
+	// zero" from "no dispatch tick has run yet". The UI reads the pair
+	// to tell "the box is offering power the car is not taking" from
+	// "the box is pausing on purpose".
+	CommandedW     float64 `json:"commanded_w"`
+	CommandedKnown bool    `json:"commanded_known"`
+
+	// GridDeferred is true while MPC has deferred grid-funded planning
+	// because the target deadline lies past the published price
+	// horizon — the loadpoint behaves surplus-only until tomorrow's
+	// prices land. Without this flag that deferral is invisible and
+	// reads as "PV only that nobody chose". Populated by the API layer
+	// from the loadpoint controller.
+	GridDeferred bool `json:"grid_deferred"`
+
+	// PlanNextStartMs/PlanNextEndMs/PlanNextWh describe the next
+	// window in which the active plan allocates charge energy to this
+	// loadpoint; PlanTotalWh is everything the plan still intends to
+	// deliver over the horizon. All zero when the planner has no
+	// allocation. Populated by the API layer from the MPC plan.
+	PlanNextStartMs int64   `json:"plan_next_start_ms,omitempty"`
+	PlanNextEndMs   int64   `json:"plan_next_end_ms,omitempty"`
+	PlanNextWh      float64 `json:"plan_next_wh,omitempty"`
+	PlanTotalWh     float64 `json:"plan_total_wh,omitempty"`
 }
 
 // Manager holds the running set of loadpoints. Thread-safe.
@@ -872,6 +898,8 @@ func (lp *loadpointRuntime) snapshot() State {
 		Schedule:           lp.schedule,
 		SoCSource:          lp.socSource,
 		VehicleName:        lp.vehicleName,
+		CommandedW:         lp.commandedW,
+		CommandedKnown:     lp.commandedKnown,
 	}
 }
 

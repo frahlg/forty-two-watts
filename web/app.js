@@ -2589,6 +2589,67 @@
     evModalBody.appendChild(p);
   }
 
+  function evFmtClock(ms) {
+    return new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  }
+
+  // renderEvPlanStatus answers the question the status table can't:
+  // "why isn't it charging right now, and when will it?" Field
+  // experience: a car plugged in against a schedule sits at 0 W until
+  // the cheap slots arrive, the modal looks dead, and the operator
+  // presses Start — which overrides the plan for the whole session.
+  // One honest sentence here is what prevents that. Returns null when
+  // there is nothing worth saying (no loadpoint, or unplugged — the
+  // schedule note covers that case).
+  function renderEvPlanStatus(lp, d) {
+    if (!lp || !lp.plugged_in) return null;
+    var text = null;
+    var tone = "var(--text-dim)";
+    var kwPlanned = lp.plan_total_wh > 0 ? " ~" + (lp.plan_total_wh / 1000).toFixed(1) + " kWh planned." : "";
+    var winActive = lp.plan_next_start_ms > 0 && lp.plan_next_start_ms <= Date.now() && Date.now() < lp.plan_next_end_ms;
+    var charging = (lp.current_power_w || 0) >= 100;
+    var hasSchedule = lp.schedule && lp.schedule.soc > 0;
+    if (lp.manual_active) {
+      text = "Manual charge pinned at " + formatW(lp.manual_charge_w || 0) +
+        " — plan and PV logic are off until Stop or unplug.";
+    } else if (charging) {
+      text = winActive
+        ? "Charging on plan until " + evFmtClock(lp.plan_next_end_ms) + "." + kwPlanned
+        : "Charging.";
+    } else if (lp.commanded_known && lp.commanded_w > 0) {
+      text = "Charger offers " + formatW(lp.commanded_w) +
+        " but the car isn't drawing — it may be full or at its own charge limit.";
+      if (d && d.reason_no_current_label) {
+        text += " Charger reports: " + d.reason_no_current_label + ".";
+      }
+      tone = "var(--text)";
+    } else if (lp.grid_deferred) {
+      text = "Waiting for tomorrow's electricity prices — until they arrive (~13:00) the car charges from PV surplus only.";
+    } else if (winActive) {
+      text = "Paused by the box (fuse protection or PV clamp) — charging resumes on its own." + kwPlanned;
+    } else if (lp.plan_next_start_ms > Date.now()) {
+      text = "Charging planned " + evFmtClock(lp.plan_next_start_ms) + "–" +
+        evFmtClock(lp.plan_next_end_ms) + "." + kwPlanned +
+        " The planner picks the cheapest hours before your target.";
+    } else if (lp.surplus_only) {
+      text = "PV surplus only — charges when solar exceeds house load.";
+    } else if (!hasSchedule) {
+      text = "Nothing will start charging: set a schedule, turn on PV only, or press Start.";
+      tone = "var(--text)";
+    } else {
+      text = "No charge window in the current plan — the target may already be reached.";
+    }
+    if (!text) return null;
+    var p = document.createElement("p");
+    p.style.color = tone;
+    p.style.margin = "0 0 0.6rem 0";
+    p.style.padding = "0.35rem 0.5rem";
+    p.style.borderLeft = "3px solid var(--accent, #888)";
+    p.style.background = "color-mix(in srgb, var(--accent, #888) 8%, transparent)";
+    p.textContent = text;
+    return p;
+  }
+
   // EV modal sub-elements held across refreshes. The status table is
   // updated in place on every poll. The tabbed control (PV charging /
   // Manual / Scheduled) is mounted exactly once per (modal-open × LP)
@@ -2598,6 +2659,7 @@
   // next poll rebuilds from the new authoritative server state. The
   // active tab persists across rebuilds via evActiveTab.
   var statusTableEl = null;
+  var planStatusEl = null;
   var evTabsEl = null;
   var evTabsLpId = null;
   var schedNeedsRebuild = false;
@@ -2646,6 +2708,7 @@
       if (!carConnected && !hasLoadpoints) {
         setEvModalMessage("No EV charger connected");
         statusTableEl = null;
+        planStatusEl = null;
         evTabsEl = null;
         evTabsLpId = null;
         return;
@@ -2705,6 +2768,21 @@
           matched = lps.loadpoints[0];
         }
       }
+      // Plan-status strip: one sentence on why the charger is (not)
+      // charging and when it will. Refreshed on every poll, anchored
+      // right below the status table so it reads as part of the live
+      // state rather than the (once-built) tabbed controls.
+      var freshPlan = renderEvPlanStatus(matched, d);
+      if (planStatusEl && planStatusEl.parentNode === evModalBody) {
+        if (freshPlan) {
+          evModalBody.replaceChild(freshPlan, planStatusEl);
+        } else {
+          evModalBody.removeChild(planStatusEl);
+        }
+      } else if (freshPlan) {
+        evModalBody.insertBefore(freshPlan, statusTableEl.nextSibling);
+      }
+      planStatusEl = freshPlan;
       if (matched) {
         // Build the tabbed control (PV charging / Manual / Scheduled)
         // exactly once per LP. Polling never rebuilds it — inputs keep
