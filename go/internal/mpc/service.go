@@ -1140,6 +1140,29 @@ func (s *Service) canceledReplan(request replanRequest, stage string) *Plan {
 	return s.Latest()
 }
 
+// Resolution caps for a replan whose state space carries an EV
+// loadpoint. See derateResolutionForLoadpoint.
+const (
+	loadpointSoCLevelCap    = 101
+	loadpointActionLevelCap = 201
+)
+
+// derateResolutionForLoadpoint caps the battery grid once a loadpoint
+// extends the state space. DP complexity is O(N·S·A·EL·EA), and the EV
+// dimensions multiply the battery grid by ~50×: carrying the
+// battery-only 201×401 into an EV replan pushes it from ~0.1 s toward
+// ~5 s, past the replan budget. The caps hold EV replans near 1 s.
+// Grids already at or below them pass through untouched.
+func derateResolutionForLoadpoint(socLevels, actionLevels int) (int, int) {
+	if socLevels > loadpointSoCLevelCap {
+		socLevels = loadpointSoCLevelCap
+	}
+	if actionLevels > loadpointActionLevelCap {
+		actionLevels = loadpointActionLevelCap
+	}
+	return socLevels, actionLevels
+}
+
 func (s *Service) runReplan(request replanRequest) *Plan {
 	if !request.accepted {
 		request.cancel()
@@ -1332,6 +1355,7 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 			p.Loadpoints = active
 			p.Loadpoint = active[0]
 			loadpointID = active[0].ID
+			p.SoCLevels, p.ActionLevels = derateResolutionForLoadpoint(p.SoCLevels, p.ActionLevels)
 		}
 	}
 

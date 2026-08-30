@@ -145,6 +145,20 @@ func TestReplayBenchSnapshots(t *testing.T) {
 		if params.MinArbitrageSpreadOreKwh == 0 {
 			params.MinArbitrageSpreadOreKwh = fallbackSpreadOre
 		}
+		// A blob carries the RECORDED replan's grid resolution, so a
+		// default bump would be invisible here without an override —
+		// judging a resolution change is exactly what the knobs exist
+		// for (FTW_MPC_BENCH_SOC_LEVELS / FTW_MPC_BENCH_ACTION_LEVELS).
+		if v := os.Getenv("FTW_MPC_BENCH_SOC_LEVELS"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n >= 3 {
+				params.SoCLevels = n
+			}
+		}
+		if v := os.Getenv("FTW_MPC_BENCH_ACTION_LEVELS"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n >= 3 {
+				params.ActionLevels = n
+			}
+		}
 
 		recCorr := terminalCorrectedOre(recorded.TotalCostOre, planEndSoC(recorded), params)
 

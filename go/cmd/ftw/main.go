@@ -4028,23 +4028,32 @@ func buildMPC(cfg *config.Config, st *state.Store, tel *telemetry.Store, capacit
 	}
 	params := mpc.Params{
 		Mode:                mode,
-		SoCLevels:           41,
+		SoCLevels:           201,
 		CapacityWh:          totalCap,
 		SoCMin:              socMin,
 		SoCMax:              socMax,
 		PVChargeBonusOreKwh: pvBonus,
 		InitialSoC:          0.50,
-		// ActionLevels = 81 → 225 W discretization step on a ±9 kW
-		// action range. Coarser values (21=900 W, 41=450 W) lose
-		// borderline-PV slots: on a 273 W net surplus the 450 W min
-		// charge action overshoots ModeSelfConsumption's no-battery-
-		// export rule (gridW ends up positive past tolerance) and the
-		// DP falls back to idle/export the surplus. 81 levels lets the
-		// DP land on +225 W and absorb the surplus into the battery.
-		// DP complexity is O(N×S×A×EL×EA) — at the production 192-slot
-		// × 41-SoC × 1-EV grid, 81 actions is ~636k evaluations,
-		// still ~5 ms per replan on the Pi.
-		ActionLevels:        81,
+		// Coarse action grids lose borderline-PV slots: at 21 levels
+		// (900 W step on a ±9 kW range) or 41 (450 W), the smallest
+		// legal charge action on a 273 W net surplus overshoots
+		// ModeSelfConsumption's no-battery-export rule (gridW ends up
+		// positive past tolerance) and the DP falls back to idle and
+		// exports the surplus. 81 levels (225 W) was the first grid
+		// that could land inside that slot; it is still the floor
+		// pinned by self_consumption_horizon_test.go.
+		//
+		// Discretization is now the last measured gap to the external
+		// MILP (−72 öre per 48 h plan, terminal-corrected, on the
+		// 12-snapshot replay bench), so the grid is sized to the solve
+		// budget rather than to one slot. DP complexity is
+		// O(N×S×A×EL×EA): 193 slots × 201 SoC × 401 actions ≈ 15.6M
+		// evaluations, ~100 ms-scale on a Pi 5 — the same bench
+		// measured 3–6 ms at 41×81 — well inside the seconds budget.
+		// An active EV loadpoint multiplies this grid, so service.go
+		// derates it to 101×201 for those replans; see
+		// derateResolutionForLoadpoint.
+		ActionLevels:        401,
 		MaxChargeW:          maxChg,
 		MaxDischargeW:       maxDis,
 		ChargeEfficiency:    chgEff,
