@@ -542,11 +542,13 @@ func main() {
 	storedTrust, _ := st.LoadConfig(config.StateKeyForecastTrust)
 	storedExport, _ := st.LoadConfig(config.StateKeyBatteryExport)
 	yamlTrust, yamlExport := "", ""
+	var yamlK *float64
 	if cfg.Planner != nil {
 		yamlTrust = cfg.Planner.ForecastTrust
 		yamlExport = cfg.Planner.BatteryExport
+		yamlK = cfg.Planner.PVForecastSafetyK
 	}
-	trust, export, missingPrefs := config.ResolvePlannerPrefs(storedTrust, storedExport, string(ctrl.Mode), yamlTrust, yamlExport)
+	trust, export, missingPrefs := config.ResolvePlannerPrefs(storedTrust, storedExport, string(ctrl.Mode), yamlTrust, yamlExport, yamlK)
 	plannerPrefs := config.NewPlannerPrefs(trust, export)
 	if missingPrefs {
 		if err := st.SaveConfig(config.StateKeyForecastTrust, string(trust)); err != nil {

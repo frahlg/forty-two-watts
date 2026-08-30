@@ -889,8 +889,13 @@ type Planner struct {
 	// down betting on PV that may not arrive — a reserve emerges from the
 	// live forecast uncertainty itself, sized to the real risk (large on
 	// variable cloudy days, ~zero on clear days or in winter), not a flat
-	// SoC %. Pointer so unset (→ default 1.0) is distinct from an explicit
-	// 0 (= raw forecast, no hedge: "use the battery you have").
+	// SoC %. Pointer so unset is distinct from an explicit 0.
+	//
+	// FIRST-BOOT SEED ONLY. The live value follows the Plan card's
+	// forecast-trust slider (SQLite, same stored-wins contract as
+	// forecast_trust); this field maps to the nearest trust step once
+	// when nothing is stored and never overrides the slider — the old
+	// precedence disabled the slider for as long as the field existed.
 	PVForecastSafetyK *float64 `yaml:"pv_forecast_safety_k,omitempty" json:"pv_forecast_safety_k,omitempty"`
 
 	// PVChargeBonusOreKwh credits each kWh of battery charge fed from
@@ -942,16 +947,6 @@ func (p *Planner) OptimizerTimeout() time.Duration {
 		return optimizercontract.DefaultTimeout
 	}
 	return time.Duration(p.OptimizerTimeoutS * float64(time.Second))
-}
-
-// PVSafetyK resolves the downside-PV haircut scale (forecast − k·σ). Unset
-// config (nil Planner or nil field) → default 1.0; an explicit value is
-// honored verbatim, including 0 (no hedge — "use the battery you have").
-func (p *Planner) PVSafetyK() float64 {
-	if p == nil || p.PVForecastSafetyK == nil {
-		return 1.0
-	}
-	return *p.PVForecastSafetyK
 }
 
 // Site is the top-level control loop config.

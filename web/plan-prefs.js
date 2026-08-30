@@ -92,7 +92,6 @@ export function prefsFromStatus(status) {
     battery_export: (exp === "allowed" || exp === "not_allowed" || exp === "unknown")
       ? exp
       : "unknown",
-    yaml_custom: !!s.planner_yaml_custom,
     mapped_k: typeof s.planner_mapped_k === "number" && !isNaN(s.planner_mapped_k)
       ? s.planner_mapped_k
       : safetyK(trust),

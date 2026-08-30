@@ -48,14 +48,14 @@ func TestDeriveBatteryExport(t *testing.T) {
 }
 
 func TestResolvePlannerPrefsStoredWins(t *testing.T) {
-	trust, export, missing := ResolvePlannerPrefs("bold", "allowed", "planner_passive_arbitrage", "cautious", "not_allowed")
+	trust, export, missing := ResolvePlannerPrefs("bold", "allowed", "planner_passive_arbitrage", "cautious", "not_allowed", nil)
 	if trust != ForecastTrustBold || export != BatteryExportAllowed || missing {
 		t.Fatalf("got trust=%s export=%s missing=%v", trust, export, missing)
 	}
 }
 
 func TestResolvePlannerPrefsActiveUpgradeAsks(t *testing.T) {
-	trust, export, missing := ResolvePlannerPrefs("", "", "planner_arbitrage", "", "")
+	trust, export, missing := ResolvePlannerPrefs("", "", "planner_arbitrage", "", "", nil)
 	if trust != ForecastTrustBalanced {
 		t.Errorf("trust=%s, want balanced", trust)
 	}
@@ -68,20 +68,20 @@ func TestResolvePlannerPrefsActiveUpgradeAsks(t *testing.T) {
 }
 
 func TestResolvePlannerPrefsPassiveStaysOff(t *testing.T) {
-	_, export, _ := ResolvePlannerPrefs("", "", "planner_passive_arbitrage", "", "")
+	_, export, _ := ResolvePlannerPrefs("", "", "planner_passive_arbitrage", "", "", nil)
 	if export != BatteryExportNotAllowed {
 		t.Errorf("export=%s, want not_allowed", export)
 	}
 }
 
-func TestPlannerEffectiveSafetyKYAMLWins(t *testing.T) {
+func TestPlannerEffectiveSafetyKFollowsTrust(t *testing.T) {
+	// The slider owns the live haircut: a YAML k no longer wins over the
+	// trust mapping (it only seeds the first boot, see
+	// TestResolvePlannerPrefsSeedsFromYAMLK).
 	k := 0.5
 	p := &Planner{PVForecastSafetyK: &k}
-	if got := p.EffectiveSafetyK(ForecastTrustCautious); got != 0.5 {
-		t.Errorf("yaml k=%v, want 0.5", got)
-	}
-	if !p.YAMLCustomK() {
-		t.Error("YAMLCustomK should be true")
+	if got := p.EffectiveSafetyK(ForecastTrustCautious); got != 2 {
+		t.Errorf("cautious → 2 despite YAML k, got %v", got)
 	}
 	empty := &Planner{}
 	if got := empty.EffectiveSafetyK(ForecastTrustCautious); got != 2 {
@@ -95,5 +95,21 @@ func TestParseForecastTrustRejectsJunk(t *testing.T) {
 	}
 	if _, ok := ParseBatteryExport("maybe"); ok {
 		t.Fatal("maybe must not parse")
+	}
+}
+
+func TestResolvePlannerPrefsSeedsFromYAMLK(t *testing.T) {
+	// No stored pref, no yaml forecast_trust, but a legacy
+	// pv_forecast_safety_k: the k seeds the nearest trust step once and
+	// the result is persisted — the slider owns it from then on.
+	two := 2.0
+	trust, _, missing := ResolvePlannerPrefs("", "", "planner_passive_arbitrage", "", "", &two)
+	if trust != ForecastTrustCautious || !missing {
+		t.Fatalf("k=2 seed: got trust=%s missing=%v, want cautious/true", trust, missing)
+	}
+	// A stored pref always beats the yaml k.
+	trust, _, _ = ResolvePlannerPrefs("bold", "allowed", "planner_passive_arbitrage", "", "", &two)
+	if trust != ForecastTrustBold {
+		t.Fatalf("stored beats yaml k: got %s", trust)
 	}
 }

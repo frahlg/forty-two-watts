@@ -104,21 +104,18 @@ describe("prefsFromStatus", () => {
     const p = prefsFromStatus({});
     assert.equal(p.forecast_trust, "balanced");
     assert.equal(p.battery_export, "unknown");
-    assert.equal(p.yaml_custom, false);
     assert.equal(p.mapped_k, 1);
   });
 
-  it("passes through yaml_custom and mapped_k", () => {
+  it("passes through mapped_k — the slider always owns trust (#1017)", () => {
     const p = prefsFromStatus({
       forecast_trust: "bold",
       battery_export: "allowed",
-      planner_yaml_custom: true,
-      planner_mapped_k: 0.25,
+      planner_mapped_k: 0,
     });
     assert.equal(p.forecast_trust, "bold");
     assert.equal(p.battery_export, "allowed");
-    assert.equal(p.yaml_custom, true);
-    assert.equal(p.mapped_k, 0.25);
+    assert.equal(p.mapped_k, 0);
   });
 });
 

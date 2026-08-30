@@ -8,7 +8,7 @@ import (
 	"github.com/srcfl/ftw/go/internal/control"
 )
 
-func (s *Server) plannerPrefsSnapshot() (trust config.ForecastTrust, export config.BatteryExport, yamlCustom bool, mappedK float64, mappedMode string) {
+func (s *Server) plannerPrefsSnapshot() (trust config.ForecastTrust, export config.BatteryExport, mappedK float64, mappedMode string) {
 	trust, export = s.deps.PlannerPrefs.Get()
 	var planner *config.Planner
 	if s.deps.Cfg != nil {
@@ -16,18 +16,16 @@ func (s *Server) plannerPrefsSnapshot() (trust config.ForecastTrust, export conf
 		planner = s.deps.Cfg.Planner
 		s.deps.CfgMu.RUnlock()
 	}
-	yamlCustom = planner.YAMLCustomK()
 	mappedK = planner.EffectiveSafetyK(trust)
 	mappedMode = export.PlannerModeKey()
 	return
 }
 
 func (s *Server) handleGetPlannerPrefs(w http.ResponseWriter, r *http.Request) {
-	trust, export, yamlCustom, mappedK, mappedMode := s.plannerPrefsSnapshot()
+	trust, export, mappedK, mappedMode := s.plannerPrefsSnapshot()
 	writeJSON(w, 200, map[string]any{
 		"forecast_trust": trust,
 		"battery_export": export,
-		"yaml_custom":    yamlCustom,
 		"mapped_k":       mappedK,
 		"mapped_mode":    mappedMode,
 	})
@@ -56,12 +54,11 @@ func (s *Server) handleSetPlannerPrefs(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]string{"error": err.Error()})
 		return
 	}
-	_, _, yamlCustom, mappedK, mappedMode := s.plannerPrefsSnapshot()
+	_, _, mappedK, mappedMode := s.plannerPrefsSnapshot()
 	writeJSON(w, 200, map[string]any{
 		"status":         "ok",
 		"forecast_trust": trust,
 		"battery_export": export,
-		"yaml_custom":    yamlCustom,
 		"mapped_k":       mappedK,
 		"mapped_mode":    mappedMode,
 	})

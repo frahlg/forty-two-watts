@@ -1042,18 +1042,13 @@ import {
     const slider = document.getElementById("forecast-trust-slider");
     if (slider && !trustDirty) {
       slider.value = String(sliderFromTrust(p.forecast_trust));
-      slider.disabled = !!p.yaml_custom;
       slider.setAttribute("aria-valuenow", slider.value);
       slider.setAttribute("aria-valuetext", p.forecast_trust);
     }
-    const yamlNote = document.getElementById("forecast-trust-yaml");
-    if (yamlNote) yamlNote.hidden = !p.yaml_custom;
 
     const hedgeEl = document.getElementById("forecast-trust-hedge");
     if (hedgeEl) {
-      const kUse = p.yaml_custom
-        ? mappedK()
-        : (slider ? safetyK(trustFromSlider(slider.value)) : mappedK());
+      const kUse = slider ? safetyK(trustFromSlider(slider.value)) : mappedK();
       const text = hedgeLine(kUse, state.pvSigmaW);
       if (text == null) {
         hedgeEl.hidden = true;
@@ -1101,7 +1096,6 @@ import {
       state.prefs = {
         forecast_trust: j.forecast_trust,
         battery_export: j.battery_export,
-        yaml_custom: !!j.yaml_custom,
         mapped_k: typeof j.mapped_k === "number" ? j.mapped_k : safetyK(j.forecast_trust),
       };
       trustDirty = false;

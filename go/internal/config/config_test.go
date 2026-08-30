@@ -25,21 +25,23 @@ api:
   port: 8080
 `
 
-func TestPlannerPVSafetyKResolution(t *testing.T) {
-	var nilPlanner *Planner
-	if got := nilPlanner.PVSafetyK(); got != 1.0 {
-		t.Errorf("nil Planner → 1.0, got %v", got)
+func TestPlannerSafetyKFollowsTrustNotYAML(t *testing.T) {
+	// pv_forecast_safety_k seeds the first boot (TrustFromSafetyK) and
+	// never wins over the slider afterwards — EffectiveSafetyK is the
+	// trust mapping regardless of what YAML says.
+	quarter := 0.25
+	p := &Planner{PVForecastSafetyK: &quarter}
+	if got := p.EffectiveSafetyK(ForecastTrustCautious); got != 2.0 {
+		t.Errorf("cautious → 2.0 despite YAML k, got %v", got)
 	}
-	if got := (&Planner{}).PVSafetyK(); got != 1.0 {
-		t.Errorf("nil field → 1.0, got %v", got)
+	if got := TrustFromSafetyK(0); got != ForecastTrustBold {
+		t.Errorf("k=0 seeds bold, got %v", got)
 	}
-	zero := 0.0
-	if got := (&Planner{PVForecastSafetyK: &zero}).PVSafetyK(); got != 0 {
-		t.Errorf("explicit 0 → 0 (no hedge), got %v", got)
+	if got := TrustFromSafetyK(1); got != ForecastTrustBalanced {
+		t.Errorf("k=1 seeds balanced, got %v", got)
 	}
-	two := 2.0
-	if got := (&Planner{PVForecastSafetyK: &two}).PVSafetyK(); got != 2.0 {
-		t.Errorf("explicit 2.0 → 2.0, got %v", got)
+	if got := TrustFromSafetyK(2); got != ForecastTrustCautious {
+		t.Errorf("k=2 seeds cautious, got %v", got)
 	}
 }
 
@@ -70,10 +72,8 @@ planner:
 	if c.Planner.PVForecastSafetyK != nil {
 		t.Errorf("unset pv_forecast_safety_k must stay nil, got %v", *c.Planner.PVForecastSafetyK)
 	}
-	if got := c.Planner.PVSafetyK(); got != 1.0 {
-		t.Errorf("unset → PVSafetyK 1.0, got %v", got)
-	}
-	// Explicit 0 must parse to *0 (distinct from unset) and be honored.
+	// Explicit 0 must parse to *0 (distinct from unset): it seeds the
+	// first boot as bold via TrustFromSafetyK.
 	c0, err := Parse([]byte(base+"  pv_forecast_safety_k: 0\n"), "/tmp")
 	if err != nil {
 		t.Fatal(err)
@@ -81,16 +81,9 @@ planner:
 	if c0.Planner.PVForecastSafetyK == nil || *c0.Planner.PVForecastSafetyK != 0 {
 		t.Errorf("explicit 0 must parse to *0, got %v", c0.Planner.PVForecastSafetyK)
 	}
-	if got := c0.Planner.PVSafetyK(); got != 0 {
-		t.Errorf("explicit 0 → PVSafetyK 0 (no hedge), got %v", got)
-	}
-	// Explicit non-default value.
-	c25, err := Parse([]byte(base+"  pv_forecast_safety_k: 2.5\n"), "/tmp")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := c25.Planner.PVSafetyK(); got != 2.5 {
-		t.Errorf("explicit 2.5 → PVSafetyK 2.5, got %v", got)
+	// The live value always follows the trust step, never the YAML k.
+	if got := c0.Planner.EffectiveSafetyK(ForecastTrustBalanced); got != 1.0 {
+		t.Errorf("EffectiveSafetyK ignores YAML k: want 1.0, got %v", got)
 	}
 }
 

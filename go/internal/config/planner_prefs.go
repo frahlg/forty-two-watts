@@ -95,17 +95,33 @@ func DeriveBatteryExport(persistedMode string) BatteryExport {
 	}
 }
 
-// ResolvePlannerPrefs builds the live household object from SQLite, then YAML,
-// then the persisted control mode. missingStored is true when either SQLite
-// key was absent so the caller should persist the result.
-func ResolvePlannerPrefs(storedTrust, storedExport, persistedMode, yamlTrust, yamlExport string) (trust ForecastTrust, export BatteryExport, missingStored bool) {
+// TrustFromSafetyK maps an explicit numeric haircut scale onto the nearest
+// trust step. Used only to seed a first boot from a legacy
+// pv_forecast_safety_k in YAML — after that the slider owns the value.
+func TrustFromSafetyK(k float64) ForecastTrust {
+	switch {
+	case k <= 0.25:
+		return ForecastTrustBold
+	case k < 1.5:
+		return ForecastTrustBalanced
+	default:
+		return ForecastTrustCautious
+	}
+}
+
+// ResolvePlannerPrefs builds the live household object from SQLite, then YAML
+// (forecast_trust, or a legacy pv_forecast_safety_k mapped to the nearest
+// step), then the persisted control mode. missingStored is true when either
+// SQLite key was absent so the caller should persist the result.
+func ResolvePlannerPrefs(storedTrust, storedExport, persistedMode, yamlTrust, yamlExport string, yamlK *float64) (trust ForecastTrust, export BatteryExport, missingStored bool) {
 	if t, ok := ParseForecastTrust(storedTrust); ok && storedTrust != "" {
 		trust = t
-	} else if t, ok := ParseForecastTrust(yamlTrust); ok {
+	} else if t, ok := ParseForecastTrust(yamlTrust); ok && yamlTrust != "" {
 		trust = t
-		if storedTrust == "" {
-			missingStored = true
-		}
+		missingStored = true
+	} else if yamlK != nil {
+		trust = TrustFromSafetyK(*yamlK)
+		missingStored = true
 	} else {
 		trust = ForecastTrustBalanced
 		missingStored = true
@@ -122,16 +138,15 @@ func ResolvePlannerPrefs(storedTrust, storedExport, persistedMode, yamlTrust, ya
 	return trust, export, missingStored
 }
 
-// EffectiveSafetyK prefers an explicit YAML k over the trust mapping.
+// EffectiveSafetyK maps the household's trust step to the haircut scale.
+// An explicit pv_forecast_safety_k in YAML no longer wins over the
+// slider: it seeds the first boot (ResolvePlannerPrefs) and nothing
+// else — the Plan card's slider owns the live value, the same
+// stored-wins contract forecast_trust itself has. The old precedence
+// rendered the slider permanently disabled with a "config.yaml wins"
+// note, which is a config file acting as a user interface.
 func (p *Planner) EffectiveSafetyK(trust ForecastTrust) float64 {
-	if p != nil && p.PVForecastSafetyK != nil {
-		return *p.PVForecastSafetyK
-	}
 	return trust.SafetyK()
-}
-
-func (p *Planner) YAMLCustomK() bool {
-	return p != nil && p.PVForecastSafetyK != nil
 }
 
 // PlannerPrefs is the in-memory household planner object. SQLite is the

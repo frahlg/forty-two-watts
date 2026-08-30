@@ -124,7 +124,10 @@ func TestSetModeActiveConfirmsExport(t *testing.T) {
 	}
 }
 
-func TestYAMLCustomKWinsOverTrust(t *testing.T) {
+func TestYAMLKNeverLocksTheSlider(t *testing.T) {
+	// A pv_forecast_safety_k in YAML seeds the first boot and nothing
+	// else — the slider owns the live value, so the prefs endpoint must
+	// report the trust mapping, not the YAML number, and no lock flag.
 	k := 0.25
 	srv, _, _ := plannerPrefsServer(t, control.ModePlannerPassiveArbitrage)
 	srv.deps.Cfg.Planner = &config.Planner{PVForecastSafetyK: &k}
@@ -135,10 +138,10 @@ func TestYAMLCustomKWinsOverTrust(t *testing.T) {
 	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
 		t.Fatal(err)
 	}
-	if got["yaml_custom"] != true {
-		t.Errorf("yaml_custom=%v", got["yaml_custom"])
+	if _, present := got["yaml_custom"]; present {
+		t.Errorf("yaml_custom still reported: %v", got["yaml_custom"])
 	}
-	if got["mapped_k"] != 0.25 {
-		t.Errorf("mapped_k=%v, want 0.25", got["mapped_k"])
+	if got["mapped_k"] != 1.0 {
+		t.Errorf("mapped_k=%v, want 1.0 (balanced mapping, YAML ignored)", got["mapped_k"])
 	}
 }
