@@ -567,6 +567,16 @@
             <p id="plan-export-unknown" class="plan-export-unknown" hidden>Not checked — battery export stays off.</p>
           </div>
           <p id="plan-export-sentence" class="plan-export-sentence"></p>
+          <!-- The way back to the planner. Without it a house left in a
+               manual mode has no control here that starts planning again.
+               Which planner mode it lands on is the server's answer
+               (GET /api/planner/prefs → mapped_mode), so this button never
+               decides on its own whether the battery may sell. Shown only
+               while a manual mode is driving. -->
+          <div class="mode-buttons mode-buttons-primary" id="plan-use-row" hidden>
+            <button type="button" id="plan-use-btn"
+                    title="Hand the battery back to the plan">Use the plan</button>
+          </div>
           <!-- Remaining /api/modes entries (manual) still render here.
                Planner keys are skipped in renderModeCatalog. -->
           <div class="mode-buttons mode-buttons-primary" id="mode-buttons-primary" hidden></div>

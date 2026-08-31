@@ -1231,6 +1231,14 @@ import {
       replan.disabled = !enabled;
       replan.title = enabled ? 'Force a fresh plan' : copy.summary;
     }
+    // "Use the plan" carries no data-mode, so the loop above never sees it.
+    // Offering it while the planner cannot run would hand the house to a
+    // mode that then has to explain why it is not planning.
+    const usePlan = document.getElementById('plan-use-btn');
+    if (usePlan) {
+      usePlan.disabled = !enabled;
+      usePlan.title = enabled ? 'Hand the battery back to the plan' : copy.detail;
+    }
   }
 
   function renderStrategyHint() {

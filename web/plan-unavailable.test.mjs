@@ -11,6 +11,7 @@ describe("plan unavailable reason", () => {
     assert.match(plan, /applyPlannerModeAvailability/);
     assert.match(plan, /btn\.disabled = !enabled/);
     assert.match(plan, /replan\.disabled = !enabled/);
+    assert.match(plan, /usePlan\.disabled = !enabled/);
     assert.doesNotMatch(plan, /MPC planner disabled/);
   });
 });

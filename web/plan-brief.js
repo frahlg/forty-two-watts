@@ -115,7 +115,7 @@ function manualBrief(status, hasBattery) {
     state: { key: "manual", label: "Manual", tone: "idle" },
     next: {
       action: "Manual control is active",
-      time: "Choose a planning strategy to create a schedule",
+      time: "Use the plan to create a schedule",
     },
     reason: "Planning is not controlling the battery",
     constraint: "FTW safety limits still apply to manual control",
@@ -126,7 +126,7 @@ function manualBrief(status, hasBattery) {
     soc: batterySocNow(status, hasBattery, "Expected charge needs an active plan"),
     planner: {
       label: "Planner off",
-      detail: "Select a planning strategy to enable it",
+      detail: "Use the plan to enable it",
     },
   };
 }
