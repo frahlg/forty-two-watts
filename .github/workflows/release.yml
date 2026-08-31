@@ -115,7 +115,7 @@ jobs:
 
       - name: Create or update Version Packages PR
         id: changesets
-        uses: changesets/action@v1
+        uses: changesets/action@v2
         with:
           # `version-packages` runs `changeset version` to bump package.json
           # and rewrite CHANGELOG.md, then synchronizes package-lock.json's
