@@ -28,3 +28,10 @@ a snapshot records the planning inputs but not the site's solver settings,
 so replaying one with the bench's defaults asks the challenger a different
 question than the box asked — worth more than 130 öre per plan on a summer
 day with PV uncertainty, which is larger than the gap being measured.
+
+A second bench asks what the price twin is worth. It re-solves each snapshot
+three ways — the confidences the box used, those same forecast slots
+flattened to the horizon mean, and the forecast slots deleted — and reports
+the only number that reaches hardware: the first slot's battery power. On
+every snapshot recorded so far the three agree exactly, and they keep
+agreeing until the known window falls under four hours.
