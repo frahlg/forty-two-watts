@@ -63,6 +63,21 @@ describe("optimizerStatus", () => {
   });
 });
 
+describe("Ask why settings", () => {
+  it("renders the key field and default model", () => {
+    const html = globalThis.window.FTWSettings.tabs.system.render({
+      config: { assistant: { enabled: true, has_api_key: true, model: "openrouter/free" } },
+      escHtml: (s) => String(s ?? ""),
+    });
+    assert.match(html, /Ask why/);
+    assert.match(html, /data-checkbox-path="assistant.enabled"/);
+    assert.match(html, /data-path="assistant.api_key"/);
+    assert.match(html, /configured — hidden/);
+    assert.match(html, /openrouter\/free/);
+    assert.match(html, /never issues driver commands/);
+  });
+});
+
 describe("bundleDisplay", () => {
   it("keeps the per-component breakdown for native installs", () => {
     assert.equal(bundleDisplay({ core: { version: "v1.10.0" } }), null);

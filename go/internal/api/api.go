@@ -234,6 +234,10 @@ type Deps struct {
 	Bundle *components.Bundle
 
 	Version string
+
+	// AssistantHTTP is the outbound client for Ask why. Nil uses a
+	// client with assistant.Timeout. Tests inject httptest.Server's client.
+	AssistantHTTP *http.Client
 }
 
 // Server wraps the http.ServeMux and adds shared middleware (logging,
@@ -278,6 +282,7 @@ type Server struct {
 	versionUpdateMu sync.Mutex
 	driverUpdateMu  sync.Mutex
 	backupMu        sync.Mutex
+	assistantAskMu  sync.Mutex
 
 	// Timers that put a driver back after an edit has been tried for its
 	// window. The record on disk is what survives a restart; these only make
@@ -440,6 +445,8 @@ func (s *Server) routes() {
 	s.handle("GET  /api/support/dump", Local, s.handleSupportDump)
 	s.handle("GET  /api/ocpp/chargers", Local, s.handleOCPPChargers)
 	s.handle("GET  /api/support/report", Local, s.handleSupportReport)
+	s.handle("GET  /api/assistant/status", Read, s.handleAssistantStatus)
+	s.handle("POST /api/assistant/ask", Local, s.handleAssistantAsk)
 	s.handle("POST   /api/drivers/{name}/control", Actuate, s.handleDriverControl)
 	s.handle("DELETE /api/drivers/{name}/control", Actuate, s.handleDriverControlRelease)
 	s.handle("POST /api/drivers/{name}/restart", Configure, s.handleDriverRestart)

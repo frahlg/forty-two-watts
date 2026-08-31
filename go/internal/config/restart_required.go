@@ -12,7 +12,7 @@ import "reflect"
 //
 //   - Site control scalars (grid_target, tolerance, slew, min_dispatch),
 //     fuse params, drivers, capacities, inverter groups, driver limits,
-//     loadpoints, notifications, MPC capacity, the Weather subset
+//     loadpoints, notifications, assistant, MPC capacity, the Weather subset
 //     {pv_rated_w, latitude, longitude}, fleet_ping.enabled, and
 //     home_assistant.* reload live.
 //   - Everything else (api.port, state.path, price.*, planner.*, nova.*,

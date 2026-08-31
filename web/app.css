@@ -1640,6 +1640,12 @@ body.ftw-app .plan-help-request {
   padding-top: 10px;
   border-top: 1px solid var(--border);
 }
+body.ftw-app .plan-help-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  align-items: center;
+}
 body.ftw-app .plan-help-request button { padding-left: 0; }
 body.ftw-app .plan-help-request button[disabled] {
   opacity: 0.6;

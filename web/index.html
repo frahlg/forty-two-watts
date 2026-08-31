@@ -616,10 +616,15 @@
              forecast-versus-reality and any automated findings — enough
              for someone else to answer without a screenshot round-trip. -->
         <div class="plan-help-request">
-          <button type="button" id="plan-help-report" class="btn-link">
-            Something looks wrong? Download a help report
-          </button>
-          <small>One file describing what FTW is doing and why, with the logs behind it. Share it when asking for help.</small>
+          <div class="plan-help-actions">
+            <button type="button" id="plan-ask-why" class="btn-link">
+              Something looks wrong? Ask why
+            </button>
+            <button type="button" id="plan-help-report" class="btn-link">
+              Download a help report
+            </button>
+          </div>
+          <small>Ask why reads this site and explains. The report is the same file you can share as-is.</small>
         </div>
       </section>
     </section>
@@ -989,8 +994,9 @@
   <script src="/settings/tabs/fleet.js?v=fleetping2"></script>
   <script src="/settings/tabs/notifications.js?v=tabsplit2"></script>
   <script src="/settings/tabs/ev.js?v=tabsplit2"></script>
-  <script src="/settings/tabs/system.js?v=lan1"></script>
+  <script src="/settings/tabs/system.js?v=ask1"></script>
   <script src="/diagnostics-modal.js?v=diag3"></script>
+  <script src="/assistant.js?v=ask1"></script>
   <script src="/models.js?v=diag2"></script>
   <script type="module" src="/plan.js?v=soc2"></script>
   <script src="/twins.js?v=diag2"></script>

@@ -82,7 +82,23 @@
   }
 
   S.tabs.system = {
-    render: function () {
+    render: function (ctx) {
+      ctx = ctx || {};
+      var escHtml = ctx.escHtml || function (s) {
+        var div = document.createElement("div");
+        div.textContent = s == null ? "" : String(s);
+        return div.innerHTML;
+      };
+      function escAttr(s) {
+        return String(s == null ? "" : s)
+          .replace(/&/g, "&amp;")
+          .replace(/"/g, "&quot;")
+          .replace(/</g, "&lt;");
+      }
+      var a = (ctx.config && ctx.config.assistant) || {};
+      var keyPlaceholder = a.has_api_key
+        ? "configured — hidden, type to replace"
+        : "sk-or-v1-…";
       return '' +
         '<style>' +
         '  .sys-grid { display: grid; gap: 12px; }' +
@@ -166,6 +182,19 @@
         '<fieldset>' +
         '<legend>Components</legend>' +
         '<div class="sys-grid" id="sys-components">Loading component status…</div>' +
+        '</fieldset>' +
+        '<fieldset>' +
+        '<legend>Ask why</legend>' +
+        '<p class="sys-meta">Reads the local help report and explains it. Needs an OpenRouter key. The key stays on this box and is sent only as a bearer token to the API you set. Ask why never issues driver commands.</p>' +
+        '<label class="sys-check" style="display:flex;align-items:center;gap:8px;margin:8px 0">' +
+        '  <input type="checkbox" data-checkbox-path="assistant.enabled"' + (a.enabled ? ' checked' : '') + '>' +
+        '  Enable' +
+        '</label>' +
+        '<label for="sys-assistant-key">OpenRouter API key</label>' +
+        '<input type="password" id="sys-assistant-key" data-path="assistant.api_key" value="" autocomplete="off" placeholder="' + escAttr(keyPlaceholder) + '">' +
+        '<label for="sys-assistant-model">Model</label>' +
+        '<input type="text" id="sys-assistant-model" data-path="assistant.model" value="' + escAttr(a.model || "openrouter/free") + '">' +
+        '<p class="sys-help-secondary">Free key at <a href="https://openrouter.ai/keys" target="_blank" rel="noopener">openrouter.ai/keys</a>. Default <code>openrouter/free</code> stays on free models.</p>' +
         '</fieldset>' +
         '<fieldset>' +
         '<legend>Help</legend>' +

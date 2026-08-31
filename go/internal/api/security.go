@@ -221,6 +221,7 @@ func protectedReadPath(path string) bool {
 	case "/api/config",
 		"/api/support/dump",
 		"/api/support/report",
+		"/api/assistant/status",
 		"/api/logs",
 		"/api/system/info",
 		"/api/storage/inventory",
