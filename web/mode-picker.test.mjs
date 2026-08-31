@@ -22,8 +22,16 @@ describe("strategy mode picker", () => {
 
   it("opens the manual drawer when the live mode lives there", () => {
     assert.match(app, /function revealManualModes\(mode\)/);
-    assert.match(app, /revealManualModes\(data\.mode\)/);
+    assert.match(app, /revealManualModes\(activeMode\)/);
     assert.match(app, /revealManualModes\(currentMode\)/);
+  });
+
+  it("auto-opens only when the mode changes", () => {
+    // The status poll repeats the same mode every couple of seconds. Without
+    // the early return, each one would force the drawer back open and undo
+    // "Hide manual" a second after the user pressed it.
+    assert.match(app, /lastRevealedMode = null/);
+    assert.match(app, /if \(!mode \|\| mode === lastRevealedMode\) return;/);
   });
 
   it("marks the tapped mode before the POST returns", () => {
@@ -32,5 +40,9 @@ describe("strategy mode picker", () => {
       app,
       /function setMode\(mode\) \{\s*markModeActive\(mode\);\s*revealManualModes\(mode\);/s,
     );
+    // …and holds it, so a status read already in flight with the old mode
+    // can't flash the previous button back.
+    assert.match(app, /pendingMode = mode;\s*pendingModeUntil = Date\.now\(\)/);
+    assert.match(app, /var activeMode = pendingMode \|\| data\.mode;/);
   });
 });
