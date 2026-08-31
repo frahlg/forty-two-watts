@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"math"
 	"time"
 )
 
@@ -34,7 +35,23 @@ const (
 	// shadowErrWindowLimit bounds the suppression map. Errors carrying a
 	// request id or timestamp would otherwise make every message distinct.
 	shadowErrWindowLimit = 32
+	// championEvalDriftOre is how far Core's valuation of its own plan may
+	// sit from the cost that plan reported before it counts as a bug rather
+	// than float residue. A 192-slot horizon accumulates far less than this.
+	championEvalDriftOre = 0.5
 )
+
+// shadowRefusalReason names which side Core declined to cost, and why.
+func shadowRefusalReason(championErr, shadowErr error) string {
+	switch {
+	case championErr != nil && shadowErr != nil:
+		return "core plan: " + championErr.Error() + "; python plan: " + shadowErr.Error()
+	case championErr != nil:
+		return "core plan: " + championErr.Error()
+	default:
+		return "python plan: " + shadowErr.Error()
+	}
+}
 
 type shadowErrWindow struct {
 	openedAt   time.Time
@@ -98,34 +115,75 @@ func (s *Service) runPythonShadow(ctx context.Context, cancel context.CancelFunc
 	block := compareDPShadow(champion, shadow)
 	block.ForecastBasis = "same downside input, python challenger"
 	block.Solver = shadow.Solver
-	block.TotalCostOre = shadow.TotalCostOre
-	block.ActiveMinusShadowOre = champion.TotalCostOre - shadow.TotalCostOre
+	block.SelfReportedOre = shadow.TotalCostOre
+	if shadow.Solver != nil {
+		block.SelfReportedObjectiveOre = shadow.Solver.ObjectiveOre
+	}
 	if block.FirstAction != nil {
 		mode, _, _ := actionToSlot(*block.FirstAction, p.Mode)
 		block.FirstAction.EMSMode = mode
 	}
-	// Raw totals do not compare: a plan that ends the horizon fuller looks
-	// expensive while it is merely storing value. Correct both sides before
-	// the difference is written anywhere a human will read it.
-	championOre := terminalCorrectedOre(champion.TotalCostOre, planEndSoC(&champion), p)
-	shadowOre := terminalCorrectedOre(shadow.TotalCostOre, planEndSoC(&shadow), p)
-	block.ActiveTerminalCorrectedOre = championOre
-	block.TerminalCorrectedOre = shadowOre
-	block.ActiveMinusShadowTerminalCorrectedOre = championOre - shadowOre
 	if block.Solver != nil && block.Solver.SolveMs == 0 {
 		block.Solver.SolveMs = solveMs
 	}
 
-	slog.Info("mpc: core champion vs python shadow",
+	// Both plans are costed by Core, not by whoever produced them. Doing it
+	// for the champion too is not ceremony: it keeps the subtraction
+	// symmetric, so the verdict cannot drift if the DP's own bookkeeping
+	// ever changes, and it is the only way the cross-check below exists.
+	championEval, championErr := evaluatePlan(champion, slots, p)
+	shadowEval, shadowErr := evaluatePlan(shadow, slots, p)
+
+	base := []any{
 		"decision_id", champion.DecisionID,
 		"reason", reason,
-		"core_cost_ore", champion.TotalCostOre,
-		"python_cost_ore", shadow.TotalCostOre,
-		"python_minus_core_ore_terminal_corrected", shadowOre-championOre,
+		"python_self_reported_ore", shadow.TotalCostOre,
+		"python_objective_ore", block.SelfReportedObjectiveOre,
 		"python_solve_ms", solveMs,
 		"mean_abs_battery_delta_w", block.MeanAbsBatteryDeltaW,
 		"direction_disagreements", block.DirectionDisagreements,
-		"compared_slots", block.ComparedSlots)
+		"compared_slots", block.ComparedSlots,
+	}
+	if championErr != nil || shadowErr != nil {
+		block.EvaluationRefusedReason = shadowRefusalReason(championErr, shadowErr)
+		slog.Warn("mpc: core champion vs python shadow not scored",
+			append(base, "evaluation_refused", block.EvaluationRefusedReason)...)
+		s.recordPythonShadow(champion, slots, p, reason, replanAtMs, block)
+		return
+	}
+
+	block.ActiveEvaluationDriftOre = championEval.CostOre - champion.TotalCostOre
+	if math.Abs(block.ActiveEvaluationDriftOre) > championEvalDriftOre {
+		slog.Warn("mpc: core's own plan does not cost what core reported",
+			"decision_id", champion.DecisionID,
+			"reported_ore", champion.TotalCostOre,
+			"evaluated_ore", championEval.CostOre,
+			"drift_ore", block.ActiveEvaluationDriftOre)
+	}
+	block.TotalCostOre = shadowEval.CostOre
+	block.ActiveMinusShadowOre = championEval.CostOre - shadowEval.CostOre
+	block.ActivePVCurtailmentSlots = championEval.CurtailedSlots
+	block.PVCurtailmentSlots = shadowEval.CurtailedSlots
+
+	// Raw totals do not compare: a plan that ends the horizon fuller looks
+	// expensive while it is merely storing value. Correct both sides before
+	// the difference is written anywhere a human will read it.
+	championOre := terminalCorrectedOre(championEval.CostOre, championEval.EndSoC, p)
+	shadowOre := terminalCorrectedOre(shadowEval.CostOre, shadowEval.EndSoC, p)
+	block.ActiveTerminalCorrectedOre = championOre
+	block.TerminalCorrectedOre = shadowOre
+	block.ActiveMinusShadowTerminalCorrectedOre = championOre - shadowOre
+
+	slog.Info("mpc: core champion vs python shadow",
+		append(base,
+			"core_cost_ore", championEval.CostOre,
+			"python_cost_ore", shadowEval.CostOre,
+			"core_cost_ore_terminal_corrected", championOre,
+			"python_cost_ore_terminal_corrected", shadowOre,
+			"python_minus_core_ore_terminal_corrected", shadowOre-championOre,
+			"core_evaluation_drift_ore", block.ActiveEvaluationDriftOre,
+			"pv_curtailment_slots_core", championEval.CurtailedSlots,
+			"pv_curtailment_slots_python", shadowEval.CurtailedSlots)...)
 
 	s.recordPythonShadow(champion, slots, p, reason, replanAtMs, block)
 }
