@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -13,7 +14,11 @@ import (
 	"github.com/srcfl/ftw/go/internal/config"
 )
 
-const githubNewIssueURL = "https://github.com/srcfl/ftw/issues/new?template=bug_report.yml"
+// githubNewIssueURL is a markdown template with one body field. The YAML
+// bug form is not used: it asks the operator to fill steps the diagnosis
+// already wrote.
+const githubNewIssueURL = "https://github.com/srcfl/ftw/issues/new?template=ask_why.md"
+const githubIssueURLBudget = 7000
 
 type assistantAskRequest struct {
 	Question string            `json:"question"`
@@ -72,7 +77,9 @@ func (s *Server) handleAssistantStatus(w http.ResponseWriter, r *http.Request) {
 		BaseURLHost: host,
 		SetupURL:    "https://openrouter.ai/keys",
 	}
-	if !asst.Enabled {
+	if !asst.Enabled && strings.TrimSpace(asst.APIKey) == "" {
+		out.Unavailable = "Paste an OpenRouter key in Settings → System. That turns Ask why on."
+	} else if !asst.Enabled {
 		out.Unavailable = "Turn on Ask why in Settings → System."
 	} else if strings.TrimSpace(asst.APIKey) == "" {
 		out.Unavailable = "Paste an OpenRouter API key in Settings → System. A free key is enough."
@@ -112,7 +119,24 @@ func (s *Server) handleAssistantAsk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	stream := strings.Contains(r.Header.Get("Accept"), "text/event-stream")
+	var flush http.Flusher
+	if stream {
+		var ok bool
+		flush, ok = w.(http.Flusher)
+		if !ok {
+			stream = false
+		}
+	}
+	progress := func(kind, text string) {
+		if !stream {
+			return
+		}
+		writeAssistantSSE(w, flush, map[string]string{"type": kind, "text": text})
+	}
+
 	start := time.Now()
+	progress("status", "Reading the site")
 	cli := &assistant.Client{HTTP: s.deps.AssistantHTTP}
 	reply, err := cli.Complete(r.Context(), assistant.Request{
 		APIKey:   asst.APIKey,
@@ -120,16 +144,26 @@ func (s *Server) handleAssistantAsk(w http.ResponseWriter, r *http.Request) {
 		BaseURL:  asst.ResolvedBaseURL(),
 		Question: body.Question,
 		Trigger:  formatAssistantTrigger(body.Trigger),
+		Snapshot: s.assistantFacts(),
 		Run:      s.runAssistantTool,
+		Progress: progress,
 	})
 	if err != nil {
 		var apiErr *assistant.APIError
 		if errors.As(err, &apiErr) {
 			slog.Warn("assistant ask failed", "status", apiErr.Status, "err", apiErr.Msg)
+			if stream {
+				writeAssistantSSE(w, flush, map[string]string{"type": "error", "error": apiErr.Msg})
+				return
+			}
 			writeJSON(w, apiErr.Status, map[string]string{"error": apiErr.Msg})
 			return
 		}
 		slog.Warn("assistant ask failed", "err", err)
+		if stream {
+			writeAssistantSSE(w, flush, map[string]string{"type": "error", "error": "could not reach the model API"})
+			return
+		}
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "could not reach the model API"})
 		return
 	}
@@ -141,15 +175,76 @@ func (s *Server) handleAssistantAsk(w http.ResponseWriter, r *http.Request) {
 		Model:         reply.Model,
 		ResolvedModel: reply.ResolvedModel,
 	}
+	if out.IssueTitle != "" && out.IssueBody == "" {
+		out.IssueBody = out.Answer
+	}
 	if out.IssueTitle != "" {
-		out.IssueURL = githubNewIssueURL + "&title=" + url.QueryEscape(out.IssueTitle)
+		out.IssueURL = filledIssueURL(out.IssueTitle, out.IssueBody)
 	}
 	slog.Info("assistant ask",
 		"model", out.ResolvedModel,
 		"ms", time.Since(start).Milliseconds(),
 		"tools", reply.ToolRounds,
 		"issue", out.IssueTitle != "")
+	if stream {
+		writeAssistantSSE(w, flush, map[string]any{
+			"type":           "done",
+			"answer":         out.Answer,
+			"issue_title":    out.IssueTitle,
+			"issue_body":     out.IssueBody,
+			"issue_url":      out.IssueURL,
+			"model":          out.Model,
+			"resolved_model": out.ResolvedModel,
+		})
+		return
+	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+func filledIssueURL(title, body string) string {
+	if utf8.RuneCountInString(body) > 4000 {
+		body = string([]rune(body)[:4000]) + "\n\n[truncated]"
+	}
+	u := githubNewIssueURL + "&title=" + url.QueryEscape(title) + "&body=" + url.QueryEscape(body)
+	if len(u) <= githubIssueURLBudget {
+		return u
+	}
+	return githubNewIssueURL + "&title=" + url.QueryEscape(title)
+}
+
+func writeAssistantSSE(w http.ResponseWriter, flush http.Flusher, v any) {
+	if w.Header().Get("Content-Type") == "" {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusOK)
+	}
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return
+	}
+	_, _ = w.Write([]byte("data: "))
+	_, _ = w.Write(raw)
+	_, _ = w.Write([]byte("\n\n"))
+	if flush != nil {
+		flush.Flush()
+	}
+}
+
+func (s *Server) assistantFacts() string {
+	var b strings.Builder
+	v := strings.TrimSpace(s.deps.Version)
+	if v == "" {
+		v = "dev"
+	}
+	b.WriteString("FTW version ")
+	b.WriteString(v)
+	b.WriteString("\n\n")
+	b.WriteString(s.toolDriverHealth(nil))
+	b.WriteString("\n\n")
+	b.WriteString(s.toolPlanNow())
+	b.WriteString("\n\n")
+	b.WriteString(s.toolRecentLogs([]byte(`{"limit":20}`)))
+	return assistant.Redact(b.String())
 }
 
 func formatAssistantTrigger(t *assistantTrigger) string {
@@ -158,6 +253,9 @@ func formatAssistantTrigger(t *assistantTrigger) string {
 	}
 	kind := strings.TrimSpace(t.Kind)
 	driver := sanitizeDriverName(t.Driver)
+	if kind == "plan" {
+		return "the operator is asking why the current plan looks like this"
+	}
 	if kind == "driver_offline" && driver != "" {
 		return "driver " + driver + " is offline"
 	}

@@ -37,9 +37,13 @@ type Request struct {
 	Trigger string
 	// Report is only used when Run is nil (tests, or a model without tools).
 	Report string
+	// Snapshot is a local facts pack gathered before the model runs.
+	Snapshot string
 	// Run executes read-only tools. Nil means no tool loop: the report is
 	// stuffed into the first user message, matching the original one-shot.
 	Run Runner
+	// Progress is optional live status for the UI. kind is "status" or "tool".
+	Progress func(kind, text string)
 }
 
 // Reply is what the UI shows. Issue fields are empty when the model does
@@ -129,10 +133,13 @@ func (c *Client) Complete(ctx context.Context, req Request) (Reply, error) {
 	if t := strings.TrimSpace(req.Trigger); t != "" {
 		user += "\n\nTrigger:\n" + t
 	}
+	if snap := strings.TrimSpace(req.Snapshot); snap != "" {
+		user += "\n\nSite snapshot:\n\n" + snap
+	}
 	var tools []ToolDef
 	if req.Run != nil {
 		tools = ToolDefs()
-		user += "\n\nUse tools to gather facts. Call get_support_report or get_driver_health first. Finish with ## Answer, ## Issue title, and ## Issue body."
+		user += "\n\nUse tools only if the snapshot is not enough. Finish with ## Answer, ## Issue title, and ## Issue body."
 	} else {
 		report := strings.TrimSpace(req.Report)
 		if report == "" {
@@ -172,6 +179,9 @@ func (c *Client) Complete(ctx context.Context, req Request) (Reply, error) {
 			wire.Tools = tools
 			wire.ToolChoice = "auto"
 		}
+		if req.Progress != nil {
+			req.Progress("status", "Asking the model")
+		}
 		msg, resolved, err := c.post(ctx, httpClient, endpoint, key, wire)
 		if err != nil {
 			return zero, err
@@ -189,6 +199,9 @@ func (c *Client) Complete(ctx context.Context, req Request) (Reply, error) {
 		messages = append(messages, msg)
 		for _, call := range msg.ToolCalls {
 			toolRounds++
+			if req.Progress != nil {
+				req.Progress("tool", strings.TrimSpace(call.Function.Name))
+			}
 			messages = append(messages, chatMessage{
 				Role:       "tool",
 				ToolCallID: call.ID,

@@ -14,6 +14,7 @@ import (
 	"github.com/srcfl/ftw/go/internal/assistant"
 	"github.com/srcfl/ftw/go/internal/config"
 	"github.com/srcfl/ftw/go/internal/control"
+	"github.com/srcfl/ftw/go/internal/mpc"
 	"github.com/srcfl/ftw/go/internal/telemetry"
 )
 
@@ -80,7 +81,7 @@ func TestAssistantStatusWithoutConfig(t *testing.T) {
 	if got.Model != config.DefaultAssistantModel {
 		t.Fatalf("model = %q", got.Model)
 	}
-	if !strings.Contains(got.Unavailable, "Turn on") {
+	if !strings.Contains(got.Unavailable, "Paste an OpenRouter key") {
 		t.Fatalf("unavailable = %q", got.Unavailable)
 	}
 }
@@ -153,6 +154,15 @@ func TestAssistantAskExplainsReport(t *testing.T) {
 	}
 	if !strings.Contains(got.IssueURL, "github.com/srcfl/ftw/issues/new") {
 		t.Fatalf("issue url = %q", got.IssueURL)
+	}
+	if !strings.Contains(got.IssueURL, "template=ask_why.md") {
+		t.Fatalf("issue url used the YAML form: %q", got.IssueURL)
+	}
+	if strings.Contains(got.IssueURL, "bug_report.yml") {
+		t.Fatalf("issue url used the YAML form: %q", got.IssueURL)
+	}
+	if !strings.Contains(got.IssueURL, "&body=") {
+		t.Fatalf("issue url missing filled body: %q", got.IssueURL)
 	}
 	if strings.Contains(rec.Body.String(), "sk-or-v1-secret-key") {
 		t.Fatal("API key leaked into the HTTP response")
@@ -286,5 +296,128 @@ func TestAssistantToolHealthAndLogs(t *testing.T) {
 	}
 	if !strings.Contains(ver, "v-test") {
 		t.Fatalf("version = %q", ver)
+	}
+	planNow := s.toolPlanNow()
+	if !strings.Contains(planNow, "## Right now") || !strings.Contains(planNow, "## Plan") {
+		t.Fatalf("plan now = %q", planNow)
+	}
+}
+
+func TestFilledIssueURLUsesMarkdownTemplate(t *testing.T) {
+	u := filledIssueURL("[bug] sungrow oauth", "FTW 2.12.0-beta.1\n\nmyuplink returned invalid_grant.")
+	if !strings.Contains(u, "template=ask_why.md") {
+		t.Fatalf("url = %q", u)
+	}
+	if strings.Contains(u, "bug_report.yml") {
+		t.Fatalf("url = %q", u)
+	}
+	if !strings.Contains(u, "&body=") {
+		t.Fatalf("url missing body: %q", u)
+	}
+}
+
+func TestFilledIssueURLDropsBodyWhenOverBudget(t *testing.T) {
+	body := strings.Repeat("%", 4000)
+	u := filledIssueURL("title", body)
+	if strings.Contains(u, "&body=") {
+		t.Fatalf("expected title-only url, got len %d", len(u))
+	}
+	if !strings.Contains(u, "template=ask_why.md") {
+		t.Fatalf("url = %q", u)
+	}
+}
+
+func TestFormatAssistantTriggerPlan(t *testing.T) {
+	got := formatAssistantTrigger(&assistantTrigger{Kind: "plan"})
+	if !strings.Contains(got, "current plan") {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestAssistantAskPlanTrigger(t *testing.T) {
+	var sawPrompt string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		sawPrompt = string(raw)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{
+				{"message": map[string]string{"role": "assistant", "content": "## Answer\nCharging because the next hours are cheap.\n"}},
+			},
+		})
+	}))
+	defer upstream.Close()
+	asst := &config.Assistant{Enabled: true, APIKey: "k", BaseURL: upstream.URL}
+	srv := assistantTestServer(t, asst, upstream.Client())
+	req := httptest.NewRequest(http.MethodPost, "/api/assistant/ask", strings.NewReader(`{"question":"why charge?","trigger":{"kind":"plan"}}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(sawPrompt, "why charge?") {
+		t.Fatal("prompt missing the question")
+	}
+	if !strings.Contains(sawPrompt, "current plan") {
+		t.Fatalf("prompt missing plan trigger: %s", sawPrompt)
+	}
+	if !strings.Contains(sawPrompt, "Hours ahead") && !strings.Contains(sawPrompt, "## Plan") {
+		t.Fatalf("prompt missing plan snapshot: %s", sawPrompt)
+	}
+}
+
+func TestAssistantAskStreamsProgress(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{
+				{"message": map[string]string{"role": "assistant", "content": "## Answer\nIdle as planned.\n"}},
+			},
+		})
+	}))
+	defer upstream.Close()
+	asst := &config.Assistant{Enabled: true, APIKey: "k", BaseURL: upstream.URL}
+	srv := assistantTestServer(t, asst, upstream.Client())
+	req := postAssistantAsk("why idle?")
+	req.Header.Set("Accept", "text/event-stream")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Header().Get("Content-Type"), "text/event-stream") {
+		t.Fatalf("content-type = %q", rec.Header().Get("Content-Type"))
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `"type":"status"`) {
+		t.Fatalf("missing status event: %s", body)
+	}
+	if !strings.Contains(body, `"type":"done"`) {
+		t.Fatalf("missing done event: %s", body)
+	}
+	if !strings.Contains(body, "Idle as planned") {
+		t.Fatalf("missing answer: %s", body)
+	}
+}
+
+func TestWritePlanAheadGroupsSlots(t *testing.T) {
+	now := time.Date(2026, 8, 31, 14, 0, 0, 0, time.UTC)
+	plan := &mpc.Plan{
+		Actions: []mpc.Action{
+			{SlotStartMs: now.UnixMilli(), SlotLenMin: 15, BatteryW: 3000, Reason: "cheap hour", PriceOre: 20, SoC: 0.50},
+			{SlotStartMs: now.Add(15 * time.Minute).UnixMilli(), SlotLenMin: 15, BatteryW: 2800, Reason: "cheap hour", PriceOre: 22, SoC: 0.55},
+			{SlotStartMs: now.Add(30 * time.Minute).UnixMilli(), SlotLenMin: 15, BatteryW: -2000, Reason: "expensive evening", PriceOre: 180, SoC: 0.40},
+		},
+	}
+	var b strings.Builder
+	writePlanAhead(&b, plan, now)
+	got := b.String()
+	if !strings.Contains(got, "## Hours ahead") {
+		t.Fatalf("got %q", got)
+	}
+	if !strings.Contains(got, "charge") || !strings.Contains(got, "cheap hour") {
+		t.Fatalf("missing charge block: %q", got)
+	}
+	if !strings.Contains(got, "discharge") || !strings.Contains(got, "expensive evening") {
+		t.Fatalf("missing discharge block: %q", got)
 	}
 }

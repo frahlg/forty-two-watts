@@ -1,5 +1,6 @@
 // node --test web/settings/tabs/system.test.mjs
 
+import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
@@ -75,6 +76,13 @@ describe("Ask why settings", () => {
     assert.match(html, /configured — hidden/);
     assert.match(html, /openrouter\/free/);
     assert.match(html, /never issues driver commands/);
+  });
+
+  it("checks Enable when a key is typed", () => {
+    const src = readFileSync(new URL("./system.js", import.meta.url), "utf8");
+    assert.match(src, /sys-assistant-key/);
+    assert.match(src, /enable\.checked = true/);
+    assert.match(src, /uncheck Enable later without deleting the key/);
   });
 });
 

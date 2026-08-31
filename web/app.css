@@ -1621,6 +1621,32 @@ body.ftw-app .plan-now-secondary > small {
   max-width: 44ch;
   text-align: right;
 }
+body.ftw-app .plan-ask-why {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 16px 14px;
+  border-top: 1px solid var(--line);
+}
+body.ftw-app .plan-ask-why-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+body.ftw-app .plan-ask-why input {
+  flex: 1;
+  min-width: 0;
+  background: var(--ink);
+  color: var(--fg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 12px;
+  font: 0.9rem var(--sans);
+}
+body.ftw-app .plan-ask-why .btn-send {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
 body.ftw-app .plan-state-badge {
   flex: 0 0 auto;
   padding: 4px 7px;
@@ -2709,6 +2735,15 @@ body.ftw-app .diagnose-detail {
   }
   body.ftw-app .plan-now-meta > div:last-child {
     border-bottom: 0;
+  }
+  body.ftw-app .plan-ask-why {
+    padding: 10px 12px 12px;
+  }
+  body.ftw-app .plan-ask-why-row {
+    flex-wrap: wrap;
+  }
+  body.ftw-app .plan-ask-why input {
+    min-width: 12rem;
   }
   body.ftw-app .plan-actions { align-items: stretch; flex-wrap: wrap; }
   body.ftw-app .more-actions { grid-template-columns: 1fr; }

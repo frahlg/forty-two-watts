@@ -149,11 +149,116 @@ func (s *Server) toolPlanNow() string {
 	slotEnergy := s.deps.Ctrl.SlotEnergy()
 	s.deps.CtrlMu.Unlock()
 	snap := s.liveNow(ctrl, now)
+	var plan *mpc.Plan
+	var replanAt time.Time
+	var replanReason string
 	var activeSlot *mpc.Action
 	if s.deps.MPC != nil {
-		activeSlot = activeAction(s.deps.MPC.Latest(), now)
+		plan = s.deps.MPC.Latest()
+		replanAt, replanReason = s.deps.MPC.LastReplanInfo()
+		activeSlot = activeAction(plan, now)
 	}
 	var b strings.Builder
 	writeRightNow(&b, ctrl, snap, activeSlot, targets, slotEnergy, now)
+	b.WriteString("\n")
+	writePlanSection(&b, plan, replanAt, replanReason, now)
+	writePlanAhead(&b, plan, now)
 	return strings.TrimSpace(b.String())
+}
+
+func batteryIntent(w float64) string {
+	if w > 50 {
+		return "charge"
+	}
+	if w < -50 {
+		return "discharge"
+	}
+	return "idle"
+}
+
+// writePlanAhead groups the next 24 hours so Ask why can explain the
+// schedule without dumping every 15-minute slot.
+func writePlanAhead(b *strings.Builder, plan *mpc.Plan, now time.Time) {
+	if plan == nil || len(plan.Actions) == 0 {
+		return
+	}
+	b.WriteString("## Hours ahead\n\n")
+	b.WriteString("Grouped battery intent for the next 24 hours. Positive W is charge. Negative W is discharge.\n\n")
+
+	limit := now.Add(24 * time.Hour)
+	var (
+		started            bool
+		dir, reason        string
+		start, end         time.Time
+		sumW               float64
+		n, blocks          int
+		minPrice, maxPrice float64
+		endSoC             float64
+	)
+	flush := func() {
+		if !started || n == 0 {
+			return
+		}
+		fmt.Fprintf(b, "%s–%s %s %s · %s",
+			start.Format("15:04"), end.Format("15:04"),
+			dir, fmtReportW(sumW/float64(n)), reason)
+		if minPrice == maxPrice {
+			fmt.Fprintf(b, " · price %.0f öre", minPrice)
+		} else {
+			fmt.Fprintf(b, " · price %.0f–%.0f öre", minPrice, maxPrice)
+		}
+		fmt.Fprintf(b, " · charge ends %.0f%%\n", endSoC)
+		blocks++
+		started = false
+	}
+	for i := range plan.Actions {
+		a := &plan.Actions[i]
+		slotStart := time.UnixMilli(a.SlotStartMs)
+		slotLen := time.Duration(a.SlotLenMin) * time.Minute
+		if slotLen <= 0 {
+			slotLen = 15 * time.Minute
+		}
+		slotEnd := slotStart.Add(slotLen)
+		if slotEnd.Before(now) {
+			continue
+		}
+		if !slotStart.Before(limit) {
+			break
+		}
+		d := batteryIntent(a.BatteryW)
+		r := strings.TrimSpace(a.Reason)
+		if started && (d != dir || r != reason) {
+			flush()
+			if blocks >= 16 {
+				b.WriteString("… further slots omitted\n")
+				break
+			}
+		}
+		if !started {
+			dir, reason = d, r
+			start = slotStart
+			if start.Before(now) {
+				start = now
+			}
+			minPrice, maxPrice = a.PriceOre, a.PriceOre
+			started = true
+			n = 0
+			sumW = 0
+		}
+		if a.PriceOre < minPrice {
+			minPrice = a.PriceOre
+		}
+		if a.PriceOre > maxPrice {
+			maxPrice = a.PriceOre
+		}
+		sumW += a.BatteryW
+		n++
+		end = slotEnd
+		endSoC = a.SoC * 100
+	}
+	flush()
+	if blocks == 0 {
+		b.WriteString("No upcoming slots in the next 24 hours.\n")
+	}
+	b.WriteByte('\n')
 }

@@ -185,7 +185,7 @@
         '</fieldset>' +
         '<fieldset>' +
         '<legend>Ask why</legend>' +
-        '<p class="sys-meta">Reads the local help report and explains it. Needs an OpenRouter key. The key stays on this box and is sent only as a bearer token to the API you set. Ask why never issues driver commands.</p>' +
+        '<p class="sys-meta">Explains what this box is doing, including why the plan looks like it does. Paste an OpenRouter key to turn it on. You can uncheck Enable later without deleting the key. The key stays on this box. Ask why never issues driver commands.</p>' +
         '<label class="sys-check" style="display:flex;align-items:center;gap:8px;margin:8px 0">' +
         '  <input type="checkbox" data-checkbox-path="assistant.enabled"' + (a.enabled ? ' checked' : '') + '>' +
         '  Enable' +
@@ -207,6 +207,14 @@
     },
 
     after: function (ctx) {
+      var keyEl = document.getElementById("sys-assistant-key");
+      if (keyEl) {
+        keyEl.addEventListener("input", function () {
+          if (!String(keyEl.value || "").trim()) return;
+          var enable = document.querySelector('[data-checkbox-path="assistant.enabled"]');
+          if (enable) enable.checked = true;
+        });
+      }
       var escHtml = (ctx && ctx.escHtml) || function (s) {
         var div = document.createElement("div");
         div.textContent = s == null ? "" : String(s);
