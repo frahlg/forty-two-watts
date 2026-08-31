@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.12.1
+
+### Patch Changes
+
+- b129a83: Ask why follow-ups keep the conversation, a closed dialog cannot steal a late answer, and pasting a key no longer forces Enable on.
+- d464e47: Ask why can explain the current plan from a question under the Plan card, shows live progress in a conversation, and opens a GitHub issue with one filled text field.
+
 ## 2.12.0
 
 ### Minor Changes
