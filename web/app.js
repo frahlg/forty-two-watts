@@ -787,6 +787,7 @@
       if (btn.dataset.mode === data.mode) btn.classList.add("active");
       else btn.classList.remove("active");
     });
+    revealManualModes(data.mode);
     // When planner is driving, grey out the grid-target slider and show a hint.
     var plannerActive = (data.mode || "").indexOf("planner_") === 0;
     var gridSlider = document.getElementById("grid-target-slider");
@@ -2306,6 +2307,8 @@
   }
 
   function setMode(mode) {
+    markModeActive(mode);
+    revealManualModes(mode);
     apiFetch("/api/mode", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -2319,6 +2322,26 @@
       .catch(function () {
         setConnected(false);
       });
+  }
+
+  function markModeActive(mode) {
+    document.querySelectorAll("#mode-buttons-primary button, #mode-buttons button").forEach(function (btn) {
+      if (btn.dataset.mode === mode) btn.classList.add("active");
+      else btn.classList.remove("active");
+    });
+  }
+
+  // Open the manual drawer when the live mode lives there, so a reload
+  // (or a change made from the phone app / HA) never leaves the current
+  // setting with no button on screen.
+  function revealManualModes(mode) {
+    var panel = document.getElementById("mode-buttons");
+    var advBtn = document.getElementById("mode-advanced-btn");
+    if (!panel || !mode) return;
+    var match = panel.querySelector('button[data-mode="' + mode + '"]');
+    if (!match) return;
+    panel.style.display = "flex";
+    if (advBtn) advBtn.textContent = "Hide manual";
   }
 
   // ---- Mode buttons, built from the server's canonical catalog ----
@@ -2365,6 +2388,7 @@
         advanced.replaceChildren(frags.advanced);
         primary.hidden = !primary.childElementCount;
         modeCatalogRendered = true;
+        revealManualModes(currentMode);
         return true;
       })
       .catch(function () {

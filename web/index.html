@@ -69,9 +69,10 @@
     <div class="header-right">
       <button id="theme-toggle" class="icon-btn" data-menu-label="Dark mode" title="Toggle light / dark theme">&#9790;</button>
       <!-- Advanced toggle moved below the Plan chart so it's visually
-           colocated with the controls + diagnostics it reveals (twins,
-           drivers, models, manual mode buttons). The button still
-           lives in the DOM as #ui-mode-toggle, just rendered there. -->
+           colocated with the diagnostics it reveals (twins, drivers,
+           models). The button still lives in the DOM as #ui-mode-toggle,
+           just rendered there. Manual strategy fallbacks stay on the
+           Plan card itself. -->
       <ftw-notif-history poll-ms="30000" data-menu-label="Notification history"></ftw-notif-history>
       <!-- Always-available entry into the setup wizard. The wizard
            currently REPLACES config on save, so the copy says "Run setup
@@ -570,10 +571,15 @@
                Planner keys are skipped in renderModeCatalog. -->
           <div class="mode-buttons mode-buttons-primary" id="mode-buttons-primary" hidden></div>
           <div class="strategy-hint" id="strategy-hint"></div>
-          <div class="mode-advanced-toggle advanced-only">
+          <!-- Manual fallbacks are a drawer on this card, not a diagnostic.
+               They used to be `.advanced-only`, so the simple view hid both
+               the current manual mode and the way back to a planner
+               strategy. Keep them behind "Manual…" — that is already the
+               progressive disclosure. -->
+          <div class="mode-advanced-toggle">
             <button class="btn-link" id="mode-advanced-btn" title="Show manual modes">Manual…</button>
           </div>
-          <div class="mode-buttons mode-buttons-advanced advanced-only" id="mode-buttons" style="display:none"></div>
+          <div class="mode-buttons mode-buttons-advanced" id="mode-buttons" style="display:none"></div>
         </div>
         <p class="plan-help">
           Forecast-driven battery schedule for the next 48&nbsp;h, recomputed every few minutes.
