@@ -44,6 +44,51 @@ test("the conversation keeps the question and the answer in separate messages", 
   assert.doesNotMatch(assistant, /innerHTML = j\.answer/);
 });
 
+test("follow-ups send the earlier turns", () => {
+  assert.match(assistant, /history: state\.turns\.slice\(\)/);
+  assert.match(assistant, /role: "user"/);
+  assert.match(assistant, /role: "assistant"/);
+});
+
+test("a closed dialog does not take the late answer", () => {
+  assert.match(assistant, /state\.generation/);
+  assert.match(assistant, /AbortController/);
+  assert.match(assistant, /AbortError/);
+  assert.match(assistant, /stillOpen\(gen\)/);
+});
+
+test("SSE error events reach the request, torn JSON does not", () => {
+  const sandbox = {
+    document: {
+      readyState: "complete",
+      getElementById: () => null,
+      addEventListener() {},
+      createElement: () => ({ style: {}, setAttribute() {} }),
+      head: { appendChild() {} },
+      body: { appendChild() {} },
+    },
+    fetch: () => new Promise(() => {}),
+    navigator: {},
+    console,
+    addEventListener() {},
+  };
+  sandbox.window = sandbox;
+  vm.createContext(sandbox);
+  vm.runInContext(assistant, sandbox);
+  const parse = sandbox.window.FTWAskWhy._test.parseSSEChunk;
+  let seen = null;
+  parse('data: {"type":"status","text":"Reading"}\n\n', (ev) => { seen = ev; });
+  assert.equal(seen.type, "status");
+  assert.doesNotThrow(() => parse("data: {nope\n\n", () => {
+    throw new Error("torn frame must not call onEvent");
+  }));
+  assert.throws(() => {
+    parse('data: {"type":"error","error":"key expired"}\n\n', (ev) => {
+      if (ev.type === "error") throw new Error(ev.error);
+    });
+  }, /key expired/);
+});
+
 test("settings hold the OpenRouter key on the box", () => {
   assert.match(system, /data-path="assistant.api_key"/);
   assert.match(system, /openrouter\.ai\/keys/);

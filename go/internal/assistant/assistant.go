@@ -22,9 +22,11 @@ const (
 	Timeout = 90 * time.Second
 	// maxReportRunes keeps a stuffed one-shot inside a free-model context.
 	maxReportRunes = 80_000
-	maxQuestion    = 2000
-	maxTokens      = 2500
-	maxIssueTitle  = 80
+	maxQuestion     = 2000
+	maxTokens       = 2500
+	maxIssueTitle   = 80
+	maxHistoryTurns = 6
+	maxHistoryRunes = 1500
 )
 
 // Request is one Ask why turn.
@@ -39,6 +41,9 @@ type Request struct {
 	Report string
 	// Snapshot is a local facts pack gathered before the model runs.
 	Snapshot string
+	// History is earlier turns in this dialog, oldest first. Follow-ups
+	// need it; the current question is not included.
+	History []Turn
 	// Run executes read-only tools. Nil means no tool loop: the report is
 	// stuffed into the first user message, matching the original one-shot.
 	Run Runner
@@ -64,6 +69,35 @@ type APIError struct {
 }
 
 func (e *APIError) Error() string { return e.Msg }
+
+// Turn is one earlier Ask why line in a dialog.
+type Turn struct {
+	Role string `json:"role"`
+	Text string `json:"text"`
+}
+
+// SanitizeHistory keeps user/assistant lines, caps count and length.
+func SanitizeHistory(in []Turn) []Turn {
+	out := make([]Turn, 0, maxHistoryTurns)
+	for _, t := range in {
+		if len(out) >= maxHistoryTurns {
+			break
+		}
+		role := strings.ToLower(strings.TrimSpace(t.Role))
+		if role != "user" && role != "assistant" {
+			continue
+		}
+		text := strings.TrimSpace(t.Text)
+		if text == "" {
+			continue
+		}
+		if utf8.RuneCountInString(text) > maxHistoryRunes {
+			text = string([]rune(text)[:maxHistoryRunes]) + "…"
+		}
+		out = append(out, Turn{Role: role, Text: text})
+	}
+	return out
+}
 
 // Client posts chat completions. HTTP may be nil (a 90s client is used).
 type Client struct {
@@ -154,8 +188,11 @@ func (c *Client) Complete(ctx context.Context, req Request) (Reply, error) {
 
 	messages := []chatMessage{
 		{Role: "system", Content: Skill},
-		{Role: "user", Content: user},
 	}
+	for _, t := range SanitizeHistory(req.History) {
+		messages = append(messages, chatMessage{Role: t.Role, Content: t.Text})
+	}
+	messages = append(messages, chatMessage{Role: "user", Content: user})
 
 	httpClient := c.HTTP
 	if httpClient == nil {

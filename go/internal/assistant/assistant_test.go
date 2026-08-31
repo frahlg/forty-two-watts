@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestParseSplitsAnswerAndIssue(t *testing.T) {
@@ -118,6 +119,67 @@ func TestCompleteRejectsEmptyKey(t *testing.T) {
 	apiErr, ok := err.(*APIError)
 	if !ok || apiErr.Status != http.StatusConflict {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestSanitizeHistoryKeepsUserAndAssistant(t *testing.T) {
+	got := SanitizeHistory([]Turn{
+		{Role: "system", Text: "ignore"},
+		{Role: "user", Text: "why charge?"},
+		{Role: "assistant", Text: "Cheap hour."},
+		{Role: "tool", Text: "nope"},
+		{Role: "user", Text: ""},
+	})
+	if len(got) != 2 || got[0].Role != "user" || got[1].Role != "assistant" {
+		t.Fatalf("got %#v", got)
+	}
+}
+
+func TestSanitizeHistoryCapsLength(t *testing.T) {
+	long := strings.Repeat("x", maxHistoryRunes+20)
+	got := SanitizeHistory([]Turn{{Role: "user", Text: long}})
+	if len(got) != 1 {
+		t.Fatalf("len = %d", len(got))
+	}
+	if utf8.RuneCountInString(got[0].Text) != maxHistoryRunes+1 { // plus ellipsis
+		t.Fatalf("len = %d", utf8.RuneCountInString(got[0].Text))
+	}
+	if !strings.HasSuffix(got[0].Text, "…") {
+		t.Fatalf("missing ellipsis: %q", got[0].Text)
+	}
+}
+
+func TestCompleteIncludesHistory(t *testing.T) {
+	var gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		gotBody = string(raw)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{
+				{"message": map[string]string{"role": "assistant", "content": "## Answer\nStill cheap.\n"}},
+			},
+		})
+	}))
+	defer srv.Close()
+	cli := &Client{HTTP: srv.Client()}
+	_, err := cli.Complete(context.Background(), Request{
+		APIKey:   "k",
+		BaseURL:  srv.URL,
+		Question: "what about tomorrow?",
+		Report:   "idle",
+		History: []Turn{
+			{Role: "user", Text: "why charge?"},
+			{Role: "assistant", Text: "Cheap hour."},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(gotBody, "why charge?") || !strings.Contains(gotBody, "Cheap hour.") {
+		t.Fatalf("history missing from prompt: %s", gotBody)
+	}
+	if !strings.Contains(gotBody, "what about tomorrow?") {
+		t.Fatalf("current question missing: %s", gotBody)
 	}
 }
 

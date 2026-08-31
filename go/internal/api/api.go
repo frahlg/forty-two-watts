@@ -1572,13 +1572,9 @@ func (s *Server) handlePostConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	typedAssistantKey := newCfg.Assistant != nil && strings.TrimSpace(newCfg.Assistant.APIKey) != ""
 	// Preserve secrets the UI sent back as empty (masked) values.
 	s.deps.CfgMu.RLock()
 	newCfg.PreserveMaskedSecrets(s.deps.Cfg)
-	if typedAssistantKey && newCfg.Assistant != nil {
-		newCfg.Assistant.Enabled = true
-	}
 	// Restore catalog-declared driver secrets (api_token etc.) the UI
 	// returned as maskedPlaceholder or empty. Same semantics as
 	// PreserveMaskedSecrets but scoped to keys the driver itself

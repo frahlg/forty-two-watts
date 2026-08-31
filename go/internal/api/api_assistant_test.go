@@ -421,3 +421,57 @@ func TestWritePlanAheadGroupsSlots(t *testing.T) {
 		t.Fatalf("missing discharge block: %q", got)
 	}
 }
+
+func TestAssistantAskForwardsHistory(t *testing.T) {
+	var sawPrompt string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		sawPrompt = string(raw)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{
+				{"message": map[string]string{"role": "assistant", "content": "## Answer\nStill cheap.\n"}},
+			},
+		})
+	}))
+	defer upstream.Close()
+	asst := &config.Assistant{Enabled: true, APIKey: "k", BaseURL: upstream.URL}
+	srv := assistantTestServer(t, asst, upstream.Client())
+	body := `{"question":"what about tomorrow?","history":[{"role":"user","text":"why charge?"},{"role":"assistant","text":"Cheap hour."}]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/assistant/ask", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(sawPrompt, "why charge?") || !strings.Contains(sawPrompt, "Cheap hour.") {
+		t.Fatalf("history missing: %s", sawPrompt)
+	}
+	if !strings.Contains(sawPrompt, "what about tomorrow?") {
+		t.Fatalf("question missing: %s", sawPrompt)
+	}
+}
+
+func TestAssistantAskStreamsError(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":{"message":"key expired"}}`))
+	}))
+	defer upstream.Close()
+	asst := &config.Assistant{Enabled: true, APIKey: "k", BaseURL: upstream.URL}
+	srv := assistantTestServer(t, asst, upstream.Client())
+	req := postAssistantAsk("why idle?")
+	req.Header.Set("Accept", "text/event-stream")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `"type":"error"`) {
+		t.Fatalf("missing error event: %s", body)
+	}
+	if strings.Contains(body, `"type":"done"`) {
+		t.Fatalf("done should not follow an error: %s", body)
+	}
+}

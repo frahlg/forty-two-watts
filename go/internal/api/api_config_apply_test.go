@@ -76,6 +76,34 @@ func TestPostConfigFirstSiteMeterReachesControl(t *testing.T) {
 	}
 }
 
+func TestPostConfigKeepsAskWhyOffWhenKeyPasted(t *testing.T) {
+	srv, _, cfg := postConfigServer(t, nil)
+	body := `{
+  "site": {"name": "Test", "smoothing_alpha": 0.3},
+  "fuse": {"max_amps": 16, "phases": 3, "voltage": 230},
+  "api": {"port": 8080},
+  "assistant": {"enabled": false, "api_key": "sk-or-v1-new"},
+  "drivers": [{
+    "name": "foxess",
+    "lua": "drivers/foxess_h3_smart.lua",
+    "is_site_meter": true,
+    "capabilities": {"modbus": {"host": "192.0.2.10", "port": 502, "unit_id": 247}}
+  }]
+}`
+	if code := postConfig(t, srv, body); code != 200 {
+		t.Fatalf("POST /api/config = %d, want 200", code)
+	}
+	if cfg.Assistant == nil {
+		t.Fatal("assistant missing after save")
+	}
+	if cfg.Assistant.Enabled {
+		t.Fatal("pasting a key must not force Ask why on when Enable is off")
+	}
+	if cfg.Assistant.APIKey != "sk-or-v1-new" {
+		t.Fatalf("api_key = %q", cfg.Assistant.APIKey)
+	}
+}
+
 func TestPostConfigRunsTheSharedApplierWithOldSnapshot(t *testing.T) {
 	var gotNew, gotOld *config.Config
 	srv, _, _ := postConfigServer(t, func(newCfg, oldCfg *config.Config) {

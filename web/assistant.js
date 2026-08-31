@@ -77,6 +77,9 @@
     trigger: null,
     offlineNames: [],
     busy: false,
+    turns: [],
+    generation: 0,
+    abort: null,
   };
 
   function offlineDrivers(data) {
@@ -110,6 +113,11 @@
   }
 
   function close() {
+    state.generation += 1;
+    if (state.abort) {
+      try { state.abort.abort(); } catch (e) { /* already closed */ }
+      state.abort = null;
+    }
     if (state.keyHandler) {
       document.removeEventListener("keydown", state.keyHandler);
       state.keyHandler = null;
@@ -119,6 +127,11 @@
     }
     state.backdrop = null;
     state.busy = false;
+    state.turns = [];
+  }
+
+  function stillOpen(gen) {
+    return gen === state.generation && !!state.backdrop;
   }
 
   function threadEl() {
@@ -189,7 +202,9 @@
         return l.replace(/^data:\s?/, "");
       }).join("");
       if (!line) return;
-      try { onEvent(JSON.parse(line)); } catch (e) { /* ignore a torn frame */ }
+      var ev;
+      try { ev = JSON.parse(line); } catch (e) { return; }
+      onEvent(ev);
     });
     return rest;
   }
@@ -197,6 +212,7 @@
   function ask(question) {
     var q = String(question || "").trim();
     if (!q || state.busy) return;
+    var gen = state.generation;
     state.busy = true;
     addUser(q);
     setProgress("This can take a minute. Reading the site…");
@@ -205,14 +221,20 @@
     var input = state.backdrop && state.backdrop.querySelector('[data-role="input"]');
     if (askBtn) askBtn.disabled = true;
     if (input) input.value = "";
-    var payload = { question: q };
+    var payload = { question: q, history: state.turns.slice() };
     if (state.trigger) payload.trigger = state.trigger;
-    apiFetch("/api/assistant/ask", {
+    var fetchOpts = {
       method: "POST",
       headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
       body: JSON.stringify(payload),
-    })
+    };
+    if (typeof AbortController === "function") {
+      state.abort = new AbortController();
+      fetchOpts.signal = state.abort.signal;
+    }
+    apiFetch("/api/assistant/ask", fetchOpts)
       .then(function (r) {
+        if (!stillOpen(gen)) return null;
         var ctype = (r.headers.get("Content-Type") || "");
         if (ctype.indexOf("text/event-stream") >= 0 && r.body && r.body.getReader) {
           var reader = r.body.getReader();
@@ -221,8 +243,10 @@
           var donePayload = null;
           function pump() {
             return reader.read().then(function (chunk) {
+              if (!stillOpen(gen)) return null;
               if (chunk.value) buf += decoder.decode(chunk.value, { stream: true });
               buf = parseSSEChunk(buf, function (ev) {
+                if (!stillOpen(gen)) return;
                 if (ev.type === "status") setProgress(ev.text || "Working…");
                 if (ev.type === "tool") setProgress(toolLabel(ev.text) + "…");
                 if (ev.type === "error") throw new Error(ev.error || "Ask why failed");
@@ -233,6 +257,7 @@
             });
           }
           return pump().then(function (ev) {
+            if (!stillOpen(gen)) return null;
             if (!ev) throw new Error("No answer");
             return ev;
           });
@@ -243,8 +268,12 @@
         });
       })
       .then(function (j) {
+        if (!stillOpen(gen) || !j) return;
         clearProgress();
         state.last = j;
+        state.turns.push({ role: "user", text: q });
+        state.turns.push({ role: "assistant", text: j.answer || "" });
+        if (state.turns.length > 6) state.turns = state.turns.slice(-6);
         addAssistant(j.answer || "");
         var used = j.resolved_model || j.model || "";
         var foot = '<span class="ftw-ask-status">' + escHtml(used ? "Answered by " + used : "Done") + "</span>";
@@ -256,6 +285,8 @@
         if (issueBtn) issueBtn.addEventListener("click", function () { openFilledIssue(state.last); });
       })
       .catch(function (err) {
+        if (!stillOpen(gen)) return;
+        if (err && err.name === "AbortError") return;
         clearProgress();
         var thread = threadEl();
         if (thread) {
@@ -266,7 +297,9 @@
         }
       })
       .then(function () {
+        if (!stillOpen(gen)) return;
         state.busy = false;
+        state.abort = null;
         if (askBtn) askBtn.disabled = false;
         if (input) input.focus();
       });
@@ -308,10 +341,12 @@
 
   function open(opts) {
     opts = opts || {};
-    state.trigger = opts.trigger || null;
-    state.last = null;
     ensureStyles();
     close();
+    state.trigger = opts.trigger || null;
+    state.last = null;
+    state.turns = [];
+    var gen = state.generation;
     var title = (opts.trigger && opts.trigger.kind === "plan") ? "Ask why this plan" : "Ask why";
     var backdrop = document.createElement("div");
     backdrop.className = "ftw-ask-backdrop";
@@ -339,10 +374,12 @@
         return r.json();
       })
       .then(function (status) {
+        if (!stillOpen(gen)) return;
         if (status.ready) renderReady(body, status, opts);
         else renderSetup(body, status);
       })
       .catch(function (err) {
+        if (!stillOpen(gen)) return;
         body.innerHTML = '<p class="ftw-ask-error" style="padding:16px 18px">Could not load Ask why: ' + escHtml(err.message) + "</p>";
       });
   }
@@ -393,5 +430,5 @@
     bind();
   }
 
-  window.FTWAskWhy = { open: open, close: close, updateChip: updateChip };
+  window.FTWAskWhy = { open: open, close: close, updateChip: updateChip, _test: { parseSSEChunk: parseSSEChunk } };
 })();

@@ -23,6 +23,7 @@ const githubIssueURLBudget = 7000
 type assistantAskRequest struct {
 	Question string            `json:"question"`
 	Trigger  *assistantTrigger `json:"trigger,omitempty"`
+	History  []assistant.Turn  `json:"history,omitempty"`
 }
 
 type assistantTrigger struct {
@@ -144,6 +145,7 @@ func (s *Server) handleAssistantAsk(w http.ResponseWriter, r *http.Request) {
 		BaseURL:  asst.ResolvedBaseURL(),
 		Question: body.Question,
 		Trigger:  formatAssistantTrigger(body.Trigger),
+		History:  body.History,
 		Snapshot: s.assistantFacts(),
 		Run:      s.runAssistantTool,
 		Progress: progress,
