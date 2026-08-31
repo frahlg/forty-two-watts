@@ -127,6 +127,27 @@ body.ftw-app select:focus-visible {
 body.ftw-app .header-right {
   gap: 10px;
 }
+/* Offline chip lives outside .header-right so it stays in the header
+   row on phones, where the right cluster folds into the hamburger. */
+body.ftw-app .ask-why-chip {
+  max-width: min(42vw, 280px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--sans);
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  padding: 6px 10px;
+  border: 1px solid var(--red-e, #ef4444);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--red-e, #ef4444);
+  cursor: pointer;
+}
+body.ftw-app .ask-why-chip:hover {
+  border-color: var(--fg);
+}
 body.ftw-app .version {
   font-family: var(--mono);
   font-size: 13px;

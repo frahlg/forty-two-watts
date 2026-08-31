@@ -1,12 +1,11 @@
 // Package assistant calls an OpenAI-compatible chat API (OpenRouter by
-// default) to explain a local FTW help report. It never issues commands.
+// default) to explain a local FTW site. It never issues commands.
 package assistant
 
 import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -19,23 +18,28 @@ import (
 const (
 	DefaultModel   = "openrouter/free"
 	DefaultBaseURL = "https://openrouter.ai/api/v1"
-	// Timeout covers a slow free-tier completion. The HTTP handler holds
-	// one in-flight ask, so a long wait does not pile up.
+	// Timeout covers a slow free-tier completion, including a few tool rounds.
 	Timeout = 90 * time.Second
-	// maxReportRunes keeps the prompt inside a free-model context.
+	// maxReportRunes keeps a stuffed one-shot inside a free-model context.
 	maxReportRunes = 80_000
 	maxQuestion    = 2000
 	maxTokens      = 2500
 	maxIssueTitle  = 80
 )
 
-// Request is one Ask why turn: a question plus the already-built help report.
+// Request is one Ask why turn.
 type Request struct {
 	APIKey   string
 	Model    string
 	BaseURL  string
 	Question string
-	Report   string
+	// Trigger is a short fact from the UI, e.g. "driver sungrow is offline".
+	Trigger string
+	// Report is only used when Run is nil (tests, or a model without tools).
+	Report string
+	// Run executes read-only tools. Nil means no tool loop: the report is
+	// stuffed into the first user message, matching the original one-shot.
+	Run Runner
 }
 
 // Reply is what the UI shows. Issue fields are empty when the model does
@@ -46,6 +50,7 @@ type Reply struct {
 	IssueBody     string
 	Model         string
 	ResolvedModel string
+	ToolRounds    int
 }
 
 // APIError is an outbound failure the HTTP layer can map to a status code.
@@ -66,11 +71,24 @@ type chatRequest struct {
 	Messages    []chatMessage `json:"messages"`
 	MaxTokens   int           `json:"max_tokens"`
 	Temperature float64       `json:"temperature"`
+	Tools       []ToolDef     `json:"tools,omitempty"`
+	ToolChoice  string        `json:"tool_choice,omitempty"`
 }
 
 type chatMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role       string     `json:"role"`
+	Content    string     `json:"content,omitempty"`
+	ToolCalls  []toolCall `json:"tool_calls,omitempty"`
+	ToolCallID string     `json:"tool_call_id,omitempty"`
+}
+
+type toolCall struct {
+	ID       string `json:"id"`
+	Type     string `json:"type"`
+	Function struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	} `json:"function"`
 }
 
 type chatResponse struct {
@@ -83,7 +101,8 @@ type chatResponse struct {
 	} `json:"error"`
 }
 
-// Complete asks the model to explain the report. It does not stream.
+// Complete asks the model to explain the site. With Run set it loops on
+// read-only tools. Without Run it stuffs Report into the first message.
 func (c *Client) Complete(ctx context.Context, req Request) (Reply, error) {
 	var zero Reply
 	key := strings.TrimSpace(req.APIKey)
@@ -105,40 +124,113 @@ func (c *Client) Complete(ctx context.Context, req Request) (Reply, error) {
 	if utf8.RuneCountInString(question) > maxQuestion {
 		return zero, &APIError{Status: http.StatusBadRequest, Msg: "question is too long"}
 	}
-	report := strings.TrimSpace(req.Report)
-	if report == "" {
-		return zero, &APIError{Status: http.StatusServiceUnavailable, Msg: "help report is empty"}
+
+	user := "Question:\n" + question
+	if t := strings.TrimSpace(req.Trigger); t != "" {
+		user += "\n\nTrigger:\n" + t
 	}
-	if utf8.RuneCountInString(report) > maxReportRunes {
-		runes := []rune(report)
-		report = string(runes[:maxReportRunes]) + "\n\n[truncated]\n"
+	var tools []ToolDef
+	if req.Run != nil {
+		tools = ToolDefs()
+		user += "\n\nUse tools to gather facts. Call get_support_report or get_driver_health first. Finish with ## Answer, ## Issue title, and ## Issue body."
+	} else {
+		report := strings.TrimSpace(req.Report)
+		if report == "" {
+			return zero, &APIError{Status: http.StatusServiceUnavailable, Msg: "help report is empty"}
+		}
+		if utf8.RuneCountInString(report) > maxReportRunes {
+			runes := []rune(report)
+			report = string(runes[:maxReportRunes]) + "\n\n[truncated]\n"
+		}
+		user += "\n\nSite report:\n\n" + report
 	}
 
-	body, err := json.Marshal(chatRequest{
-		Model: model,
-		Messages: []chatMessage{
-			{Role: "system", Content: Skill},
-			{Role: "user", Content: "Question:\n" + question + "\n\nSite report:\n\n" + report},
-		},
-		MaxTokens:   maxTokens,
-		Temperature: 0.2,
-	})
-	if err != nil {
-		return zero, err
+	messages := []chatMessage{
+		{Role: "system", Content: Skill},
+		{Role: "user", Content: user},
 	}
 
 	httpClient := c.HTTP
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: Timeout}
 	}
-
 	endpoint, err := url.JoinPath(base, "chat", "completions")
 	if err != nil {
 		return zero, &APIError{Status: http.StatusBadRequest, Msg: "assistant.base_url is not a valid URL"}
 	}
+
+	toolRounds := 0
+	for round := 0; round < maxRounds; round++ {
+		useTools := len(tools) > 0 && round < maxRounds-1
+		wire := chatRequest{
+			Model:       model,
+			Messages:    messages,
+			MaxTokens:   maxTokens,
+			Temperature: 0.2,
+		}
+		if useTools {
+			wire.Tools = tools
+			wire.ToolChoice = "auto"
+		}
+		msg, resolved, err := c.post(ctx, httpClient, endpoint, key, wire)
+		if err != nil {
+			return zero, err
+		}
+		if len(msg.ToolCalls) == 0 || req.Run == nil || !useTools {
+			reply := Parse(msg.Content)
+			reply.Model = model
+			reply.ResolvedModel = resolved
+			if reply.ResolvedModel == "" {
+				reply.ResolvedModel = model
+			}
+			reply.ToolRounds = toolRounds
+			return reply, nil
+		}
+		messages = append(messages, msg)
+		for _, call := range msg.ToolCalls {
+			toolRounds++
+			messages = append(messages, chatMessage{
+				Role:       "tool",
+				ToolCallID: call.ID,
+				Content:    runTool(req.Run, call),
+			})
+		}
+	}
+	return zero, &APIError{Status: http.StatusBadGateway, Msg: "model kept calling tools without answering"}
+}
+
+func runTool(run Runner, call toolCall) string {
+	name := strings.TrimSpace(call.Function.Name)
+	if !AllowedTool(name) {
+		return "unknown tool; Ask why is read-only"
+	}
+	args := json.RawMessage(strings.TrimSpace(call.Function.Arguments))
+	if len(args) == 0 {
+		args = json.RawMessage(`{}`)
+	}
+	out, err := run(name, args)
+	if err != nil {
+		return "tool error: " + err.Error()
+	}
+	out = Redact(strings.TrimSpace(out))
+	if utf8.RuneCountInString(out) > maxToolResult {
+		out = string([]rune(out)[:maxToolResult]) + "\n[truncated]"
+	}
+	if out == "" {
+		return "(empty)"
+	}
+	return out
+}
+
+func (c *Client) post(ctx context.Context, httpClient *http.Client, endpoint, key string, wire chatRequest) (chatMessage, string, error) {
+	var zero chatMessage
+	body, err := json.Marshal(wire)
+	if err != nil {
+		return zero, "", err
+	}
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
-		return zero, err
+		return zero, "", err
 	}
 	httpReq.Header.Set("Authorization", "Bearer "+key)
 	httpReq.Header.Set("Content-Type", "application/json")
@@ -147,48 +239,35 @@ func (c *Client) Complete(ctx context.Context, req Request) (Reply, error) {
 
 	resp, err := httpClient.Do(httpReq)
 	if err != nil {
-		return zero, &APIError{Status: http.StatusBadGateway, Msg: "could not reach the model API"}
+		return zero, "", &APIError{Status: http.StatusBadGateway, Msg: "could not reach the model API"}
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 
-	if resp.StatusCode == http.StatusUnauthorized {
-		return zero, &APIError{Status: http.StatusUnauthorized, Msg: "OpenRouter rejected the API key"}
-	}
-	if resp.StatusCode == http.StatusPaymentRequired {
-		return zero, &APIError{Status: http.StatusPaymentRequired, Msg: "this model needs credits; use openrouter/free or add credit"}
-	}
-	if resp.StatusCode == http.StatusTooManyRequests {
-		return zero, &APIError{Status: http.StatusTooManyRequests, Msg: "model rate limit; try again in a minute"}
-	}
-	if resp.StatusCode >= 500 {
-		return zero, &APIError{Status: http.StatusBadGateway, Msg: "model API is unavailable"}
-	}
-	if resp.StatusCode >= 400 {
-		msg := strings.TrimSpace(string(raw))
-		if msg == "" {
-			msg = fmt.Sprintf("model API returned HTTP %d", resp.StatusCode)
-		}
-		return zero, &APIError{Status: http.StatusBadGateway, Msg: "model API error"}
+	switch {
+	case resp.StatusCode == http.StatusUnauthorized:
+		return zero, "", &APIError{Status: http.StatusUnauthorized, Msg: "OpenRouter rejected the API key"}
+	case resp.StatusCode == http.StatusPaymentRequired:
+		return zero, "", &APIError{Status: http.StatusPaymentRequired, Msg: "this model needs credits; use openrouter/free or add credit"}
+	case resp.StatusCode == http.StatusTooManyRequests:
+		return zero, "", &APIError{Status: http.StatusTooManyRequests, Msg: "model rate limit; try again in a minute"}
+	case resp.StatusCode >= 500:
+		return zero, "", &APIError{Status: http.StatusBadGateway, Msg: "model API is unavailable"}
+	case resp.StatusCode >= 400:
+		return zero, "", &APIError{Status: http.StatusBadGateway, Msg: "model API error"}
 	}
 
 	var parsed chatResponse
 	if err := json.Unmarshal(raw, &parsed); err != nil {
-		return zero, &APIError{Status: http.StatusBadGateway, Msg: "model API returned unreadable JSON"}
+		return zero, "", &APIError{Status: http.StatusBadGateway, Msg: "model API returned unreadable JSON"}
 	}
 	if parsed.Error != nil && parsed.Error.Message != "" {
-		return zero, &APIError{Status: http.StatusBadGateway, Msg: "model API error"}
+		return zero, "", &APIError{Status: http.StatusBadGateway, Msg: "model API error"}
 	}
 	if len(parsed.Choices) == 0 {
-		return zero, &APIError{Status: http.StatusBadGateway, Msg: "model returned no answer"}
+		return zero, "", &APIError{Status: http.StatusBadGateway, Msg: "model returned no answer"}
 	}
-	reply := Parse(parsed.Choices[0].Message.Content)
-	reply.Model = model
-	reply.ResolvedModel = strings.TrimSpace(parsed.Model)
-	if reply.ResolvedModel == "" {
-		reply.ResolvedModel = model
-	}
-	return reply, nil
+	return parsed.Choices[0].Message, strings.TrimSpace(parsed.Model), nil
 }
 
 // Parse splits the model's markdown into answer and optional issue fields.

@@ -1,7 +1,7 @@
-// Ask why — explain the live help report and draft a GitHub issue.
+// Ask why — explain the live site and draft a GitHub issue.
 //
-// Bound to #plan-ask-why. One OpenRouter call per question; the box
-// already holds the report. Model output is rendered as text, never HTML.
+// Bound to #plan-ask-why and the header offline chip. The box runs a
+// read-only tool loop. Model output is rendered as text, never HTML.
 (function () {
   "use strict";
 
@@ -48,7 +48,39 @@
     backdrop: null,
     last: null,
     keyHandler: null,
+    trigger: null,
+    offlineNames: [],
   };
+
+  function offlineDrivers(data) {
+    var names = [];
+    var drivers = (data && data.drivers) || {};
+    Object.keys(drivers).sort().forEach(function (name) {
+      var d = drivers[name] || {};
+      if (d.status === "offline") names.push(name);
+    });
+    return names;
+  }
+
+  function updateChip(data) {
+    var chip = document.getElementById("ask-why-chip");
+    if (!chip) return;
+    var names = offlineDrivers(data);
+    state.offlineNames = names;
+    if (names.length === 0) {
+      chip.hidden = true;
+      chip.textContent = "";
+      chip.removeAttribute("title");
+      return;
+    }
+    chip.hidden = false;
+    if (names.length === 1) {
+      chip.textContent = names[0] + " is offline — Ask why";
+    } else {
+      chip.textContent = names.length + " drivers offline — Ask why";
+    }
+    chip.title = names.join(", ") + " offline";
+  }
 
   function close() {
     if (state.keyHandler) {
@@ -128,13 +160,15 @@
       "</div>";
   }
 
-  function renderReady(host, status) {
+  function renderReady(host, status, opts) {
+    opts = opts || {};
+    var initial = opts.question || "What is going on right now?";
     host.innerHTML =
-      '<p class="ftw-ask-note">Ask why reads the live help report on this box and sends it to <code>' +
+      '<p class="ftw-ask-note">Ask why reads this box with read-only tools and sends what it finds to <code>' +
       escHtml(status.model || "openrouter/free") +
       "</code>. It cannot change modes or send driver commands.</p>" +
       '<label for="ftw-ask-question">What looks wrong?</label>' +
-      '<textarea id="ftw-ask-question" aria-label="Question">What is going on right now?</textarea>' +
+      '<textarea id="ftw-ask-question" aria-label="Question">' + escHtml(initial) + "</textarea>" +
       '<div class="ftw-ask-error" data-role="error" hidden></div>' +
       '<div class="ftw-ask-answer" data-role="answer" hidden></div>' +
       '<div class="ftw-ask-actions"><span class="ftw-ask-status" data-role="status" aria-live="polite"></span>' +
@@ -162,10 +196,12 @@
       askBtn.disabled = true;
       draftBtn.hidden = true;
       setStatus(statusEl, "Reading the site…");
+      var payload = { question: questionEl.value || "" };
+      if (state.trigger) payload.trigger = state.trigger;
       apiFetch("/api/assistant/ask", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question: questionEl.value || "" }),
+        body: JSON.stringify(payload),
       })
         .then(function (r) {
           return r.json().then(function (j) {
@@ -192,9 +228,12 @@
     draftBtn.addEventListener("click", function () {
       openIssueReview(state.last || {});
     });
+    if (opts.autoAsk) askBtn.click();
   }
 
-  function open() {
+  function open(opts) {
+    opts = opts || {};
+    state.trigger = opts.trigger || null;
     ensureStyles();
     close();
     var backdrop = document.createElement("div");
@@ -223,7 +262,7 @@
         return r.json();
       })
       .then(function (status) {
-        if (status.ready) renderReady(body, status);
+        if (status.ready) renderReady(body, status, opts);
         else renderSetup(body, status);
       })
       .catch(function (err) {
@@ -233,8 +272,24 @@
 
   function bind() {
     var btn = document.getElementById("plan-ask-why");
-    if (!btn) return;
-    btn.addEventListener("click", open);
+    if (btn) btn.addEventListener("click", function () { open(); });
+    var chip = document.getElementById("ask-why-chip");
+    if (chip) {
+      chip.addEventListener("click", function () {
+        var names = state.offlineNames || [];
+        var question = names.length === 1
+          ? names[0] + " is offline. Why?"
+          : names.length + " drivers are offline. Why?";
+        open({
+          question: question,
+          trigger: { kind: "driver_offline", driver: names[0] || "" },
+          autoAsk: true,
+        });
+      });
+    }
+    window.addEventListener("ftw-status", function (e) {
+      updateChip(e.detail);
+    });
   }
 
   if (document.readyState === "loading") {
@@ -243,5 +298,5 @@
     bind();
   }
 
-  window.FTWAskWhy = { open: open, close: close };
+  window.FTWAskWhy = { open: open, close: close, updateChip: updateChip };
 })();

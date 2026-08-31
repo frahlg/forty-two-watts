@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/srcfl/ftw/go/internal/apiauth"
+	"github.com/srcfl/ftw/go/internal/assistant"
 	"github.com/srcfl/ftw/go/internal/config"
 	"github.com/srcfl/ftw/go/internal/control"
 	"github.com/srcfl/ftw/go/internal/telemetry"
@@ -130,8 +131,8 @@ func TestAssistantAskExplainsReport(t *testing.T) {
 	if !strings.Contains(sawPrompt, "why import?") {
 		t.Fatal("prompt missing the question")
 	}
-	if !strings.Contains(sawPrompt, "test-version") && !strings.Contains(sawPrompt, "FTW help report") {
-		t.Fatalf("prompt missing the help report: %s", sawPrompt)
+	if !strings.Contains(sawPrompt, `"name":"get_support_report"`) {
+		t.Fatalf("prompt missing tools: %s", sawPrompt)
 	}
 	if strings.Contains(sawPrompt, "sk-or-v1-secret-key") {
 		t.Fatal("API key was sent in the prompt body")
@@ -192,5 +193,98 @@ func TestAssistantAskRejectsSecondCall(t *testing.T) {
 	}
 	if code := <-done; code != http.StatusOK {
 		t.Fatalf("first ask = %d", code)
+	}
+}
+
+func TestAssistantAskRunsSupportReportTool(t *testing.T) {
+	var rounds int
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		rounds++
+		if strings.Contains(string(raw), `"role":"tool"`) {
+			if !strings.Contains(string(raw), "test-version") && !strings.Contains(string(raw), "FTW help report") {
+				t.Errorf("tool result missing help report: %s", raw)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"choices": []map[string]any{
+					{"message": map[string]string{"role": "assistant", "content": "## Answer\nReport read.\n"}},
+				},
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{
+				{"message": map[string]any{
+					"role": "assistant",
+					"tool_calls": []map[string]any{{
+						"id":       "c1",
+						"type":     "function",
+						"function": map[string]string{"name": "get_support_report", "arguments": "{}"},
+					}},
+				}},
+			},
+		})
+	}))
+	defer upstream.Close()
+	asst := &config.Assistant{Enabled: true, APIKey: "k", BaseURL: upstream.URL}
+	srv := assistantTestServer(t, asst, upstream.Client())
+	req := postAssistantAsk("what is going on?")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if rounds != 2 {
+		t.Fatalf("rounds = %d, want 2", rounds)
+	}
+	var got assistantAskResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Answer != "Report read." {
+		t.Fatalf("answer = %q", got.Answer)
+	}
+}
+
+func TestAssistantToolHealthAndLogs(t *testing.T) {
+	st := control.NewState(0, 50, "meter")
+	tel := telemetry.NewStore()
+	tel.DriverHealthMut("sungrow").SetOffline()
+	tel.DriverHealthMut("sungrow").RecordError("dial 10.0.0.5:502")
+	ring := telemetry.NewLogRing()
+	ring.Append(telemetry.LogEntry{TS: time.Now(), Level: "ERROR", Msg: "poll failed at 10.0.0.5", Driver: "sungrow"})
+	ring.Append(telemetry.LogEntry{TS: time.Now(), Level: "INFO", Msg: "tick", Driver: "sungrow"})
+	s := New(&Deps{
+		Ctrl: st, CtrlMu: &sync.Mutex{}, Tel: tel, LogRing: ring, Version: "v-test",
+	})
+	health, err := s.runAssistantTool(assistant.ToolDriverHealth, []byte(`{"name":"sungrow"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(health, "sungrow") || !strings.Contains(health, "offline") {
+		t.Fatalf("health = %q", health)
+	}
+	if strings.Contains(health, "10.0.0.5") {
+		t.Fatalf("health leaked an IP: %q", health)
+	}
+	logs, err := s.runAssistantTool(assistant.ToolRecentLogs, []byte(`{"driver":"sungrow"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(logs, "poll failed") {
+		t.Fatalf("logs = %q", logs)
+	}
+	if strings.Contains(logs, "10.0.0.5") {
+		t.Fatalf("logs leaked an IP: %q", logs)
+	}
+	if strings.Contains(logs, "tick") {
+		t.Fatalf("info lines should be filtered: %q", logs)
+	}
+	ver, err := s.runAssistantTool(assistant.ToolVersion, []byte(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(ver, "v-test") {
+		t.Fatalf("version = %q", ver)
 	}
 }

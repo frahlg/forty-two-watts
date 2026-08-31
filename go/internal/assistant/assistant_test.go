@@ -120,3 +120,95 @@ func TestCompleteRejectsEmptyKey(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+func TestCompleteRunsReadOnlyTools(t *testing.T) {
+	var saw []string
+	var called []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		saw = append(saw, string(raw))
+		if strings.Contains(string(raw), `"role":"tool"`) {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"model": "openrouter/free",
+				"choices": []map[string]any{
+					{"message": map[string]string{
+						"role":    "assistant",
+						"content": "## Answer\nSungrow is offline.\n\n## Issue title\n\n## Issue body\n",
+					}},
+				},
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{
+				{"message": map[string]any{
+					"role": "assistant",
+					"tool_calls": []map[string]any{
+						{
+							"id":   "call_1",
+							"type": "function",
+							"function": map[string]string{
+								"name":      "get_driver_health",
+								"arguments": `{"name":"sungrow"}`,
+							},
+						},
+						{
+							"id":   "call_bad",
+							"type": "function",
+							"function": map[string]string{
+								"name":      "driver_command",
+								"arguments": `{"action":"battery"}`,
+							},
+						},
+					},
+				}},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	cli := &Client{HTTP: srv.Client()}
+	reply, err := cli.Complete(context.Background(), Request{
+		APIKey:   "k",
+		BaseURL:  srv.URL,
+		Question: "why is sungrow down?",
+		Trigger:  "driver sungrow is offline",
+		Run: func(name string, args json.RawMessage) (string, error) {
+			called = append(called, name)
+			return "sungrow status=offline last_success=12 min ago", nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reply.Answer != "Sungrow is offline." {
+		t.Fatalf("answer = %q", reply.Answer)
+	}
+	if reply.ToolRounds != 2 {
+		t.Fatalf("tool rounds = %d, want 2 (health + rejected write)", reply.ToolRounds)
+	}
+	if len(called) != 1 || called[0] != ToolDriverHealth {
+		t.Fatalf("runner called %v, want only get_driver_health", called)
+	}
+	if !strings.Contains(saw[0], `"name":"get_driver_health"`) {
+		t.Fatalf("first request missing tools: %s", saw[0])
+	}
+	if !strings.Contains(saw[0], "driver sungrow is offline") {
+		t.Fatalf("first request missing trigger: %s", saw[0])
+	}
+	if !strings.Contains(saw[1], "unknown tool; Ask why is read-only") {
+		t.Fatalf("write tool was not refused: %s", saw[1])
+	}
+	if !strings.Contains(saw[1], "sungrow status=offline") {
+		t.Fatalf("health result missing: %s", saw[1])
+	}
+}
+
+func TestAllowedToolIsReadOnly(t *testing.T) {
+	if AllowedTool("driver_command") || AllowedTool("set_mode") {
+		t.Fatal("write names must not be allowed")
+	}
+	if !AllowedTool(ToolSupportReport) || !AllowedTool(ToolPlanNow) {
+		t.Fatal("read tools must be allowed")
+	}
+}

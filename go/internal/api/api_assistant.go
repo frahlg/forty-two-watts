@@ -16,7 +16,13 @@ import (
 const githubNewIssueURL = "https://github.com/srcfl/ftw/issues/new?template=bug_report.yml"
 
 type assistantAskRequest struct {
-	Question string `json:"question"`
+	Question string            `json:"question"`
+	Trigger  *assistantTrigger `json:"trigger,omitempty"`
+}
+
+type assistantTrigger struct {
+	Kind   string `json:"kind"`
+	Driver string `json:"driver,omitempty"`
 }
 
 type assistantAskResponse struct {
@@ -107,14 +113,14 @@ func (s *Server) handleAssistantAsk(w http.ResponseWriter, r *http.Request) {
 	}
 
 	start := time.Now()
-	report := s.buildSupportReport(r.Context(), start)
 	cli := &assistant.Client{HTTP: s.deps.AssistantHTTP}
 	reply, err := cli.Complete(r.Context(), assistant.Request{
 		APIKey:   asst.APIKey,
 		Model:    asst.ResolvedModel(),
 		BaseURL:  asst.ResolvedBaseURL(),
 		Question: body.Question,
-		Report:   report,
+		Trigger:  formatAssistantTrigger(body.Trigger),
+		Run:      s.runAssistantTool,
 	})
 	if err != nil {
 		var apiErr *assistant.APIError
@@ -141,6 +147,36 @@ func (s *Server) handleAssistantAsk(w http.ResponseWriter, r *http.Request) {
 	slog.Info("assistant ask",
 		"model", out.ResolvedModel,
 		"ms", time.Since(start).Milliseconds(),
+		"tools", reply.ToolRounds,
 		"issue", out.IssueTitle != "")
 	writeJSON(w, http.StatusOK, out)
+}
+
+func formatAssistantTrigger(t *assistantTrigger) string {
+	if t == nil {
+		return ""
+	}
+	kind := strings.TrimSpace(t.Kind)
+	driver := sanitizeDriverName(t.Driver)
+	if kind == "driver_offline" && driver != "" {
+		return "driver " + driver + " is offline"
+	}
+	if kind == "driver_offline" {
+		return "a driver is offline"
+	}
+	return ""
+}
+
+func sanitizeDriverName(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" || len(name) > 40 {
+		return ""
+	}
+	for _, r := range name {
+		if r == '_' || r == '-' || r == '.' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			continue
+		}
+		return ""
+	}
+	return name
 }
