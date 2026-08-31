@@ -1025,6 +1025,11 @@ body.ftw-app .strategy-hint {
   color: var(--fg);
   line-height: 1.5;
 }
+/* The hint describes the manual mode in use, so it is empty while the
+   planner drives — without this it leaves a bordered blank strip. */
+body.ftw-app .strategy-hint:empty {
+  display: none;
+}
 body.ftw-app .forecast-trust {
   margin: 0 0 12px;
 }
@@ -1123,6 +1128,45 @@ body.ftw-app .plan-export-sentence {
   font-family: var(--sans);
   font-size: 13px;
   line-height: 1.4;
+}
+/* The Plan card is as wide as the chart below it. Controls stretched to
+   that width read as a banner, not as something to touch, and prose set
+   across it is hard to follow — so both get a comfortable measure and
+   the rest of the row stays empty. */
+body.ftw-app .plan-strategy .forecast-trust,
+body.ftw-app .plan-strategy .plan-export,
+body.ftw-app .plan-strategy .plan-export-banner,
+body.ftw-app .plan-strategy .plan-export-row,
+body.ftw-app .plan-strategy .mode-advanced-toggle,
+body.ftw-app .plan-strategy #mode-buttons {
+  max-width: 560px;
+}
+body.ftw-app .plan-strategy .forecast-trust-help,
+body.ftw-app .plan-strategy .forecast-trust-yaml,
+body.ftw-app .plan-strategy .plan-export-help,
+body.ftw-app .plan-strategy .plan-export-unknown,
+body.ftw-app .plan-strategy .plan-export-sentence,
+body.ftw-app .plan-strategy .strategy-hint {
+  max-width: 70ch;
+}
+/* "Use the plan" is the one action on this card while a manual mode
+   drives, so it takes the accent the mode buttons do not — and only the
+   width its label needs. */
+body.ftw-app #plan-use-row {
+  margin-top: 12px;
+}
+body.ftw-app .mode-buttons #plan-use-btn {
+  flex: 0 0 auto;
+  background: var(--accent-e);
+  border: 1px solid var(--accent-e);
+  color: var(--on-accent);
+  font-weight: 600;
+  padding: 8px 16px;
+}
+body.ftw-app .mode-buttons #plan-use-btn:hover {
+  background: var(--accent-e);
+  color: var(--on-accent);
+  opacity: 0.9;
 }
 body.ftw-app .engine-details {
   margin-top: 16px;
