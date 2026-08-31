@@ -42,23 +42,29 @@
     style.id = "ftw-ask-styles";
     style.textContent = [
       ".ftw-ask-backdrop{position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:9000;display:flex;align-items:center;justify-content:center;}",
-      ".ftw-ask-shell{width:min(680px,94vw);max-height:90vh;display:flex;flex-direction:column;background:var(--ink-raised,#161616);border:1px solid var(--line,#2a2a2a);border-radius:10px;overflow:hidden;}",
-      ".ftw-ask-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 18px;border-bottom:1px solid var(--line,#2a2a2a);background:var(--ink,#111);}",
+      ".ftw-ask-shell{width:min(680px,94vw);max-height:90vh;min-height:0;display:flex;flex-direction:column;background:var(--ink-raised,#161616);border:1px solid var(--line,#2a2a2a);border-radius:10px;overflow:hidden;}",
+      ".ftw-ask-head{flex:0 0 auto;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 18px;border-bottom:1px solid var(--line,#2a2a2a);background:var(--ink,#111);}",
       ".ftw-ask-title{font-family:var(--mono,monospace);font-size:0.7rem;letter-spacing:0.18em;text-transform:uppercase;color:var(--accent-e,#f5b942);font-weight:500;}",
       ".ftw-ask-close{font-size:1.4rem;line-height:1;background:transparent;border:none;color:var(--fg-muted,#858585);cursor:pointer;padding:4px 8px;}",
       ".ftw-ask-close:hover{color:var(--fg,#e8e8e8);}",
-      ".ftw-ask-thread{padding:16px 18px;overflow:auto;flex:1;display:flex;flex-direction:column;gap:10px;}",
-      ".ftw-ask-msg{max-width:92%;padding:10px 12px;border-radius:10px;font:0.9rem/1.5 var(--sans,sans-serif);overflow-wrap:anywhere;}",
+      ".ftw-ask-body{flex:1 1 auto;min-height:0;display:flex;flex-direction:column;overflow:hidden;}",
+      ".ftw-ask-thread{padding:16px 18px;overflow:auto;flex:1 1 auto;min-height:0;display:flex;flex-direction:column;gap:10px;}",
+      ".ftw-ask-msg{max-width:92%;padding:10px 12px;border-radius:10px;font:0.9rem/1.5 var(--sans,sans-serif);overflow-wrap:anywhere;word-break:break-word;}",
       ".ftw-ask-msg.user{align-self:flex-end;background:var(--ink,#111);border:1px solid var(--line,#2a2a2a);color:var(--fg,#e8e8e8);}",
       ".ftw-ask-msg.assistant{align-self:flex-start;background:var(--ink-sunken,#0d0d0d);border:1px solid var(--line,#2a2a2a);color:var(--fg,#e8e8e8);}",
       ".ftw-ask-msg.assistant strong{color:var(--fg,#e8e8e8);}",
       ".ftw-ask-msg.assistant code{font-family:var(--mono,monospace);font-size:0.82em;}",
-      ".ftw-ask-progress{align-self:flex-start;color:var(--fg-dim,#a0a0a0);font:0.8rem/1.4 var(--sans,sans-serif);}",
+      ".ftw-ask-activity{align-self:flex-start;display:flex;flex-direction:column;gap:4px;padding:2px 0 4px;max-width:100%;}",
+      ".ftw-ask-step{display:flex;align-items:center;gap:8px;color:var(--fg-dim,#a0a0a0);font:0.78rem/1.4 var(--sans,sans-serif);}",
+      ".ftw-ask-step::before{content:'';width:6px;height:6px;border-radius:50%;background:var(--fg-muted,#858585);flex:0 0 auto;}",
+      ".ftw-ask-step.is-live{color:var(--accent-e,#f5b942);}",
+      ".ftw-ask-step.is-live::before{background:var(--accent-e,#f5b942);box-shadow:0 0 0 3px rgba(245,185,66,0.22);}",
+      ".ftw-ask-step.is-tool{font-family:var(--mono,monospace);font-size:0.72rem;letter-spacing:0.02em;}",
       ".ftw-ask-note{color:var(--fg-dim,#a0a0a0);font-size:0.84rem;line-height:1.45;margin:0;}",
       ".ftw-ask-error{color:var(--red-e,#ef4444);font-size:0.84rem;}",
-      ".ftw-ask-foot{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:0 18px 10px;flex-wrap:wrap;}",
+      ".ftw-ask-foot{flex:0 0 auto;display:flex;justify-content:space-between;align-items:center;gap:8px;padding:0 18px 10px;flex-wrap:wrap;}",
       ".ftw-ask-status{color:var(--fg-dim,#a0a0a0);font-size:0.78rem;}",
-      ".ftw-ask-composer{display:flex;gap:8px;padding:12px 18px 16px;border-top:1px solid var(--line,#2a2a2a);}",
+      ".ftw-ask-composer{flex:0 0 auto;display:flex;gap:8px;padding:12px 18px 16px;border-top:1px solid var(--line,#2a2a2a);}",
       ".ftw-ask-composer input{flex:1;min-width:0;background:var(--ink-sunken,#0d0d0d);color:var(--fg,#e8e8e8);border:1px solid var(--line,#2a2a2a);border-radius:8px;padding:10px 12px;font:0.9rem var(--sans,sans-serif);}",
       ".ftw-ask-btn{font-family:var(--sans,sans-serif);font-size:0.78rem;font-weight:500;letter-spacing:0.02em;padding:8px 14px;border:1px solid var(--line,#2a2a2a);border-radius:8px;background:transparent;color:var(--fg,#e8e8e8);cursor:pointer;}",
       ".ftw-ask-btn:hover{border-color:var(--fg-dim,#a0a0a0);}",
@@ -158,25 +164,80 @@
     thread.scrollTop = thread.scrollHeight;
   }
 
-  function setProgress(text) {
-    var thread = threadEl();
-    if (!thread) return;
-    var el = thread.querySelector('[data-role="progress"]');
-    if (!el) {
-      el = document.createElement("div");
-      el.className = "ftw-ask-progress";
-      el.setAttribute("data-role", "progress");
-      thread.appendChild(el);
-    }
-    el.hidden = !text;
-    el.textContent = text || "";
-    thread.scrollTop = thread.scrollHeight;
+  function visibleAnswer(s) {
+    s = String(s || "");
+    var cut = s.search(/\n#{1,3}\s*Issue title\b/i);
+    if (cut < 0) cut = s.search(/\n\*\*Issue title\*\*/i);
+    if (cut >= 0) s = s.slice(0, cut);
+    s = s.replace(/^#{1,3}\s*Answer\s*\n+/i, "");
+    s = s.replace(/^\*\*Answer\*\*\s*\n+/i, "");
+    return s;
   }
 
-  function clearProgress() {
-    setProgress("");
-    var el = threadEl() && threadEl().querySelector('[data-role="progress"]');
-    if (el && el.parentNode) el.parentNode.removeChild(el);
+  function activityEl() {
+    var thread = threadEl();
+    if (!thread) return null;
+    var el = thread.querySelector('[data-role="activity"]');
+    if (!el) {
+      el = document.createElement("div");
+      el.className = "ftw-ask-activity";
+      el.setAttribute("data-role", "activity");
+      thread.appendChild(el);
+    }
+    return el;
+  }
+
+  function addActivity(text, kind) {
+    var log = activityEl();
+    if (!log) return;
+    var live = log.querySelector(".is-live");
+    if (live) live.classList.remove("is-live");
+    var el = document.createElement("div");
+    el.className = "ftw-ask-step" + (kind === "tool" ? " is-tool is-live" : " is-live");
+    el.textContent = text;
+    log.appendChild(el);
+    var thread = threadEl();
+    if (thread) thread.scrollTop = thread.scrollHeight;
+  }
+
+  function settleActivity() {
+    var log = activityEl();
+    if (!log) return;
+    var live = log.querySelector(".is-live");
+    if (live) live.classList.remove("is-live");
+  }
+
+  function draftEl() {
+    var thread = threadEl();
+    if (!thread) return null;
+    var el = thread.querySelector('[data-role="draft"]');
+    if (!el) {
+      el = document.createElement("div");
+      el.className = "ftw-ask-msg assistant";
+      el.setAttribute("data-role", "draft");
+      thread.appendChild(el);
+    }
+    return el;
+  }
+
+  function appendDelta(raw) {
+    var el = draftEl();
+    if (!el) return;
+    el.textContent = visibleAnswer(raw);
+    var thread = threadEl();
+    if (thread) thread.scrollTop = thread.scrollHeight;
+  }
+
+  function finishAssistant(text) {
+    var thread = threadEl();
+    var draft = thread && thread.querySelector('[data-role="draft"]');
+    if (!draft) {
+      addAssistant(text);
+      return;
+    }
+    draft.removeAttribute("data-role");
+    draft.innerHTML = formatAnswer(text);
+    thread.scrollTop = thread.scrollHeight;
   }
 
   function setFoot(html) {
@@ -215,8 +276,10 @@
     var gen = state.generation;
     state.busy = true;
     addUser(q);
-    setProgress("This can take a minute. Reading the site…");
+    addActivity("This can take a minute.");
+    addActivity("Reading the site");
     setFoot("");
+    var streamed = "";
     var askBtn = state.backdrop && state.backdrop.querySelector('[data-role="ask"]');
     var input = state.backdrop && state.backdrop.querySelector('[data-role="input"]');
     if (askBtn) askBtn.disabled = true;
@@ -247,8 +310,12 @@
               if (chunk.value) buf += decoder.decode(chunk.value, { stream: true });
               buf = parseSSEChunk(buf, function (ev) {
                 if (!stillOpen(gen)) return;
-                if (ev.type === "status") setProgress(ev.text || "Working…");
-                if (ev.type === "tool") setProgress(toolLabel(ev.text) + "…");
+                if (ev.type === "status") addActivity(ev.text || "Working");
+                if (ev.type === "tool") addActivity(toolLabel(ev.text), "tool");
+                if (ev.type === "delta") {
+                  streamed += ev.text || "";
+                  appendDelta(streamed);
+                }
                 if (ev.type === "error") throw new Error(ev.error || "Ask why failed");
                 if (ev.type === "done") donePayload = ev;
               });
@@ -269,12 +336,12 @@
       })
       .then(function (j) {
         if (!stillOpen(gen) || !j) return;
-        clearProgress();
+        settleActivity();
         state.last = j;
         state.turns.push({ role: "user", text: q });
         state.turns.push({ role: "assistant", text: j.answer || "" });
         if (state.turns.length > 6) state.turns = state.turns.slice(-6);
-        addAssistant(j.answer || "");
+        finishAssistant(j.answer || "");
         var used = j.resolved_model || j.model || "";
         var foot = '<span class="ftw-ask-status">' + escHtml(used ? "Answered by " + used : "Done") + "</span>";
         if (j.issue_title) {
@@ -287,7 +354,7 @@
       .catch(function (err) {
         if (!stillOpen(gen)) return;
         if (err && err.name === "AbortError") return;
-        clearProgress();
+        settleActivity();
         var thread = threadEl();
         if (thread) {
           var el = document.createElement("div");
@@ -354,7 +421,7 @@
       '<div class="ftw-ask-shell" role="dialog" aria-modal="true" aria-labelledby="ftw-ask-title">' +
       '  <div class="ftw-ask-head"><span class="ftw-ask-title" id="ftw-ask-title">' + escHtml(title) + '</span>' +
       '    <button class="ftw-ask-close" data-role="close" aria-label="Close" type="button">×</button></div>' +
-      '  <div data-role="body"><p class="ftw-ask-note" style="padding:16px 18px">Loading…</p></div>' +
+      '  <div class="ftw-ask-body" data-role="body"><p class="ftw-ask-note" style="padding:16px 18px">Loading…</p></div>' +
       "</div>";
     document.body.appendChild(backdrop);
     state.backdrop = backdrop;
@@ -430,5 +497,5 @@
     bind();
   }
 
-  window.FTWAskWhy = { open: open, close: close, updateChip: updateChip, _test: { parseSSEChunk: parseSSEChunk } };
+  window.FTWAskWhy = { open: open, close: close, updateChip: updateChip, _test: { parseSSEChunk: parseSSEChunk, visibleAnswer: visibleAnswer } };
 })();

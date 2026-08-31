@@ -44,6 +44,41 @@ test("the conversation keeps the question and the answer in separate messages", 
   assert.doesNotMatch(assistant, /innerHTML = j\.answer/);
 });
 
+test("the dialog keeps long answers inside the shell", () => {
+  assert.match(assistant, /ftw-ask-body/);
+  assert.match(assistant, /min-height:0/);
+  assert.match(assistant, /word-break:break-word/);
+});
+
+test("tokens and tool calls append while waiting", () => {
+  assert.match(assistant, /ev\.type === "delta"/);
+  assert.match(assistant, /ftw-ask-activity/);
+  assert.match(assistant, /ftw-ask-step/);
+  assert.match(assistant, /addActivity\(toolLabel/);
+});
+
+test("visibleAnswer hides issue fields while the answer streams", () => {
+  const sandbox = {
+    document: {
+      readyState: "complete",
+      getElementById: () => null,
+      addEventListener() {},
+      createElement: () => ({ style: {}, setAttribute() {} }),
+      head: { appendChild() {} },
+      body: { appendChild() {} },
+    },
+    fetch: () => new Promise(() => {}),
+    navigator: {},
+    console,
+    addEventListener() {},
+  };
+  sandbox.window = sandbox;
+  vm.createContext(sandbox);
+  vm.runInContext(assistant, sandbox);
+  const vis = sandbox.window.FTWAskWhy._test.visibleAnswer;
+  assert.equal(vis("## Answer\nHello\n\n## Issue title\nbug").trim(), "Hello");
+});
+
 test("follow-ups send the earlier turns", () => {
   assert.match(assistant, /history: state\.turns\.slice\(\)/);
   assert.match(assistant, /role: "user"/);
