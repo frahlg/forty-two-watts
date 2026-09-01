@@ -24,6 +24,8 @@ type assistantAskRequest struct {
 	Question string            `json:"question"`
 	Trigger  *assistantTrigger `json:"trigger,omitempty"`
 	History  []assistant.Turn  `json:"history,omitempty"`
+	// ThreadID continues a stored conversation. Empty starts a new one.
+	ThreadID string `json:"thread_id,omitempty"`
 }
 
 type assistantTrigger struct {
@@ -38,6 +40,7 @@ type assistantAskResponse struct {
 	IssueURL      string `json:"issue_url,omitempty"`
 	Model         string `json:"model"`
 	ResolvedModel string `json:"resolved_model,omitempty"`
+	ThreadID      string `json:"thread_id,omitempty"`
 }
 
 type assistantStatusResponse struct {
@@ -186,6 +189,7 @@ func (s *Server) handleAssistantAsk(w http.ResponseWriter, r *http.Request) {
 	if out.IssueTitle != "" {
 		out.IssueURL = filledIssueURL(out.IssueTitle, out.IssueBody)
 	}
+	out.ThreadID = s.recordAssistantTurn(body, out.Answer, out.ResolvedModel)
 	slog.Info("assistant ask",
 		"model", out.ResolvedModel,
 		"ms", time.Since(start).Milliseconds(),
@@ -200,6 +204,7 @@ func (s *Server) handleAssistantAsk(w http.ResponseWriter, r *http.Request) {
 			"issue_url":      out.IssueURL,
 			"model":          out.Model,
 			"resolved_model": out.ResolvedModel,
+			"thread_id":      out.ThreadID,
 		})
 		return
 	}

@@ -785,6 +785,20 @@ func (s *Store) migrate() error {
 		) STRICT`,
 		`CREATE INDEX IF NOT EXISTS idx_caldav_objects_collection ON caldav_objects(collection)`,
 
+		// Ask why conversations. One row per thread; the turns are JSON
+		// because a thread is read and written whole and is never queried
+		// by its contents. Capped at AssistantThreadCap rows on write —
+		// see assistant_threads.go for why the box does not keep them all.
+		`CREATE TABLE IF NOT EXISTS assistant_threads (
+			id         TEXT PRIMARY KEY NOT NULL,
+			started_ms INTEGER NOT NULL,
+			updated_ms INTEGER NOT NULL,
+			title      TEXT NOT NULL DEFAULT '',
+			model      TEXT NOT NULL DEFAULT '',
+			turns_json TEXT NOT NULL
+		) STRICT`,
+		`CREATE INDEX IF NOT EXISTS idx_assistant_threads_updated ON assistant_threads(updated_ms)`,
+
 		// Nova federation: one row per local DER we've provisioned in Nova.
 		// Keyed on (device_id, der_type) so a hybrid inverter with multiple
 		// DERs (battery + pv + meter on the same device_id) has one row per

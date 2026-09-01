@@ -253,6 +253,11 @@ func protectedReadPath(path string) bool {
 	if path == "/api/backups" || strings.HasPrefix(path, "/api/backups/") {
 		return true
 	}
+	// Ask why history holds the model's answers about this house, so the
+	// list and every single conversation stay off a public host.
+	if path == "/api/assistant/threads" || strings.HasPrefix(path, "/api/assistant/threads/") {
+		return true
+	}
 	if path == "/api/series" || strings.HasPrefix(path, "/api/series/") {
 		return true
 	}

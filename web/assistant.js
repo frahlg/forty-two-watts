@@ -153,6 +153,17 @@
       ".ftw-ask-btn-primary{background:var(--accent-e,#f5b942);color:#0a0a0a;border-color:var(--accent-e,#f5b942);}",
       ".ftw-ask-setup{padding:16px 18px;}",
       ".ftw-ask-setup a{color:var(--accent-e,#f5b942);}",
+      ".ftw-ask-head-actions{display:flex;align-items:center;gap:4px;}",
+      ".ftw-ask-icon{font-family:var(--sans,sans-serif);font-size:0.72rem;letter-spacing:0.02em;background:transparent;border:1px solid var(--line,#2a2a2a);border-radius:6px;color:var(--fg-dim,#a0a0a0);cursor:pointer;padding:4px 9px;}",
+      ".ftw-ask-icon:hover{color:var(--fg,#e8e8e8);border-color:var(--fg-dim,#a0a0a0);}",
+      ".ftw-ask-history{list-style:none;margin:0;padding:8px 10px;overflow:auto;flex:1 1 auto;min-height:0;}",
+      ".ftw-ask-history li{display:flex;align-items:stretch;gap:4px;}",
+      ".ftw-ask-thread{flex:1;min-width:0;text-align:left;background:transparent;border:none;border-radius:8px;color:var(--fg,#e8e8e8);cursor:pointer;padding:9px 10px;display:flex;flex-direction:column;gap:2px;}",
+      ".ftw-ask-thread:hover{background:var(--ink-sunken,#0d0d0d);}",
+      ".ftw-ask-thread-title{font:0.86rem/1.35 var(--sans,sans-serif);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}",
+      ".ftw-ask-thread-meta{font:0.72rem var(--mono,monospace);color:var(--fg-muted,#858585);}",
+      ".ftw-ask-thread-del{flex:0 0 auto;background:transparent;border:none;color:var(--fg-muted,#858585);cursor:pointer;padding:0 8px;font-size:1.1rem;line-height:1;border-radius:8px;}",
+      ".ftw-ask-thread-del:hover{color:var(--red-e,#ef4444);background:var(--ink-sunken,#0d0d0d);}",
     ].join("");
     document.head.appendChild(style);
   }
@@ -167,6 +178,7 @@
     turns: [],
     generation: 0,
     abort: null,
+    threadID: "",
   };
 
   function offlineDrivers(data) {
@@ -215,6 +227,7 @@
     state.backdrop = null;
     state.busy = false;
     state.turns = [];
+    state.threadID = "";
   }
 
   function stillOpen(gen) {
@@ -383,6 +396,7 @@
     if (input) { input.value = ""; input.disabled = true; }
     var payload = { question: q, history: state.turns.slice() };
     if (state.trigger) payload.trigger = state.trigger;
+    if (state.threadID) payload.thread_id = state.threadID;
     var fetchOpts = {
       method: "POST",
       headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
@@ -436,6 +450,7 @@
         if (!stillOpen(gen) || !j) return;
         settleActivity(run);
         state.last = j;
+        if (j.thread_id) state.threadID = j.thread_id;
         state.turns.push({ role: "user", text: q });
         state.turns.push({ role: "assistant", text: j.answer || "" });
         if (state.turns.length > 6) state.turns = state.turns.slice(-6);
@@ -485,6 +500,113 @@
       });
   }
 
+  // "14:32" today, "Tue 14:32" this week, "3 Sep" beyond that. A stored
+  // conversation is found by when it happened, so the stamp has to say
+  // that without a full date on every row.
+  function whenLabel(ms) {
+    if (!ms) return "";
+    var d = new Date(ms);
+    if (isNaN(d.getTime())) return "";
+    var now = new Date();
+    var hhmm = String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+    if (d.toDateString() === now.toDateString()) return hhmm;
+    if (now - d < 6 * 864e5) {
+      return ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][d.getDay()] + " " + hhmm;
+    }
+    return d.getDate() + " " + ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][d.getMonth()];
+  }
+
+  function renderHistory(host) {
+    host.innerHTML = '<div class="ftw-ask-setup"><p class="ftw-ask-note">Loading…</p></div>';
+    var gen = state.generation;
+    apiFetch("/api/assistant/threads")
+      .then(function (r) {
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        return r.json();
+      })
+      .then(function (data) {
+        if (!stillOpen(gen)) return;
+        var threads = (data && data.threads) || [];
+        if (!threads.length) {
+          host.innerHTML =
+            '<div class="ftw-ask-setup"><p class="ftw-ask-note">No earlier conversations yet. ' +
+            "Ask something and it is kept on the box.</p></div>";
+          return;
+        }
+        var rows = threads.map(function (t) {
+          return '<li><button class="ftw-ask-thread" type="button" data-thread="' + escHtml(t.id) + '">' +
+            '<span class="ftw-ask-thread-title">' + escHtml(t.title || "Ask why") + "</span>" +
+            '<span class="ftw-ask-thread-meta">' + escHtml(whenLabel(t.updated_ms)) +
+            (t.turn_count ? " · " + Math.ceil(t.turn_count / 2) + (t.turn_count > 2 ? " questions" : " question") : "") +
+            "</span></button>" +
+            '<button class="ftw-ask-thread-del" type="button" data-del="' + escHtml(t.id) + '" aria-label="Delete conversation" title="Delete">×</button></li>';
+        }).join("");
+        host.innerHTML = '<ul class="ftw-ask-history">' + rows + "</ul>";
+        host.querySelectorAll("[data-thread]").forEach(function (btn) {
+          btn.addEventListener("click", function () { openThread(btn.getAttribute("data-thread")); });
+        });
+        host.querySelectorAll("[data-del]").forEach(function (btn) {
+          btn.addEventListener("click", function () {
+            var id = btn.getAttribute("data-del");
+            apiFetch("/api/assistant/threads/" + encodeURIComponent(id), { method: "DELETE" })
+              .then(function () { if (stillOpen(gen)) renderHistory(host); });
+          });
+        });
+      })
+      .catch(function (err) {
+        if (!stillOpen(gen)) return;
+        host.innerHTML = '<p class="ftw-ask-error" style="padding:16px 18px">Could not read earlier conversations: ' +
+          escHtml((err && err.message) || String(err)) + "</p>";
+      });
+  }
+
+  // Reopen a stored conversation: its turns become the thread on screen and
+  // the composer continues it, so a follow-up lands in the same row.
+  function openThread(id) {
+    var gen = state.generation;
+    var body = state.backdrop && state.backdrop.querySelector('[data-role="body"]');
+    if (!body) return;
+    apiFetch("/api/assistant/threads/" + encodeURIComponent(id))
+      .then(function (r) {
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        return r.json();
+      })
+      .then(function (t) {
+        if (!stillOpen(gen)) return;
+        state.threadID = t.id || "";
+        state.turns = [];
+        showHistory(false);
+        renderReady(body, {}, {});
+        (t.turns || []).forEach(function (turn) {
+          if (turn.role === "user") addUser(turn.text || "");
+          else addAssistant(turn.text || "");
+          state.turns.push({ role: turn.role, text: turn.text || "" });
+        });
+        if (state.turns.length > 6) state.turns = state.turns.slice(-6);
+        if (t.model) {
+          setFoot('<span class="ftw-ask-status">' + escHtml("Answered by " + t.model) + "</span>");
+        }
+      })
+      .catch(function (err) {
+        if (!stillOpen(gen)) return;
+        body.innerHTML = '<p class="ftw-ask-error" style="padding:16px 18px">Could not open that conversation: ' +
+          escHtml((err && err.message) || String(err)) + "</p>";
+      });
+  }
+
+  // Flip the header between the live conversation and the history list.
+  function showHistory(on) {
+    var root = state.backdrop;
+    if (!root) return;
+    var histBtn = root.querySelector('[data-role="history"]');
+    var newBtn = root.querySelector('[data-role="new"]');
+    if (histBtn) {
+      histBtn.setAttribute("aria-expanded", on ? "true" : "false");
+      histBtn.hidden = !!on;
+    }
+    if (newBtn) newBtn.hidden = !on;
+  }
+
   function renderSetup(host, status) {
     host.innerHTML =
       '<div class="ftw-ask-setup">' +
@@ -527,14 +649,21 @@
     state.trigger = opts.trigger || null;
     state.last = null;
     state.turns = [];
+    state.threadID = "";
     var gen = state.generation;
     var title = (opts.trigger && opts.trigger.kind === "plan") ? "Ask why this plan" : "Ask why";
     var backdrop = document.createElement("div");
     backdrop.className = "ftw-ask-backdrop";
     backdrop.innerHTML =
       '<div class="ftw-ask-shell" role="dialog" aria-modal="true" aria-labelledby="ftw-ask-title">' +
-      '  <div class="ftw-ask-head"><span class="ftw-ask-title" id="ftw-ask-title">' + escHtml(title) + '</span>' +
-      '    <button class="ftw-ask-close" data-role="close" aria-label="Close" type="button">×</button></div>' +
+      '  <div class="ftw-ask-head">' +
+      '    <span class="ftw-ask-title" id="ftw-ask-title">' + escHtml(title) + "</span>" +
+      '    <span class="ftw-ask-head-actions">' +
+      '      <button class="ftw-ask-icon" data-role="history" type="button" aria-label="Earlier conversations" title="Earlier conversations" aria-expanded="false">Earlier</button>' +
+      '      <button class="ftw-ask-icon" data-role="new" type="button" aria-label="New conversation" title="New conversation" hidden>New</button>' +
+      '      <button class="ftw-ask-close" data-role="close" aria-label="Close" type="button">×</button>' +
+      "    </span>" +
+      "  </div>" +
       '  <div class="ftw-ask-body" data-role="body"><p class="ftw-ask-note" style="padding:16px 18px">Loading…</p></div>' +
       "</div>";
     document.body.appendChild(backdrop);
@@ -543,6 +672,18 @@
       if (e.target === backdrop) close();
     });
     backdrop.querySelector('[data-role="close"]').addEventListener("click", close);
+    backdrop.querySelector('[data-role="history"]').addEventListener("click", function () {
+      if (state.busy) return;
+      showHistory(true);
+      renderHistory(backdrop.querySelector('[data-role="body"]'));
+    });
+    backdrop.querySelector('[data-role="new"]').addEventListener("click", function () {
+      state.threadID = "";
+      state.turns = [];
+      state.last = null;
+      showHistory(false);
+      renderReady(backdrop.querySelector('[data-role="body"]'), {}, opts);
+    });
     state.keyHandler = function (e) {
       if (e.key === "Escape") close();
     };
@@ -611,5 +752,5 @@
     bind();
   }
 
-  window.FTWAskWhy = { open: open, close: close, updateChip: updateChip, _test: { parseSSEChunk: parseSSEChunk, visibleAnswer: visibleAnswer, formatAnswer: formatAnswer } };
+  window.FTWAskWhy = { open: open, close: close, updateChip: updateChip, _test: { parseSSEChunk: parseSSEChunk, visibleAnswer: visibleAnswer, formatAnswer: formatAnswer, whenLabel: whenLabel } };
 })();

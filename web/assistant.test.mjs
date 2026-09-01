@@ -11,6 +11,9 @@ const appCss = readFileSync(new URL("./app.css", import.meta.url), "utf8");
 const issueTemplate = readFileSync(new URL("../.github/ISSUE_TEMPLATE/ask_why.md", import.meta.url), "utf8");
 const goAssistant = readFileSync(new URL("../go/internal/assistant/assistant.go", import.meta.url), "utf8");
 const goApi = readFileSync(new URL("../go/internal/api/api_assistant.go", import.meta.url), "utf8");
+const goState = readFileSync(new URL("../go/internal/state/assistant_threads.go", import.meta.url), "utf8");
+const goSecurity = readFileSync(new URL("../go/internal/api/security.go", import.meta.url), "utf8");
+const goThreads = readFileSync(new URL("../go/internal/api/api_assistant_threads.go", import.meta.url), "utf8");
 
 // escHtml escapes by writing textContent and reading innerHTML back, so
 // the stub element has to do the same or the escaping tests prove nothing.
@@ -275,4 +278,43 @@ test("the offline chip names the driver and hides when it recovers", () => {
     drivers: { sungrow: { status: "ok" }, meter: { status: "ok" } },
   });
   assert.equal(chip.hidden, true);
+});
+
+test("Ask why history lives on the box, not in the browser", () => {
+  // localStorage would not survive a different device; the box is the record.
+  assert.doesNotMatch(assistant, /localStorage|sessionStorage/);
+  assert.match(assistant, /\/api\/assistant\/threads/);
+  assert.match(goApi, /recordAssistantTurn/);
+  assert.match(goThreads, /AssistantThread/);
+});
+
+test("a follow-up names the thread it continues", () => {
+  assert.match(assistant, /payload\.thread_id = state\.threadID/);
+  assert.match(assistant, /if \(j\.thread_id\) state\.threadID = j\.thread_id/);
+});
+
+test("earlier conversations can be opened and deleted", () => {
+  assert.match(assistant, /function renderHistory/);
+  assert.match(assistant, /function openThread/);
+  assert.match(assistant, /method: "DELETE"/);
+  assert.match(assistant, /data-role="history"/);
+  assert.match(assistant, /data-role="new"/);
+});
+
+test("history is capped so an SD card cannot fill", () => {
+  assert.match(goState, /AssistantThreadCap\s*=\s*\d+/);
+  assert.match(goState, /DELETE FROM assistant_threads WHERE id NOT IN/);
+});
+
+test("a stored conversation never reaches a public host", () => {
+  assert.match(goSecurity, /HasPrefix\(path, "\/api\/assistant\/threads\/"\)/);
+});
+
+test("the history list is stamped by when it happened", () => {
+  const when = sandboxed()._test.whenLabel;
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 14, 32);
+  assert.equal(when(today.getTime()), "14:32");
+  assert.equal(when(0), "");
+  assert.equal(when(NaN), "");
 });
