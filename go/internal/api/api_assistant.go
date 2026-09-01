@@ -139,7 +139,8 @@ func (s *Server) handleAssistantAsk(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	progress("status", "Reading the site")
 	facts := s.assistantFacts()
-	progress("status", "Asking the model")
+	// Complete emits "Asking the model" once per round. Saying it here
+	// too would double every line in the activity log.
 	cli := &assistant.Client{HTTP: s.deps.AssistantHTTP}
 	reply, err := cli.Complete(r.Context(), assistant.Request{
 		APIKey:   asst.APIKey,

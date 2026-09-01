@@ -18,13 +18,82 @@
     return div.innerHTML;
   }
 
-  function formatAnswer(text) {
-    var s = escHtml(text);
+  // Inline marks. Code spans are lifted out first so ** and * inside a
+  // span stay literal.
+  function inlineMd(s) {
+    var codes = [];
+    s = escHtml(s);
+    s = s.replace(/`([^`]+)`/g, function (m, c) {
+      codes.push(c);
+      return "\u0000" + (codes.length - 1) + "\u0000";
+    });
     s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
-    s = s.replace(/`([^`]+)`/g, "<code>$1</code>");
-    s = s.replace(/^(\d+)\.\s/gm, "<br>$1. ");
-    s = s.replace(/\n/g, "<br>");
-    return s;
+    s = s.replace(/(^|[\s(])\*([^*\n]+)\*/g, "$1<em>$2</em>");
+    return s.replace(/\u0000(\d+)\u0000/g, function (m, i) {
+      return "<code>" + codes[Number(i)] + "</code>";
+    });
+  }
+
+  // The model is asked for markdown, so render markdown: headings, both
+  // kinds of list, fenced code and paragraphs.
+  function formatAnswer(text) {
+    var lines = String(text == null ? "" : text).replace(/\r\n/g, "\n").split("\n");
+    var out = [];
+    var para = [];
+    var listTag = null;
+    var items = [];
+    var code = null;
+    function flushPara() {
+      if (!para.length) return;
+      out.push("<p>" + inlineMd(para.join("\n")).replace(/\n/g, "<br>") + "</p>");
+      para = [];
+    }
+    function flushList() {
+      if (!listTag) return;
+      out.push("<" + listTag + ">" + items.map(function (i) {
+        return "<li>" + inlineMd(i) + "</li>";
+      }).join("") + "</" + listTag + ">");
+      listTag = null;
+      items = [];
+    }
+    function flushAll() { flushPara(); flushList(); }
+    function openList(tag, item) {
+      flushPara();
+      if (listTag !== tag) { flushList(); listTag = tag; }
+      items.push(item);
+    }
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i];
+      if (code !== null) {
+        if (/^\s*```/.test(line)) {
+          out.push("<pre><code>" + escHtml(code.join("\n")) + "</code></pre>");
+          code = null;
+        } else {
+          code.push(line);
+        }
+        continue;
+      }
+      if (/^\s*```/.test(line)) { flushAll(); code = []; continue; }
+      if (!line.trim()) { flushAll(); continue; }
+      var head = line.match(/^\s*(#{1,4})\s+(.*)$/);
+      if (head) {
+        flushAll();
+        var lvl = Math.min(head[1].length + 2, 6);
+        out.push("<h" + lvl + ">" + inlineMd(head[2].trim()) + "</h" + lvl + ">");
+        continue;
+      }
+      var bullet = line.match(/^\s*[-*•]\s+(.*)$/);
+      if (bullet) { openList("ul", bullet[1]); continue; }
+      var numbered = line.match(/^\s*\d+[.)]\s+(.*)$/);
+      if (numbered) { openList("ol", numbered[1]); continue; }
+      flushList();
+      para.push(line);
+    }
+    if (code !== null) {
+      out.push("<pre><code>" + escHtml(code.join("\n")) + "</code></pre>");
+    }
+    flushAll();
+    return out.join("");
   }
 
   function toolLabel(name) {
@@ -54,6 +123,18 @@
       ".ftw-ask-msg.assistant{align-self:flex-start;background:var(--ink-sunken,#0d0d0d);border:1px solid var(--line,#2a2a2a);color:var(--fg,#e8e8e8);}",
       ".ftw-ask-msg.assistant strong{color:var(--fg,#e8e8e8);}",
       ".ftw-ask-msg.assistant code{font-family:var(--mono,monospace);font-size:0.82em;}",
+      ".ftw-ask-msg.assistant > *:first-child{margin-top:0;}",
+      ".ftw-ask-msg.assistant > *:last-child{margin-bottom:0;}",
+      ".ftw-ask-msg.assistant p{margin:0 0 0.7em;}",
+      ".ftw-ask-msg.assistant h3,.ftw-ask-msg.assistant h4,.ftw-ask-msg.assistant h5,.ftw-ask-msg.assistant h6{margin:0.9em 0 0.4em;font-size:0.86rem;font-weight:600;color:var(--fg,#e8e8e8);}",
+      ".ftw-ask-msg.assistant ul,.ftw-ask-msg.assistant ol{margin:0 0 0.7em;padding-left:1.35em;}",
+      ".ftw-ask-msg.assistant li{margin:0.15em 0;}",
+      ".ftw-ask-msg.assistant pre{margin:0 0 0.7em;padding:8px 10px;background:var(--ink,#111);border:1px solid var(--line,#2a2a2a);border-radius:6px;overflow-x:auto;}",
+      ".ftw-ask-msg.assistant pre code{font-size:0.78em;white-space:pre;}",
+      // The caret is the sign the model is still writing.
+      ".ftw-ask-msg.is-streaming > *:last-child::after{content:'';display:inline-block;width:0.5em;height:1em;margin-left:2px;vertical-align:text-bottom;background:var(--accent-e,#f5b942);animation:ftw-ask-caret 1s steps(2,start) infinite;}",
+      "@keyframes ftw-ask-caret{to{visibility:hidden;}}",
+      "@media (prefers-reduced-motion:reduce){.ftw-ask-msg.is-streaming > *:last-child::after{animation:none;}}",
       ".ftw-ask-activity{align-self:flex-start;display:flex;flex-direction:column;gap:4px;padding:2px 0 4px;max-width:100%;}",
       ".ftw-ask-step{display:flex;align-items:center;gap:8px;color:var(--fg-dim,#a0a0a0);font:0.78rem/1.4 var(--sans,sans-serif);}",
       ".ftw-ask-step::before{content:'';width:6px;height:6px;border-radius:50%;background:var(--fg-muted,#858585);flex:0 0 auto;}",
@@ -140,6 +221,13 @@
     return gen === state.generation && !!state.backdrop;
   }
 
+  // Abort the in-flight question but keep the dialog and the thread.
+  // close() aborts too, but bumps the generation and drops everything.
+  function stop() {
+    if (!state.abort) return;
+    try { state.abort.abort(); } catch (e) { /* already finished */ }
+  }
+
   function threadEl() {
     return state.backdrop && state.backdrop.querySelector('[data-role="thread"]');
   }
@@ -174,70 +262,78 @@
     return s;
   }
 
-  function activityEl() {
-    var thread = threadEl();
-    if (!thread) return null;
-    var el = thread.querySelector('[data-role="activity"]');
-    if (!el) {
-      el = document.createElement("div");
-      el.className = "ftw-ask-activity";
-      el.setAttribute("data-role", "activity");
-      thread.appendChild(el);
-    }
-    return el;
+  // One run is one question. Its activity log and draft bubble are held
+  // by reference, never looked up in the thread: a DOM query would find
+  // the previous question's nodes and append this answer above the one
+  // before it.
+  function newRun() {
+    return { activity: null, draft: null, streamed: "" };
   }
 
-  function addActivity(text, kind) {
-    var log = activityEl();
-    if (!log) return;
-    var live = log.querySelector(".is-live");
+  function addActivity(run, text, kind) {
+    var thread = threadEl();
+    if (!thread) return;
+    if (!run.activity) {
+      run.activity = document.createElement("div");
+      run.activity.className = "ftw-ask-activity";
+      thread.appendChild(run.activity);
+    }
+    var live = run.activity.querySelector(".is-live");
     if (live) live.classList.remove("is-live");
     var el = document.createElement("div");
     el.className = "ftw-ask-step" + (kind === "tool" ? " is-tool is-live" : " is-live");
     el.textContent = text;
-    log.appendChild(el);
-    var thread = threadEl();
-    if (thread) thread.scrollTop = thread.scrollHeight;
+    run.activity.appendChild(el);
+    thread.scrollTop = thread.scrollHeight;
   }
 
-  function settleActivity() {
-    var log = activityEl();
-    if (!log) return;
-    var live = log.querySelector(".is-live");
+  function settleActivity(run) {
+    if (!run.activity) return;
+    var live = run.activity.querySelector(".is-live");
     if (live) live.classList.remove("is-live");
   }
 
-  function draftEl() {
+  // The last line is half-written while tokens arrive. Rendering it would
+  // flash a partial "## Issue title" as a heading, so hold that line back
+  // until it ends.
+  function streamingText(s) {
+    return visibleAnswer(s).replace(/\n#{1,4}[^\n]*$/, "");
+  }
+
+  function appendDelta(run) {
     var thread = threadEl();
-    if (!thread) return null;
-    var el = thread.querySelector('[data-role="draft"]');
-    if (!el) {
-      el = document.createElement("div");
-      el.className = "ftw-ask-msg assistant";
-      el.setAttribute("data-role", "draft");
-      thread.appendChild(el);
+    if (!thread) return;
+    if (!run.draft) {
+      run.draft = document.createElement("div");
+      run.draft.className = "ftw-ask-msg assistant is-streaming";
+      thread.appendChild(run.draft);
     }
-    return el;
+    // Rendered as it arrives: raw ** and - for the length of a slow free
+    // model's answer reads as broken output.
+    run.draft.innerHTML = formatAnswer(streamingText(run.streamed));
+    thread.scrollTop = thread.scrollHeight;
   }
 
-  function appendDelta(raw) {
-    var el = draftEl();
-    if (!el) return;
-    el.textContent = visibleAnswer(raw);
-    var thread = threadEl();
-    if (thread) thread.scrollTop = thread.scrollHeight;
+  // A new model round discards what streamed in the previous one: that
+  // text led up to a tool call, it is not the answer being written.
+  function resetDraft(run) {
+    run.streamed = "";
+    if (run.draft && run.draft.parentNode) {
+      run.draft.parentNode.removeChild(run.draft);
+    }
+    run.draft = null;
   }
 
-  function finishAssistant(text) {
+  function finishAssistant(run, text) {
     var thread = threadEl();
-    var draft = thread && thread.querySelector('[data-role="draft"]');
-    if (!draft) {
+    if (!run.draft) {
       addAssistant(text);
       return;
     }
-    draft.removeAttribute("data-role");
-    draft.innerHTML = formatAnswer(text);
-    thread.scrollTop = thread.scrollHeight;
+    run.draft.classList.remove("is-streaming");
+    run.draft.innerHTML = formatAnswer(text);
+    run.draft = null;
+    if (thread) thread.scrollTop = thread.scrollHeight;
   }
 
   function setFoot(html) {
@@ -274,16 +370,17 @@
     var q = String(question || "").trim();
     if (!q || state.busy) return;
     var gen = state.generation;
+    var run = newRun();
     state.busy = true;
     addUser(q);
-    addActivity("This can take a minute.");
-    addActivity("Reading the site");
     setFoot("");
-    var streamed = "";
     var askBtn = state.backdrop && state.backdrop.querySelector('[data-role="ask"]');
     var input = state.backdrop && state.backdrop.querySelector('[data-role="input"]');
-    if (askBtn) askBtn.disabled = true;
-    if (input) input.value = "";
+    // The button becomes Stop while the model works. A free model can
+    // run for a minute; leaving no way out but closing the dialog threw
+    // the thread away.
+    if (askBtn) askBtn.textContent = "Stop";
+    if (input) { input.value = ""; input.disabled = true; }
     var payload = { question: q, history: state.turns.slice() };
     if (state.trigger) payload.trigger = state.trigger;
     var fetchOpts = {
@@ -310,11 +407,12 @@
               if (chunk.value) buf += decoder.decode(chunk.value, { stream: true });
               buf = parseSSEChunk(buf, function (ev) {
                 if (!stillOpen(gen)) return;
-                if (ev.type === "status") addActivity(ev.text || "Working");
-                if (ev.type === "tool") addActivity(toolLabel(ev.text), "tool");
+                if (ev.type === "round") resetDraft(run);
+                if (ev.type === "status") addActivity(run, ev.text || "Working");
+                if (ev.type === "tool") addActivity(run, toolLabel(ev.text), "tool");
                 if (ev.type === "delta") {
-                  streamed += ev.text || "";
-                  appendDelta(streamed);
+                  run.streamed += ev.text || "";
+                  appendDelta(run);
                 }
                 if (ev.type === "error") throw new Error(ev.error || "Ask why failed");
                 if (ev.type === "done") donePayload = ev;
@@ -336,12 +434,12 @@
       })
       .then(function (j) {
         if (!stillOpen(gen) || !j) return;
-        settleActivity();
+        settleActivity(run);
         state.last = j;
         state.turns.push({ role: "user", text: q });
         state.turns.push({ role: "assistant", text: j.answer || "" });
         if (state.turns.length > 6) state.turns = state.turns.slice(-6);
-        finishAssistant(j.answer || "");
+        finishAssistant(run, j.answer || "");
         var used = j.resolved_model || j.model || "";
         var foot = '<span class="ftw-ask-status">' + escHtml(used ? "Answered by " + used : "Done") + "</span>";
         if (j.issue_title) {
@@ -353,22 +451,37 @@
       })
       .catch(function (err) {
         if (!stillOpen(gen)) return;
-        if (err && err.name === "AbortError") return;
-        settleActivity();
+        settleActivity(run);
+        // Stopped by the operator: keep whatever arrived, as an answer
+        // that is simply cut short.
+        if (err && err.name === "AbortError") {
+          if (run.streamed.trim()) {
+            finishAssistant(run, visibleAnswer(run.streamed));
+            addActivity(run, "Stopped");
+          } else {
+            resetDraft(run);
+            addActivity(run, "Stopped before the model answered");
+          }
+          return;
+        }
+        // A failed stream must not leave a half-written bubble behind:
+        // the next question would otherwise stream into it.
+        resetDraft(run);
         var thread = threadEl();
         if (thread) {
           var el = document.createElement("div");
           el.className = "ftw-ask-error";
-          el.textContent = err.message || String(err);
+          el.textContent = (err && err.message) || String(err);
           thread.appendChild(el);
+          thread.scrollTop = thread.scrollHeight;
         }
       })
       .then(function () {
         if (!stillOpen(gen)) return;
         state.busy = false;
         state.abort = null;
-        if (askBtn) askBtn.disabled = false;
-        if (input) input.focus();
+        if (askBtn) { askBtn.disabled = false; askBtn.textContent = "Ask why"; }
+        if (input) { input.disabled = false; input.focus(); }
       });
   }
 
@@ -397,6 +510,7 @@
     var input = host.querySelector('[data-role="input"]');
     form.addEventListener("submit", function (e) {
       e.preventDefault();
+      if (state.busy) { stop(); return; }
       ask(input.value);
     });
     if (opts.question) {
@@ -497,5 +611,5 @@
     bind();
   }
 
-  window.FTWAskWhy = { open: open, close: close, updateChip: updateChip, _test: { parseSSEChunk: parseSSEChunk, visibleAnswer: visibleAnswer } };
+  window.FTWAskWhy = { open: open, close: close, updateChip: updateChip, _test: { parseSSEChunk: parseSSEChunk, visibleAnswer: visibleAnswer, formatAnswer: formatAnswer } };
 })();

@@ -48,8 +48,9 @@ type Request struct {
 	// Run executes read-only tools. Nil means no tool loop: the report is
 	// stuffed into the first user message, matching the original one-shot.
 	Run Runner
-	// Progress is optional live status for the UI.
-	// kind is "status", "tool", or "delta" (a token of the answer).
+	// Progress is optional live status for the UI. kind is "status",
+	// "tool", "delta" (a token of the answer), or "round" (a new model
+	// round starts, so deltas so far were not the answer).
 	Progress func(kind, text string)
 }
 
@@ -221,6 +222,10 @@ func (c *Client) Complete(ctx context.Context, req Request) (Reply, error) {
 			wire.ToolChoice = "auto"
 		}
 		if req.Progress != nil {
+			// A round starts its own answer. Text streamed before a tool
+			// call belongs to that round, not to the reply the operator
+			// ends up reading, so the UI drops what it has so far.
+			req.Progress("round", "")
 			req.Progress("status", "Asking the model")
 		}
 		msg, resolved, err := c.post(ctx, httpClient, endpoint, key, wire, req.Progress)
