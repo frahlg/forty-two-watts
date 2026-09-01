@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.13.0
+
+### Minor Changes
+
+- e374e77: Ask why keeps earlier conversations. The box stores each thread, so a question asked from a laptop is readable from a phone and closing the dialog no longer throws the answer away. Open one from Earlier to read it or carry it on; the box keeps the 50 most recent.
+
+### Patch Changes
+
+- 711346b: Ask why streams the answer as it is written, shows each tool call while it waits, and keeps long replies inside the dialog. The reply renders as markdown — headings, lists and code, not raw dashes and asterisks — and a Stop button ends a slow model without losing the thread.
+
 ## 2.12.1
 
 ### Patch Changes
