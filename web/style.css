@@ -1600,6 +1600,38 @@ footer {
   border-color: var(--amber) !important;
   background: color-mix(in oklch, var(--amber) 10%, transparent) !important;
 }
+#data-coverage { margin: 0 0 10px; }
+.data-coverage-panel {
+  font-size: 0.72rem;
+  font-family: var(--mono);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px 10px;
+  background: var(--ink-sunken);
+}
+.data-coverage-title {
+  color: var(--text-dim);
+  margin-bottom: 4px;
+}
+.data-coverage-row { margin: 2px 0; }
+.data-coverage-kind {
+  display: inline-block;
+  min-width: 74px;
+  color: var(--text-dim);
+}
+.data-coverage-ok { color: var(--text-dim); }
+.data-coverage-miss { color: var(--amber); }
+.data-coverage-sep { color: var(--text-dim); }
+.data-coverage-warn {
+  color: var(--amber);
+  font-size: 0.72rem;
+  margin: 6px 0 0;
+}
+.data-coverage-note {
+  color: var(--text-dim);
+  font-size: 0.8rem;
+  margin: 8px 0 0;
+}
 .plan-summary {
   font-size: 0.8rem;
   color: var(--text-dim, #a0a0a0);

@@ -57,6 +57,13 @@ describe("price zone picker", () => {
     assert.match(priceTab, /FALLBACK/);
     assert.match(setupHtml, /<option value="SE3"/);
   });
+
+  it("says when the site is outside every price source instead of leaving an empty chart", () => {
+    assert.match(priceTab, /\/api\/data-sources/);
+    assert.match(priceTab, /id="price-coverage"/);
+    assert.match(priceTab, /outside every price source/);
+    assert.match(priceTab, /no provider for markets outside Europe/);
+  });
 });
 
 describe("price labels follow the currency", () => {

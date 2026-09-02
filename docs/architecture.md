@@ -158,6 +158,13 @@ schema. The handlers registered in
 [`go/internal/api/api.go`](../go/internal/api/api.go) define the HTTP surface. Driver metadata defines
 the device catalog. These sources replace manually duplicated reference docs.
 
+External data sources do not all work everywhere. Weather and PV forecasts
+are worldwide; every spot-price provider is European, and there is no
+manual tariff to stand in outside that domain. `GET /api/data-sources`
+and [data-coverage.md](data-coverage.md) are the product statement of
+where each source reaches. The registry lives in
+[`go/internal/coverage`](../go/internal/coverage).
+
 Some startup bindings cannot be hot-reloaded, including state paths, API
 listener and selected integration transports. Normal device and control
 configuration is reloaded through

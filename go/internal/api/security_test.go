@@ -208,6 +208,7 @@ func TestAuthenticateLeavesOrdinaryReadsAndOAuthCallbackCompatible(t *testing.T)
 		{method: http.MethodGet, path: "/api/oauth/myuplink/callback?code=code&state=state"},
 		{method: http.MethodGet, path: "/api/energy/history"},
 		{method: http.MethodGet, path: "/api/prices"},
+		{method: http.MethodGet, path: "/api/data-sources"},
 		{method: http.MethodGet, path: "/api/mpc/plan"},
 		// Dashboard poll — must stay open so lan_auth does not pop a login
 		// on every 2s status tick.

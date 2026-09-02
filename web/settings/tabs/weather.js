@@ -152,6 +152,7 @@
       lonInput.value = lo.toFixed(4);
       setByPath(ctx.config, "weather.latitude", la);
       setByPath(ctx.config, "weather.longitude", lo);
+      renderCoverage(ctx, la, lo);
     }
     marker.on("dragend", function () {
       var ll = marker.getLatLng();
@@ -166,11 +167,66 @@
       if (!isNaN(la) && !isNaN(lo)) {
         marker.setLatLng([la, lo]);
         map.panTo([la, lo]);
+        renderCoverage(ctx, la, lo);
       }
     }
     latInput.addEventListener("change", syncFromInputs);
     lonInput.addEventListener("change", syncFromInputs);
     setTimeout(function () { map.invalidateSize(); }, 150);
+  }
+
+  // Data-source coverage for the current pin. Every price provider is
+  // European and until now nothing said so — a site outside them just got
+  // empty results. Rendered from GET /api/data-sources, which answers for
+  // a specific lat/lon.
+  var coverageSeq = 0;
+  function renderCoverage(ctx, lat, lon) {
+    var host = document.getElementById("data-coverage");
+    if (!host) return;
+    // Coordinates change on marker drag; keep only the newest response so
+    // a slow early request cannot overwrite a fast later one.
+    var seq = ++coverageSeq;
+    var q = lat != null && lon != null
+      ? "?lat=" + encodeURIComponent(lat) + "&lon=" + encodeURIComponent(lon)
+      : "";
+    var fetchFn = ctx.apiFetch || fetch;
+    fetchFn("/api/data-sources" + q)
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (d) {
+        if (seq !== coverageSeq || !d || !Array.isArray(d.sources)) return;
+        host.innerHTML = coverageHTML(ctx.escHtml, d.sources);
+      })
+      .catch(function () { /* coverage is advisory; never break the tab */ });
+  }
+
+  var kindLabels = { forecast: "Forecast", irradiance: "Irradiance", price: "Price" };
+  var kindOrder = ["forecast", "irradiance", "price"];
+
+  function coverageHTML(esc, sources) {
+    var unavailable = sources.filter(function (s) { return s.covers === false; });
+    var rows = kindOrder.map(function (kind) {
+      var list = sources.filter(function (s) { return s.kind === kind; });
+      if (!list.length) return "";
+      var names = list.map(function (s) {
+        var ok = s.covers !== false;
+        var mark = ok ? "✓" : "✕";
+        var title = (s.area || "") + (s.note ? " — " + s.note : "");
+        return '<span class="' + (ok ? "data-coverage-ok" : "data-coverage-miss") +
+          '" title="' + esc(title) + '">' + mark + " " + esc(s.label) + "</span>";
+      }).join('<span class="data-coverage-sep"> · </span>');
+      return '<div class="data-coverage-row"><span class="data-coverage-kind">' +
+        esc(kindLabels[kind] || kind) + "</span>" + names + "</div>";
+    }).join("");
+    var warn = "";
+    if (unavailable.length) {
+      var msg = unavailable.length === 1
+        ? unavailable[0].label + " does not cover this location."
+        : unavailable.length + " sources do not cover this location.";
+      warn = '<p class="data-coverage-warn">' + esc(msg) + " Hover for details.</p>";
+    }
+    return '<div class="data-coverage-panel">' +
+      '<div class="data-coverage-title">Data sources available here</div>' +
+      rows + warn + "</div>";
   }
 
   function arraysSummary(n) {
@@ -211,6 +267,7 @@
         '</div></div>' +
         '<div id="weather-map" style="height:260px;border-radius:6px;margin:6px 0;background:var(--ink-sunken)"></div>' +
         '<p style="color:var(--text-dim);font-size:0.75rem;margin:-2px 0 8px">Click or drag the marker to set your location.</p>' +
+        '<div id="data-coverage"></div>' +
         field("PV rated (W)", "weather.pv_rated_w", "number", 10000) +
         field("API key (OpenWeather only)", "weather.api_key", "text", "") +
         '</fieldset>' +
@@ -233,6 +290,10 @@
       initWeatherMap(ctx);
       renderPVArrays(ctx);
       refreshArraysSummary(ctx.config);
+      // The map may fail (no WebGL); coverage must still render, so drive
+      // it from the numeric fields rather than from the map.
+      var w = (ctx.config && ctx.config.weather) || {};
+      renderCoverage(ctx, w.latitude, w.longitude);
       var addBtn = document.getElementById("pv-array-add");
       if (addBtn) addBtn.addEventListener("click", function () {
         ctx.config.weather.pv_arrays.push({ name: "", rated_w: 0, tilt_deg: 35, azimuth_deg: 180 });
@@ -242,5 +303,5 @@
     },
   };
 
-  S.tabs.weather._pure = { arraysSummary: arraysSummary };
+  S.tabs.weather._pure = { arraysSummary: arraysSummary, coverageHTML: coverageHTML };
 })();

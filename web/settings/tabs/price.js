@@ -111,9 +111,11 @@
         'the planner prices every decision with them.</p>' +
         field("API key (ENTSO-E only)", "price.api_key", "text", "") +
         '</fieldset>' +
+        '<div id="price-coverage"></div>' +
         '<p style="color:var(--text-dim);font-size:0.8rem;margin-top:8px">' +
         'Sourceful is the keyless default and covers every European bidding zone ENTSO-E publishes. ' +
         'elprisetjustnu.se remains a Sweden-only alternative. Direct ENTSO-E access needs an API key. ' +
+        'There is no provider for markets outside Europe, and no manual or fixed-tariff option. ' +
         'FX rates come from ECB daily.' +
         '</p>';
     },
@@ -186,6 +188,7 @@
       if (note) {
         note.style.display = currency !== "SEK" && Number(vat) === 25 ? "block" : "none";
       }
+      renderPriceCoverage(ctx);
       if (!input || !warn) return;
       function check() {
         var v = parseFloat(input.value);
@@ -197,4 +200,42 @@
       check();
     },
   };
+
+  // Price sources are European. If the Weather-tab pin is outside that
+  // domain, say so here rather than leaving the operator to infer it from
+  // an empty chart. See #726.
+  function renderPriceCoverage(ctx) {
+    var host = document.getElementById("price-coverage");
+    if (!host) return;
+    var w = (ctx.config && ctx.config.weather) || {};
+    var lat = w.latitude, lon = w.longitude;
+    var q = "";
+    if (lat != null && lon != null && (Number(lat) !== 0 || Number(lon) !== 0)) {
+      q = "?lat=" + encodeURIComponent(lat) + "&lon=" + encodeURIComponent(lon);
+    }
+    var fetchFn = ctx.apiFetch || fetch;
+    fetchFn("/api/data-sources" + q)
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (d) {
+        if (!d || !Array.isArray(d.sources)) return;
+        var prices = d.sources.filter(function (s) { return s.kind === "price"; });
+        if (!prices.length) return;
+        var covered = prices.filter(function (s) { return s.covers !== false; });
+        var esc = ctx.escHtml;
+        if (q && covered.length === 0) {
+          host.innerHTML = '<p class="tariff-warning">' +
+            "This location is outside every price source. Price-driven planning " +
+            "needs a European bidding zone — there is no provider for markets " +
+            "outside Europe.</p>";
+          return;
+        }
+        var names = prices.map(function (s) {
+          var ok = s.covers !== false;
+          return esc(s.label) + (ok ? "" : " (not this location)");
+        }).join(", ");
+        host.innerHTML = '<p class="data-coverage-note">Price sources: ' +
+          names + ".</p>";
+      })
+      .catch(function () { /* coverage is advisory; the static note remains */ });
+  }
 })();
