@@ -7,7 +7,7 @@ const source = readFileSync(new URL("./weather.js", import.meta.url), "utf8");
 globalThis.window = {};
 await import("./weather.js");
 const tab = globalThis.window.FTWSettings.tabs.weather;
-const { arraysSummary, coverageHTML } = tab._pure;
+const { arraysSummary } = tab._pure;
 
 function stubCtx(weather) {
   return {
@@ -80,36 +80,5 @@ describe("weather household path", () => {
   it("does not write observed peak AC into pv_rated_w", () => {
     assert.doesNotMatch(source, /pv_rated_w\s*=/);
     assert.doesNotMatch(source, /observed.*pv_rated_w|peak.*pv_rated_w/i);
-  });
-});
-
-describe("weather data-source coverage", () => {
-  it("reserves a slot under the map for coverage of this pin", () => {
-    const html = tab.render(stubCtx());
-    const normal = html.slice(0, html.indexOf("<details"));
-    assert.ok(normal.includes('id="data-coverage"'));
-    assert.match(source, /\/api\/data-sources/);
-  });
-
-  it("flags sources that do not cover the pin, and stays quiet when they all do", () => {
-    const esc = (s) => String(s);
-    const sydney = coverageHTML(esc, [
-      { kind: "forecast", label: "Open-Meteo", area: "Worldwide", covers: true },
-      { kind: "price", label: "Sourceful (cached ENTSO-E)", area: "Europe", covers: false, note: "European day-ahead" },
-      { kind: "price", label: "Elpriset just nu", area: "Sweden", covers: false },
-    ]);
-    assert.match(sydney, /Data sources available here/);
-    assert.match(sydney, /Forecast/);
-    assert.match(sydney, /Price/);
-    assert.match(sydney, /data-coverage-miss/);
-    assert.match(sydney, /2 sources do not cover this location/);
-    assert.doesNotMatch(sydney, /Irradiance/);
-
-    const stockholm = coverageHTML(esc, [
-      { kind: "forecast", label: "Open-Meteo", area: "Worldwide", covers: true },
-      { kind: "price", label: "Sourceful (cached ENTSO-E)", area: "Europe", covers: true },
-    ]);
-    assert.doesNotMatch(stockholm, /data-coverage-miss/);
-    assert.doesNotMatch(stockholm, /does not cover this location/);
   });
 });

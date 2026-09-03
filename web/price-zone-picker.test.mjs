@@ -58,11 +58,11 @@ describe("price zone picker", () => {
     assert.match(setupHtml, /<option value="SE3"/);
   });
 
-  it("says when the site is outside every price source instead of leaving an empty chart", () => {
-    assert.match(priceTab, /\/api\/data-sources/);
-    assert.match(priceTab, /id="price-coverage"/);
-    assert.match(priceTab, /outside every price source/);
-    assert.match(priceTab, /no provider for markets outside Europe/);
+  it("offers a static tariff for markets with no day-ahead feed", () => {
+    assert.match(priceTab, /"static"/);
+    assert.match(priceTab, /price\.static_ore_kwh/);
+    assert.match(priceTab, /static_tou/);
+    assert.match(setupHtml, /value="static"/);
   });
 });
 

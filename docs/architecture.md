@@ -159,11 +159,10 @@ schema. The handlers registered in
 the device catalog. These sources replace manually duplicated reference docs.
 
 External data sources do not all work everywhere. Weather and PV forecasts
-are worldwide; every spot-price provider is European, and there is no
-manual tariff to stand in outside that domain. `GET /api/data-sources`
-and [data-coverage.md](data-coverage.md) are the product statement of
-where each source reaches. The registry lives in
-[`go/internal/coverage`](../go/internal/coverage).
+are worldwide; live day-ahead spot is European. A site outside ENTSO-E
+uses `price.provider: static` — a flat rate or time-of-use schedule —
+which is how price-driven planning works without a market feed. See
+[data-coverage.md](data-coverage.md).
 
 Some startup bindings cannot be hot-reloaded, including state paths, API
 listener and selected integration transports. Normal device and control
