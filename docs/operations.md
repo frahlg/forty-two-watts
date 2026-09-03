@@ -31,7 +31,10 @@ docker compose up -d
 ```
 
 The UI updater performs an immutable pull and recreate through the updater
-sidecar. See [self-update.md](self-update.md).
+sidecar; it never patches the host OS or Docker engine — that is the
+operator's job on a self-managed host, and automatic on the
+[Raspberry Pi image](rpi-image.md#host-os-security-updates). See
+[self-update.md](self-update.md).
 
 ## Persistent state
 

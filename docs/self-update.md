@@ -105,6 +105,15 @@ persistent component history after Core recreation.
 The updater accepts only known components and `vX.Y.Z` or
 `vX.Y.Z-beta.N` targets.
 
+## Scope: the host is not updated here
+
+Self-update covers Core, the updater sidecar, the Optimizer and signed
+drivers — never the host operating system, kernel or Docker engine. The
+Raspberry Pi appliance image keeps its own host patched with
+`unattended-upgrades` ([rpi-image.md](rpi-image.md#host-os-security-updates));
+on every other deployment the host and engine belong to the operator's own
+package and service management.
+
 ## Operator use
 
 The version badge selects `stable` or `beta`, checks availability and starts
