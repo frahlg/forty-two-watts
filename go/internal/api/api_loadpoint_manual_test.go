@@ -188,3 +188,45 @@ func TestManualHoldDeleteClears(t *testing.T) {
 		t.Errorf("hold still active after DELETE")
 	}
 }
+
+// A "charge now → X %" hold whose target the SoC estimate already meets
+// is refused, not installed-then-released: the operator who pressed
+// Start five times against an estimate sitting on the schedule target
+// got "active" for one tick each time and no charge. Omitting the
+// target (or setting it above the estimate) still installs.
+func TestManualHoldRefusesReleaseTargetAlreadyMet(t *testing.T) {
+	srv, ctrl := newManualHoldServer(t)
+	// Plugged in; the estimate re-anchored to 80 %.
+	srv.deps.Loadpoints.Observe("garage", true, 0, 0, true)
+	if !srv.deps.Loadpoints.SetCurrentSoC("garage", 0.8) {
+		t.Fatalf("SetCurrentSoC failed")
+	}
+	post := func(body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/api/loadpoints/garage/manual_hold", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rr, req)
+		return rr
+	}
+	if rr := post(`{"power_w":11040,"hold_s":0,"release_at_soc_pct":80}`); rr.Code != http.StatusConflict {
+		t.Fatalf("target == estimate: status = %d, want 409 (body: %s)", rr.Code, rr.Body.String())
+	} else if !strings.Contains(rr.Body.String(), "already at 80 %") {
+		t.Errorf("409 body should name the estimate: %s", rr.Body.String())
+	}
+	if _, active := ctrl.GetManualHold("garage", time.Now()); active {
+		t.Fatalf("refused hold must not be installed")
+	}
+	if rr := post(`{"power_w":11040,"hold_s":0,"release_at_soc_pct":70}`); rr.Code != http.StatusConflict {
+		t.Errorf("target below estimate: status = %d, want 409", rr.Code)
+	}
+	if rr := post(`{"power_w":11040,"hold_s":0,"release_at_soc_pct":90}`); rr.Code != http.StatusOK {
+		t.Errorf("target above estimate: status = %d, want 200 (body: %s)", rr.Code, rr.Body.String())
+	}
+	ctrl.ClearManualHold("garage")
+	if rr := post(`{"power_w":11040,"hold_s":0}`); rr.Code != http.StatusOK {
+		t.Errorf("no target: status = %d, want 200 (body: %s)", rr.Code, rr.Body.String())
+	}
+	if h, active := ctrl.GetManualHold("garage", time.Now()); !active || h.ReleaseAtSoC != 0 {
+		t.Errorf("no-target hold should be installed without a SoC release, got active=%v %+v", active, h)
+	}
+}
