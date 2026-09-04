@@ -311,3 +311,135 @@ func (h *Handler) cancelBoost(lp Loadpoints, id string, cmd Cmd, uptimeMs int64)
 	}
 	return h.settleAndReport(cmd.CmdID, res)
 }
+
+// socTolerance is how far a read-back may sit from the level asked for and
+// still be that level: half a permille, the finest unit the telemetry wire
+// carries a state of charge in. The manager re-anchors by subtracting and
+// re-adding the session's delivered energy, which is float arithmetic, and a
+// result that called that "superseded" would be reporting rounding as a
+// rival writer.
+const socTolerance = 0.0005
+
+// loadpointSoCSet is the operator's correction of the car's charge level
+// through the door: the same re-anchor POST /api/loadpoints/{id}/soc does,
+// refused the same way when no car is plugged in. `soc` is a fraction in
+// [0,1] — the rule the rest of the box keeps; permille is a telemetry wire
+// unit, not an argument shape — and the read-back is the same fraction.
+func (h *Handler) loadpointSoCSet(cmd Cmd, uptimeMs int64) error {
+	lp, id, ok, err := h.loadpointFor(cmd)
+	if !ok {
+		return err
+	}
+
+	soc, ok := argNum(cmd.Args, "soc")
+	if !ok || soc < 0 || soc > 1 {
+		return h.rejectArg(cmd, "soc", cmd.Args["soc"])
+	}
+
+	if _, err := h.acceptCmd(cmd, uptimeMs); err != nil {
+		return err
+	}
+
+	if !lp.SetSoC(id, soc) {
+		// No session to correct — the HTTP route's 409. Reported after the
+		// ack, the way control refusing a boost is, and named so the app can
+		// say "plug the car in" rather than "the box is down".
+		return h.settleAndReport(cmd.CmdID, CmdResult{
+			CmdID: cmd.CmdID,
+			State: CmdRejected,
+			Error: &ErrorBody{
+				Code:      ErrUnavailable,
+				Retryable: ErrorRetryable[ErrUnavailable],
+				Args:      map[string]any{"op": cmd.Op, "reason": "unplugged"},
+			},
+		})
+	}
+
+	// Read back the level the box now holds, never the echo of the request.
+	observed, known := lp.ObservedSoC(id)
+	readAtMs := h.cfg.Clock.UptimeMs()
+	var res CmdResult
+	switch {
+	case !known:
+		res = CmdResult{CmdID: cmd.CmdID, State: CmdUnconfirmed}
+	case math.Abs(observed-soc) > socTolerance:
+		// Something else re-anchored the level between the write and the
+		// read — a vehicle reading, another operator.
+		res = CmdResult{
+			CmdID:    cmd.CmdID,
+			State:    CmdSuperseded,
+			Observed: &Observed{Value: observed, Src: ObservedSrcCore, UptimeMs: readAtMs},
+		}
+	default:
+		res = CmdResult{
+			CmdID:    cmd.CmdID,
+			State:    CmdApplied,
+			Observed: &Observed{Value: observed, Src: ObservedSrcCore, UptimeMs: readAtMs},
+		}
+	}
+	return h.settleAndReport(cmd.CmdID, res)
+}
+
+// loadpointSurplusOnlySet turns PV-only charging on or off: the surplus_only
+// field of POST /api/loadpoints/{id}/target, and only that field. The port
+// carries the replan the HTTP route forces when the flag turns off, so the
+// plan pushed after the result already allows the grid. The read-back is 1
+// for on and 0 for off, the boost's convention for a flag.
+func (h *Handler) loadpointSurplusOnlySet(cmd Cmd, uptimeMs int64) error {
+	lp, id, ok, err := h.loadpointFor(cmd)
+	if !ok {
+		return err
+	}
+
+	want, ok := cmd.Args["surplus_only"].(bool)
+	if !ok {
+		return h.rejectArg(cmd, "surplus_only", cmd.Args["surplus_only"])
+	}
+
+	if _, err := h.acceptCmd(cmd, uptimeMs); err != nil {
+		return err
+	}
+
+	if _, ok := lp.SetSurplusOnly(id, want); !ok {
+		// The loadpoint went away between the existence check and the
+		// write — a configuration reload mid-command.
+		return h.settleAndReport(cmd.CmdID, CmdResult{
+			CmdID: cmd.CmdID,
+			State: CmdRejected,
+			Error: &ErrorBody{
+				Code:      ErrUnavailable,
+				Retryable: ErrorRetryable[ErrUnavailable],
+				Args:      map[string]any{"op": cmd.Op},
+			},
+		})
+	}
+
+	observed, known := lp.ObservedSurplusOnly(id)
+	readAtMs := h.cfg.Clock.UptimeMs()
+	var res CmdResult
+	switch {
+	case !known:
+		res = CmdResult{CmdID: cmd.CmdID, State: CmdUnconfirmed}
+	case observed != want:
+		res = CmdResult{
+			CmdID:    cmd.CmdID,
+			State:    CmdSuperseded,
+			Observed: &Observed{Value: flagValue(observed), Src: ObservedSrcCore, UptimeMs: readAtMs},
+		}
+	default:
+		res = CmdResult{
+			CmdID:    cmd.CmdID,
+			State:    CmdApplied,
+			Observed: &Observed{Value: flagValue(observed), Src: ObservedSrcCore, UptimeMs: readAtMs},
+		}
+	}
+	return h.settleAndReport(cmd.CmdID, res)
+}
+
+// flagValue is a flag as an observed value: 1 on, 0 off.
+func flagValue(v bool) float64 {
+	if v {
+		return 1
+	}
+	return 0
+}
