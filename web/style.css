@@ -2176,6 +2176,13 @@ body.advanced #ui-mode-toggle { color: #fbbf24; }
 .lp-cfg-val {
   color: var(--fg, var(--text, #e8e8e8));
   font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+/* Second line under a value: where the operator changes it. */
+.lp-cfg-hint {
+  display: block;
+  font-size: 0.68rem;
+  color: var(--fg-dim, var(--text-dim, #a0a0a0));
 }
 .lp-badge {
   display: inline-block;
