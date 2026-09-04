@@ -517,14 +517,17 @@ func (s *Server) routes() {
 	s.handle("POST /api/ev/chargers", Configure, s.handleEVChargers)
 	s.handle("GET  /api/ev/providers", Read, s.handleEVProviders)
 	s.handle("GET  /api/loadpoints", Read, s.handleLoadpoints)
-	s.handle("POST /api/loadpoints/{id}/target", Actuate, s.handleLoadpointTarget)
+	// Via names the one field of this body the session can set. The target
+	// level and its deadline still have no command; the passthrough refuses
+	// the whole route either way.
+	s.handle("POST /api/loadpoints/{id}/target", Actuate, s.handleLoadpointTarget, Via(appproto.OpLoadpointSurplusOnlySet))
 	// The schedule is configuration where its sibling target is
 	// actuation: a schedule saved late is the same instruction, only
 	// later, while target/soc/force_start move energy now. The split is
 	// what lets a phone save one through the passthrough.
 	s.handle("PUT    /api/loadpoints/{id}/schedule", Configure, s.handleLoadpointSchedulePut)
 	s.handle("DELETE /api/loadpoints/{id}/schedule", Configure, s.handleLoadpointScheduleClear)
-	s.handle("POST /api/loadpoints/{id}/soc", Actuate, s.handleLoadpointSoC)
+	s.handle("POST /api/loadpoints/{id}/soc", Actuate, s.handleLoadpointSoC, Via(appproto.OpLoadpointSoCSet))
 	s.handle("POST /api/loadpoints/{id}/force_start", Actuate, s.handleLoadpointForceStart)
 	s.handle("POST /api/loadpoints/{id}/manual_hold", Actuate, s.handleLoadpointManualHold)
 	s.handle("DELETE /api/loadpoints/{id}/manual_hold", Actuate, s.handleLoadpointManualHoldClear)

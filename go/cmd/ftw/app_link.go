@@ -406,6 +406,50 @@ func (a *appLoadpoints) ObservedBoost(id string, now time.Time) loadpoint.Batter
 	return status
 }
 
+func (a *appLoadpoints) SetSoC(id string, soc float64) bool {
+	if !a.mgr.SetCurrentSoC(id, soc) {
+		return false
+	}
+	if a.mpc != nil {
+		// Before returning, on a fresh context, for the reason the HTTP
+		// route gives: the plan pushed after the result must be drawn from
+		// the corrected level, not from the estimate it replaced.
+		a.mpc.ReplanWithReason(context.Background(), "loadpoint_soc_corrected")
+	}
+	return true
+}
+
+func (a *appLoadpoints) ObservedSoC(id string) (float64, bool) {
+	st, ok := a.mgr.State(id)
+	return st.CurrentSoC, ok
+}
+
+func (a *appLoadpoints) SetSurplusOnly(id string, v bool) (bool, bool) {
+	prev, ok := a.mgr.SetSurplusOnly(id, v)
+	if !ok {
+		return false, false
+	}
+	if a.mpc != nil {
+		if prev && !v {
+			// Turning PV-only off is a regime change: the car may now
+			// import from the grid. The same synchronous, tagged replan the
+			// HTTP target route forces, so the plan pushed after the result
+			// already says so.
+			slog.Info("loadpoint surplus_only disabled — forcing replan", "lp", id)
+			a.mpc.ReplanWithReason(context.Background(), "surplus_only_disabled")
+		} else {
+			// Any other edit gets the HTTP route's background nudge.
+			go a.mpc.ReplanWithReason(context.Background(), "loadpoint_target_changed")
+		}
+	}
+	return prev, true
+}
+
+func (a *appLoadpoints) ObservedSurplusOnly(id string) (bool, bool) {
+	st, ok := a.mgr.State(id)
+	return st.SurplusOnly, ok
+}
+
 // appPlans hands over the planner's current output.
 type appPlans struct {
 	planner *mpc.Service
