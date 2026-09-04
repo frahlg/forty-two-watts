@@ -1423,7 +1423,7 @@ func maskDriverConfigSecrets(cfg *config.Config, secretsByLua map[string][]strin
 			maskOneDriverConfigStrings(&cfg.Drivers[i])
 			continue
 		}
-		if len(keys) == 0 || cfg.Drivers[i].Config == nil {
+		if cfg.Drivers[i].Config == nil {
 			continue
 		}
 		// Defensive copy so we don't mutate the live cfg.Drivers map
@@ -1433,15 +1433,44 @@ func maskDriverConfigSecrets(cfg *config.Config, secretsByLua map[string][]strin
 		for k, v := range cfg.Drivers[i].Config {
 			cp[k] = v
 		}
-		for _, k := range keys {
-			if v, ok := cp[k]; ok {
-				if s, ok := v.(string); ok && s != "" {
-					cp[k] = maskedPlaceholder
-				}
+		for k, v := range cp {
+			if !isDriverSecretKey(k, keys) {
+				continue
+			}
+			if s, ok := v.(string); ok && s != "" {
+				cp[k] = maskedPlaceholder
 			}
 		}
 		cfg.Drivers[i].Config = cp
 	}
+}
+
+// secretKeyFragments are the substrings that mark a driver config key as
+// a credential whether or not the driver's DRIVER block lists it under
+// config_secrets. The catalog list is the contract; this is the floor
+// under it, because the installed copy of a driver can lag the source
+// (a signed channel build without the declaration served myuplink's
+// client_secret and refresh_token in clear text over the LAN, #1057).
+var secretKeyFragments = []string{"password", "passwd", "secret", "token", "credential", "apikey", "api_key", "private_key"}
+
+// isDriverSecretKey reports whether a Driver.Config key takes part in the
+// mask/restore cycle: either the catalog declared it, or its name says
+// credential. Case-insensitive on the name.
+func isDriverSecretKey(key string, declared []string) bool {
+	for _, d := range declared {
+		if d == key {
+			return true
+		}
+	}
+	// "Api-Key" and "api_key" are the same intent; fold the separator
+	// before matching.
+	lk := strings.ReplaceAll(strings.ToLower(key), "-", "_")
+	for _, frag := range secretKeyFragments {
+		if strings.Contains(lk, frag) {
+			return true
+		}
+	}
+	return strings.HasSuffix(lk, "_key")
 }
 
 func maskAllDriverConfigStrings(cfg *config.Config) {
@@ -1523,9 +1552,6 @@ func restoreDriverConfigSecrets(incoming, existing *config.Config, secretsByLua 
 			restoreOneDriverBlankStrings(&incoming.Drivers[i], existing)
 			continue
 		}
-		if len(keys) == 0 {
-			continue
-		}
 		// Match the existing driver by Name (same key PreserveMaskedSecrets uses).
 		var ed *config.Driver
 		for j := range existing.Drivers {
@@ -1540,9 +1566,8 @@ func restoreDriverConfigSecrets(incoming, existing *config.Config, secretsByLua 
 		if incoming.Drivers[i].Config == nil {
 			incoming.Drivers[i].Config = map[string]any{}
 		}
-		for _, k := range keys {
-			existingV, hasE := ed.Config[k]
-			if !hasE {
+		for k, existingV := range ed.Config {
+			if !isDriverSecretKey(k, keys) {
 				continue
 			}
 			existingS, _ := existingV.(string)
