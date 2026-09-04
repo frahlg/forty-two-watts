@@ -1,5 +1,20 @@
 # Changelog
 
+## 2.14.0
+
+### Minor Changes
+
+- 50a0992: EV modal: one way to let the home battery help the car. "Boost from home battery" now lives in the EV modal, below the charging tabs: pick how much the home battery keeps in reserve and for how long, start it, and see why it stopped when the box ends it. The "Legacy site-wide battery cover" toggle is gone from the modal; a site that still has that older setting on sees one line about it there with a button to turn it off. The Devices card no longer carries a second copy of the boost form, only a line about an active boost.
+- 173e32e: EV modal: the plan is visible at plug-in. Above the tabs the modal now draws the planned charge windows for the car on a 24 h track, with the energy in them, under the usual one-line status. Right below sits the car's current charge, which the plan is built from: drag it to the real value and let go, and the box replans and redraws the plan. The "Set current charge" button and the SoC editor in the Scheduled tab are gone. `GET /api/loadpoints` carries the windows as `plan_windows`, and `POST /api/loadpoints/{id}/soc` replans before it answers.
+  
+  Two fixes underneath, both seen on a real site: setting the car's charge level now clears the "session complete" latch instead of snapping back to the target on the next tick, and ten minutes of steady charging after that latch releases it, so the estimate follows the energy going in instead of sitting at the target while kilowatt-hours flow. `soc_source` reports `completed` when the latch is what pinned the value.
+- 43e6723: EV modal, Scheduled tab: the schedule saves as you change it. Move the target, pick a time, tick Repeat daily or choose weekdays, and the box saves, replans and redraws the plan above; the status line says so. The "Set schedule" button is gone; "Remove schedule" is the one button left. Weekday chips are new on the box (the wire and the phone client already had them).
+
+### Patch Changes
+
+- 903c701: The app can now correct the car's charge level and turn PV-only charging on or off over the session. Two new command operations, `loadpoint.soc.set` and `loadpoint.surplus_only.set`, do what the box's own page does through the same code path, and the matching HTTP routes name them when the passthrough refuses them.
+- f4430e5: "Also charge from PV surplus" on a scheduled charge now works. Once the home battery is at or above the threshold you set, spare solar is added on top of the planned charge. The planned charge itself is never cut back, and loadpoints set to PV-only behave as before.
+
 ## 2.13.1
 
 ### Patch Changes
