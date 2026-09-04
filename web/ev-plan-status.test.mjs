@@ -20,8 +20,9 @@ test('plan-status strip renders every visibility state', () => {
   // PV-only mode nobody chose.
   assert.match(source, /Waiting for tomorrow's electricity prices/);
   assert.match(source, /grid_deferred/);
-  // Manual hold names its cost: the plan is off until Stop or unplug.
-  assert.match(source, /plan and PV logic are off until Stop or unplug/);
+  // Manual hold names its cost: the plan is off until the car is full,
+  // Stop or unplug.
+  assert.match(source, /plan and PV logic are off until the car is full, Stop or unplug/);
   // The do-nothing default is called out with the three ways out.
   assert.match(source, /set a schedule, turn on PV only, or press Start/);
 });

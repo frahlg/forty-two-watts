@@ -1,6 +1,8 @@
 package api
 
 import (
+	"fmt"
+	"math"
 	"net/http"
 	"time"
 
@@ -119,6 +121,21 @@ func (s *Server) handleLoadpointManualHold(w http.ResponseWriter, r *http.Reques
 			"error": "release_at_soc_pct must be between 0 and 100",
 		})
 		return
+	}
+	// A release target the estimate already meets would install a hold
+	// that the controller clears on its next tick — the charger never
+	// starts and the caller sees "active" for a few seconds. Refuse it
+	// up front and say why, so the caller can raise the target or omit
+	// it and charge until the car is full.
+	if req.ReleaseAtSoCPct > 0 {
+		if st, ok := s.deps.Loadpoints.State(id); ok && st.PluggedIn &&
+			st.CurrentSoC*100 >= req.ReleaseAtSoCPct {
+			writeJSON(w, 409, map[string]string{
+				"error": fmt.Sprintf("car is already at %d %% — raise release_at_soc_pct or omit it to charge until the car is full",
+					int(math.Round(st.CurrentSoC*100))),
+			})
+			return
+		}
 	}
 
 	// hold_s == 0 → persistent override (no time expiry); hold_s > 0 →
