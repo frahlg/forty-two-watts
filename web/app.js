@@ -2698,8 +2698,8 @@
       text = lp.manual_release_soc > 0
         ? "Charging now at " + formatW(lp.manual_charge_w || 0) + " → returns to plan at " +
           Math.round(lp.manual_release_soc * 100) + " %."
-        : "Manual charge pinned at " + formatW(lp.manual_charge_w || 0) +
-          " — plan and PV logic are off until Stop or unplug.";
+        : "Manual charge at " + formatW(lp.manual_charge_w || 0) +
+          " — plan and PV logic are off until the car is full, Stop or unplug.";
     } else if (charging) {
       text = winActive
         ? "Charging on plan until " + evFmtClock(lp.plan_next_end_ms) + "." + kwPlanned
@@ -2945,11 +2945,12 @@
     if (curA < minA) { curA = minA; }
     if (curA > maxA) { curA = maxA; }
 
-    // "Charge now" stops at the schedule's target SoC when one is set
-    // (80 % default otherwise), then hands back to the plan — pressing
-    // Start no longer kills the planner for the rest of the session.
-    var releasePct = (lp && lp.schedule && lp.schedule.soc > 0)
-      ? Math.round(lp.schedule.soc * 100) : 80;
+    // Manual charge has no SoC gate. The estimate is a guess when the
+    // charger cannot read the car, and gating Start on it left the
+    // operator with a button that released itself on the next tick
+    // whenever the guess already sat at the target. Start runs until the
+    // car stops asking for current, Stop, or unplug; the plan takes over
+    // again after that.
 
     var box = document.createElement("div");
     box.style.marginTop = "0.75rem";
@@ -3007,8 +3008,8 @@
     status.textContent = active
       ? (lp && lp.manual_release_soc > 0
         ? "Charging now → stops at " + Math.round(lp.manual_release_soc * 100) + " %, then back to the plan (fuse still limits)."
-        : "Manual override active — overriding PV surplus (fuse still limits).")
-      : "Charge now runs at the slider's amps until " + releasePct + " %, then hands back to the plan.";
+        : "Charging at the slider's amps until the car is full, Stop or unplug (fuse still limits).")
+      : "Charges at the slider's amps until the car is full, Stop or unplug. The plan takes over again after that.";
     box.appendChild(status);
 
     // Start / Stop buttons.
@@ -3019,7 +3020,7 @@
 
     var startBtn = document.createElement("button");
     startBtn.type = "button";
-    startBtn.textContent = active ? "Update" : "Charge now → " + releasePct + " %";
+    startBtn.textContent = active ? "Update" : "Charge now";
     startBtn.style.flex = "1";
     startBtn.style.padding = "0.4rem 0.6rem";
     startBtn.style.border = "none";
@@ -3050,7 +3051,8 @@
       startBtn.disabled = true;
       status.textContent = "Starting…";
       var a = parseInt(slider.value, 10) || minA;
-      // CONTROL write — strict (FIX-B): persistent manual hold (hold_s:0).
+      // CONTROL write — strict (FIX-B): persistent manual hold (hold_s:0)
+      // with no SoC release — see the note above the slider.
       apiFetch("/api/loadpoints/" + encodeURIComponent(lp.id) + "/manual_hold", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -3058,10 +3060,9 @@
           power_w: aToW(a),
           hold_s: 0,
           phase_mode: phases === 1 ? "1p" : "3p",
-          release_at_soc_pct: releasePct,
         }),
       }).then(function () {
-        status.textContent = "Charging at " + a + " A → stops at " + releasePct + " %, then back to the plan.";
+        status.textContent = "Charging at " + a + " A until the car is full, Stop or unplug.";
         manualNeedsRebuild = true; // reflect active state on next poll
       }).catch(function () {
         startBtn.disabled = false;
