@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.13.1
+
+### Patch Changes
+
+- 62640a5: EV manual charge: "Charge now" runs until the car is full, Stop or unplug. It no longer stops at the schedule's target SoC. The SoC estimate is a guess on chargers that cannot read the car, and a Start that released itself the moment the guess sat at the target left the operator with no way to charge. The API also refuses a `release_at_soc_pct` the estimate already meets (409) instead of installing a hold that clears on the next tick.
+- 384e2de: `GET /api/config` masks driver config keys whose names say credential (password, secret, token, api key, private key) even when the installed driver's catalog entry does not list them under `config_secrets`, and `POST /api/config` restores the stored value when the client sends the mask or a blank back. The installed copy of a driver can lag its source: a box served myuplink's `client_secret` and `refresh_token` in clear text over the LAN.
+- 37df5fe: Raspberry Pi image: apply host OS security updates automatically (Debian security + Raspberry Pi archives via unattended-upgrades, automatic reboot off) and restore Docker's apt source on first boot so the engine can be patched at all; document that self-update never covers the host.
+
 ## 2.13.0
 
 ### Minor Changes
