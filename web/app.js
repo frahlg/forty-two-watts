@@ -3553,10 +3553,55 @@
     var recCb = recWrap.input;
     var surCb = surWrap.input;
 
-    // Target: same header + full-width slider treatment as Current charge.
+    // Weekdays. The wire's zero means every day (older rows and clients);
+    // the chips show that as all seven lit, and send zero back for it,
+    // the same spelling the webapp uses. Bit 0 = Monday (ISO).
+    var initDays = (typeof sched.days === "number" && (sched.days & 0x7f) > 0) ? (sched.days & 0x7f) : 0x7f;
+    var dayChips = [];
+    var daysRow = document.createElement("div");
+    daysRow.setAttribute("role", "group");
+    daysRow.setAttribute("aria-label", "Days");
+    daysRow.style.display = "flex";
+    daysRow.style.gap = "0.3rem";
+    daysRow.style.margin = "0.1rem 0 0.55rem";
+    ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].forEach(function (name, bit) {
+      var chip = document.createElement("button");
+      chip.type = "button";
+      chip.textContent = name;
+      chip.dataset.bit = String(bit);
+      chip.style.flex = "1";
+      chip.style.padding = "0.25rem 0";
+      chip.style.fontFamily = "var(--mono)";
+      chip.style.fontSize = "0.68rem";
+      chip.style.letterSpacing = "0.06em";
+      chip.style.borderRadius = "3px";
+      chip.style.cursor = "pointer";
+      chip.style.border = "1px solid var(--line)";
+      chip.on = !!(initDays & (1 << bit));
+      dayChips.push(chip);
+      daysRow.appendChild(chip);
+    });
+    function paintChips() {
+      dayChips.forEach(function (chip) {
+        chip.setAttribute("aria-pressed", chip.on ? "true" : "false");
+        chip.style.background = chip.on ? "var(--accent-e)" : "transparent";
+        chip.style.color = chip.on ? "#0a0a0a" : "var(--text-dim)";
+        chip.style.borderColor = chip.on ? "var(--accent-e)" : "var(--line)";
+      });
+    }
+    function selectedDays() {
+      var mask = 0;
+      dayChips.forEach(function (chip) { if (chip.on) mask |= 1 << Number(chip.dataset.bit); });
+      return mask;
+    }
+    paintChips();
+
+    // Target: same header + full-width slider treatment as the car's
+    // current charge above the tabs.
     var targetHdr = sliderHeader("Target", Math.max(0, Math.min(100, Math.round(initSoC))) + "%");
     box.appendChild(targetHdr.row);
     var targetSlider = fullWidthSlider(Math.max(0, Math.min(100, Math.round(initSoC))), targetHdr.value);
+    targetSlider.setAttribute("aria-label", "Target charge, percent");
     box.appendChild(targetSlider);
     box.appendChild(row("Charge by", timeInp));
 
@@ -3566,13 +3611,14 @@
     checkRow.style.gap = "0.35rem";
     checkRow.style.marginBottom = "0.55rem";
     checkRow.appendChild(recWrap);
+    box.appendChild(checkRow);
+    box.appendChild(daysRow);
     // Surplus-from-PV only makes sense on sites with a PV driver — the
     // bat-SoC unlock would have no surplus to grab otherwise. Omit the
     // checkbox + threshold entirely on PV-less sites.
     if (hasPV) {
       checkRow.appendChild(surWrap);
     }
-    box.appendChild(checkRow);
 
     var unlockHint = document.createElement("small");
     unlockHint.style.display = "block";
@@ -3595,20 +3641,26 @@
       thresholdRow.style.pointerEvents = on ? "auto" : "none";
       unlockHint.style.opacity = on ? "1" : "0.55";
     }
+    function applyDaysGate() {
+      // Inline display:flex beats the [hidden] attribute; toggle display.
+      daysRow.style.display = recCb.checked ? "flex" : "none";
+    }
     if (hasPV) {
       applySurplusGate();
-      surCb.addEventListener("change", applySurplusGate);
     }
+    applyDaysGate();
 
-    // Actions
+    // One explicit action remains: removing the schedule. Everything
+    // else saves as it changes (see scheduleSave below).
     var btnRow = document.createElement("div");
     btnRow.style.display = "flex";
     btnRow.style.gap = "0.5rem";
     btnRow.style.marginTop = "0.55rem";
     btnRow.style.justifyContent = "flex-end";
 
-    function mkBtn(label, primary) {
+    function mkBtn(label) {
       var b = document.createElement("button");
+      b.type = "button";
       b.textContent = label;
       b.style.padding = "0.3rem 0.8rem";
       b.style.fontSize = "0.8rem";
@@ -3618,22 +3670,17 @@
       b.style.borderRadius = "3px";
       b.style.cursor = "pointer";
       b.style.border = "1px solid var(--line)";
-      if (primary) {
-        b.style.background = "var(--accent-e)";
-        b.style.color = "#0a0a0a";
-        b.style.borderColor = "var(--accent-e)";
-      } else {
-        b.style.background = "transparent";
-        b.style.color = "var(--fg)";
-      }
+      b.style.background = "transparent";
+      b.style.color = "var(--fg)";
       return b;
     }
-    var clearBtn = mkBtn("Clear", false);
-    var saveBtn = mkBtn(hasSched ? "Update schedule" : "Set schedule", true);
-    clearBtn.disabled = !hasSched;
-    if (!hasSched) clearBtn.style.opacity = "0.4";
+    var clearBtn = mkBtn("Remove schedule");
+    function paintClear() {
+      clearBtn.disabled = !hasSched;
+      clearBtn.style.opacity = hasSched ? "1" : "0.4";
+    }
+    paintClear();
     btnRow.appendChild(clearBtn);
-    btnRow.appendChild(saveBtn);
     box.appendChild(btnRow);
 
     var status = document.createElement("small");
@@ -3641,28 +3688,46 @@
     status.style.color = "var(--text-dim)";
     status.style.marginTop = "0.4rem";
     status.style.minHeight = "1em";
+    status.textContent = hasSched
+      ? "Changes save as you make them; the plan above follows."
+      : "Move the target or pick a time to set a schedule; the plan above follows.";
     box.appendChild(status);
 
-    // Save and Clear both flag schedNeedsRebuild so the next poll
-    // rebuilds the section from the new authoritative server state
-    // (e.g. so the button label flips from "Save" → "Update" once a
-    // schedule exists). Polling never rebuilds otherwise — the cached
-    // schedSectionEl stays mounted and inputs keep focus.
-    saveBtn.addEventListener("click", function () {
-      saveBtn.disabled = true;
-      clearBtn.disabled = true;
+    // Every control writes when it changes: the slider on release, the
+    // time and checkboxes on change, a chip on click. Debounced so a
+    // burst of edits is one request; a stale response never overwrites
+    // a newer status. The box replans before it answers the schedule
+    // write, so the refetch right after redraws the plan view above
+    // from the new schedule. No Save button.
+    var saveTimer = null;
+    var saveSeq = 0;
+    var statusTimer = null;
+    function scheduleSave() {
+      if (saveTimer) clearTimeout(saveTimer);
+      if (statusTimer) { clearTimeout(statusTimer); statusTimer = null; }
       status.textContent = "Saving…";
+      saveTimer = setTimeout(function () { saveTimer = null; doSave(); }, 400);
+    }
+    function doSave() {
+      var seq = ++saveSeq;
       var localHHMM = timeInp.value || initLocalHHMM;
       var minUTC = localHHMMToUtcMins(localHHMM);
       // Surplus checkbox gates the threshold: when off (or hidden on
       // PV-less sites), the threshold is sent as 0 — the backend
       // interprets 0 as "feature disabled".
       var unlockVal = (hasPV && surCb.checked) ? Number(unlockWrap.input.value) : 0;
+      var days = recCb.checked ? selectedDays() : 0;
+      if (recCb.checked && days === 0) {
+        status.textContent = "Pick at least one day.";
+        return;
+      }
       var body = {
         schedule: {
           soc: Number(targetSlider.value) / 100,
           time_of_day_min_utc: minUTC,
           recurring: !!recCb.checked,
+          // All seven days is the wire's zero.
+          days: days === 0x7f ? 0 : days,
           surplus_unlock_bat_soc: unlockVal > 0 ? unlockVal / 100 : 0,
         },
       };
@@ -3673,20 +3738,36 @@
         body: JSON.stringify(body),
       }).then(function (r) {
         if (!r.ok) throw new Error("HTTP " + r.status);
-        status.textContent = "Saved.";
-        schedNeedsRebuild = true;
+        if (seq !== saveSeq) return;
+        hasSched = true;
+        paintClear();
+        status.textContent = "Saved · replanning…";
         refreshEvModal();
+        statusTimer = setTimeout(function () {
+          if (seq === saveSeq) status.textContent = "Plan updated.";
+        }, 1500);
       }).catch(function (e) {
+        if (seq !== saveSeq) return;
         status.textContent = "Save failed: " + e.message;
-        saveBtn.disabled = false;
-        clearBtn.disabled = false;
       });
+    }
+
+    targetSlider.addEventListener("change", scheduleSave);
+    timeInp.addEventListener("change", scheduleSave);
+    recCb.addEventListener("change", function () { applyDaysGate(); scheduleSave(); });
+    dayChips.forEach(function (chip) {
+      chip.addEventListener("click", function () { chip.on = !chip.on; paintChips(); scheduleSave(); });
     });
+    if (hasPV) {
+      surCb.addEventListener("change", function () { applySurplusGate(); scheduleSave(); });
+      unlockWrap.input.addEventListener("change", scheduleSave);
+    }
 
     clearBtn.addEventListener("click", function () {
-      saveBtn.disabled = true;
       clearBtn.disabled = true;
-      status.textContent = "Clearing…";
+      if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+      saveSeq++;
+      status.textContent = "Removing…";
       // CONTROL write — strict (FIX-B): loadpoint schedule clear.
       apiFetch("/api/loadpoints/" + encodeURIComponent(lp.id) + "/target", {
         method: "POST",
@@ -3694,12 +3775,12 @@
         body: JSON.stringify({ schedule: null }),
       }).then(function (r) {
         if (!r.ok) throw new Error("HTTP " + r.status);
-        status.textContent = "Cleared.";
+        status.textContent = "Schedule removed.";
         schedNeedsRebuild = true;
         refreshEvModal();
       }).catch(function (e) {
-        status.textContent = "Clear failed: " + e.message;
-        saveBtn.disabled = false;
+        status.textContent = "Remove failed: " + e.message;
+        clearBtn.disabled = false;
       });
     });
 
