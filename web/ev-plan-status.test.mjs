@@ -27,10 +27,11 @@ test('plan-status strip renders every visibility state', () => {
   assert.match(source, /set a schedule, turn on PV only, or press Start/);
 });
 
-test('plan-status strip is wired into the modal refresh', () => {
-  assert.match(source, /renderEvPlanStatus\(matched, d\)/);
-  // Updated in place on every poll, like the status table.
-  assert.match(source, /planStatusEl = freshPlan/);
+test('plan-status strip is the headline of the plan view', () => {
+  // The sentence is rendered inside buildEvPlanView's update(), which
+  // runs on every poll like the status table.
+  assert.match(source, /var fresh = renderEvPlanStatus\(lpNow, dNow\)/);
+  assert.match(source, /evPlanEl\.update\(matched, d\)/);
   // And reset when the modal short-circuits to "no charger".
-  assert.match(source, /statusTableEl = null;\s*\n\s*planStatusEl = null;/);
+  assert.match(source, /statusTableEl = null;\s*\n\s*evPlanEl = null;/);
 });

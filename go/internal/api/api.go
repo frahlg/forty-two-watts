@@ -3570,9 +3570,11 @@ func (s *Server) handleLoadpoints(w http.ResponseWriter, r *http.Request) {
 // the controller used.
 func decorateLoadpointsWithVehicle(states []loadpoint.State, tel *telemetry.Store) {
 	if len(tel.ReadingsByType(telemetry.DerVehicle)) == 0 {
-		// No vehicle drivers — mark every plugged-in lp as inferred.
+		// No vehicle drivers — mark every plugged-in lp as inferred,
+		// unless the manager already says why the estimate is where it
+		// is ("completed": pinned to target after the car declined).
 		for i := range states {
-			if states[i].PluggedIn {
+			if states[i].PluggedIn && states[i].SoCSource == "" {
 				states[i].SoCSource = "inferred"
 			}
 		}
@@ -3586,7 +3588,9 @@ func decorateLoadpointsWithVehicle(states []loadpoint.State, tel *telemetry.Stor
 		delivering := states[i].CurrentPowerW > loadpoint.DeliveringW
 		pick := telemetry.PickBestVehicleForLoadpoint(tel, delivering, now)
 		if pick.Driver == "" {
-			states[i].SoCSource = "inferred"
+			if states[i].SoCSource == "" {
+				states[i].SoCSource = "inferred"
+			}
 			continue
 		}
 		states[i].VehicleDriver = pick.Driver
@@ -3904,9 +3908,12 @@ func (s *Server) handleLoadpointSoC(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	// Trigger replan so the corrected SoC feeds into the next plan.
+	// Replan before answering, on a fresh context: the request context
+	// dies with the response, and the client reads /api/loadpoints the
+	// moment this returns to redraw the plan from the corrected SoC.
+	// A replan is well under a second on current grids.
 	if s.deps.MPC != nil {
-		go s.deps.MPC.Replan(r.Context())
+		s.deps.MPC.ReplanWithReason(context.Background(), "loadpoint_soc_corrected")
 	}
 	writeJSON(w, 200, map[string]any{"ok": true})
 }

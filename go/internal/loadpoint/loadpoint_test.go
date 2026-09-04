@@ -339,3 +339,90 @@ func TestRequestActiveDefaultPreservesInference(t *testing.T) {
 		t.Errorf("inferred SoC drifted: %.2f", st.CurrentSoC)
 	}
 }
+
+// latchedManager returns a plugged-in loadpoint whose completion latch
+// has fired: target 0.6, 1 kWh delivered, 90 s of not requesting. The
+// estimate sits pinned at 0.6. Returned clock is the latch moment.
+func latchedManager(t *testing.T) (*Manager, *time.Time) {
+	t.Helper()
+	m := NewManager()
+	m.Load([]Config{{
+		ID: "garage", DriverName: "evse-test",
+		VehicleCapacityWh: 60000, PluginSoC: 0.2, MaxChargeW: 11000,
+	}})
+	m.SetTarget("garage", 0.6, time.Date(2026, 9, 4, 15, 0, 0, 0, time.UTC))
+	clock := time.Date(2026, 9, 4, 4, 0, 0, 0, time.UTC)
+	m.SetNowFn(func() time.Time { return clock })
+	m.Observe("garage", true, 7400, 1000, true)
+	clock = clock.Add(10 * time.Second)
+	m.Observe("garage", true, 0, 1000, false)
+	clock = clock.Add(SessionCompletionTimeout)
+	m.Observe("garage", true, 0, 1000, false)
+	st, _ := m.State("garage")
+	if st.SoCSource != "completed" || st.CurrentSoC != 0.6 {
+		t.Fatalf("precondition: latch should have fired, got %+v", st)
+	}
+	return m, &clock
+}
+
+// The maintainer's morning of 2026-09-04: the car declined overnight at
+// the schedule's 80 %, the latch pinned the estimate there, and every
+// drag of the "current charge" slider snapped back to 80 on the next
+// tick. Setting the level is the operator overruling the latch.
+func TestSetCurrentSoCClearsCompletionLatch(t *testing.T) {
+	m, clock := latchedManager(t)
+	if !m.SetCurrentSoC("garage", 0.5) {
+		t.Fatalf("SetCurrentSoC refused")
+	}
+	*clock = clock.Add(3 * time.Second)
+	m.Observe("garage", true, 0, 1000, false) // still not requesting, timer restarts
+	st, _ := m.State("garage")
+	if st.SoCSource == "completed" {
+		t.Errorf("latch should be cleared by the operator's correction: %+v", st)
+	}
+	if st.CurrentSoC < 0.49 || st.CurrentSoC > 0.51 {
+		t.Errorf("estimate should hold the corrected 0.5, got %.3f", st.CurrentSoC)
+	}
+	// A car that keeps declining re-arms the latch after the timeout.
+	*clock = clock.Add(SessionCompletionTimeout)
+	m.Observe("garage", true, 0, 1000, false)
+	if st, _ := m.State("garage"); st.SoCSource != "completed" || st.CurrentSoC != 0.6 {
+		t.Errorf("latch should re-arm after sustained not-requesting: %+v", st)
+	}
+}
+
+// Same morning, later: a manual charge pushed 11 kW into the car for
+// forty minutes and the estimate still read 80 %, because the latch
+// only ever released on plug-out. Ten minutes of steady current is the
+// car charging, not an EVSE retry blip; the estimate must follow the
+// delivered energy again.
+func TestSustainedChargingClearsCompletionLatch(t *testing.T) {
+	m, clock := latchedManager(t)
+	// Charging resumes at full power; a brief run must not release.
+	*clock = clock.Add(5 * time.Second)
+	m.Observe("garage", true, 11000, 1500, true)
+	if st, _ := m.State("garage"); st.SoCSource != "completed" || st.CurrentSoC != 0.6 {
+		t.Fatalf("a fresh run must not release the latch yet: %+v", st)
+	}
+	*clock = clock.Add(InterruptSteadyRun / 2)
+	m.Observe("garage", true, 11000, 3000, true)
+	if st, _ := m.State("garage"); st.SoCSource != "completed" {
+		t.Fatalf("half a steady run must not release the latch: %+v", st)
+	}
+	*clock = clock.Add(InterruptSteadyRun/2 + time.Second)
+	m.Observe("garage", true, 11000, 4000, true)
+	st, _ := m.State("garage")
+	if st.SoCSource == "completed" {
+		t.Errorf("a full steady run should release the latch: %+v", st)
+	}
+	// anchor 0.2 + 4000/60000 ≈ 0.267 — the estimate moved off the pin.
+	if st.CurrentSoC < 0.26 || st.CurrentSoC > 0.27 {
+		t.Errorf("estimate should follow delivered Wh after release, got %.3f", st.CurrentSoC)
+	}
+	// And keeps following as more energy goes in.
+	*clock = clock.Add(time.Minute)
+	m.Observe("garage", true, 11000, 6000, true)
+	if st, _ := m.State("garage"); st.CurrentSoC < 0.29 || st.CurrentSoC > 0.31 {
+		t.Errorf("estimate should keep rising, got %.3f", st.CurrentSoC)
+	}
+}
