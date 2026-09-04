@@ -87,6 +87,10 @@ landed on somebody else's finished work.
   badly while it waits.
 - **Respect `.github/CODEOWNERS`.** An owner reviews what lands in their
   area, whoever — or whatever — wrote it.
+- **Do not request GitHub reviews except CODEOWNERS.** Never request
+  @erikarenhill and never @mention people for attention — the GitHub
+  Discord bot turns both into pings. See
+  [`APPROVAL_POLICY.md`](APPROVAL_POLICY.md).
 - **Review web/UI changes in a browser.** A human must inspect the rendered
   interface; AI review and reading the source code are not enough.
 
