@@ -404,6 +404,30 @@ type ShadowPlan struct {
 	ActiveTerminalCorrectedOre            float64 `json:"active_terminal_corrected_ore,omitempty"`
 	TerminalCorrectedOre                  float64 `json:"terminal_corrected_ore,omitempty"`
 	ActiveMinusShadowTerminalCorrectedOre float64 `json:"active_minus_shadow_terminal_corrected_ore,omitempty"`
+
+	// SelfReportedOre is the grid cost the challenger claimed for its own
+	// plan, kept beside Core's valuation of it rather than in place of it.
+	// The two agree only as long as the challenger prices the meter the way
+	// Core does; the gap is the diagnostic.
+	SelfReportedOre float64 `json:"self_reported_ore,omitempty"`
+	// SelfReportedObjectiveOre is the value the challenger actually
+	// minimized — scenario-weighted, CVaR-shaped, carrying its own
+	// penalties. It is NOT comparable with any cost above and exists to
+	// show how differently the two objectives are shaped.
+	SelfReportedObjectiveOre float64 `json:"self_reported_objective_ore,omitempty"`
+	// EvaluationRefusedReason is set when Core declined to cost one of the
+	// plans. The comparison fields are then left empty: a refusal that gets
+	// recorded beats a plausible number nobody can tell from a measurement.
+	EvaluationRefusedReason string `json:"evaluation_refused_reason,omitempty"`
+	// ActiveEvaluationDriftOre is Core's valuation of its OWN plan minus the
+	// cost that plan reported. Anything but ~0 is a bug in Core's
+	// bookkeeping, not a property of the challenger.
+	ActiveEvaluationDriftOre float64 `json:"active_evaluation_drift_ore,omitempty"`
+	// PV curtailment counts. Core's cost model prices every slot at full
+	// forecast generation on both sides, so slots either plan wants to
+	// curtail are slots where the comparison is blind to a real difference.
+	ActivePVCurtailmentSlots int `json:"active_pv_curtailment_slots,omitempty"`
+	PVCurtailmentSlots       int `json:"pv_curtailment_slots,omitempty"`
 }
 
 // terminalCorrectedOre nets the terminal-SoC credit out of a raw grid cost so
@@ -491,6 +515,48 @@ func SlotGridCostOre(slot Slot, gridKWh float64, p Params) float64 {
 // pass-through retail agreements, exporting during negative spot is a cost.
 func SlotExportPriceOre(slot Slot, p Params) float64 {
 	return gridcost.ExportPriceOre(slot.SpotOre, exportPricingFromParams(p))
+}
+
+// planSlotOutcome is one slot of a forward walk: the SoC the battery
+// reaches, the power the meter sees, and what that flow costs under Core's
+// cost model.
+type planSlotOutcome struct {
+	SoC     float64
+	GridW   float64
+	CostOre float64
+}
+
+// stepPlanSlot advances one slot from socIn under a battery and loadpoint
+// power. The DP's own forward pass and evaluatePlan both drive it, so the
+// cost arithmetic cannot be changed for one and not the other. That sharing
+// is the point: a foreign plan can only be judged on Core's terms while
+// "Core's terms" is a single piece of code, and a second copy of these three
+// lines would silently invalidate every comparison the day one of them moved.
+//
+// SoC comes back unclamped. The DP pins it to the operating band afterwards
+// because its feasibility screen already rejected out-of-band transitions;
+// evaluatePlan needs to see the raw excursion, because a foreign plan has had
+// no such screen.
+func stepPlanSlot(slot Slot, p Params, socIn, batteryW, loadpointW float64) planSlotOutcome {
+	dtH := float64(slot.LenMin) / 60.0
+	var deltaWh float64
+	if batteryW >= 0 {
+		deltaWh = +batteryW * dtH * p.ChargeEfficiency
+	} else {
+		deltaWh = +batteryW * dtH / p.DischargeEfficiency
+	}
+	gridW := slot.LoadW + slot.PVW + batteryW + loadpointW
+	return planSlotOutcome{
+		SoC:     socIn + deltaWh/p.CapacityWh,
+		GridW:   gridW,
+		CostOre: SlotGridCostOre(slot, gridW*dtH/1000.0, p),
+	}
+}
+
+// stepLoadpointSoC advances one flex load over a slot. Charging only, so the
+// result never falls; the caller enforces the ceiling.
+func stepLoadpointSoC(socIn, powerW, dtH, capacityWh, chargeEfficiency float64) float64 {
+	return socIn + powerW*dtH*chargeEfficiency/capacityWh
 }
 
 func exportPricingFromParams(p Params) gridcost.ExportPricing {
@@ -1077,14 +1143,12 @@ func Optimize(slots []Slot, p Params) Plan {
 		ea := pol % EA
 		actW := actionAt(ba)
 		evW := evActionW(ea)
-		// Battery SoC transition.
-		var dSoCWh float64
-		if actW >= 0 {
-			dSoCWh = +actW * dtH * p.ChargeEfficiency
-		} else {
-			dSoCWh = +actW * dtH / p.DischargeEfficiency
-		}
-		soc2 := soc + dSoCWh/p.CapacityWh
+		// Battery SoC transition and slot cost. Report the ACTUAL
+		// expected cost using the raw (un-blended) prices so the UI
+		// summary reflects "what we'd actually pay if prices hold".
+		// Blending is a decision lens only.
+		step := stepPlanSlot(slot, p, soc, actW, evW)
+		soc2 := step.SoC
 		if soc2 < p.SoCMin {
 			soc2 = p.SoCMin
 		}
@@ -1094,18 +1158,13 @@ func Optimize(slots []Slot, p Params) Plan {
 		// EV SoC transition (no-op when !evActive since evW = 0).
 		var evSoc2 float64
 		if evActive {
-			dEvWh := evW * dtH * evChargeEff
-			evSoc2 = evSoc + dEvWh/lp.CapacityWh
+			evSoc2 = stepLoadpointSoC(evSoc, evW, dtH, lp.CapacityWh, evChargeEff)
 			if evSoc2 > lp.SoCMax {
 				evSoc2 = lp.SoCMax
 			}
 		}
-		gridW := slot.LoadW + slot.PVW + actW + evW
-		gridKWh := gridW * dtH / 1000.0
-		// Report the ACTUAL expected cost using the raw (un-blended)
-		// prices so the UI summary reflects "what we'd actually pay
-		// if prices hold". Blending is a decision lens only.
-		cost := SlotGridCostOre(slot, gridKWh, p)
+		gridW := step.GridW
+		cost := step.CostOre
 		totalCost += cost
 		a := Action{
 			SlotStartMs: slot.StartMs,

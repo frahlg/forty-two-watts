@@ -61,15 +61,57 @@ func loadDiagnosticBlob(data []byte) (*Diagnostic, error) {
 // field shadow reports the same correction every replan, so the bench
 // and the running planner must not drift apart on the formula.
 
+// benchEvaluate costs one plan under Core's model. A plan Core cannot cost
+// fails the bench outright rather than being silently replaced by the number
+// it came with — the same rule the field shadow follows. The caller
+// terminal-corrects; the raw cost and the reached end SoC are reported
+// alongside so a reader can see whether an advantage is cheaper decisions or
+// merely more energy left in the pack.
+func benchEvaluate(t *testing.T, leg, snapshot string, plan *Plan, slots []Slot, p Params) planEvaluation {
+	t.Helper()
+	eval, err := evaluatePlan(*plan, slots, p)
+	if err != nil {
+		t.Fatalf("%s: core cannot cost the %s plan: %v", snapshot, leg, err)
+	}
+	return eval
+}
+
 // TestReplayBenchSnapshots is the A/B instrument. Skipped without
 // FTW_MPC_SNAPSHOT_DIR. Optional knobs:
 //
-//	FTW_TEST_OPTIMIZER_PYTHON  — adds the Python champion leg
+//	FTW_TEST_OPTIMIZER_PYTHON  — adds the Python challenger leg
 //	FTW_MPC_BENCH_SPREAD_ORE   — MinArbitrageSpreadOreKwh fallback for
 //	                             blobs written before the diagnostic
 //	                             persisted it. A spread carried by the
 //	                             snapshot always wins: it is what the
 //	                             replan actually solved under.
+//	FTW_MPC_BENCH_CVAR_WEIGHT  — the site's optimizer.cvar_weight
+//	FTW_MPC_BENCH_CVAR_ALPHA   — the site's optimizer.cvar_alpha
+//	FTW_MPC_BENCH_MIP_GAP      — the site's optimizer.mip_rel_gap
+//	FTW_MPC_BENCH_TERMINAL_SCALE — multiplier on the snapshot's
+//	                             TerminalSoCPrice: 1.0 as recorded, 0 for no
+//	                             terminal credit at all.
+//
+// The three optimizer knobs exist because the diagnostic records the
+// PLANNING inputs, not the challenger's solver configuration: replaying a
+// box's snapshot with the bench's defaults asks Python a different question
+// than the box asked it, and the answer differs by more than the gap being
+// measured. Set them to the site's values before reading a py column as "what
+// that box's shadow would have said".
+//
+// The terminal knob answers a different question: whether a measured gap is a
+// gap between plans or an artifact of how stored energy is priced. The
+// terminal price is both an input the solvers optimize against and the rate
+// the comparison credits leftover charge at, so the scale moves both together
+// — every leg still solves and is scored under one consistent price of stored
+// energy. If a challenger's lead melts as the scale goes to 0, the lead was
+// bought with end-of-horizon SoC, not with cheaper decisions.
+//
+// py_self is what Python reported for its own plan; py_corr is what that same
+// plan costs under Core's model, terminal-corrected. Only py_corr may be
+// subtracted from dp_corr. The *_raw columns are the same plans before the
+// correction and *_soc the SoC each parks the horizon at, which is what makes
+// the difference between the two readable.
 //
 // Run with -v; the verdict is the table, not a pass/fail.
 func TestReplayBenchSnapshots(t *testing.T) {
@@ -90,6 +132,15 @@ func TestReplayBenchSnapshots(t *testing.T) {
 		}
 	}
 
+	benchFloat := func(key string, fallback float64) float64 {
+		if v := os.Getenv(key); v != "" {
+			if f, err := strconv.ParseFloat(v, 64); err == nil {
+				return f
+			}
+		}
+		return fallback
+	}
+
 	var ext *ExternalOptimizer
 	if python := os.Getenv("FTW_TEST_OPTIMIZER_PYTHON"); python != "" {
 		_, file, _, ok := runtime.Caller(0)
@@ -97,13 +148,19 @@ func TestReplayBenchSnapshots(t *testing.T) {
 			t.Fatal("runtime.Caller failed")
 		}
 		moduleDir := filepath.Clean(filepath.Join(filepath.Dir(file), "..", "..", "..", "optimizer"))
+		cvarWeight := benchFloat("FTW_MPC_BENCH_CVAR_WEIGHT", 0)
+		cvarAlpha := benchFloat("FTW_MPC_BENCH_CVAR_ALPHA", 0.9)
+		mipGap := benchFloat("FTW_MPC_BENCH_MIP_GAP", 0.001)
+		t.Logf("python leg: cvar_weight=%g cvar_alpha=%g mip_rel_gap=%g", cvarWeight, cvarAlpha, mipGap)
 		ext, err = NewExternalOptimizer(ExternalOptimizerConfig{
 			Command:     []string{python, "-m", "ftw_optimizer.worker"},
 			ModuleDir:   moduleDir,
 			Timeout:     60 * time.Second,
 			Solver:      "HIGHS",
 			Formulation: "auto",
-			MIPRelGap:   0.001,
+			MIPRelGap:   mipGap,
+			CVaRWeight:  cvarWeight,
+			CVaRAlpha:   cvarAlpha,
 			IdleTimeout: 5 * time.Second,
 		})
 		if err != nil {
@@ -112,9 +169,16 @@ func TestReplayBenchSnapshots(t *testing.T) {
 		defer ext.Close()
 	}
 
-	t.Logf("%-15s %-18s %10s %10s %10s %10s %10s %10s",
-		"snapshot", "mode", "rec_corr", "dp_corr", "dp-rec", "py_corr", "py-dp", "dp_ms")
-	var sumDPvsRec, sumPYvsDP float64
+	terminalScale := benchFloat("FTW_MPC_BENCH_TERMINAL_SCALE", 1)
+	if terminalScale != 1 {
+		t.Logf("terminal price scaled by %g (solve and scoring alike)", terminalScale)
+	}
+
+	t.Logf("%-15s %-18s %9s %9s %6s %9s %9s %9s %9s %6s %9s %9s %9s %8s",
+		"snapshot", "mode", "rec_corr",
+		"dp_raw", "dp_soc", "dp_corr", "dp-rec",
+		"py_self", "py_raw", "py_soc", "py_corr", "py-dp", "py-dp_raw", "dp_ms")
+	var sumDPvsRec, sumPYvsDP, sumPYvsDPRaw, sumSoCDiff float64
 	var nDP, nPY int
 	for _, path := range paths {
 		data, err := os.ReadFile(path)
@@ -134,6 +198,9 @@ func TestReplayBenchSnapshots(t *testing.T) {
 		if params.MinArbitrageSpreadOreKwh == 0 {
 			params.MinArbitrageSpreadOreKwh = fallbackSpreadOre
 		}
+		// Applied before anything solves, so the DP, Python and the
+		// correction all price stored energy the same way.
+		params.TerminalSoCPrice *= terminalScale
 		// A blob carries the RECORDED replan's grid resolution, so a
 		// default bump would be invisible here without an override —
 		// judging a resolution change is exactly what the knobs exist
@@ -149,38 +216,61 @@ func TestReplayBenchSnapshots(t *testing.T) {
 			}
 		}
 
-		recCorr := terminalCorrectedOre(recorded.TotalCostOre, planEndSoC(recorded), params)
+		// Every leg is costed by Core, on Core's terms. A solver's own
+		// total is its objective's opinion of its own plan; subtracting
+		// one solver's objective from another's measures the objectives,
+		// not the plans (#1020 follow-up).
+		recEval := benchEvaluate(t, "recorded", filepath.Base(path), recorded, slots, params)
+		recCorr := terminalCorrectedOre(recEval.CostOre, recEval.EndSoC, params)
 
 		dpStart := time.Now()
 		dpPlan := Optimize(slots, params)
 		dpMs := time.Since(dpStart).Milliseconds()
-		dpCorr := terminalCorrectedOre(dpPlan.TotalCostOre, planEndSoC(&dpPlan), params)
+		dpEval := benchEvaluate(t, "dp", filepath.Base(path), &dpPlan, slots, params)
+		dpCorr := terminalCorrectedOre(dpEval.CostOre, dpEval.EndSoC, params)
 		sumDPvsRec += dpCorr - recCorr
 		nDP++
 
-		pyCol, pyDelta := "-", "-"
+		pySelf, pyRaw, pySoC, pyCol, pyDelta, pyDeltaRaw := "-", "-", "-", "-", "-", "-"
 		if ext != nil {
 			pyPlan, err := ext.Optimize(t.Context(), slots, params)
-			if err != nil {
+			switch {
+			case err != nil:
 				pyCol = "ERR"
 				t.Logf("%-15s python: %v", filepath.Base(path), err)
-			} else {
-				pyCorr := terminalCorrectedOre(pyPlan.TotalCostOre, planEndSoC(&pyPlan), params)
-				pyCol = fmt.Sprintf("%10.1f", pyCorr)
-				pyDelta = fmt.Sprintf("%10.1f", pyCorr-dpCorr)
+			default:
+				pySelf = fmt.Sprintf("%9.1f",
+					terminalCorrectedOre(pyPlan.TotalCostOre, planEndSoC(&pyPlan), params))
+				pyEval, evalErr := evaluatePlan(pyPlan, slots, params)
+				if evalErr != nil {
+					pyCol = "REFUSED"
+					t.Logf("%-15s python plan not costable by core: %v", filepath.Base(path), evalErr)
+					break
+				}
+				pyCorr := terminalCorrectedOre(pyEval.CostOre, pyEval.EndSoC, params)
+				pyRaw = fmt.Sprintf("%9.1f", pyEval.CostOre)
+				pySoC = fmt.Sprintf("%6.3f", pyEval.EndSoC)
+				pyCol = fmt.Sprintf("%9.1f", pyCorr)
+				pyDelta = fmt.Sprintf("%9.1f", pyCorr-dpCorr)
+				pyDeltaRaw = fmt.Sprintf("%9.1f", pyEval.CostOre-dpEval.CostOre)
 				sumPYvsDP += pyCorr - dpCorr
+				sumPYvsDPRaw += pyEval.CostOre - dpEval.CostOre
+				sumSoCDiff += pyEval.EndSoC - dpEval.EndSoC
 				nPY++
 			}
 		}
-		t.Logf("%-15s %-18s %10.1f %10.1f %10.1f %10s %10s %8dms",
-			filepath.Base(path), string(params.Mode),
-			recCorr, dpCorr, dpCorr-recCorr, pyCol, pyDelta, dpMs)
+		t.Logf("%-15s %-18s %9.1f %9.1f %6.3f %9.1f %9.1f %9s %9s %6s %9s %9s %9s %6dms",
+			filepath.Base(path), string(params.Mode), recCorr,
+			dpEval.CostOre, dpEval.EndSoC, dpCorr, dpCorr-recCorr,
+			pySelf, pyRaw, pySoC, pyCol, pyDelta, pyDeltaRaw, dpMs)
 	}
 	if nDP > 0 {
 		t.Logf("SUMMARY dp_vs_recorded: n=%d mean=%.1f öre/plan", nDP, sumDPvsRec/float64(nDP))
 	}
 	if nPY > 0 {
-		t.Logf("SUMMARY python_vs_dp (terminal-corrected, positive = python costs more): n=%d mean=%.1f öre/plan", nPY, sumPYvsDP/float64(nPY))
+		t.Logf("SUMMARY python_vs_dp (both costed by core, terminal-corrected, positive = python costs more): n=%d mean=%.1f öre/plan", nPY, sumPYvsDP/float64(nPY))
+		t.Logf("SUMMARY python_vs_dp_raw (no terminal correction): n=%d mean=%.1f öre/plan; mean end_soc diff (py-dp) = %+.4f (%+.1f Wh)",
+			nPY, sumPYvsDPRaw/float64(nPY), sumSoCDiff/float64(nPY), sumSoCDiff/float64(nPY)*9600)
 	}
 }
 

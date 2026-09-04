@@ -6,6 +6,7 @@ import (
 	"errors"
 	"math"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -13,28 +14,58 @@ import (
 	"github.com/srcfl/ftw/go/internal/state"
 )
 
-// costShadowOptimizer answers with the DP's own plan re-labelled as the
-// external solver, then overrides the two numbers the comparison is made of.
-// That keeps the plan structurally valid while the cost difference stays a
-// hand-computable constant.
+// costShadowOptimizer answers with the DP's own plan, optionally scaled into
+// a genuinely different action sequence, and then claims whatever cost and
+// end SoC the test asks it to. The claims are the point: a challenger's own
+// numbers must not reach the verdict, because they are the value of ITS
+// objective, not Core's price for its plan.
 type costShadowOptimizer struct {
 	totalCostOre float64
+	objectiveOre float64
 	endSoC       float64
-	calls        atomic.Int32
+	// chargeLastSlotW rewrites the final slot's battery power, making the
+	// challenger a genuinely different — and here deliberately worse — plan
+	// rather than the champion's own actions handed back.
+	chargeLastSlotW float64
+	calls           atomic.Int32
 }
 
 func (o *costShadowOptimizer) Optimize(_ context.Context, slots []Slot, p Params) (Plan, error) {
 	o.calls.Add(1)
 	plan := Optimize(slots, p)
+	if n := len(plan.Actions); n > 0 && o.chargeLastSlotW != 0 {
+		plan.Actions[n-1].BatteryW = o.chargeLastSlotW
+	}
 	plan.TotalCostOre = o.totalCostOre
 	if n := len(plan.Actions); n > 0 {
 		plan.Actions[n-1].SoC = o.endSoC
 	}
-	plan.Solver = &SolverInfo{Engine: "cvxpy", Backend: "highs", Status: "optimal", SolveMs: 42}
+	plan.Solver = &SolverInfo{
+		Engine: "cvxpy", Backend: "highs", Status: "optimal", SolveMs: 42,
+		ObjectiveOre: o.objectiveOre,
+	}
 	return plan, nil
 }
 
 func (o *costShadowOptimizer) Close() error { return nil }
+
+// refusedShadowOptimizer answers with a plan Core cannot cost: the battery
+// drives straight through the floor. A real challenger doing this is a
+// finding, not a number.
+type refusedShadowOptimizer struct{ calls atomic.Int32 }
+
+func (o *refusedShadowOptimizer) Optimize(_ context.Context, slots []Slot, p Params) (Plan, error) {
+	o.calls.Add(1)
+	plan := Optimize(slots, p)
+	for i := range plan.Actions {
+		plan.Actions[i].BatteryW = -p.MaxDischargeW
+	}
+	plan.TotalCostOre = -100000 // and a flattering total to go with it
+	plan.Solver = &SolverInfo{Engine: "cvxpy", Backend: "highs", Status: "optimal"}
+	return plan, nil
+}
+
+func (o *refusedShadowOptimizer) Close() error { return nil }
 
 type failingShadowOptimizer struct{ calls atomic.Int32 }
 
@@ -175,10 +206,15 @@ func TestPrimaryFailureStillMarksTheDPPlanAsFallback(t *testing.T) {
 
 // TestPythonShadowRecordsTerminalCorrectedComparison is the soak instrument:
 // same inputs, one number per replan, on the Diagnostic that
-// /api/mpc/diagnose/at hands out.
+// /api/mpc/diagnose/at hands out. Both plans are costed by Core, so a
+// challenger cannot move the verdict by reporting a flattering total of its
+// own — which is exactly how a −97 öre field verdict once stood beside a
+// +32 öre bench result on the same day's data.
 func TestPythonShadowRecordsTerminalCorrectedComparison(t *testing.T) {
 	svc := shadowTestService(t)
-	shadow := &costShadowOptimizer{totalCostOre: 1234, endSoC: 0.75}
+	shadow := &costShadowOptimizer{
+		totalCostOre: 1234, objectiveOre: 4321, endSoC: 0.75, chargeLastSlotW: 1000,
+	}
 	svc.ShadowOptimizer = shadow
 	var saved atomic.Int32
 	var withShadow atomic.Int32
@@ -210,34 +246,92 @@ func TestPythonShadowRecordsTerminalCorrectedComparison(t *testing.T) {
 	if block.ComparedSlots != len(plan.Actions) || block.FirstAction == nil {
 		t.Fatalf("comparison incomplete: %+v", block)
 	}
-	if block.TotalCostOre != 1234 {
-		t.Fatalf("shadow raw cost = %v, want 1234", block.TotalCostOre)
-	}
-	if got, want := block.ActiveMinusShadowOre, plan.TotalCostOre-1234; got != want {
-		t.Fatalf("raw core − python = %v, want %v", got, want)
+	if block.EvaluationRefusedReason != "" {
+		t.Fatalf("a feasible challenger was refused: %q", block.EvaluationRefusedReason)
 	}
 
-	// Hand value: corrected = raw − price·(SoC·capacity)/1000
-	//                       = 1234 − 200·(0.75·10000)/1000 = 1234 − 1500 = −266.
-	if d.Params.TerminalSoCPrice != 200 || d.Params.CapacityWh != 10000 {
-		t.Fatalf("terminal economics moved: price=%v capacity=%v",
-			d.Params.TerminalSoCPrice, d.Params.CapacityWh)
+	// What the challenger claimed is kept, and kept apart.
+	if block.SelfReportedOre != 1234 || block.SelfReportedObjectiveOre != 4321 {
+		t.Fatalf("self-reported figures = %v / %v, want 1234 / 4321",
+			block.SelfReportedOre, block.SelfReportedObjectiveOre)
 	}
-	wantShadow := -266.0
-	wantChampion := terminalCorrectedOre(plan.TotalCostOre,
-		plan.Actions[len(plan.Actions)-1].SoC, Params{TerminalSoCPrice: 200, CapacityWh: 10000})
-	if block.TerminalCorrectedOre != wantShadow {
-		t.Fatalf("shadow corrected = %v, want %v", block.TerminalCorrectedOre, wantShadow)
+	// ...but none of it reaches the comparison.
+	if block.TotalCostOre == 1234 {
+		t.Fatal("the challenger's own total became the comparison")
 	}
-	if block.ActiveTerminalCorrectedOre != wantChampion {
-		t.Fatalf("champion corrected = %v, want %v", block.ActiveTerminalCorrectedOre, wantChampion)
+	svcParams := Params{TerminalSoCPrice: 200, CapacityWh: 10000}
+	if terminalCorrectedOre(1234, 0.75, svcParams) == block.TerminalCorrectedOre {
+		t.Fatal("the challenger's own end SoC and total set the corrected figure")
 	}
-	if got := block.ActiveMinusShadowTerminalCorrectedOre; got != wantChampion-wantShadow {
-		t.Fatalf("corrected difference = %v, want %v", got, wantChampion-wantShadow)
+
+	// Core's own plan must cost what Core said it costs.
+	if math.Abs(block.ActiveEvaluationDriftOre) > 1e-9 {
+		t.Fatalf("core's plan drifted from its own bookkeeping by %v öre", block.ActiveEvaluationDriftOre)
+	}
+	if got, want := block.ActiveTerminalCorrectedOre,
+		terminalCorrectedOre(plan.TotalCostOre, planEndSoC(plan), svcParams); math.Abs(got-want) > 1e-9 {
+		t.Fatalf("champion corrected = %v, want %v", got, want)
+	}
+
+	// The challenger really is a different plan, so the verdict is not zero.
+	if block.MeanAbsBatteryDeltaW == 0 {
+		t.Fatal("the challenger returned the champion's own actions")
+	}
+	wantDiff := block.ActiveTerminalCorrectedOre - block.TerminalCorrectedOre
+	if got := block.ActiveMinusShadowTerminalCorrectedOre; math.Abs(got-wantDiff) > 1e-9 {
+		t.Fatalf("corrected difference = %v, want %v", got, wantDiff)
+	}
+	if got, want := block.ActiveMinusShadowOre, plan.TotalCostOre-block.TotalCostOre; math.Abs(got-want) > 1e-9 {
+		t.Fatalf("raw core − python = %v, want %v", got, want)
+	}
+	// The DP is optimal on these inputs, so a halved challenger costs more.
+	if block.ActiveMinusShadowTerminalCorrectedOre >= 0 {
+		t.Fatalf("a worse challenger scored as cheap: %v", block.ActiveMinusShadowTerminalCorrectedOre)
 	}
 	if saved.Load() != 2 || withShadow.Load() != 1 {
 		t.Fatalf("diagnostic writes = %d (%d carrying the shadow), want the replan's write plus one rewrite",
 			saved.Load(), withShadow.Load())
+	}
+}
+
+// TestPythonShadowRefusesToScoreAnInfeasiblePlan — a challenger Core cannot
+// cost produces a recorded reason and no difference at all. Half a
+// measurement is worse than none: it looks exactly like a whole one.
+func TestPythonShadowRefusesToScoreAnInfeasiblePlan(t *testing.T) {
+	svc := shadowTestService(t)
+	svc.ShadowOptimizer = &refusedShadowOptimizer{}
+	svc.SaveDiag = func(*Diagnostic, string) error { return nil }
+
+	plan := svc.Replan(context.Background())
+	if plan == nil {
+		t.Fatal("no champion plan")
+	}
+	waitFor(t, "the refused shadow to land", func() bool {
+		d := svc.Diagnose()
+		return d != nil && d.PythonShadow != nil
+	})
+
+	block := svc.Diagnose().PythonShadow
+	if block.EvaluationRefusedReason == "" {
+		t.Fatalf("an unscoreable plan was scored anyway: %+v", block)
+	}
+	if !strings.Contains(block.EvaluationRefusedReason, "python plan") {
+		t.Fatalf("refusal does not name the side that failed: %q", block.EvaluationRefusedReason)
+	}
+	for name, got := range map[string]float64{
+		"total_cost_ore":                             block.TotalCostOre,
+		"active_minus_shadow_ore":                    block.ActiveMinusShadowOre,
+		"terminal_corrected_ore":                     block.TerminalCorrectedOre,
+		"active_terminal_corrected_ore":              block.ActiveTerminalCorrectedOre,
+		"active_minus_shadow_terminal_corrected_ore": block.ActiveMinusShadowTerminalCorrectedOre,
+	} {
+		if got != 0 {
+			t.Fatalf("%s = %v on a refused comparison, want no number at all", name, got)
+		}
+	}
+	// The challenger's own claim is still recorded — it is the evidence.
+	if block.SelfReportedOre != -100000 {
+		t.Fatalf("self-reported cost = %v, want the claim that was refused", block.SelfReportedOre)
 	}
 }
 
