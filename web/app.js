@@ -281,9 +281,6 @@
   const evSlider = $("ev-slider");
   const evValue = $("ev-value");
   const evSend = $("ev-send");
-  const bceToggle = $("battery-covers-ev-toggle");
-  const bceLabel = $("battery-covers-ev-label");
-  const bceInfo = $("battery-covers-ev-info");
   const fuseUse = $("fuse-use");
   const fuseFill = $("fuse-fill");
   const fusePhases = $("fuse-phases");
@@ -863,15 +860,6 @@
       evSlider.value = data.ev_charging_w;
       evValue.textContent = formatW(data.ev_charging_w);
     }
-    // Battery-covers-EV toggle — only update DOM when not mid-click,
-    // otherwise the user's change would get overwritten by the next
-    // status poll before the POST round-trip settles.
-    if (bceToggle && document.activeElement !== bceToggle && data.battery_covers_ev != null) {
-      bceToggle.checked = !!data.battery_covers_ev;
-      if (bceLabel) bceLabel.textContent = data.battery_covers_ev ? "On" : "Off";
-      if (bceInfo) bceInfo.hidden = !data.battery_covers_ev;
-    }
-
     // Energy today
     if (data.energy && data.energy.today) {
       var t = data.energy.today;
@@ -2613,14 +2601,6 @@
     });
   }
 
-  if (bceToggle) {
-    bceToggle.addEventListener("change", function () {
-      if (bceLabel) bceLabel.textContent = bceToggle.checked ? "On" : "Off";
-      if (bceInfo) bceInfo.hidden = !bceToggle.checked;
-      setBatteryCoversEV(bceToggle.checked);
-    });
-  }
-
   // EV detail modal — <ftw-modal> handles ESC / backdrop / close button;
   // we only drive open()/close() and refresh the body on a timer. Opened
   // by clicking an EV planet in the energy-flow hero (no card-ev tile).
@@ -2768,6 +2748,8 @@
   var evPlanLpId = null;
   var evTabsEl = null;
   var evTabsLpId = null;
+  var evBoostEl = null;  // { el, update } from buildEvBoostView
+  var evBoostLpId = null;
   var schedNeedsRebuild = false;
   var manualNeedsRebuild = false;
   var evActiveTab = "pv"; // "pv" | "manual" | "scheduled"
@@ -2816,6 +2798,8 @@
         statusTableEl = null;
         evPlanEl = null;
         evPlanLpId = null;
+        evBoostEl = null;
+        evBoostLpId = null;
         evTabsEl = null;
         evTabsLpId = null;
         return;
@@ -2928,9 +2912,263 @@
         evTabsEl = null;
         evTabsLpId = null;
       }
+      // Boost from the home battery: one control, below the tabs, for
+      // whichever mode the loadpoint is in. Mounted once per loadpoint
+      // (the reserve slider keeps its value); update() redraws state
+      // every poll. Always kept last so a tabs rebuild cannot land
+      // underneath it.
+      if (matched) {
+        if (evBoostEl == null || evBoostLpId !== matched.id) {
+          if (evBoostEl && evBoostEl.el.parentNode === evModalBody) {
+            evModalBody.removeChild(evBoostEl.el);
+          }
+          evBoostEl = buildEvBoostView(matched, status);
+          evBoostLpId = matched.id;
+        } else {
+          evBoostEl.update(matched, status);
+        }
+        if (evModalBody.lastChild !== evBoostEl.el) {
+          evModalBody.appendChild(evBoostEl.el);
+        }
+      } else if (evBoostEl) {
+        if (evBoostEl.el.parentNode === evModalBody) {
+          evModalBody.removeChild(evBoostEl.el);
+        }
+        evBoostEl = null;
+        evBoostLpId = null;
+      }
     }).catch(function () {
       setEvModalMessage("Failed to load EV status");
     });
+  }
+
+  // Stop reasons the controller reports for a battery boost lease, in
+  // the operator's words. Unknown reasons fall back to the raw token.
+  var EV_BOOST_STOP_LABELS = {
+    cancelled: "stopped by you",
+    expired: "time limit reached",
+    vehicle_unplugged: "car unplugged",
+    ev_target_reached: "car target reached",
+    departure_reached: "departure time reached",
+    operator_hold: "a manual charge took priority",
+    surplus_only: "PV only took priority",
+    site_safety_block: "site-meter safety stopped it",
+    loadpoint_driver_unavailable: "charger driver unavailable",
+    battery_unavailable: "home battery unavailable",
+    battery_reserve_reached: "home battery reached its reserve",
+    battery_hold: "a battery hold took priority",
+    core_mode: "the site mode does not allow it",
+    fuse_safety_block: "fuse protection stopped it",
+    restart_lease_invalid: "the saved lease was no longer safe after a restart",
+  };
+
+  function evFmtRemaining(ms) {
+    var leftS = Math.max(0, Math.ceil((ms - Date.now()) / 1000));
+    var h = Math.floor(leftS / 3600);
+    var m = Math.ceil((leftS % 3600) / 60);
+    return h > 0 ? h + " h " + m + " min" : m + " min";
+  }
+
+  // buildEvBoostView — the one way to let the home battery help the car.
+  // A per-loadpoint, time-boxed lease with a reserve the house keeps
+  // (POST/DELETE /api/loadpoints/{id}/battery_boost); the controller ends
+  // it on its own with a reason the view names. Replaces the site-wide
+  // battery_covers_ev toggle that used to sit here: that setting had no
+  // time limit and no reserve. A site that still has it on sees one
+  // line about it here with a way to turn it off, so the state is never
+  // hidden. Mounted once per loadpoint; update() runs on every poll.
+  function buildEvBoostView(lp, status) {
+    var box = document.createElement("div");
+    box.style.marginTop = "0.9rem";
+    box.style.paddingTop = "0.6rem";
+    box.style.borderTop = "1px solid var(--line)";
+
+    var eyebrow = document.createElement("div");
+    eyebrow.textContent = "Boost from home battery";
+    eyebrow.style.fontFamily = "var(--mono)";
+    eyebrow.style.fontSize = "0.7rem";
+    eyebrow.style.letterSpacing = "0.18em";
+    eyebrow.style.textTransform = "uppercase";
+    eyebrow.style.color = "var(--text-dim)";
+    eyebrow.style.marginBottom = "0.45rem";
+    box.appendChild(eyebrow);
+
+    // Active state.
+    var activeRow = document.createElement("div");
+    activeRow.style.display = "flex";
+    activeRow.style.alignItems = "center";
+    activeRow.style.gap = "0.6rem";
+    var activeText = document.createElement("div");
+    activeText.style.flex = "1";
+    activeText.style.fontSize = "0.9rem";
+    var stopBtn = document.createElement("button");
+    stopBtn.type = "button";
+    stopBtn.textContent = "Stop boost";
+    stopBtn.style.padding = "0.35rem 0.7rem";
+    stopBtn.style.border = "1px solid var(--line)";
+    stopBtn.style.borderRadius = "4px";
+    stopBtn.style.cursor = "pointer";
+    stopBtn.style.background = "transparent";
+    stopBtn.style.color = "var(--fg)";
+    activeRow.appendChild(activeText);
+    activeRow.appendChild(stopBtn);
+    box.appendChild(activeRow);
+
+    // Idle state: reserve + duration + start.
+    var form = document.createElement("div");
+    var copy = document.createElement("small");
+    copy.style.display = "block";
+    copy.style.color = "var(--text-dim)";
+    copy.style.marginBottom = "0.5rem";
+    copy.textContent = "Let the home battery feed the car for a while. Fuse, reserve and battery-health limits still apply.";
+    form.appendChild(copy);
+    var hdr = sliderHeader("Keep home battery above", "30%");
+    form.appendChild(hdr.row);
+    var reserve = fullWidthSlider(30, hdr.value);
+    reserve.min = "5";
+    reserve.setAttribute("aria-label", "Home battery reserve, percent");
+    form.appendChild(reserve);
+    var durRow = document.createElement("div");
+    durRow.style.display = "flex";
+    durRow.style.alignItems = "center";
+    durRow.style.gap = "0.6rem";
+    durRow.style.margin = "0.55rem 0";
+    var durLbl = document.createElement("span");
+    durLbl.textContent = "For";
+    durLbl.style.fontFamily = "var(--mono)";
+    durLbl.style.fontSize = "0.68rem";
+    durLbl.style.letterSpacing = "0.14em";
+    durLbl.style.textTransform = "uppercase";
+    durLbl.style.color = "var(--text-dim)";
+    var dur = document.createElement("select");
+    [["1800", "30 min"], ["3600", "1 h"], ["7200", "2 h"], ["14400", "4 h"]].forEach(function (o) {
+      var opt = document.createElement("option");
+      opt.value = o[0];
+      opt.textContent = o[1];
+      if (o[0] === "3600") opt.selected = true;
+      dur.appendChild(opt);
+    });
+    dur.style.flex = "1";
+    var startBtn = document.createElement("button");
+    startBtn.type = "button";
+    startBtn.style.padding = "0.4rem 0.8rem";
+    startBtn.style.border = "none";
+    startBtn.style.borderRadius = "4px";
+    startBtn.style.cursor = "pointer";
+    startBtn.style.fontWeight = "600";
+    startBtn.style.background = "var(--accent-e)";
+    startBtn.style.color = "#0a0a0a";
+    function renderStartLabel() { startBtn.textContent = "Boost for " + dur.options[dur.selectedIndex].textContent; }
+    renderStartLabel();
+    dur.addEventListener("change", renderStartLabel);
+    durRow.appendChild(durLbl);
+    durRow.appendChild(dur);
+    durRow.appendChild(startBtn);
+    form.appendChild(durRow);
+    var blocked = document.createElement("small");
+    blocked.style.display = "block";
+    blocked.style.color = "var(--text-dim)";
+    form.appendChild(blocked);
+    box.appendChild(form);
+
+    var msg = document.createElement("small");
+    msg.style.display = "block";
+    msg.style.color = "var(--text-dim)";
+    msg.style.minHeight = "1em";
+    msg.style.marginTop = "0.3rem";
+    msg.setAttribute("aria-live", "polite");
+    box.appendChild(msg);
+
+    // Older site-wide setting, shown only while it is on.
+    var legacy = document.createElement("div");
+    legacy.style.display = "flex";
+    legacy.style.alignItems = "center";
+    legacy.style.gap = "0.6rem";
+    legacy.style.marginTop = "0.6rem";
+    legacy.style.padding = "0.4rem 0.5rem";
+    legacy.style.borderLeft = "3px solid var(--accent, #888)";
+    legacy.style.background = "color-mix(in srgb, var(--accent, #888) 8%, transparent)";
+    var legacyText = document.createElement("small");
+    legacyText.style.flex = "1";
+    legacyText.textContent = "Site-wide battery cover is on (older setting): the home battery feeds the car with no time limit and no reserve.";
+    var legacyOff = document.createElement("button");
+    legacyOff.type = "button";
+    legacyOff.textContent = "Turn off";
+    legacyOff.style.padding = "0.3rem 0.6rem";
+    legacyOff.style.border = "1px solid var(--line)";
+    legacyOff.style.borderRadius = "4px";
+    legacyOff.style.cursor = "pointer";
+    legacyOff.style.background = "transparent";
+    legacyOff.style.color = "var(--fg)";
+    legacy.appendChild(legacyText);
+    legacy.appendChild(legacyOff);
+    box.appendChild(legacy);
+
+    startBtn.addEventListener("click", function () {
+      var r = parseInt(reserve.value, 10);
+      if (!isFinite(r) || r < 5 || r > 100) { msg.textContent = "Reserve must be 5–100 %."; return; }
+      startBtn.disabled = true;
+      msg.textContent = "Starting boost…";
+      // CONTROL write — strict (FIX-B): time-boxed battery boost lease.
+      apiFetch("/api/loadpoints/" + encodeURIComponent(lp.id) + "/battery_boost", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          duration_s: parseInt(dur.value, 10),
+          min_battery_soc: r / 100,
+        }),
+      }).then(function (res) { return res.json().then(function (j) { return { ok: res.ok, body: j }; }); })
+        .then(function (res) {
+          startBtn.disabled = false;
+          if (res.ok) { msg.textContent = ""; refreshEvModal(); }
+          else { msg.textContent = (res.body && res.body.error) || "Boost could not start."; }
+        }).catch(function (e) { startBtn.disabled = false; msg.textContent = "Boost could not start: " + e.message; });
+    });
+
+    stopBtn.addEventListener("click", function () {
+      stopBtn.disabled = true;
+      msg.textContent = "Stopping boost…";
+      apiFetch("/api/loadpoints/" + encodeURIComponent(lp.id) + "/battery_boost", { method: "DELETE" })
+        .then(function (res) {
+          stopBtn.disabled = false;
+          if (res.ok) { msg.textContent = ""; refreshEvModal(); }
+          else { msg.textContent = "Boost could not be stopped."; }
+        }).catch(function (e) { stopBtn.disabled = false; msg.textContent = "Boost could not be stopped: " + e.message; });
+    });
+
+    legacyOff.addEventListener("click", function () {
+      legacyOff.disabled = true;
+      setBatteryCoversEV(false);
+      msg.textContent = "Site-wide battery cover turned off.";
+    });
+
+    function update(lpNow, statusNow) {
+      var boost = (lpNow && lpNow.battery_boost) || { state: "inactive", active: false };
+      var active = !!boost.active;
+      activeRow.style.display = active ? "flex" : "none";
+      form.hidden = active;
+      if (active) {
+        activeText.textContent = "Active · " + evFmtRemaining(boost.expires_at_ms) + " left · home battery kept above " +
+          Math.round((boost.min_battery_soc || 0) * 100) + " %.";
+      } else {
+        var why = "";
+        if (!lpNow.plugged_in) why = "Plug in the car first.";
+        else if (lpNow.manual_active) why = "Stop the manual charge first — it already takes what it needs.";
+        else if (lpNow.surplus_only) why = "Turn off PV only first.";
+        startBtn.disabled = !!why;
+        startBtn.style.opacity = why ? "0.5" : "1";
+        var last = boost.stop_reason
+          ? "Last boost ended: " + (EV_BOOST_STOP_LABELS[boost.stop_reason] || boost.stop_reason) + "."
+          : "";
+        blocked.textContent = why || last;
+      }
+      var coverOn = !!(statusNow && statusNow.battery_covers_ev);
+      legacy.style.display = coverOn ? "flex" : "none";
+      if (!coverOn) legacyOff.disabled = false;
+    }
+
+    update(lp, status);
+    return { el: box, update: update };
   }
 
   // buildManualChargeSection renders the Tesla-style manual override: an
@@ -3553,10 +3791,55 @@
     var recCb = recWrap.input;
     var surCb = surWrap.input;
 
-    // Target: same header + full-width slider treatment as Current charge.
+    // Weekdays. The wire's zero means every day (older rows and clients);
+    // the chips show that as all seven lit, and send zero back for it,
+    // the same spelling the webapp uses. Bit 0 = Monday (ISO).
+    var initDays = (typeof sched.days === "number" && (sched.days & 0x7f) > 0) ? (sched.days & 0x7f) : 0x7f;
+    var dayChips = [];
+    var daysRow = document.createElement("div");
+    daysRow.setAttribute("role", "group");
+    daysRow.setAttribute("aria-label", "Days");
+    daysRow.style.display = "flex";
+    daysRow.style.gap = "0.3rem";
+    daysRow.style.margin = "0.1rem 0 0.55rem";
+    ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].forEach(function (name, bit) {
+      var chip = document.createElement("button");
+      chip.type = "button";
+      chip.textContent = name;
+      chip.dataset.bit = String(bit);
+      chip.style.flex = "1";
+      chip.style.padding = "0.25rem 0";
+      chip.style.fontFamily = "var(--mono)";
+      chip.style.fontSize = "0.68rem";
+      chip.style.letterSpacing = "0.06em";
+      chip.style.borderRadius = "3px";
+      chip.style.cursor = "pointer";
+      chip.style.border = "1px solid var(--line)";
+      chip.on = !!(initDays & (1 << bit));
+      dayChips.push(chip);
+      daysRow.appendChild(chip);
+    });
+    function paintChips() {
+      dayChips.forEach(function (chip) {
+        chip.setAttribute("aria-pressed", chip.on ? "true" : "false");
+        chip.style.background = chip.on ? "var(--accent-e)" : "transparent";
+        chip.style.color = chip.on ? "#0a0a0a" : "var(--text-dim)";
+        chip.style.borderColor = chip.on ? "var(--accent-e)" : "var(--line)";
+      });
+    }
+    function selectedDays() {
+      var mask = 0;
+      dayChips.forEach(function (chip) { if (chip.on) mask |= 1 << Number(chip.dataset.bit); });
+      return mask;
+    }
+    paintChips();
+
+    // Target: same header + full-width slider treatment as the car's
+    // current charge above the tabs.
     var targetHdr = sliderHeader("Target", Math.max(0, Math.min(100, Math.round(initSoC))) + "%");
     box.appendChild(targetHdr.row);
     var targetSlider = fullWidthSlider(Math.max(0, Math.min(100, Math.round(initSoC))), targetHdr.value);
+    targetSlider.setAttribute("aria-label", "Target charge, percent");
     box.appendChild(targetSlider);
     box.appendChild(row("Charge by", timeInp));
 
@@ -3566,13 +3849,14 @@
     checkRow.style.gap = "0.35rem";
     checkRow.style.marginBottom = "0.55rem";
     checkRow.appendChild(recWrap);
+    box.appendChild(checkRow);
+    box.appendChild(daysRow);
     // Surplus-from-PV only makes sense on sites with a PV driver — the
     // bat-SoC unlock would have no surplus to grab otherwise. Omit the
     // checkbox + threshold entirely on PV-less sites.
     if (hasPV) {
       checkRow.appendChild(surWrap);
     }
-    box.appendChild(checkRow);
 
     var unlockHint = document.createElement("small");
     unlockHint.style.display = "block";
@@ -3595,20 +3879,26 @@
       thresholdRow.style.pointerEvents = on ? "auto" : "none";
       unlockHint.style.opacity = on ? "1" : "0.55";
     }
+    function applyDaysGate() {
+      // Inline display:flex beats the [hidden] attribute; toggle display.
+      daysRow.style.display = recCb.checked ? "flex" : "none";
+    }
     if (hasPV) {
       applySurplusGate();
-      surCb.addEventListener("change", applySurplusGate);
     }
+    applyDaysGate();
 
-    // Actions
+    // One explicit action remains: removing the schedule. Everything
+    // else saves as it changes (see scheduleSave below).
     var btnRow = document.createElement("div");
     btnRow.style.display = "flex";
     btnRow.style.gap = "0.5rem";
     btnRow.style.marginTop = "0.55rem";
     btnRow.style.justifyContent = "flex-end";
 
-    function mkBtn(label, primary) {
+    function mkBtn(label) {
       var b = document.createElement("button");
+      b.type = "button";
       b.textContent = label;
       b.style.padding = "0.3rem 0.8rem";
       b.style.fontSize = "0.8rem";
@@ -3618,22 +3908,17 @@
       b.style.borderRadius = "3px";
       b.style.cursor = "pointer";
       b.style.border = "1px solid var(--line)";
-      if (primary) {
-        b.style.background = "var(--accent-e)";
-        b.style.color = "#0a0a0a";
-        b.style.borderColor = "var(--accent-e)";
-      } else {
-        b.style.background = "transparent";
-        b.style.color = "var(--fg)";
-      }
+      b.style.background = "transparent";
+      b.style.color = "var(--fg)";
       return b;
     }
-    var clearBtn = mkBtn("Clear", false);
-    var saveBtn = mkBtn(hasSched ? "Update schedule" : "Set schedule", true);
-    clearBtn.disabled = !hasSched;
-    if (!hasSched) clearBtn.style.opacity = "0.4";
+    var clearBtn = mkBtn("Remove schedule");
+    function paintClear() {
+      clearBtn.disabled = !hasSched;
+      clearBtn.style.opacity = hasSched ? "1" : "0.4";
+    }
+    paintClear();
     btnRow.appendChild(clearBtn);
-    btnRow.appendChild(saveBtn);
     box.appendChild(btnRow);
 
     var status = document.createElement("small");
@@ -3641,28 +3926,46 @@
     status.style.color = "var(--text-dim)";
     status.style.marginTop = "0.4rem";
     status.style.minHeight = "1em";
+    status.textContent = hasSched
+      ? "Changes save as you make them; the plan above follows."
+      : "Move the target or pick a time to set a schedule; the plan above follows.";
     box.appendChild(status);
 
-    // Save and Clear both flag schedNeedsRebuild so the next poll
-    // rebuilds the section from the new authoritative server state
-    // (e.g. so the button label flips from "Save" → "Update" once a
-    // schedule exists). Polling never rebuilds otherwise — the cached
-    // schedSectionEl stays mounted and inputs keep focus.
-    saveBtn.addEventListener("click", function () {
-      saveBtn.disabled = true;
-      clearBtn.disabled = true;
+    // Every control writes when it changes: the slider on release, the
+    // time and checkboxes on change, a chip on click. Debounced so a
+    // burst of edits is one request; a stale response never overwrites
+    // a newer status. The box replans before it answers the schedule
+    // write, so the refetch right after redraws the plan view above
+    // from the new schedule. No Save button.
+    var saveTimer = null;
+    var saveSeq = 0;
+    var statusTimer = null;
+    function scheduleSave() {
+      if (saveTimer) clearTimeout(saveTimer);
+      if (statusTimer) { clearTimeout(statusTimer); statusTimer = null; }
       status.textContent = "Saving…";
+      saveTimer = setTimeout(function () { saveTimer = null; doSave(); }, 400);
+    }
+    function doSave() {
+      var seq = ++saveSeq;
       var localHHMM = timeInp.value || initLocalHHMM;
       var minUTC = localHHMMToUtcMins(localHHMM);
       // Surplus checkbox gates the threshold: when off (or hidden on
       // PV-less sites), the threshold is sent as 0 — the backend
       // interprets 0 as "feature disabled".
       var unlockVal = (hasPV && surCb.checked) ? Number(unlockWrap.input.value) : 0;
+      var days = recCb.checked ? selectedDays() : 0;
+      if (recCb.checked && days === 0) {
+        status.textContent = "Pick at least one day.";
+        return;
+      }
       var body = {
         schedule: {
           soc: Number(targetSlider.value) / 100,
           time_of_day_min_utc: minUTC,
           recurring: !!recCb.checked,
+          // All seven days is the wire's zero.
+          days: days === 0x7f ? 0 : days,
           surplus_unlock_bat_soc: unlockVal > 0 ? unlockVal / 100 : 0,
         },
       };
@@ -3673,20 +3976,36 @@
         body: JSON.stringify(body),
       }).then(function (r) {
         if (!r.ok) throw new Error("HTTP " + r.status);
-        status.textContent = "Saved.";
-        schedNeedsRebuild = true;
+        if (seq !== saveSeq) return;
+        hasSched = true;
+        paintClear();
+        status.textContent = "Saved · replanning…";
         refreshEvModal();
+        statusTimer = setTimeout(function () {
+          if (seq === saveSeq) status.textContent = "Plan updated.";
+        }, 1500);
       }).catch(function (e) {
+        if (seq !== saveSeq) return;
         status.textContent = "Save failed: " + e.message;
-        saveBtn.disabled = false;
-        clearBtn.disabled = false;
       });
+    }
+
+    targetSlider.addEventListener("change", scheduleSave);
+    timeInp.addEventListener("change", scheduleSave);
+    recCb.addEventListener("change", function () { applyDaysGate(); scheduleSave(); });
+    dayChips.forEach(function (chip) {
+      chip.addEventListener("click", function () { chip.on = !chip.on; paintChips(); scheduleSave(); });
     });
+    if (hasPV) {
+      surCb.addEventListener("change", function () { applySurplusGate(); scheduleSave(); });
+      unlockWrap.input.addEventListener("change", scheduleSave);
+    }
 
     clearBtn.addEventListener("click", function () {
-      saveBtn.disabled = true;
       clearBtn.disabled = true;
-      status.textContent = "Clearing…";
+      if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+      saveSeq++;
+      status.textContent = "Removing…";
       // CONTROL write — strict (FIX-B): loadpoint schedule clear.
       apiFetch("/api/loadpoints/" + encodeURIComponent(lp.id) + "/target", {
         method: "POST",
@@ -3694,12 +4013,12 @@
         body: JSON.stringify({ schedule: null }),
       }).then(function (r) {
         if (!r.ok) throw new Error("HTTP " + r.status);
-        status.textContent = "Cleared.";
+        status.textContent = "Schedule removed.";
         schedNeedsRebuild = true;
         refreshEvModal();
       }).catch(function (e) {
-        status.textContent = "Clear failed: " + e.message;
-        saveBtn.disabled = false;
+        status.textContent = "Remove failed: " + e.message;
+        clearBtn.disabled = false;
       });
     });
 
