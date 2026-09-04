@@ -217,6 +217,20 @@ type State struct {
 	PlanNextEndMs   int64   `json:"plan_next_end_ms,omitempty"`
 	PlanNextWh      float64 `json:"plan_next_wh,omitempty"`
 	PlanTotalWh     float64 `json:"plan_total_wh,omitempty"`
+	// PlanWindows lists every remaining window (the next one first) so a
+	// client can draw the plan instead of reading one sentence about
+	// it. Same source as the PlanNext* fields; empty when the planner
+	// has no allocation or the plan is stale.
+	PlanWindows []PlanWindow `json:"plan_windows,omitempty"`
+}
+
+// PlanWindow is one contiguous stretch in which the active plan
+// allocates charge energy to a loadpoint. Millisecond epoch bounds so
+// the on-box UI can place it on a clock without a timezone round-trip.
+type PlanWindow struct {
+	StartMs int64   `json:"start_ms"`
+	EndMs   int64   `json:"end_ms"`
+	Wh      float64 `json:"wh"`
 }
 
 // Manager holds the running set of loadpoints. Thread-safe.
@@ -693,6 +707,18 @@ func (m *Manager) Observe(id string, pluggedIn bool, powerW, deliveredWh float64
 		lp.steadyRunArmed = false
 	}
 
+	// InterruptSteadyRun of real current after the completion latch is
+	// not an EVSE retry blip: the car is taking energy again (operator
+	// Start, a raised charge limit in the car). Release the latch so the
+	// estimate follows delivered Wh instead of sitting at targetSoC while
+	// kilowatt-hours go in; if the car declines once more, the timer
+	// re-arms it. A 900 W renegotiation burst stays below the steady
+	// floor and never gets here.
+	if pluggedIn && lp.sessionComplete && lp.steadyRunArmed && requestActive && powerW >= steadyChargeFloorW {
+		lp.sessionComplete = false
+		lp.socSource = ""
+	}
+
 	if pluggedIn {
 		if lp.sessionComplete && lp.targetSoC > 0 {
 			// Snap the inferred SoC to target; the planner reads
@@ -892,6 +918,14 @@ func (m *Manager) SetCurrentSoC(id string, socPct float64) bool {
 	if !lp.pluggedIn {
 		return false
 	}
+	// An operator who sets the level is telling us the latch's guess
+	// ("declined, so it must be at target") was wrong. Drop it, or the
+	// next Observe pins the estimate straight back to targetSoC and the
+	// slider looks broken. If the car really does decline, the latch
+	// re-arms after SessionCompletionTimeout as usual.
+	lp.sessionComplete = false
+	lp.socSource = ""
+	lp.notRequestingSince = time.Time{}
 	reanchorSoCLocked(lp, socPct)
 	return true
 }

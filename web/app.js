@@ -2764,7 +2764,8 @@
   // next poll rebuilds from the new authoritative server state. The
   // active tab persists across rebuilds via evActiveTab.
   var statusTableEl = null;
-  var planStatusEl = null;
+  var evPlanEl = null;   // { el, update } from buildEvPlanView
+  var evPlanLpId = null;
   var evTabsEl = null;
   var evTabsLpId = null;
   var schedNeedsRebuild = false;
@@ -2813,7 +2814,8 @@
       if (!carConnected && !hasLoadpoints) {
         setEvModalMessage("No EV charger connected");
         statusTableEl = null;
-        planStatusEl = null;
+        evPlanEl = null;
+        evPlanLpId = null;
         evTabsEl = null;
         evTabsLpId = null;
         return;
@@ -2873,21 +2875,31 @@
           matched = lps.loadpoints[0];
         }
       }
-      // Plan-status strip: one sentence on why the charger is (not)
-      // charging and when it will. Refreshed on every poll, anchored
-      // right below the status table so it reads as part of the live
-      // state rather than the (once-built) tabbed controls.
-      var freshPlan = renderEvPlanStatus(matched, d);
-      if (planStatusEl && planStatusEl.parentNode === evModalBody) {
-        if (freshPlan) {
-          evModalBody.replaceChild(freshPlan, planStatusEl);
+      // Plan view: what the box will do with this car (one sentence +
+      // the planned windows on a 24 h track) and the car's charge level,
+      // which the plan is built from. Mounted once per loadpoint so the
+      // slider survives polls; update() redraws the rest every tick.
+      if (matched) {
+        if (evPlanEl == null || evPlanLpId !== matched.id) {
+          if (evPlanEl && evPlanEl.el.parentNode === evModalBody) {
+            evModalBody.removeChild(evPlanEl.el);
+          }
+          evPlanEl = buildEvPlanView(matched, d);
+          evPlanLpId = matched.id;
+          evModalBody.insertBefore(evPlanEl.el, statusTableEl.nextSibling);
         } else {
-          evModalBody.removeChild(planStatusEl);
+          evPlanEl.update(matched, d);
+          if (evPlanEl.el.parentNode !== evModalBody) {
+            evModalBody.insertBefore(evPlanEl.el, statusTableEl.nextSibling);
+          }
         }
-      } else if (freshPlan) {
-        evModalBody.insertBefore(freshPlan, statusTableEl.nextSibling);
+      } else if (evPlanEl) {
+        if (evPlanEl.el.parentNode === evModalBody) {
+          evModalBody.removeChild(evPlanEl.el);
+        }
+        evPlanEl = null;
+        evPlanLpId = null;
       }
-      planStatusEl = freshPlan;
       if (matched) {
         // Build the tabbed control (PV charging / Manual / Scheduled)
         // exactly once per LP. Polling never rebuilds it — inputs keep
@@ -3130,86 +3142,186 @@
     return s;
   }
 
-  // buildSoCSection — the car's CURRENT charge (a planning input: the
-  // planner sizes the grid/PV gap to the target from it). Lives in the
-  // Scheduled tab, above the target. The estimate drifts when there's no
-  // vehicle BMS reading, so the operator can correct it via
-  // POST /api/loadpoints/{id}/soc (re-anchors + replans). Editing is gated
-  // on plugged_in.
-  function buildSoCSection(lp) {
-    var socBox = document.createElement("div");
-    socBox.style.marginTop = "0.25rem";
+  // buildEvPlanView — the plug-in moment. Above the tabs, the operator
+  // sees what the box will do with this car: the plan-status sentence,
+  // the planned charge windows drawn on a 24 h track, and right under
+  // it the car's CURRENT charge, which is the input the plan is built
+  // from. Chargers like Easee cannot read the car, so that value is an
+  // estimate; correcting it should be the easiest thing in the modal.
+  // The slider writes on release (POST /api/loadpoints/{id}/soc, which
+  // replans before it answers) and the view refetches so the plan on
+  // screen moves with the value. No button. Mounted once per loadpoint;
+  // update() runs on every poll and leaves the slider alone while the
+  // operator is dragging it.
+  var EV_PLAN_HORIZON_MS = 24 * 3600 * 1000;
 
-    var curSoc = (lp && lp.current_soc != null) ? lp.current_soc * 100 : null;
-    var socSource = (lp && lp.soc_source) ? lp.soc_source : "";
-    var sourceNote = socSource === "vehicle"
-      ? "Live from the car — drag only to correct drift."
-      : socSource === "inferred"
-        ? "Estimated from energy delivered — drag to set the real value."
-        : "Drag to set the car's current charge.";
+  function buildEvPlanView(lp, d) {
+    var box = document.createElement("div");
+    box.style.margin = "0 0 0.6rem 0";
 
-    var hdr = sliderHeader("Current charge", curSoc != null ? Math.round(curSoc) + "%" : "—");
-    socBox.appendChild(hdr.row);
+    var headline = null; // <p> from renderEvPlanStatus, or null
 
-    if (lp && lp.plugged_in) {
-      var initSoc = (curSoc != null) ? Math.max(0, Math.min(100, Math.round(curSoc))) : 50;
-      var socInput = fullWidthSlider(initSoc, hdr.value);
-      socBox.appendChild(socInput);
+    // 24 h track: windows from lp.plan_windows placed by wall clock.
+    var track = document.createElement("div");
+    track.className = "ev-plan-track";
+    track.style.position = "relative";
+    track.style.height = "12px";
+    track.style.borderRadius = "3px";
+    track.style.background = "color-mix(in srgb, var(--line) 60%, transparent)";
+    track.style.margin = "0.5rem 0 0.25rem";
+    track.style.overflow = "hidden";
 
-      var socStatus = document.createElement("small");
-      socStatus.style.display = "block";
-      socStatus.style.color = "var(--text-dim)";
-      socStatus.style.marginTop = "0.4rem";
-      socStatus.style.minHeight = "1em";
-      socStatus.textContent = sourceNote;
-      socBox.appendChild(socStatus);
+    var ticks = document.createElement("div");
+    ticks.style.display = "flex";
+    ticks.style.justifyContent = "space-between";
+    ticks.style.fontFamily = "var(--mono)";
+    ticks.style.fontSize = "0.65rem";
+    ticks.style.color = "var(--text-dim)";
 
-      var socSetBtn = document.createElement("button");
-      socSetBtn.type = "button";
-      socSetBtn.textContent = "Set current charge";
-      socSetBtn.style.padding = "0.35rem 0.8rem";
-      socSetBtn.style.marginTop = "0.4rem";
-      socSetBtn.style.border = "1px solid var(--line)";
-      socSetBtn.style.borderRadius = "4px";
-      socSetBtn.style.cursor = "pointer";
-      socSetBtn.style.background = "transparent";
-      socSetBtn.style.color = "var(--fg)";
-      var socBtnRow = document.createElement("div");
-      socBtnRow.style.display = "flex";
-      socBtnRow.style.justifyContent = "flex-end";
-      socBtnRow.appendChild(socSetBtn);
-      socBox.appendChild(socBtnRow);
+    var caption = document.createElement("small");
+    caption.style.display = "block";
+    caption.style.color = "var(--text-dim)";
+    caption.style.marginTop = "0.3rem";
 
-      socSetBtn.addEventListener("click", function () {
-        var v = parseInt(socInput.value, 10);
-        if (!isFinite(v) || v < 0 || v > 100) { socStatus.textContent = "Enter 0–100%."; return; }
-        socSetBtn.disabled = true;
-        socStatus.textContent = "Saving…";
-        apiFetch("/api/loadpoints/" + encodeURIComponent(lp.id) + "/soc", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ soc: v / 100 }),
-        }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, body: j }; }); })
-          .then(function (res) {
-            socSetBtn.disabled = false;
-            if (res.ok && res.body && res.body.ok) {
-              socStatus.textContent = "Saved — replanning.";
-              manualNeedsRebuild = true;
-            } else {
-              socStatus.textContent = (res.body && res.body.error) || "Set failed.";
-            }
-          }).catch(function (e) { socSetBtn.disabled = false; socStatus.textContent = "Set failed: " + e.message; });
-      });
-    } else {
-      hdr.value.style.color = "var(--text-dim)";
-      var socMuted = document.createElement("small");
-      socMuted.style.display = "block";
-      socMuted.style.color = "var(--text-dim)";
-      socMuted.textContent = "Plug in to set the car's current charge.";
-      socBox.appendChild(socMuted);
+    var planWrap = document.createElement("div");
+    planWrap.appendChild(track);
+    planWrap.appendChild(ticks);
+    planWrap.appendChild(caption);
+
+    // Car's current charge.
+    var socWrap = document.createElement("div");
+    socWrap.style.marginTop = "0.75rem";
+    var hdr = sliderHeader("Car is at", "—");
+    socWrap.appendChild(hdr.row);
+    var slider = fullWidthSlider(50, hdr.value);
+    slider.setAttribute("aria-label", "Car's current charge, percent");
+    socWrap.appendChild(slider);
+    var note = document.createElement("small");
+    note.style.display = "block";
+    note.style.color = "var(--text-dim)";
+    note.style.marginTop = "0.3rem";
+    note.style.minHeight = "1em";
+    socWrap.appendChild(note);
+
+    box.appendChild(planWrap);
+    box.appendChild(socWrap);
+
+    // While the operator holds the slider (pointer down, or keyboard
+    // input in the last moment), polls must not snap it back to the
+    // server's value. Focus alone does not count: a range input keeps
+    // focus after a drag, and the slider must still follow the box.
+    var dragging = false;
+    var lastInputAt = 0;
+    var noteTimer = null;
+    slider.addEventListener("pointerdown", function () { dragging = true; });
+    ["pointerup", "pointercancel"].forEach(function (ev) {
+      slider.addEventListener(ev, function () { dragging = false; });
+    });
+    slider.addEventListener("input", function () { lastInputAt = Date.now(); });
+    function operatorHolds() { return dragging || (Date.now() - lastInputAt) < 1500; }
+
+    function sourceNote(lpNow) {
+      var src = (lpNow && lpNow.soc_source) || "";
+      if (src === "vehicle") return "Live from the car. Drag only to correct drift.";
+      if (src === "completed") return "The car stopped asking for current, so the box assumes the target was reached. Drag to correct.";
+      return "Estimated from energy delivered. Drag to the real value and the plan follows.";
     }
 
-    return socBox;
+    // Write on release. The handler replans before answering, so the
+    // refetch right after shows the plan built from the new value.
+    slider.addEventListener("change", function () {
+      var v = parseInt(slider.value, 10);
+      if (!isFinite(v) || v < 0 || v > 100) return;
+      if (noteTimer) { clearTimeout(noteTimer); noteTimer = null; }
+      note.textContent = "Replanning from " + v + " %…";
+      // CONTROL write — strict (FIX-B): corrects the SoC estimate and replans.
+      apiFetch("/api/loadpoints/" + encodeURIComponent(lp.id) + "/soc", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ soc: v / 100 }),
+      }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, body: j }; }); })
+        .then(function (res) {
+          if (res.ok && res.body && res.body.ok) {
+            note.textContent = "Plan updated from " + v + " %.";
+            noteTimer = setTimeout(function () { note.textContent = sourceNote(lastLp); noteTimer = null; }, 4000);
+            refreshEvModal();
+          } else {
+            note.textContent = (res.body && res.body.error) || "Could not set the charge level.";
+          }
+        }).catch(function (e) { note.textContent = "Could not set the charge level: " + e.message; });
+    });
+
+    var lastLp = lp;
+
+    function drawTrack(lpNow) {
+      track.textContent = "";
+      ticks.textContent = "";
+      var now = Date.now();
+      var windows = (lpNow && Array.isArray(lpNow.plan_windows)) ? lpNow.plan_windows : [];
+      var shown = 0;
+      var shownWh = 0;
+      windows.forEach(function (w) {
+        var start = Math.max(w.start_ms, now);
+        var end = Math.min(w.end_ms, now + EV_PLAN_HORIZON_MS);
+        if (!(end > start)) return;
+        var seg = document.createElement("div");
+        seg.className = "ev-plan-window";
+        seg.style.position = "absolute";
+        seg.style.top = "0";
+        seg.style.bottom = "0";
+        seg.style.left = ((start - now) / EV_PLAN_HORIZON_MS * 100) + "%";
+        seg.style.width = Math.max(0.8, (end - start) / EV_PLAN_HORIZON_MS * 100) + "%";
+        seg.style.background = "var(--accent-e)";
+        seg.style.borderRadius = "2px";
+        seg.title = evFmtClock(w.start_ms) + "–" + evFmtClock(w.end_ms) + " · " + (w.wh / 1000).toFixed(1) + " kWh";
+        track.appendChild(seg);
+        shown++;
+        shownWh += w.wh;
+      });
+      for (var h = 0; h <= 24; h += 6) {
+        var t = document.createElement("span");
+        t.textContent = h === 0 ? "now" : evFmtClock(now + h * 3600 * 1000);
+        ticks.appendChild(t);
+      }
+      if (lpNow && lpNow.manual_active) {
+        caption.textContent = shown > 0
+          ? "Manual charge is running. The plan below resumes after it."
+          : "Manual charge is running. Nothing else is planned in the next 24 h.";
+      } else if (shown > 0) {
+        var first = windows[0];
+        caption.textContent = "Charges " + evFmtClock(first.start_ms) + "–" + evFmtClock(first.end_ms) +
+          (shown > 1 ? " and " + (shown - 1) + " more window" + (shown > 2 ? "s" : "") : "") +
+          " · " + (shownWh / 1000).toFixed(1) + " kWh in the next 24 h.";
+      } else if (lpNow && lpNow.plugged_in) {
+        caption.textContent = "No charge window in the next 24 h.";
+      } else {
+        caption.textContent = "Plug in to see the plan for this car.";
+      }
+    }
+
+    function update(lpNow, dNow) {
+      lastLp = lpNow;
+      var fresh = renderEvPlanStatus(lpNow, dNow);
+      if (headline && headline.parentNode === box) {
+        if (fresh) { box.replaceChild(fresh, headline); } else { box.removeChild(headline); }
+      } else if (fresh) {
+        box.insertBefore(fresh, planWrap);
+      }
+      headline = fresh;
+      drawTrack(lpNow);
+      var plugged = !!(lpNow && lpNow.plugged_in);
+      socWrap.hidden = !plugged;
+      if (!plugged) return;
+      var cur = (lpNow.current_soc != null) ? Math.max(0, Math.min(100, Math.round(lpNow.current_soc * 100))) : null;
+      if (!operatorHolds() && cur != null) {
+        slider.value = String(cur);
+        hdr.value.textContent = cur + "%";
+      }
+      if (!noteTimer && !operatorHolds()) note.textContent = sourceNote(lpNow);
+    }
+
+    update(lp, d);
+    return { el: box, update: update, slider: slider };
   }
 
   // buildPVModeSection — the per-loadpoint surplus-only toggle (PV
@@ -3598,8 +3710,8 @@
   // section into the right one:
   //   PV charging → surplus-only toggle
   //   Manual      → amp slider + Start/Stop
-  //   Scheduled   → current-SoC correction (a planning input) + the
-  //                 target-SoC-by-deadline schedule
+  //   Scheduled   → the target-SoC-by-deadline schedule (the car's
+  //                 current charge lives above the tabs, with the plan)
   // The active tab persists across rebuilds via evActiveTab.
   function buildEvTabbedControl(lp, hasPV) {
     var container = document.createElement("div");
@@ -3620,7 +3732,6 @@
     manualPanel.appendChild(buildManualChargeSection(lp));
 
     var schedPanel = document.createElement("div");
-    schedPanel.appendChild(buildSoCSection(lp));
     schedPanel.appendChild(buildScheduleSection(lp, hasPV));
 
     var panels = { pv: pvPanel, manual: manualPanel, scheduled: schedPanel };
