@@ -929,20 +929,6 @@
     <div id="ev-modal-body">
       <p style="color:var(--text-dim)">Loading...</p>
     </div>
-    <!-- Kept for API/UI backward compatibility. New operation should use the
-         bounded per-loadpoint Battery boost lease in the Loadpoints panel. -->
-    <div class="control-card" style="margin-top:1rem">
-      <div class="card-label">Legacy site-wide battery cover</div>
-      <label class="ftw-toggle">
-        <input type="checkbox" id="battery-covers-ev-toggle">
-        <span class="ftw-toggle-slider"></span>
-        <span class="ftw-toggle-label" id="battery-covers-ev-label">Off</span>
-      </label>
-      <div class="card-sub card-hint">Compatibility control. Prefer Battery boost on a loadpoint for a time limit, reserve and visible stop reason. Surplus-only loadpoints still use real PV surplus only.</div>
-      <div class="ev-cover-info" id="battery-covers-ev-info" hidden>
-        This site-wide setting has no lease or reserve of its own. Use the loadpoint Battery boost for normal operation.
-      </div>
-    </div>
     <!-- Start/Pause/Resume footer buttons removed: the Manual tab's
          Charge control (amp slider + Start/Stop, built by buildManualChargeSection)
          supersedes them. Start pins a persistent hold at a chosen amperage
