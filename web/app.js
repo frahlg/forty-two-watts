@@ -278,9 +278,6 @@
   function writeLastPeakLimitW(w) {
     try { localStorage.setItem("ftw-peak-import-ceiling-w", String(w)); } catch (e) {}
   }
-  const evSlider = $("ev-slider");
-  const evValue = $("ev-value");
-  const evSend = $("ev-send");
   const fuseUse = $("fuse-use");
   const fuseFill = $("fuse-fill");
   const fusePhases = $("fuse-phases");
@@ -855,10 +852,6 @@
       peakLimitValue.textContent = formatW(display);
       if (enabled) writeLastPeakLimitW(peakSrcW);
       if (peakLimitSend) peakLimitSend.disabled = true; // pristine
-    }
-    if (evSlider && document.activeElement !== evSlider && data.ev_charging_w != null) {
-      evSlider.value = data.ev_charging_w;
-      evValue.textContent = formatW(data.ev_charging_w);
     }
     // Energy today
     if (data.energy && data.energy.today) {
@@ -2436,17 +2429,13 @@
     return postJson("/api/peak_import_ceiling", { peak_import_ceiling_w: w });
   }
 
-  function setEvCharging(w) {
-    postJson("/api/ev_charging", { power_w: w, active: w > 0 }).catch(function () {});
-  }
-
   function setBatteryCoversEV(enabled) {
     postJson("/api/battery_covers_ev", { enabled: !!enabled }).catch(function () {});
   }
 
   function postJson(url, body) {
     // CONTROL write — strict (FIX-B). Covers /api/target, /api/peak_limit,
-    // /api/peak_import_ceiling, /api/ev_charging, /api/battery_covers_ev,
+    // /api/peak_import_ceiling, /api/battery_covers_ev,
     // /api/ev/command, … (every state-changing dashboard knob routes here).
     return apiFetch(url, {
       method: "POST",
