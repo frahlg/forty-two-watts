@@ -73,6 +73,13 @@ func (s *Schedule) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
+// HasTarget reports whether the schedule commits to a SoC by a deadline.
+// A target makes the plan the floor of automatic dispatch: the runtime
+// surplus clamps may add to it but never throttle it (see
+// Controller.surplusActive and surplusAddsToPlan, and the planner spec
+// gate in main.go).
+func (s Schedule) HasTarget() bool { return s.SoC > 0 }
+
 // Empty reports whether the schedule carries no operator intent. The
 // persistence layer writes nothing on Empty so a stale-loadpoint
 // schedule on disk is naturally GC'd when the operator clears it via

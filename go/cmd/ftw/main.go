@@ -1707,9 +1707,15 @@ func main() {
 				//      dispatch then has to censor — producing
 				//      misleading slot entries the operator sees in
 				//      /api/mpc/plan that never actually execute.
+				//   The arm only replaces the plan while no schedule
+				//   target is set. Under a target it adds spare PV on top
+				//   of the plan (loadpoint.Controller.surplusAddsToPlan,
+				//   #1060), so the planner must keep planning the grid
+				//   charge the deadline needs and is not told surplus-only.
 				batSoCArmed := false
 				if lpController != nil {
-					batSoCArmed = lpController.IsBatSoCArmed(st.ID)
+					sched, _ := lpMgr.GetSchedule(st.ID)
+					batSoCArmed = lpController.IsBatSoCArmed(st.ID) && !sched.HasTarget()
 				}
 				// NoBatteryToEV mirrors the site-wide ctrl.BatteryCoversEV
 				// flag (inverted). Plumbing the constraint into the DP
