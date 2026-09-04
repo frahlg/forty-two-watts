@@ -974,13 +974,18 @@ func (c *Controller) gridDeferredFor(lpID string) bool {
 	return c.gridDeferred[lpID]
 }
 
-// surplusActive reports whether surplus-only dispatch semantics apply
-// to this loadpoint right now. True when ANY of:
+// surplusActive reports whether surplus-only dispatch semantics REPLACE
+// the plan for this loadpoint right now: the commanded W is snapped to
+// live PV surplus and the plan budget is at most a ceiling. True when
+// ANY of:
 //   - the operator's configured SurplusOnly flag is on
-//   - MPC has deferred grid-funded planning (forecast-vs-real divergence
-//     guard: even if the cached plan said "charge 2 kW now", live PV
-//     might have collapsed since the last replan)
-//   - the bat-SoC unlock is armed for this LP
+//   - no schedule target is set AND MPC has deferred grid-funded planning
+//     (forecast-vs-real divergence guard: even if the cached plan said
+//     "charge 2 kW now", live PV might have collapsed since the last replan)
+//   - no schedule target is set AND the bat-SoC unlock is armed for this LP
+//
+// With a schedule target and SurplusOnly off, surplus never replaces the
+// plan; the bat-SoC unlock then ADDS to it instead — see surplusAddsToPlan.
 //
 // The caller passes the loadpoint's schedule so we read the threshold
 // without re-locking the Manager.
@@ -996,11 +1001,29 @@ func (c *Controller) surplusActive(lpCfg Config, sched Schedule) bool {
 	// available surplus and the deadline is missed. The explicit SurplusOnly
 	// config above still wins, so a "surplus-preferred with a deadline floor"
 	// combo is unaffected. Operator directive 2026-05-30.
-	if sched.SoC > 0 {
+	if sched.HasTarget() {
 		return false
 	}
 	if c.gridDeferredFor(lpCfg.ID) {
 		return true
+	}
+	return c.evalBatSoCArm(lpCfg.ID, sched.SurplusUnlockBatSoC)
+}
+
+// surplusAddsToPlan reports whether spare PV may be added ON TOP of the
+// plan this tick: a schedule target is set, SurplusOnly is off, and the
+// bat-SoC unlock is armed. The plan's grid charge is the floor and the
+// command becomes max(plan, surplus); surplus never throttles the plan
+// (the 2026-05-30 directive above still holds). This is what the
+// Scheduled tab's "Also charge from PV surplus" + "Home battery ≥ %"
+// controls mean, since the UI always saves them together with a target
+// (#1060).
+//
+// Exactly one of surplusActive and surplusAddsToPlan evaluates the arm on
+// a given tick, so its hysteresis counters advance once per tick.
+func (c *Controller) surplusAddsToPlan(lpCfg Config, sched Schedule) bool {
+	if lpCfg.SurplusOnly || !sched.HasTarget() {
+		return false
 	}
 	return c.evalBatSoCArm(lpCfg.ID, sched.SurplusUnlockBatSoC)
 }
@@ -1222,6 +1245,13 @@ func (c *Controller) wakeVehicleAuto(ctx context.Context, lpID string, reason st
 // misleading "battery discharges to feed EV" entries in the plan UI
 // that never actually happen.
 //
+// The arm is raw state: it says nothing about whether surplus replaces
+// the plan or adds to it. main.go only marks the planner spec
+// surplus-only when the loadpoint has no schedule target (the case
+// where the arm replaces the plan, surplusActive); under a target the
+// arm adds to the plan (surplusAddsToPlan) and the planner must keep
+// planning the grid charge the deadline needs (#1060).
+//
 // Returns false if the controller is nil, no arm map yet exists, or
 // the LP id isn't tracked. Safe to call concurrently with Tick.
 func (c *Controller) IsBatSoCArmed(lpID string) bool {
@@ -1424,14 +1454,19 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config, d
 	if c.tel != nil {
 		sample, _ = c.tel(lpCfg.DriverName)
 	}
-	// Resolve the schedule once per tick — used for bat-SoC unlock
-	// (surplusActive) below. Zero value when no schedule is set,
-	// which makes evalBatSoCArm a no-op.
+	// Resolve the schedule once per tick — used for the bat-SoC unlock
+	// (surplusActive / surplusAddsToPlan) and the phase decision below.
+	// Zero value when no schedule is set, which makes evalBatSoCArm a
+	// no-op.
 	var sched Schedule
 	if c.manager != nil {
 		sched, _ = c.manager.GetSchedule(lpCfg.ID)
 	}
+	// surplusOn: surplus REPLACES the plan (surplus-only semantics).
+	// surplusAdds: surplus is ADDED on top of a scheduled plan. Never
+	// both true.
 	surplusOn := c.surplusActive(lpCfg, sched)
+	surplusAdds := c.surplusAddsToPlan(lpCfg, sched)
 	// Detect the disconnected→connected edge (state.PluggedIn flips
 	// from false to true) so we can reset session-scoped state
 	// before the new session's first dispatch tick. Without this
@@ -1680,6 +1715,23 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config, d
 				cmdReason = "pv_surplus_pause"
 			}
 		}
+		// Schedule + bat-SoC unlock (#1060): spare PV is added ON TOP of
+		// the plan. The plan's watts are the floor — a scheduled grid
+		// charge is never throttled to live surplus (directive
+		// 2026-05-30) — and surplus may only lift the command above it,
+		// snapped to the same steps the surplus-only path uses. The
+		// reason names surplus only when it actually raised the watts;
+		// otherwise the plan's own reason stands. Phase selection below
+		// still sees the schedule as active, so a 3Φ grid charge keeps
+		// its phase behaviour and the additive path never flips the
+		// surplus 1Φ lock.
+		if surplusAdds {
+			surplusW := c.computeSurplusCmd(now, lpCfg, lpCfg.MaxChargeW, sample.PowerW)
+			if surplusW > cmdW {
+				cmdW = surplusW
+				cmdReason = "pv_surplus"
+			}
+		}
 		// Wake-kick AFTER the surplus clamp: when an auto-wake just
 		// fired and the surplus clamp paused us to 0, force the
 		// wallbox to signal at least min 3Φ current for a few
@@ -1741,7 +1793,7 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config, d
 		// rationale in one testable place. Operator directive 2026-05-30.
 		phaseMode := resolvePhaseMode(
 			lpCfg.PhaseMode,
-			sched.SoC > 0,
+			sched.HasTarget(),
 			c.surplusLockedTo1P(lpCfg.ID),
 			surplusOn,
 			c.dwellSelectedPhaseMode(lpCfg.ID),
