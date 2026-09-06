@@ -2775,6 +2775,7 @@
         return "Nothing is charging" + (since ? " after " + since : "") + ": the charger has not acted on " + reqA + "." +
           (reason || " Check the car's own charge limit or schedule, then the charger's app.");
       case "limited":
+        if (m.limit_reason === "charger_limit") return "The charger limits this request to " + cmdA + " (" + reqA + " requested).";
         if (m.limit_reason === "fuse_cooldown") {
           return "Paused: main-fuse protection — " + reqA + " requested; charging resumes on its own." + sinceP;
         }

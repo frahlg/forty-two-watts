@@ -88,3 +88,10 @@ test('pause status waits for the charger before claiming it stopped', () => {
   assert.match(paused, /Paused by you/);
   assert.match(paused, /until you resume the plan/);
 });
+
+
+test('a charger limit does not blame the main fuse', () => {
+  const words = describeManual({ ...lp, manual: { ...lp.manual, state: 'limited', limit_reason: 'charger_limit', commanded_a: 10 } });
+  assert.match(words, /The charger limits this request to 10 A/);
+  assert.doesNotMatch(words, /Main fuse/);
+});
