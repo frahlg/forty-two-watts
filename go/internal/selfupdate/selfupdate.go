@@ -723,6 +723,56 @@ func (c *Checker) Trigger(ctx context.Context, action, target string) error {
 	return c.TriggerComponentAt(ctx, action, target, "core", time.Time{})
 }
 
+// TriggerRestart asks the sidecar to recreate Core on the release it runs
+// now. The sidecar reads the running container's tag itself; naming it here
+// as well keeps the release on a sidecar that cannot inspect the container,
+// including the sidecars shipped before that check existed. A build without a
+// release tag ("dev") sends no target and lets compose resolve the image.
+func (c *Checker) TriggerRestart(ctx context.Context) error {
+	target := ""
+	if isImmutableReleaseTag(c.cfg.CurrentVersion) {
+		target = c.cfg.CurrentVersion
+	}
+	return c.Trigger(ctx, "restart", target)
+}
+
+// isImmutableReleaseTag accepts the tags the release publishers produce:
+// stable vX.Y.Z and beta vX.Y.Z-beta.N. It mirrors the sidecar's own check so
+// a restart never names a tag the sidecar would refuse.
+func isImmutableReleaseTag(s string) bool {
+	version, ok := strings.CutPrefix(s, "v")
+	if !ok || version == "" {
+		return false
+	}
+	base, pre, hasPre := strings.Cut(version, "-")
+	parts := strings.Split(base, ".")
+	if len(parts) != 3 {
+		return false
+	}
+	for _, p := range parts {
+		if !isDecimalDigits(p) {
+			return false
+		}
+	}
+	if !hasPre {
+		return true
+	}
+	n, ok := strings.CutPrefix(pre, "beta.")
+	return ok && isDecimalDigits(n)
+}
+
+func isDecimalDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 // TriggerComponent requests a selective core or optimizer compose update.
 func (c *Checker) TriggerComponent(ctx context.Context, action, target, component string) error {
 	return c.TriggerComponentAt(ctx, action, target, component, time.Time{})

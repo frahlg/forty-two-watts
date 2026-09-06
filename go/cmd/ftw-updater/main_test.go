@@ -744,10 +744,78 @@ func TestPrepareUpdateImagePin_WinsOverHardcodedUserOverride(t *testing.T) {
 	}
 }
 
-// `restart` is the dev path — no target needed, no env override, falls
-// through to compose's :latest default.
-func TestHandleUpdate_RestartLeavesEnvUnset(t *testing.T) {
+// A restart brings back the release that is running. Compose resolves
+// `${FTW_IMAGE_TAG:-latest}` afresh on every recreate, and the pin in .env or
+// the registry's :latest can name another release: on 2026-09-05 one press of
+// Restart moved a beta box from v2.14.0-beta.1 to v2.0.0-beta.2 (issue #989).
+func TestHandleUpdate_RestartKeepsRunningRelease(t *testing.T) {
 	s, runner := newTestServer(t)
+	s.imageRef = func(context.Context, string) (string, error) {
+		return "ghcr.io/srcfl/ftw:v2.14.0-beta.1", nil
+	}
+	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(`{"action":"restart"}`))
+	rr := httptest.NewRecorder()
+	s.handleUpdate(rr, req)
+	if rr.Code != 202 {
+		t.Fatalf("status = %d", rr.Code)
+	}
+	st := waitForState(t, s, "done")
+	if st.Target != "v2.14.0-beta.1" {
+		t.Errorf("state target = %q, want the running release", st.Target)
+	}
+	envs := runner.envSnapshot()
+	if len(envs) == 0 {
+		t.Fatal("no compose calls recorded")
+	}
+	for i, env := range envs {
+		if len(env) != 1 || env[0] != "FTW_IMAGE_TAG=v2.14.0-beta.1" {
+			t.Errorf("restart call %d must pin the running release, got %v", i, env)
+		}
+	}
+}
+
+// A caller that names its release pins that; the sidecar does not need to
+// inspect the container. This is the path an older sidecar already had, so a
+// new Core keeps its release on a sidecar without runningReleaseTag.
+func TestHandleUpdate_RestartWithTargetPinsIt(t *testing.T) {
+	s, runner := newTestServer(t)
+	s.imageRef = func(context.Context, string) (string, error) {
+		return "", errors.New("inspect must not be needed")
+	}
+	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(`{"action":"restart","target":"v2.14.0-beta.1"}`))
+	rr := httptest.NewRecorder()
+	s.handleUpdate(rr, req)
+	if rr.Code != 202 {
+		t.Fatalf("status = %d: %s", rr.Code, rr.Body.String())
+	}
+	waitForState(t, s, "done")
+	for i, env := range runner.envSnapshot() {
+		if len(env) != 1 || env[0] != "FTW_IMAGE_TAG=v2.14.0-beta.1" {
+			t.Errorf("restart call %d must pin the named release, got %v", i, env)
+		}
+	}
+}
+
+func TestHandleUpdate_RestartRejectsMovingTarget(t *testing.T) {
+	s, runner := newTestServer(t)
+	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(`{"action":"restart","target":"latest"}`))
+	rr := httptest.NewRecorder()
+	s.handleUpdate(rr, req)
+	if rr.Code != 400 {
+		t.Fatalf("status = %d, want 400 for a moving tag", rr.Code)
+	}
+	if calls := runner.snapshot(); len(calls) != 0 {
+		t.Errorf("no compose call may run for a rejected restart, got %v", calls)
+	}
+}
+
+// A dev build runs a moving tag. With nothing to pin, the restart leaves the
+// env unset and compose's `${FTW_IMAGE_TAG:-latest}` resolves the image.
+func TestHandleUpdate_RestartOnMovingTagLeavesEnvUnset(t *testing.T) {
+	s, runner := newTestServer(t)
+	s.imageRef = func(context.Context, string) (string, error) {
+		return "ghcr.io/srcfl/ftw:latest", nil
+	}
 	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(`{"action":"restart"}`))
 	rr := httptest.NewRecorder()
 	s.handleUpdate(rr, req)

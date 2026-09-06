@@ -425,16 +425,17 @@ func containsTraversal(id string) bool {
 	return id == "." || id == ".."
 }
 
-// handleVersionRestart signals the sidecar to pull + force-recreate the
-// main service regardless of whether a newer image exists. Exists so the
-// full update flow can be exercised end-to-end in dev / CI before cutting
-// a real release.
+// handleVersionRestart signals the sidecar to force-recreate the main
+// service on the release it runs now. Exists so the full update flow can be
+// exercised end-to-end in dev / CI before cutting a real release, and as the
+// operator's Restart button. It names the running release so the recreate
+// cannot resolve to another tag (issue #989).
 func (s *Server) handleVersionRestart(w http.ResponseWriter, r *http.Request) {
 	if s.deps.SelfUpdate == nil {
 		writeJSON(w, 503, map[string]string{"error": "self-update disabled"})
 		return
 	}
-	if err := s.deps.SelfUpdate.Trigger(r.Context(), "restart", ""); err != nil {
+	if err := s.deps.SelfUpdate.TriggerRestart(r.Context()); err != nil {
 		writeJSON(w, 502, map[string]string{"error": err.Error()})
 		return
 	}

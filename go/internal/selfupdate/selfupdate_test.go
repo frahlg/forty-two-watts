@@ -3,6 +3,7 @@ package selfupdate
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -851,6 +852,78 @@ func TestTrigger_NoSocket(t *testing.T) {
 	c := New(Config{}, newMemStore())
 	if err := c.Trigger(context.Background(), "update", ""); err == nil {
 		t.Error("expected 'socket not configured' error")
+	}
+}
+
+// A restart names the running release so the sidecar recreates Core on it
+// instead of whatever compose resolves for `${FTW_IMAGE_TAG:-latest}` (issue
+// #989: one Restart moved a beta box from v2.14.0-beta.1 to v2.0.0-beta.2).
+// A build without a release tag sends no target.
+func TestTriggerRestart_NamesRunningRelease(t *testing.T) {
+	for _, tc := range []struct {
+		name, current, wantTarget string
+	}{
+		{name: "beta", current: "v2.14.0-beta.1", wantTarget: "v2.14.0-beta.1"},
+		{name: "stable", current: "v2.14.0", wantTarget: "v2.14.0"},
+		{name: "dev build", current: "dev", wantTarget: ""},
+		{name: "legacy edge", current: "edge-20260101", wantTarget: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, err := os.MkdirTemp("", "ftw-su-")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { os.RemoveAll(dir) })
+			sock := filepath.Join(dir, "sock")
+			ln, err := net.Listen("unix", sock)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { ln.Close() })
+			got := make(chan map[string]any, 1)
+			srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var body map[string]any
+				_ = json.NewDecoder(r.Body).Decode(&body)
+				got <- body
+				w.WriteHeader(202)
+			})}
+			go srv.Serve(ln)
+			t.Cleanup(func() { srv.Close() })
+
+			c := New(Config{SocketPath: sock, CurrentVersion: tc.current}, newMemStore())
+			if err := c.TriggerRestart(context.Background()); err != nil {
+				t.Fatalf("TriggerRestart: %v", err)
+			}
+			body := <-got
+			if body["action"] != "restart" {
+				t.Errorf("action = %v, want restart", body["action"])
+			}
+			target, _ := body["target"].(string)
+			if target != tc.wantTarget {
+				t.Errorf("target = %q, want %q", target, tc.wantTarget)
+			}
+		})
+	}
+}
+
+func TestIsImmutableReleaseTag(t *testing.T) {
+	for tag, want := range map[string]bool{
+		"v2.14.0":         true,
+		"v2.14.0-beta.1":  true,
+		"v2.14.0-beta.12": true,
+		"dev":             false,
+		"":                false,
+		"latest":          false,
+		"v2.14":           false,
+		"v2.14.0-rc.1":    false,
+		"v2.14.0-beta":    false,
+		"v2.14.0-beta.x":  false,
+		"2.14.0":          false,
+		"edge-20260101":   false,
+	} {
+		if got := isImmutableReleaseTag(tag); got != want {
+			t.Errorf("isImmutableReleaseTag(%q) = %v, want %v", tag, got, want)
+		}
 	}
 }
 

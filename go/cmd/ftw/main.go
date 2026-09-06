@@ -2596,7 +2596,7 @@ func main() {
 			// which is the same code path post-update restarts use, so
 			// there's only one battle-tested escape hatch in production.
 			if selfUpdater != nil {
-				if err := selfUpdater.Trigger(reqCtx, "restart", ""); err == nil {
+				if err := selfUpdater.TriggerRestart(reqCtx); err == nil {
 					slog.Info("restart: dispatched via updater sidecar")
 					return nil
 				} else {

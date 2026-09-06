@@ -372,9 +372,17 @@ func (s *server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	case "restart":
-		// target optional — when empty, compose's `${FTW_IMAGE_TAG:-latest}`
-		// substitution falls through to :latest. That's the dev path for
-		// exercising the flow without a real release.
+		// A restart brings back the release that is running. The target is
+		// optional: the sidecar reads the running container's tag itself
+		// (runningReleaseTag), and a caller that knows its release may name
+		// it for a sidecar that cannot inspect the container. Only when
+		// neither yields a release tag does compose's
+		// `${FTW_IMAGE_TAG:-latest}` resolve the image — the dev path for a
+		// build without a release.
+		if body.Target != "" && !isImmutableImageTag(body.Target) {
+			http.Error(w, "target must be stable vX.Y.Z or beta vX.Y.Z-beta.N", 400)
+			return
+		}
 	case "rollback":
 		if body.Snapshot == "" {
 			http.Error(w, "rollback requires snapshot id", 400)
@@ -464,6 +472,33 @@ func (s *server) runJob(action, target string) {
 	s.runComponentJob(action, target, "core", time.Time{})
 }
 
+// runningReleaseTag returns the immutable tag of the image the service runs
+// now, or "" when it runs a moving tag (a dev build on :latest) or cannot be
+// inspected. A restart must bring back the release that is running: compose
+// resolves `${FTW_IMAGE_TAG:-latest}` afresh on every recreate, and the pin in
+// .env or the registry's :latest can name another release. Issue #989; on
+// 2026-09-05 one press of Restart moved a beta box from v2.14.0-beta.1 to
+// v2.0.0-beta.2 because .env still held the tag of an update from August.
+func (s *server) runningReleaseTag(spec componentSpec) string {
+	if s.imageRef == nil {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	ref, err := s.imageRef(ctx, spec.service)
+	if err != nil {
+		slog.Warn("restart: cannot read the running image; compose resolves the tag", "service", spec.service, "err", err)
+		return ""
+	}
+	tag, ok := imageTagFromReference(ref)
+	if !ok {
+		slog.Info("restart: running image has no release tag; compose resolves the tag", "service", spec.service, "image", ref)
+		return ""
+	}
+	slog.Info("restart keeps the running release", "service", spec.service, "tag", tag)
+	return tag
+}
+
 func (s *server) runComponentJob(action, target, component string, startedAt time.Time) {
 	now := startedAt
 	if now.IsZero() {
@@ -473,6 +508,9 @@ func (s *server) runComponentJob(action, target, component string, startedAt tim
 	if err != nil {
 		s.writeState(State{State: "failed", Action: action, Component: component, Target: target, StartedAt: now, UpdatedAt: now, Message: err.Error()})
 		return
+	}
+	if action == "restart" && target == "" {
+		target = s.runningReleaseTag(spec)
 	}
 	if action == "update" && spec.name == "core" {
 		if err := s.requireHealthyOptimizer(); err != nil {
