@@ -1653,6 +1653,10 @@ func (s *Server) handlePostConfig(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]string{"error": "validation: " + err.Error()})
 		return
 	}
+	// API input carries portable paths, while the registry and file watcher
+	// use resolved paths. Resolve before comparing or applying so an unrelated
+	// settings edit cannot restart every driver with a missing relative file.
+	newCfg.ResolveDriverPaths(filepath.Dir(s.deps.ConfigPath))
 	// Diff against the live config BEFORE we mutate the shared pointer —
 	// otherwise the comparison would always come back empty.
 	s.deps.CfgMu.RLock()
