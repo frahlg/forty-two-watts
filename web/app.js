@@ -2733,7 +2733,7 @@
         : "Waiting for the charger's first status report.";
       tone = "var(--text)";
     } else if (lp.manual_active) {
-      // The same sentence as the Manual tab, so the charger's own reason is
+      // The same sentence as the charge controls, so the charger's own reason is
       // never hidden behind "manual charge is running".
       text = manualStatusText(lp, d) || "Manual charge requested. Waiting for charger status.";
       if (lp.manual && (lp.manual.state === "not_drawing" || lp.manual.state === "stalled")) {
@@ -2776,7 +2776,7 @@
     } else if (lp.surplus_only) {
       text = "PV surplus only — charges when solar exceeds house load.";
     } else if (!hasSchedule) {
-      text = "No charging plan yet. Choose Scheduled to set a ready time, or Manual to charge now.";
+      text = "No charging plan yet. Set a ready time, or choose Charge now.";
       tone = "var(--text)";
     } else {
       text = "No charge window in the current plan — the target may already be reached.";
@@ -2792,25 +2792,17 @@
     return p;
   }
 
-  // EV modal sub-elements held across refreshes. The status table is
-  // updated in place on every poll. The tabbed control (PV charging /
-  // Manual / Scheduled) is mounted exactly once per (modal-open × LP)
-  // and is NEVER detached on a poll — detaching+reattaching a focused
-  // <input> blurs it mid-keystroke and resets caret position. After a
-  // Save/Clear/Start/Stop we set the matching *NeedsRebuild flag so the
-  // next poll rebuilds from the new authoritative server state. The
-  // active tab persists across rebuilds via evActiveTab.
+  // Keep controls mounted while polling so editing never loses focus.
   var statusTableEl = null;
   var evPlanEl = null;   // { el, update } from buildEvPlanView
   var evPlanLpId = null;
-  var evTabsEl = null;
-  var evTabsLpId = null;
+  var evControlsEl = null;
+  var evControlsLpId = null;
   var evBoostEl = null;  // { el, update } from buildEvBoostView
   var evBoostLpId = null;
   var evBoostDetails = null;
   var schedNeedsRebuild = false;
   var manualNeedsRebuild = false;
-  var evActiveTab = "manual"; // "pv" | "manual" | "scheduled"
 
   // Detect whether the site has any PV driver configured. Used to hide
   // the "surplus charge from PV" option on PV-less sites where the
@@ -2827,9 +2819,10 @@
   }
 
   var evReading = false;
+  var evReadPromise = null;
   var evLastLp = null;
   function refreshEvModal() {
-    if (evReading) return;
+    if (evReading) return evReadPromise;
     evReading = true;
     var requestedDriver = evModalDriver;
     // Pass driver query if known so the backend can scope the response
@@ -2840,7 +2833,7 @@
     // recent payload cached by fetchStatus() instead of issuing a
     // duplicate /api/status fetch on every 5 s modal tick. Falls back
     // to "no PV" until the dashboard's own fetchStatus lands once.
-    Promise.all([
+    evReadPromise = Promise.all([
       // Local API reads.
       boundedApiRead(url, function (r) { if (!r.ok) throw new Error("Charger status unavailable"); return r.json(); }),
       boundedApiRead("/api/loadpoints", function (r) { if (!r.ok) throw new Error("Charging settings unavailable"); return r.json(); }),
@@ -2867,8 +2860,8 @@
         evPlanLpId = null;
         evBoostEl = null;
         evBoostLpId = null;
-        evTabsEl = null;
-        evTabsLpId = null;
+        evControlsEl = null;
+        evControlsLpId = null;
         return;
       }
       // Status table: replace in place so the rest of the modal body
@@ -2978,40 +2971,37 @@
         evPlanLpId = null;
       }
       if (matched) {
-        // Build the tabbed control (PV charging / Manual / Scheduled)
-        // exactly once per LP. Polling never rebuilds it — inputs keep
-        // focus/value/caret and the active tab persists. Only a
-        // Save/Clear (schedNeedsRebuild) or Start/Stop/Set-SoC
-        // (manualNeedsRebuild), or switching LP (planet), forces a build.
-        var lpChanged = evTabsEl == null || evTabsLpId !== matched.id;
+        // Rebuild only for a changed charger or a removed goal.
+        var lpChanged = evControlsEl == null || evControlsLpId !== matched.id;
         if (lpChanged || schedNeedsRebuild || manualNeedsRebuild) {
-          if (evTabsEl && evTabsEl.parentNode === evModalBody) {
-            evModalBody.removeChild(evTabsEl);
+          if (evControlsEl && evControlsEl.parentNode === evModalBody) {
+            evModalBody.removeChild(evControlsEl);
           }
-          evTabsEl = buildEvTabbedControl(matched, siteHasPV(status));
-          evTabsLpId = matched.id;
+          evControlsEl = buildEvControls(matched, siteHasPV(status));
+          evControlsLpId = matched.id;
           schedNeedsRebuild = false;
           manualNeedsRebuild = false;
-          evModalBody.appendChild(evTabsEl);
-        } else if (evTabsEl.parentNode !== evModalBody) {
+          evModalBody.appendChild(evControlsEl);
+        } else if (evControlsEl.parentNode !== evModalBody) {
           // Modal was previously closed: body got wiped but our cached
           // section is still valid — re-attach.
-          evModalBody.appendChild(evTabsEl);
+          evModalBody.appendChild(evControlsEl);
         }
       } else {
-        if (evTabsEl && evTabsEl.parentNode === evModalBody) {
-          evModalBody.removeChild(evTabsEl);
+        if (evControlsEl && evControlsEl.parentNode === evModalBody) {
+          evModalBody.removeChild(evControlsEl);
         }
-        evTabsEl = null;
-        evTabsLpId = null;
+        evControlsEl = null;
+        evControlsLpId = null;
       }
-      if (matched && evTabsEl && typeof evTabsEl.update === "function") {
-        evTabsEl.update(matched, d);
+      if (matched && evControlsEl && statusTableEl) evModalBody.appendChild(statusTableEl);
+      if (matched && evControlsEl && typeof evControlsEl.update === "function") {
+        evControlsEl.update(matched, d);
       }
-      // Boost from the home battery: one control, below the tabs, for
+      // Boost from the home battery: one control, below the goal, for
       // whichever mode the loadpoint is in. Mounted once per loadpoint
       // (the reserve slider keeps its value); update() redraws state
-      // every poll. Always kept last so a tabs rebuild cannot land
+      // every poll. Always kept last so a controls rebuild cannot land
       // underneath it.
       if (matched) {
         if (evBoostEl == null || evBoostLpId !== matched.id) {
@@ -3053,10 +3043,16 @@
           charger: { known: true, available: false },
           manual: Object.assign({}, evLastLp.manual, { state: "unavailable" }),
         });
-        if (evTabsEl && evTabsEl.update) evTabsEl.update(stale, null);
+        if (evControlsEl && evControlsEl.update) evControlsEl.update(stale, null);
         if (evPlanEl) evPlanEl.update(stale, null);
       }
     }).finally(function () { evReading = false; });
+    return evReadPromise;
+  }
+
+  function refreshEvModalAfterWrite() {
+    if (evReading) return evReadPromise.then(function () { return refreshEvModal(); });
+    return refreshEvModal();
   }
 
   // Stop reasons the controller reports for a battery boost lease, in
@@ -3237,7 +3233,7 @@
       }).then(function (res) { return res.json().then(function (j) { return { ok: res.ok, body: j }; }); })
         .then(function (res) {
           startBtn.disabled = false;
-          if (res.ok) { msg.textContent = ""; refreshEvModal(); }
+          if (res.ok) { msg.textContent = ""; refreshEvModalAfterWrite(); }
           else { msg.textContent = (res.body && res.body.error) || "Boost could not start."; }
         }).catch(function (e) { startBtn.disabled = false; msg.textContent = "Boost could not start: " + e.message; });
     });
@@ -3248,7 +3244,7 @@
       evWrite("/api/loadpoints/" + encodeURIComponent(lp.id) + "/battery_boost", { method: "DELETE" })
         .then(function (res) {
           stopBtn.disabled = false;
-          if (res.ok) { msg.textContent = ""; refreshEvModal(); }
+          if (res.ok) { msg.textContent = ""; refreshEvModalAfterWrite(); }
           else { msg.textContent = "Boost could not be stopped."; }
         }).catch(function (e) { stopBtn.disabled = false; msg.textContent = "Boost could not be stopped: " + e.message; });
     });
@@ -3325,7 +3321,8 @@
     box.style.borderTop = "1px solid var(--line)";
 
     var eyebrow = document.createElement("div");
-    eyebrow.textContent = "Manual Charge";
+    eyebrow.textContent = "Charge now is active";
+    eyebrow.hidden = !active;
     eyebrow.style.fontFamily = "var(--mono)";
     eyebrow.style.fontSize = "0.7rem";
     eyebrow.style.letterSpacing = "0.18em";
@@ -3361,10 +3358,13 @@
       readout.textContent = a + " A · " + (aToW(a) / 1000).toFixed(1) + " kW";
     }
     renderReadout();
-    slider.addEventListener("input", renderReadout);
+    var currentEditingUntil = 0;
+    slider.addEventListener("input", function () { currentEditingUntil = Date.now() + 1500; renderReadout(); });
 
     row.appendChild(slider);
     row.appendChild(readout);
+    row.hidden = !active;
+    row.style.display = active ? "flex" : "none";
     box.appendChild(row);
 
     // Status line.
@@ -3375,7 +3375,7 @@
     status.style.minHeight = "1em";
     status.setAttribute("role", "status");
     status.setAttribute("aria-live", "polite");
-    var idleText = "Requests this current now. Return to plan restores your schedule and solar settings.";
+    var idleText = "Starts at up to " + maxA + " A · " + (aToW(maxA) / 1000).toFixed(1) + " kW. Ignores the goal and solar rule until you return to the plan or unplug.";
     status.textContent = active ? "Changes apply when you release the slider." : idleText;
     box.appendChild(status);
 
@@ -3408,6 +3408,7 @@
     stopBtn.style.cursor = "pointer";
     stopBtn.style.background = "transparent";
     stopBtn.style.color = "var(--fg)";
+    stopBtn.hidden = !active;
     stopBtn.disabled = !active;
     stopBtn.style.opacity = active ? "1" : "0.5";
 
@@ -3426,9 +3427,14 @@
     function renderStatus() {
       var on = !!(lastLp && lastLp.manual_active);
       if (!busy) {
+        stopBtn.hidden = !on;
         stopBtn.disabled = !on;
+        eyebrow.hidden = !on;
+        row.hidden = !on;
+        row.style.display = on ? "flex" : "none";
         stopBtn.style.opacity = on ? "1" : "0.5";
         startBtn.hidden = on;
+        if (!on) { slider.value = String(maxA); renderReadout(); }
         startBtn.disabled = false;
       }
       if (busy || Date.now() < holdLineUntil) return;
@@ -3437,6 +3443,10 @@
     function update(nextLp, d) {
       if (nextLp) lastLp = nextLp;
       if (d) lastD = d;
+      if (!busy && Date.now() >= currentEditingUntil && lastLp.manual_active) {
+        slider.value = String(Math.min(maxA, Math.max(minA, Math.round(wToA(lastLp.manual_charge_w || 0)))));
+        renderReadout();
+      }
       renderStatus();
     }
 
@@ -3472,7 +3482,7 @@
         slider.disabled = false;
         status.textContent = "FTW received " + a + " A. Waiting for the charger…";
         holdLineUntil = Date.now() + 6000;
-        refreshEvModal(); // read the hold and charger response without rebuilding focused inputs
+        refreshEvModalAfterWrite(); // read the hold and charger response without rebuilding focused inputs
       }).catch(function (e) {
         busy = false;
         slider.disabled = false;
@@ -3501,7 +3511,7 @@
         startBtn.disabled = false;
         status.textContent = "Manual charge ended. The plan decides when to charge.";
         holdLineUntil = Date.now() + 6000;
-        refreshEvModal();
+        refreshEvModalAfterWrite();
       }).catch(function (e) {
         busy = false;
         slider.disabled = false;
@@ -3558,7 +3568,7 @@
     return s;
   }
 
-  // buildEvPlanView — the plug-in moment. Above the tabs, the operator
+  // buildEvPlanView — the plug-in moment. Above the controls, the operator
   // sees what the box will do with this car: the plan-status sentence,
   // the planned charge windows drawn on a 24 h track, and right under
   // it the car's CURRENT charge, which is the input the plan is built
@@ -3607,7 +3617,7 @@
     // Car's current charge.
     var socWrap = document.createElement("div");
     socWrap.style.marginTop = "0.75rem";
-    var hdr = sliderHeader("Car is at", "—");
+    var hdr = sliderHeader("Battery now", "—");
     socWrap.appendChild(hdr.row);
     var slider = fullWidthSlider(50, hdr.value);
     slider.setAttribute("aria-label", "Car's current charge, percent");
@@ -3663,9 +3673,9 @@
           if (revision !== socRevision) return;
           note.textContent = "Charge level saved: " + v + " %." +
             (!(lastLp.schedule && lastLp.schedule.soc > 0) && !lastLp.manual_active && !lastLp.surplus_only
-              ? " Choose Scheduled or Manual to start charging." : " Reading the updated plan…");
+              ? " Set a ready time, or choose Charge now." : " Reading the updated plan…");
           noteTimer = setTimeout(function () { noteTimer = null; if (!socFailed) note.textContent = sourceNote(lastLp); }, 6000);
-          refreshEvModal();
+          refreshEvModalAfterWrite();
         }).catch(function (e) {
           if (revision === socRevision) { socFailed = true; note.textContent = "Charge level not confirmed: " + e.message; }
         }).finally(function () {
@@ -3758,82 +3768,63 @@
     return { el: box, update: update, slider: slider };
   }
 
-  // buildPVModeSection — the per-loadpoint surplus-only toggle (PV
-  // charging tab). A hard flag, *independent* of any schedule: when on,
-  // dispatch refuses to import grid for this loadpoint regardless of what
-  // the MPC plans. Operators can run with this alone ("harvest PV when
-  // there's enough") or layer a schedule on top. Saves on click.
+  // Solar is a rule of the plan. A manual hold overrides it.
   function buildPVModeSection(lp) {
     var soBox = document.createElement("div");
-    soBox.style.marginTop = "0.25rem";
-
-    var soEyebrow = document.createElement("div");
-    soEyebrow.textContent = "PV Mode";
-    soEyebrow.style.fontFamily = "var(--mono)";
-    soEyebrow.style.fontSize = "0.7rem";
-    soEyebrow.style.letterSpacing = "0.18em";
-    soEyebrow.style.textTransform = "uppercase";
-    soEyebrow.style.color = "var(--text-dim)";
-    soEyebrow.style.marginBottom = "0.45rem";
-    soBox.appendChild(soEyebrow);
-
+    soBox.style.marginTop = "0.7rem";
     var soWrap = document.createElement("label");
-    soWrap.style.display = "flex";
-    soWrap.style.alignItems = "center";
-    soWrap.style.gap = "0.4rem";
-    soWrap.style.fontSize = "0.85rem";
-    soWrap.style.cursor = "pointer";
+    soWrap.style.cssText = "display:flex;align-items:center;gap:0.5rem;font-size:0.85rem;cursor:pointer";
     var soCb = document.createElement("input");
     soCb.type = "checkbox";
-    soCb.checked = !!(lp && lp.surplus_only);
+    soCb.setAttribute("role", "switch");
     soCb.style.accentColor = "var(--accent-e)";
     var soText = document.createElement("span");
-    soText.textContent = "Surplus only (PV only — no grid or battery)";
+    soText.textContent = "Only spare solar";
     soWrap.appendChild(soCb);
     soWrap.appendChild(soText);
-
     var soStatus = document.createElement("small");
-    soStatus.style.display = "block";
-    soStatus.style.color = "var(--text-dim)";
-    soStatus.style.marginTop = "0.25rem";
-    soStatus.style.marginLeft = "1.4rem";
-    soStatus.style.minHeight = "1em";
-    soStatus.textContent = "Saves automatically on click. Independent of the schedule below.";
-
-    soBox.appendChild(soWrap);
-    soBox.appendChild(soStatus);
-
+    soStatus.style.cssText = "display:block;color:var(--text-dim);margin:0.25rem 0 0 1.5rem";
+    soStatus.setAttribute("role", "status");
+    var busy = false, failure = "", latest = lp;
+    function update(next) {
+      latest = next;
+      if (busy) return;
+      soCb.checked = !!latest.surplus_only;
+      soCb.disabled = !!latest.manual_active;
+      soStatus.textContent = failure || (latest.manual_active
+        ? "Charge now overrides this rule. It resumes when you return to the plan."
+        : latest.surplus_only
+          ? "No grid or home battery. Your target may not be reached in time."
+          : "The plan may use grid power to reach your target.");
+    }
     soCb.addEventListener("change", function () {
-      // Surface the surplus-only ↔ schedule interaction immediately on
-      // toggle, before the network save returns — operators get instant
-      // feedback that flipping surplus on turns the deadline soft.
-      if (typeof surplusBestEffortHint !== "undefined" && surplusBestEffortHint) {
-        surplusBestEffortHint.style.display = soCb.checked ? "" : "none";
-      }
+      var on = soCb.checked;
+      busy = true;
+      failure = "";
       soCb.disabled = true;
-      soStatus.textContent = "Saving…";
-      // CONTROL write — strict (FIX-B): loadpoint surplus-only toggle.
+      soStatus.textContent = "Applying solar rule…";
       evWrite("/api/loadpoints/" + encodeURIComponent(lp.id) + "/target", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ surplus_only: soCb.checked }),
-      }).then(function () {
-        soCb.disabled = false;
-        soStatus.textContent = "Saved. Independent of the schedule below.";
-        // Rebuild on next poll so the schedule section reflects any
-        // server-side side effects (e.g. soc_source recompute).
-        schedNeedsRebuild = true;
-      }).catch(function () {
-        soCb.disabled = false;
-        soStatus.textContent = "Save failed — try again.";
-      });
+        body: JSON.stringify({ surplus_only: on }),
+      }).then(function (r) {
+        if (!r.ok) return r.json().then(function (j) { throw new Error(j.error || ("HTTP " + r.status)); });
+        soStatus.textContent = "Solar rule saved. Reading the plan…";
+        // Keep it pending until the read finishes; a poll cannot undo the choice.
+        return refreshEvModalAfterWrite();
+      }).catch(function (e) {
+        failure = "Solar rule not confirmed: " + e.message;
+      }).finally(function () { busy = false; update(latest); });
     });
-
+    soBox.appendChild(soWrap);
+    soBox.appendChild(soStatus);
+    soBox.update = update;
+    update(lp);
     return soBox;
   }
 
   // buildScheduleSection — target SoC by a deadline + recurring + the
-  // bat-SoC surplus-unlock threshold (Scheduled tab). Persisted across
+  // home battery threshold for spare solar. Persisted across
   // restarts; the backend rolls the deadline forward daily when Recurring
   // is set and arms the surplus-grab when the home battery is at/above the
   // threshold (5 pp release hysteresis).
@@ -3843,7 +3834,7 @@
     // local zone. The UI shows local time everywhere; we marshal back to
     // UTC minutes on save.
     var hasSched = !!(sched.soc || sched.recurring || sched.surplus_unlock_bat_soc);
-    var initLocalHHMM = utcMinsToLocalHHMM(typeof sched.time_of_day_min_utc === "number" ? sched.time_of_day_min_utc : 360);
+    var initLocalHHMM = hasSched ? utcMinsToLocalHHMM(typeof sched.time_of_day_min_utc === "number" ? sched.time_of_day_min_utc : 360) : "07:00";
     var initSoC = typeof sched.soc === "number" && sched.soc > 0 ? sched.soc * 100 : 80;
     var initRec = !!sched.recurring;
     var savedUnlock = typeof sched.surplus_unlock_bat_soc === "number" ? sched.surplus_unlock_bat_soc * 100 : 0;
@@ -3853,10 +3844,7 @@
     var initSurplus = savedUnlock > 0;
     var initUnlock = savedUnlock > 0 ? savedUnlock : 50;
 
-    // Hairline divider separating the current-charge slider above from the
-    // target + deadline controls below. The tab is already named
-    // "Scheduled", so no section eyebrow/explainer here — the field labels
-    // carry the meaning.
+    // The goal editor opens below the saved goal summary.
     var box = document.createElement("div");
     box.style.marginTop = "0.9rem";
     box.style.paddingTop = "0.9rem";
@@ -3891,7 +3879,7 @@
     // above, so toggling it gives instant feedback without waiting on
     // the network save round-trip.
     var surplusBestEffortHint = document.createElement("div");
-    surplusBestEffortHint.textContent = "Surplus only is on — the deadline becomes best-effort from real PV surplus only. Turn it off to let the planner grid-charge if PV can't cover.";
+    surplusBestEffortHint.textContent = "Only spare solar is on. Your target may not be reached in time.";
     surplusBestEffortHint.style.fontSize = "0.72rem";
     surplusBestEffortHint.style.color = "var(--fg)";
     surplusBestEffortHint.style.fontStyle = "italic";
@@ -3982,8 +3970,8 @@
       return wrap;
     }
 
-    var recWrap = checkbox(initRec, "Repeat daily");
-    var surWrap = checkbox(initSurplus && !!hasPV, "Also charge from PV surplus");
+    var recWrap = checkbox(initRec, "Repeat on chosen days");
+    var surWrap = checkbox(initSurplus && !!hasPV, "Also use spare solar before the planned hours");
     var recCb = recWrap.input;
     var surCb = surWrap.input;
 
@@ -4031,13 +4019,15 @@
     paintChips();
 
     // Target: same header + full-width slider treatment as the car's
-    // current charge above the tabs.
-    var targetHdr = sliderHeader("Target", Math.max(0, Math.min(100, Math.round(initSoC))) + "%");
+    // current charge above the goal.
+    var targetHdr = sliderHeader("Charge to", Math.max(0, Math.min(100, Math.round(initSoC))) + "%");
     box.appendChild(targetHdr.row);
     var targetSlider = fullWidthSlider(Math.max(0, Math.min(100, Math.round(initSoC))), targetHdr.value);
+    targetSlider.min = "10";
+    targetSlider.step = "5";
     targetSlider.setAttribute("aria-label", "Target charge, percent");
     box.appendChild(targetSlider);
-    box.appendChild(row("Charge by", timeInp));
+    box.appendChild(row("Ready by", timeInp));
 
     var checkRow = document.createElement("div");
     checkRow.style.display = "flex";
@@ -4047,11 +4037,17 @@
     checkRow.appendChild(recWrap);
     box.appendChild(checkRow);
     box.appendChild(daysRow);
+    var solarDetails = document.createElement("details");
+    var solarSummary = document.createElement("summary");
+    solarSummary.textContent = "Solar timing";
+    solarSummary.style.cssText = "cursor:pointer;font-size:0.8rem;color:var(--text-dim)";
+    solarDetails.appendChild(solarSummary);
+    if (hasPV) box.appendChild(solarDetails);
     // Surplus-from-PV only makes sense on sites with a PV driver — the
     // bat-SoC unlock would have no surplus to grab otherwise. Omit the
     // checkbox + threshold entirely on PV-less sites.
     if (hasPV) {
-      checkRow.appendChild(surWrap);
+      solarDetails.appendChild(surWrap);
     }
 
     var unlockHint = document.createElement("small");
@@ -4064,8 +4060,8 @@
     var thresholdRow = row("Home battery ≥", unlockWrap);
 
     if (hasPV) {
-      box.appendChild(unlockHint);
-      box.appendChild(thresholdRow);
+      solarDetails.appendChild(unlockHint);
+      solarDetails.appendChild(thresholdRow);
     }
 
     function applySurplusGate() {
@@ -4180,7 +4176,7 @@
           hasSched = true;
           paintClear();
           status.textContent = "Schedule saved. Reading the plan…";
-          refreshEvModal();
+          refreshEvModalAfterWrite();
         }).catch(function (e) {
           if (seq === saveSeq) status.textContent = "Schedule not confirmed: " + e.message;
         });
@@ -4212,7 +4208,7 @@
           if (!r.ok) return r.json().then(function (j) { throw new Error(j.error || ("HTTP " + r.status)); });
           status.textContent = "Schedule removed.";
           schedNeedsRebuild = true;
-          refreshEvModal();
+          refreshEvModalAfterWrite();
         }).catch(function (e) {
           status.textContent = "Removal not confirmed: " + e.message;
           clearBtn.disabled = false;
@@ -4220,87 +4216,61 @@
       });
     });
 
+    box.update = function (nextLp) {
+      surplusBestEffortHint.style.display = nextLp.surplus_only && !nextLp.manual_active ? "" : "none";
+    };
     return box;
   }
 
-  // buildEvTabbedControl assembles the modal's three tabs and routes each
-  // section into the right one:
-  //   PV charging → surplus-only toggle
-  //   Manual      → amp slider + Start/Stop
-  //   Scheduled   → the target-SoC-by-deadline schedule (the car's
-  //                 current charge lives above the tabs, with the plan)
-  // The active tab persists across rebuilds via evActiveTab.
-  function buildEvTabbedControl(lp, hasPV) {
+  // One session view. Opening settings never changes the charging mode.
+  function buildEvControls(lp, hasPV) {
     var container = document.createElement("div");
-    container.style.marginTop = "0.75rem";
-    container.style.paddingTop = "0.6rem";
-    container.style.borderTop = "1px solid var(--line)";
-
-    var tabBar = document.createElement("div");
-    tabBar.style.display = "flex";
-    tabBar.style.gap = "0.15rem";
-    tabBar.style.borderBottom = "1px solid var(--line)";
-    tabBar.style.marginBottom = "0.7rem";
-
-    var pvPanel = document.createElement("div");
-    pvPanel.appendChild(buildPVModeSection(lp));
-
-    var manualPanel = document.createElement("div");
+    container.className = "ev-controls";
     var manual = buildManualChargeSection(lp);
-    manualPanel.appendChild(manual.el);
+    container.appendChild(manual.el);
 
-    var schedPanel = document.createElement("div");
-    schedPanel.appendChild(buildScheduleSection(lp, hasPV));
+    var goal = document.createElement("section");
+    goal.className = "ev-goal";
+    goal.style.cssText = "margin-top:1rem;padding:0.8rem;border:1px solid var(--line);border-radius:8px";
+    var heading = document.createElement("div");
+    heading.textContent = "Your goal";
+    heading.style.cssText = "font-weight:600;font-size:0.95rem;margin-bottom:0.3rem";
+    goal.appendChild(heading);
+    var summary = document.createElement("p");
+    summary.style.cssText = "margin:0;font-size:0.9rem";
+    goal.appendChild(summary);
+    var suspended = document.createElement("small");
+    suspended.style.cssText = "display:block;color:var(--text-dim);margin-top:0.3rem";
+    goal.appendChild(suspended);
 
-    var panels = { pv: pvPanel, manual: manualPanel, scheduled: schedPanel };
-    var tabs = [
-      { id: "pv", label: "PV charging" },
-      { id: "manual", label: "Manual" },
-      { id: "scheduled", label: "Scheduled" },
-    ];
-    var tabBtns = {};
+    var editor = document.createElement("details");
+    var editLabel = document.createElement("summary");
+    editLabel.style.cssText = "cursor:pointer;color:var(--accent-e);font-size:0.85rem;margin-top:0.65rem";
+    editor.appendChild(editLabel);
+    var schedule = buildScheduleSection(lp, hasPV);
+    editor.appendChild(schedule);
+    goal.appendChild(editor);
+    var solar = hasPV || lp.surplus_only ? buildPVModeSection(lp) : null;
+    if (solar) goal.appendChild(solar);
+    container.appendChild(goal);
 
-    function selectTab(id) {
-      if (!panels[id]) { id = "pv"; }
-      evActiveTab = id;
-      for (var k in panels) { panels[k].style.display = (k === id) ? "" : "none"; }
-      tabs.forEach(function (t) {
-        var on = t.id === id;
-        var b = tabBtns[t.id];
-        b.style.color = on ? "var(--fg)" : "var(--text-dim)";
-        b.style.borderBottom = on ? "2px solid var(--accent-e)" : "2px solid transparent";
-        b.style.fontWeight = on ? "600" : "400";
-      });
-    }
-
-    tabs.forEach(function (t) {
-      var b = document.createElement("button");
-      b.type = "button";
-      b.textContent = t.label;
-      b.style.background = "transparent";
-      b.style.border = "none";
-      b.style.borderBottom = "2px solid transparent";
-      b.style.padding = "0.4rem 0.7rem";
-      b.style.marginBottom = "-1px";
-      b.style.cursor = "pointer";
-      b.style.fontFamily = "var(--mono)";
-      b.style.fontSize = "0.72rem";
-      b.style.letterSpacing = "0.08em";
-      b.style.textTransform = "uppercase";
-      b.addEventListener("click", function () { selectTab(t.id); });
-      tabBtns[t.id] = b;
-      tabBar.appendChild(b);
-    });
-
-    container.appendChild(tabBar);
-    container.appendChild(pvPanel);
-    container.appendChild(manualPanel);
-    container.appendChild(schedPanel);
-
-    // Polls redraw the live parts of the panels without remounting them.
-    container.update = function (nextLp, d) { manual.update(nextLp, d); };
-
-    selectTab(evActiveTab);
+    container.update = function (nextLp, d) {
+      manual.el.hidden = !nextLp.plugged_in;
+      manual.update(nextLp, d);
+      var s = nextLp.schedule;
+      var hasGoal = !!(s && s.soc > 0);
+      summary.textContent = hasGoal
+        ? Math.round(s.soc * 100) + " % by " + utcMinsToLocalHHMM(s.time_of_day_min_utc) +
+          (s.recurring ? " · repeats" : " · once")
+        : "No ready time set.";
+      editLabel.textContent = hasGoal ? "Change goal" : "Set a ready time";
+      suspended.textContent = nextLp.manual_active
+        ? "Charge now overrides this goal. Edits apply when you return to the plan."
+        : "Changes apply as you make them.";
+      schedule.update(nextLp);
+      if (solar) solar.update(nextLp);
+    };
+    container.update(lp, null);
     return container;
   }
 

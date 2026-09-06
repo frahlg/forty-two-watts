@@ -5,10 +5,10 @@ import test from 'node:test';
 const source = readFileSync(new URL('./app.js', import.meta.url), 'utf8');
 const sched = source.slice(
   source.indexOf('function buildScheduleSection'),
-  source.indexOf('function buildEvTabbedControl'),
+  source.indexOf('function buildEvControls'),
 );
 
-// The Scheduled tab is direct manipulation (#1065): every control writes
+// The goal editor is direct manipulation (#1065): every control writes
 // when it changes and the plan view above redraws. No Save button.
 
 test('every schedule control saves on change', () => {
@@ -23,7 +23,7 @@ test('every schedule control saves on change', () => {
   assert.match(sched, /setTimeout\(function \(\) \{ saveTimer = null; doSave\(\); \}, 400\)/);
   assert.match(sched, /if \(seq !== saveSeq\) return;/);
   assert.match(sched, /Schedule saved. Reading the plan…/);
-  assert.match(sched, /refreshEvModal\(\)/);
+  assert.match(sched, /refreshEvModalAfterWrite\(\)/);
 });
 
 test('weekday chips speak the wire: bit 0 = Monday, all seven = zero', () => {

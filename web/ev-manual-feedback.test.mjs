@@ -32,10 +32,10 @@ test('the status line follows the charger through every state', () => {
   assert.match(statusText, /m\.since_ms/);
 });
 
-test('the manual tab is redrawn on every poll', () => {
+test('the manual controls follow every poll', () => {
   assert.match(manual, /return \{ el: box, update: update \};/);
-  assert.match(source, /container\.update = function \(nextLp, d\) \{ manual\.update\(nextLp, d\); \};/);
-  assert.match(source, /evTabsEl\.update\(matched, d\);/);
+  assert.match(source, /manual\.update\(nextLp, d\);/);
+  assert.match(source, /evControlsEl\.update\(matched, d\);/);
 });
 
 test("a refused Start reads as a failure with the server's reason", () => {
