@@ -52,10 +52,10 @@ func (c *Controller) restoreManualHoldForSession(id string) {
 	changed := bound && previous.configuration != current.configuration
 	if bound && previous.deviceID != "" && current.deviceID != "" {
 		changed = changed || previous.deviceID != current.deviceID
-		// An explicit Start from a paused/unconfirmed session may acquire its
-		// first session ID as charging starts. It already names this hardware.
-		firstSessionProof := previous.sessionID == "" && current.sessionID != ""
-		changed = changed || (!firstSessionProof && previous.generation != current.generation)
+		// ObserveSession preserves the generation for a valid first proof.
+		// A changed generation therefore means a new connection or a counter
+		// reset, even when the earlier session ID was still unknown.
+		changed = changed || previous.generation != current.generation
 	}
 	// A Start before the first hardware reading binds here. Once bound, a
 	// different hardware/session/config generation must not inherit its power.

@@ -210,6 +210,24 @@ func TestExplicitStartCanAcquireFirstSessionProof(t *testing.T) {
 	}
 }
 
+func TestFirstSessionIDAfterCounterResetCannotInheritManualStart(t *testing.T) {
+	store := &sessionMemory{data: map[string]string{}}
+	m := sessionManager(store, "garage", "charger")
+	m.ObserveSession("garage", true, 0, 11000, true, "easee:A", "")
+	c := NewController(m, nil, nil, nil)
+	c.SetManualHold("garage", ManualHold{PowerW: 4140, Persistent: true})
+	// The old session was paused and unverified. A fresh charging session
+	// appears with less energy, after an unplug the box did not observe.
+	m.ObserveSession("garage", true, 4300, 500, true, "easee:A", "session-2")
+	c.restoreManualHoldForSession("garage")
+	if h, ok := c.GetManualHold("garage", time.Now()); !ok || h.PowerW != 0 {
+		t.Fatalf("new car inherited the previous Start: %+v %v", h, ok)
+	}
+	if s, _ := m.State("garage"); !s.ManualRestoreUnconfirmed {
+		t.Fatal("changed session did not ask for confirmation")
+	}
+}
+
 func TestClearBeforeTelemetrySurvivesAnotherImmediateRestart(t *testing.T) {
 	store := &sessionMemory{data: map[string]string{}}
 	m := sessionManager(store, "garage", "charger")
