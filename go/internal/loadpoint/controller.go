@@ -1312,6 +1312,9 @@ func (c *Controller) SetManualHold(id string, h ManualHold) {
 	if c == nil {
 		return
 	}
+	c.manualPersistMu.Lock()
+	defer c.manualPersistMu.Unlock()
+	c.markManualExplicit(id)
 	if h.PowerW > 0 && c.manager != nil {
 		c.manager.RetryCharging(id)
 	}
@@ -1350,6 +1353,9 @@ func (c *Controller) ClearManualHold(id string) {
 	if c == nil {
 		return
 	}
+	c.manualPersistMu.Lock()
+	defer c.manualPersistMu.Unlock()
+	c.markManualExplicit(id)
 	c.holdMu.Lock()
 	_, existed := c.holds[id]
 	delete(c.holds, id)
@@ -1516,6 +1522,7 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config, d
 	selfWithheld := surplusOn && enteringSurplusPaused
 	c.manager.SetSurplusWithheld(lpCfg.ID, selfWithheld)
 	c.manager.ObserveSession(lpCfg.ID, sample.Connected, sample.PowerW, sample.SessionWh, sample.RequestActive, sample.DeviceID, sample.SessionID)
+	c.restoreManualHoldForSession(lpCfg.ID)
 	c.evaluateBatteryBoost(lpCfg.ID, now, sample.Connected, dispatchAllowed)
 	if !sample.Connected {
 		c.resetSurplusSession(lpCfg.ID)

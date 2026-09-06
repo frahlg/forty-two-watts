@@ -1972,49 +1972,11 @@ func main() {
 			}
 			return ""
 		})
-		// Persist operator manual holds (the amp-slider "Start") so they
-		// survive reboot / firmware update and the EV keeps charging across
-		// the restart — the in-memory hold would otherwise be lost (Stefan
-		// 2026-06-11: a binary deploy dropped the live manual charge). Mirrors
-		// the loadpoint_schedule k/v pattern: one row per LP keyed
-		// `loadpoint_manual_hold:<id>`, "{}" = cleared.
-		const lpManualHoldKeyPrefix = "loadpoint_manual_hold:"
-		// Restore FIRST (before wiring the saver) so re-applying a persisted
-		// hold doesn't immediately re-write what we just read. A stale hold
-		// for a car unplugged during downtime self-clears on the first tick
-		// (tickOne unplug → ClearManualHold).
-		for _, lpState := range lpMgr.States() {
-			v, ok := st.LoadConfig(lpManualHoldKeyPrefix + lpState.ID)
-			if !ok || v == "" || v == "{}" {
-				continue
-			}
-			var h loadpoint.ManualHold
-			if err := json.Unmarshal([]byte(v), &h); err != nil {
-				slog.Warn("failed to parse persisted manual hold", "lp", lpState.ID, "err", err)
-				continue
-			}
-			if !h.Persistent {
-				continue // only operator (never-expiring) holds persist
-			}
-			lpController.SetManualHold(lpState.ID, h)
-			slog.Info("restored persistent manual hold across restart",
-				"lp", lpState.ID, "power_w", h.PowerW, "phase_mode", h.PhaseMode)
-		}
+		// The manager binds saved holds to charger hardware and session. The
+		// controller restores only after fresh telemetry supplies those IDs.
 		lpController.SetManualHoldSaver(func(id string, h loadpoint.ManualHold, cleared bool) {
-			key := lpManualHoldKeyPrefix + id
-			if cleared {
-				if err := st.SaveConfig(key, "{}"); err != nil {
-					slog.Warn("failed to clear persisted manual hold", "lp", id, "err", err)
-				}
-				return
-			}
-			b, err := json.Marshal(h)
-			if err != nil {
-				slog.Warn("failed to marshal manual hold", "lp", id, "err", err)
-				return
-			}
-			if err := st.SaveConfig(key, string(b)); err != nil {
-				slog.Warn("failed to persist manual hold", "lp", id, "err", err)
+			if err := lpMgr.PersistManualHold(id, h, cleared); err != nil {
+				slog.Warn("failed to persist manual charging choice", "lp", id, "err", err)
 			}
 		})
 		const lpBatteryBoostKeyPrefix = "loadpoint_battery_boost:"
