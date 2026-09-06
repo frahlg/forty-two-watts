@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -238,7 +239,9 @@ func TestManualHoldRefusesReleaseTargetAlreadyMet(t *testing.T) {
 func TestLoadpointsCarryManualStatus(t *testing.T) {
 	mgr := loadpoint.NewManager()
 	mgr.Load([]loadpoint.Config{{ID: "garage", DriverName: "easee", MinChargeW: 1380, MaxChargeW: 11000}})
-	ctrl := loadpoint.NewController(mgr, nil, nil, nil)
+	ctrl := loadpoint.NewController(mgr, func(time.Time) (loadpoint.Directive, bool) { return loadpoint.Directive{}, false }, func(string) (loadpoint.EVSample, bool) {
+		return loadpoint.EVSample{Connected: true, RequestActive: true}, true
+	}, nil)
 	tel := telemetry.NewStore()
 	srv := New(&Deps{Loadpoints: mgr, LoadpointCtrl: ctrl, Tel: tel})
 
@@ -292,6 +295,10 @@ func TestLoadpointsCarryManualStatus(t *testing.T) {
 
 	// The Easee echoes the limit: accepted, waiting for the car.
 	tel.Update("easee", telemetry.DerEV, 0, nil, json.RawMessage(`{"max_a":6,"charging":false,"reason_no_current_label":"car not drawing current"}`))
+	if m = manual(); m.State != loadpoint.ManualSent {
+		t.Fatalf("charger echo cannot confirm an unprocessed request: %+v", m)
+	}
+	ctrl.Tick(context.Background(), time.Now())
 	m = manual()
 	if m.State != loadpoint.ManualAccepted || !m.ChargerLimitKnown || m.ChargerLimitA != 6 || m.ChargerReason != "car not drawing current" {
 		t.Fatalf("after the charger took the limit: %+v", m)
@@ -302,6 +309,9 @@ func TestLoadpointsCarryManualStatus(t *testing.T) {
 	if m = manual(); m.StartedAtMs != first || m.RequestedA != 16 {
 		t.Fatalf("after Update: %+v (first start %d)", m, first)
 	}
+
+	// The controller processes the new choice before its charger response.
+	ctrl.Tick(context.Background(), time.Now())
 
 	// The charger says the command stalled.
 	tel.Update("easee", telemetry.DerEV, 0, nil, json.RawMessage(`{"max_a":16,"charging":false,"reason_no_current_label":"EV not accepting current","command_stalled":true}`))

@@ -1581,7 +1581,11 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config, d
 		// being handled is the meter's.
 		// The standdown is still the box ordering zero; record it so the
 		// interruption latch knows this stop is ours.
-		c.manager.SetCommanded(lpCfg.ID, 0, "site_meter_stale")
+		var manualUpdatedAt time.Time
+		if hold, held := c.GetManualHold(lpCfg.ID, now); held {
+			manualUpdatedAt = hold.UpdatedAt
+		}
+		c.manager.setCommandedForManual(lpCfg.ID, 0, "site_meter_stale", manualUpdatedAt)
 		payload, err := json.Marshal(map[string]any{
 			"action":  "ev_set_current",
 			"power_w": 0,
