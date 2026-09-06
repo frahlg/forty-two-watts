@@ -2967,7 +2967,7 @@
         freshStatus.style.color = "var(--text-dim)";
         freshStatus.style.fontStyle = "italic";
         freshStatus.style.margin = "0 0 0.6rem 0";
-        freshStatus.textContent = "No car connected. This goal is saved and applies when you plug in.";
+        freshStatus.textContent = "No car connected. Set a ready time, or plug in and choose Charge now.";
       }
       if (statusTableEl && statusTableEl.parentNode === evModalBody) {
         evModalBody.replaceChild(freshStatus, statusTableEl);
@@ -3006,6 +3006,9 @@
         if (!matched && !evModalDriver) {
           matched = lps.loadpoints[0];
         }
+      }
+      if (!carConnected && matched && matched.schedule && matched.schedule.soc > 0) {
+        freshStatus.textContent = "No car connected. This goal is saved and applies when you plug in.";
       }
       evLastLp = matched;
       if (matched && matched.charger && !matched.charger.available) {
