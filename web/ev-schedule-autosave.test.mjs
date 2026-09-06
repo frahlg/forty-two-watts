@@ -22,7 +22,7 @@ test('every schedule control saves on change', () => {
   // view above moves with the schedule.
   assert.match(sched, /setTimeout\(function \(\) \{ saveTimer = null; doSave\(\); \}, 400\)/);
   assert.match(sched, /if \(seq !== saveSeq\) return;/);
-  assert.match(sched, /Schedule saved. Reading the plan…/);
+  assert.match(sched, /Schedule saved\./);
   assert.match(sched, /refreshEvModalAfterWrite\(\)/);
 });
 

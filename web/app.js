@@ -4248,7 +4248,7 @@
           if (seq !== saveSeq) return;
           hasSched = true;
           paintClear();
-          status.textContent = "Schedule saved. Reading the plan…";
+          status.textContent = "Schedule saved.";
           refreshEvModalAfterWrite();
         }).catch(function (e) {
           if (seq === saveSeq) {
