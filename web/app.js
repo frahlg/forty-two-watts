@@ -3912,7 +3912,7 @@
     var retry = document.createElement("button");
     retry.type = "button"; retry.textContent = "Try battery size again"; retry.hidden = true;
     wrap.appendChild(retry);
-    var busy = false, dirty = false;
+    var busy = false, dirty = false, currentCapacity = null, available = true;
     input.addEventListener("input", function () { dirty = true; });
     function save() {
       if (busy) return;
@@ -3923,13 +3923,24 @@
       evWrite("/api/loadpoints/" + encodeURIComponent(lp.id) + "/vehicle", {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ capacity_wh: Math.round(value * 1000) }),
       }).then(function (r) { return r.json().then(function (j) { if (!r.ok || !j.ok) throw new Error(j.error || "FTW refused the change."); return j; }); })
-        .then(function () { dirty = false; note.textContent = "Battery size saved. The plan uses this size for its estimates."; return refreshEvModalAfterWrite(); })
+        .then(function () {
+          dirty = false;
+          note.textContent = "Battery size saved. Reading charging status…";
+          return refreshEvModalAfterWrite().then(function () {
+            note.textContent = !available ? "Battery size saved. Current charging status is unavailable."
+              : currentCapacity !== null && currentCapacity !== Math.round(value * 1000)
+                ? "Saved as the usual battery size. This session uses " + (currentCapacity / 1000) + " kWh."
+                : "Battery size saved. The plan uses this size for its estimates.";
+          });
+        })
         .catch(function (err) { note.textContent = "Battery size not confirmed: " + err.message; note.setAttribute("role", "alert"); retry.hidden = false; })
         .finally(function () { busy = false; input.disabled = false; });
     }
     input.addEventListener("change", save); retry.addEventListener("click", save);
     function update(next) {
       var capacity = Number(next.vehicle_capacity_wh);
+      currentCapacity = isFinite(capacity) && capacity > 0 ? capacity : null;
+      available = !next.charger || next.charger.available !== false;
       wrap.hidden = !next.plugged_in || !(capacity > 0);
       summary.textContent = "Car battery · " + (capacity / 1000) + " kWh";
       hint.textContent = next.capacity_source === "default" ? "FTW is using a default size. Check it against your car." : "Used for estimates. Check this size if you use another car.";
