@@ -75,8 +75,10 @@ func (m *Manager) ObserveSession(id string, pluggedIn bool, powerW, deliveredWh 
 		return
 	}
 	previousDevice, previousSession := lp.sessionDeviceID, lp.sessionID
-	changed := previousDevice != deviceID || previousSession != sessionID
 	regressed := pluggedIn && lp.pluggedIn && deliveredWh < lp.deliveredWhSession
+	firstSessionProof := deviceID != "" && previousDevice == deviceID && previousSession == "" && sessionID != "" &&
+		lp.pluggedIn && pluggedIn && !regressed
+	changed := previousDevice != deviceID || (previousSession != sessionID && !firstSessionProof)
 	// A changed session can arrive after an unseen unplug while core was
 	// offline. Run the ordinary plug-in reset even if connected stayed true.
 	if changed || regressed {
@@ -136,6 +138,11 @@ func (m *Manager) ObserveSession(id string, pluggedIn bool, powerW, deliveredWh 
 		lp.socRetention = "unavailable"
 	}
 	m.mu.Unlock()
+	if firstSessionProof && confirmed {
+		// The driver can first verify a session when charging starts. Preserve
+		// the level the owner entered while waiting and now make it durable.
+		m.persistSession(id)
+	}
 	_ = m.flushManualHold(id)
 }
 

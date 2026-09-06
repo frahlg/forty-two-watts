@@ -58,6 +58,49 @@ func TestConfirmedSoCSurvivesRestartOnlyForSameHardwareSession(t *testing.T) {
 		})
 	}
 }
+
+func TestConfirmedSoCSurvivesFirstSessionProofWhenChargingStarts(t *testing.T) {
+	store := &sessionMemory{data: map[string]string{}}
+	m := sessionManager(store, "garage", "charger")
+	m.ObserveSession("garage", true, 0, 0, true, "easee:A", "")
+	m.SetCurrentSoC("garage", .12)
+	if s, _ := m.State("garage"); s.SoCRetention != "unavailable" {
+		t.Fatalf("unverified session was saved: %+v", s)
+	}
+	m.ObserveSession("garage", true, 4300, 600, true, "easee:A", "session-1")
+	if s, _ := m.State("garage"); math.Abs(s.CurrentSoC-.13) > 1e-9 || s.SoCSource == "assumed" || s.SoCRetention != "session" {
+		t.Fatalf("charging lost the level entered while waiting: %+v", s)
+	}
+	m = sessionManager(store, "garage", "charger")
+	m.ObserveSession("garage", true, 4300, 600, true, "easee:A", "session-1")
+	if s, _ := m.State("garage"); math.Abs(s.CurrentSoC-.13) > 1e-9 || s.SoCSource == "assumed" {
+		t.Fatalf("verified level did not survive restart: %+v", s)
+	}
+}
+
+func TestFirstSessionProofDoesNotCrossConnectionChanges(t *testing.T) {
+	for _, change := range []string{"unplug", "hardware", "counter_regression"} {
+		t.Run(change, func(t *testing.T) {
+			m := sessionManager(&sessionMemory{data: map[string]string{}}, "garage", "charger")
+			m.ObserveSession("garage", true, 0, 1000, true, "easee:A", "")
+			m.SetCurrentSoC("garage", .12)
+			device, wh := "easee:A", 1600.0
+			switch change {
+			case "unplug":
+				m.ObserveSession("garage", false, 0, 1000, false, "easee:A", "")
+			case "hardware":
+				device = "easee:B"
+			case "counter_regression":
+				wh = 500
+			}
+			m.ObserveSession("garage", true, 4300, wh, true, device, "session-1")
+			if s, _ := m.State("garage"); s.SoCSource != "assumed" {
+				t.Fatalf("level followed %s: %+v", change, s)
+			}
+		})
+	}
+}
+
 func TestUnseenReconnectResetsConfirmedSoC(t *testing.T) {
 	store := &sessionMemory{data: map[string]string{}}
 	m := sessionManager(store, "garage", "charger")
