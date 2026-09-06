@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/srcfl/ftw/go/internal/loadpoint"
+	"github.com/srcfl/ftw/go/internal/mpc"
 )
 
 // Planner-visibility decoration for GET /api/loadpoints. Fills the
@@ -25,14 +26,23 @@ import (
 // decorateLoadpointsWithPlan mutates states in place.
 func (s *Server) decorateLoadpointsWithPlan(states []loadpoint.State) {
 	now := time.Now()
+	var snapshot mpc.PlanSnapshot
+	if s.deps.MPC != nil {
+		snapshot = s.deps.MPC.PlanSnapshot()
+	}
 	for i := range states {
+		states[i].PlanPending = snapshot.Pending
+		states[i].PlanOutdated = snapshot.Outdated
+		if snapshot.Outdated {
+			continue
+		}
 		if s.deps.LoadpointCtrl != nil {
 			states[i].GridDeferred = s.deps.LoadpointCtrl.GridDeferred(states[i].ID)
 		}
 		if s.deps.MPC == nil {
 			continue
 		}
-		windows, totalWh := s.deps.MPC.LoadpointPlanWindows(states[i].ID, now, maxPlanWindows)
+		windows, totalWh := snapshot.LoadpointPlanWindows(states[i].ID, now, maxPlanWindows)
 		if len(windows) == 0 {
 			continue
 		}

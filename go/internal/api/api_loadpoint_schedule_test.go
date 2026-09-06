@@ -127,6 +127,7 @@ func newScheduleServer(t *testing.T) (*Server, *loadpoint.Manager, *mpc.Service)
 	})
 	svc.Horizon = time.Hour
 	svc.BaseLoad = 500
+	t.Cleanup(func() { waitForSchedulePlan(t, svc) })
 	return New(&Deps{Loadpoints: mgr, MPC: svc}), mgr, svc
 }
 
@@ -167,6 +168,7 @@ func TestSchedulePutStoresRollsAndReplans(t *testing.T) {
 		t.Fatalf("PUT did not roll: target_soc_pct = %v, want 80", lpState.TargetSoC)
 	}
 
+	waitForSchedulePlan(t, svc)
 	if _, reason := svc.LastReplanInfo(); reason != "loadpoint_schedule_changed" {
 		t.Fatalf("replan reason = %q, want loadpoint_schedule_changed", reason)
 	}
@@ -193,6 +195,7 @@ func TestScheduleDeleteClearsAndReplans(t *testing.T) {
 	if state.TargetSoC != 0 || !state.TargetTime.IsZero() {
 		t.Fatalf("DELETE left an active target after removing the goal: %+v", state)
 	}
+	waitForSchedulePlan(t, svc)
 	if _, reason := svc.LastReplanInfo(); reason != "loadpoint_schedule_changed" {
 		t.Fatalf("replan reason = %q, want loadpoint_schedule_changed", reason)
 	}
@@ -269,6 +272,7 @@ func TestTargetRouteStillCarriesSchedule(t *testing.T) {
 	if !ok || got.SoC != 0.7 || got.TimeOfDayMinUTC != 420 {
 		t.Fatalf("target route stopped storing schedules: got=%+v ok=%v", got, ok)
 	}
+	waitForSchedulePlan(t, svc)
 	if _, reason := svc.LastReplanInfo(); reason != "loadpoint_schedule_changed" {
 		t.Fatalf("replan reason = %q, want loadpoint_schedule_changed", reason)
 	}
@@ -284,5 +288,16 @@ func TestTargetRouteStillCarriesSchedule(t *testing.T) {
 	}
 	if _, ok := mgr.GetSchedule("garage"); ok {
 		t.Fatal("target route stopped clearing schedules via null")
+	}
+}
+
+func waitForSchedulePlan(t *testing.T, svc *mpc.Service) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for svc.IsReplanning() {
+		if time.Now().After(deadline) {
+			t.Fatal("planner did not finish")
+		}
+		time.Sleep(time.Millisecond)
 	}
 }

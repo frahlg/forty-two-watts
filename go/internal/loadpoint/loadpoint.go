@@ -233,6 +233,8 @@ type State struct {
 	// loadpoint; PlanTotalWh is everything the plan still intends to
 	// deliver over the horizon. All zero when the planner has no
 	// allocation. Populated by the API layer from the MPC plan.
+	PlanPending     bool    `json:"plan_pending"`
+	PlanOutdated    bool    `json:"plan_outdated"`
 	PlanNextStartMs int64   `json:"plan_next_start_ms,omitempty"`
 	PlanNextEndMs   int64   `json:"plan_next_end_ms,omitempty"`
 	PlanNextWh      float64 `json:"plan_next_wh,omitempty"`

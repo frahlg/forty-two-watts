@@ -392,7 +392,7 @@ func (a *appLoadpoints) Boost(id string, lease loadpoint.BatteryBoostLease, now 
 		// its next scheduled run. Off this goroutine and unattached to the
 		// session — a phone that drops its socket right after tapping must
 		// not abort the planner mid-run.
-		go a.mpc.ReplanWithReason(context.Background(), "loadpoint_battery_boost_enabled")
+		a.mpc.RequestReplan("loadpoint_battery_boost_enabled")
 	}
 	return nil
 }
@@ -411,10 +411,7 @@ func (a *appLoadpoints) SetSoC(id string, soc float64) bool {
 		return false
 	}
 	if a.mpc != nil {
-		// Before returning, on a fresh context, for the reason the HTTP
-		// route gives: the plan pushed after the result must be drawn from
-		// the corrected level, not from the estimate it replaced.
-		a.mpc.ReplanWithReason(context.Background(), "loadpoint_soc_corrected")
+		a.mpc.RequestReplan("loadpoint_soc_corrected")
 	}
 	return true
 }
@@ -431,15 +428,10 @@ func (a *appLoadpoints) SetSurplusOnly(id string, v bool) (bool, bool) {
 	}
 	if a.mpc != nil {
 		if prev && !v {
-			// Turning PV-only off is a regime change: the car may now
-			// import from the grid. The same synchronous, tagged replan the
-			// HTTP target route forces, so the plan pushed after the result
-			// already says so.
-			slog.Info("loadpoint surplus_only disabled — forcing replan", "lp", id)
-			a.mpc.ReplanWithReason(context.Background(), "surplus_only_disabled")
+			slog.Info("loadpoint surplus_only disabled — requesting replan", "lp", id)
+			a.mpc.RequestReplan("surplus_only_disabled")
 		} else {
-			// Any other edit gets the HTTP route's background nudge.
-			go a.mpc.ReplanWithReason(context.Background(), "loadpoint_target_changed")
+			a.mpc.RequestReplan("loadpoint_target_changed")
 		}
 	}
 	return prev, true

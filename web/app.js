@@ -2843,6 +2843,10 @@
     } else if (lp.commanded_known && !lp.commanded_w && lp.commanded_reason === "site_meter_stale") {
       text = "Paused for safety: site-meter data is stale — charging resumes when telemetry recovers.";
       tone = "var(--text)";
+    } else if (lp.plan_pending) {
+      text = "Updating the charging plan…";
+    } else if (lp.plan_outdated) {
+      text = "Charging times are unavailable. Your settings are saved.";
     } else if (lp.grid_deferred && hasSchedule) {
       // Richer than the pv_surplus_pause reason it usually co-occurs
       // with: it also says when normal planning resumes.
@@ -2863,6 +2867,7 @@
     } else {
       text = "No charge window yet for this goal. Choose Charge now if you need to charge immediately.";
     }
+    if (lp.plan_pending && !lp.manual_active && text && text.indexOf("Updating the charging plan") < 0) text += " Updating the charging plan…";
     if (lp.manual_save_error) text = (text ? text + " " : "") + "This choice is active now, but could not be saved for restart. FTW is retrying.";
     if (!text) return null;
     var p = document.createElement("p");
@@ -3008,7 +3013,7 @@
         }
       }
       if (!carConnected && matched && matched.schedule && matched.schedule.soc > 0) {
-        freshStatus.textContent = "No car connected. This goal is saved and applies when you plug in.";
+        freshStatus.textContent = "No car connected. This goal is saved and applies when you plug in." + (matched.plan_pending ? " Updating the plan…" : matched.plan_outdated ? " Charging times are unavailable." : "");
       }
       evLastLp = matched;
       if (matched && matched.charger && !matched.charger.available) {

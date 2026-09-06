@@ -35,3 +35,19 @@ test('plan-status strip is the headline of the plan view', () => {
   // And reset when the modal short-circuits to "no charger".
   assert.match(source, /statusTableEl = null;\s*\n\s*evPlanEl = null;/);
 });
+
+const planStatus = new Function('document', 'manualStatusText', 'formatW', 'evFmtClock',
+  source.slice(source.indexOf('function renderEvPlanStatus'), source.indexOf('// Keep controls mounted while polling')) + ';return renderEvPlanStatus;'
+)(
+  { createElement: () => ({ style: {}, textContent: '' }) },
+  () => 'Paused by you.', w => `${w} W`, () => '07:00',
+);
+
+test('pending and failed plans do not pretend that charging windows are ready', () => {
+  const lp = { plugged_in: true, schedule: { soc: .8 }, current_power_w: 0 };
+  assert.match(planStatus({ ...lp, plan_pending: true, plan_outdated: true }, {}).textContent, /Updating the charging plan/);
+  const failed = planStatus({ ...lp, plan_pending: false, plan_outdated: true }, {}).textContent;
+  assert.match(failed, /Charging times are unavailable.*settings are saved/);
+  assert.doesNotMatch(failed, /Updating|Charging planned/);
+  assert.equal(planStatus({ ...lp, manual_active: true, plan_pending: true }, {}).textContent, 'Paused by you.');
+});

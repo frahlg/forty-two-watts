@@ -207,10 +207,13 @@ type Service struct {
 	// latestReplanGeneration identifies the newest requested solve. Starting a
 	// newer generation cancels the older request; the generation check remains
 	// the final guard for work that does not stop promptly on context cancel.
-	latestReplanGeneration uint64 // guarded by mu
-	activeReplanCancel     context.CancelFunc
-	stopping               bool
-	replanWG               sync.WaitGroup
+	latestReplanGeneration    uint64 // guarded by mu
+	publishedReplanGeneration uint64
+	activeReplanCancel        context.CancelFunc
+	queuedReplan              *replanRequest
+	requestedReplanRunning    bool
+	stopping                  bool
+	replanWG                  sync.WaitGroup
 	// decisionIDFactory is a test seam. Production uses a random UUID for every
 	// accepted plan. It is read only while mu is held at the publish gate.
 	decisionIDFactory func() string
@@ -395,6 +398,31 @@ func (s *Service) Latest() *Plan {
 	return s.last
 }
 
+// PlanSnapshot keeps the visible plan and its freshness in one read. Outdated
+// remains true if the latest request fails; Pending only describes active work.
+type PlanSnapshot struct {
+	Plan        *Plan
+	ReplanAt    time.Time
+	Reason      string
+	Pending     bool
+	Outdated    bool
+	loadpointID string
+}
+
+func (s *Service) PlanSnapshot() PlanSnapshot {
+	if s == nil {
+		return PlanSnapshot{}
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	outdated := s.publishedReplanGeneration != s.latestReplanGeneration
+	return PlanSnapshot{
+		Plan: s.last, ReplanAt: s.lastReplanAt, Reason: s.lastReason,
+		Pending: outdated && s.activeReplanCancel != nil, Outdated: outdated,
+		loadpointID: s.lastLoadpointID,
+	}
+}
+
 // InstallPlan puts a plan in the cache SlotDirectiveAt and Latest read.
 // Optimize and RestoreDiagnostic already write that cache after a
 // successful solve. Tests that inject a known Action use the same seam
@@ -415,6 +443,7 @@ func (s *Service) InstallPlan(plan Plan, params Params, loadpointID string) {
 	s.lastParams = params
 	s.lastLoadpointID = loadpointID
 	s.lastReplanAt = time.Now()
+	s.publishedReplanGeneration = s.latestReplanGeneration
 }
 
 // MaxPlanAge is the staleness cutoff. Once a plan's `generated_at_ms`
@@ -569,13 +598,16 @@ type PlanWindow struct {
 // there is no fresh plan — same MaxPlanAge cutoff as SlotDirectiveAt,
 // because a stale plan must not promise start times.
 func (s *Service) LoadpointPlanWindows(id string, now time.Time, max int) ([]PlanWindow, float64) {
-	if s == nil || id == "" {
+	return s.PlanSnapshot().LoadpointPlanWindows(id, now, max)
+}
+
+// LoadpointPlanWindows uses the plan captured with this snapshot's status.
+func (snapshot PlanSnapshot) LoadpointPlanWindows(id string, now time.Time, max int) ([]PlanWindow, float64) {
+	if snapshot.Outdated || id == "" {
 		return nil, 0
 	}
-	s.mu.RLock()
-	p := s.last
-	legacyID := s.lastLoadpointID
-	s.mu.RUnlock()
+	p := snapshot.Plan
+	legacyID := snapshot.loadpointID
 	if p == nil || time.Since(time.UnixMilli(p.GeneratedAtMs)) > MaxPlanAge {
 		return nil, 0
 	}
@@ -1137,6 +1169,61 @@ func (s *Service) Replan(ctx context.Context) *Plan { return s.replan(ctx, "manu
 // "surplus_only_disabled", "target_soc_changed", "mode_changed".
 func (s *Service) ReplanWithReason(ctx context.Context, reason string) *Plan {
 	return s.replan(ctx, reason)
+}
+
+// RequestReplan registers the new generation before returning and computes it
+// in the background. A saved setting must not wait for the planner to finish.
+// One worker keeps only the latest waiting request. Cancellation may not stop
+// a Go solve already in progress, so starting a worker per edit would pile up
+// obsolete solves. Stop waits for accepted work, including the queued request.
+func (s *Service) RequestReplan(reason string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	request := s.beginReplanLocked(context.Background(), reason)
+	if !request.accepted {
+		s.mu.Unlock()
+		request.cancel()
+		return
+	}
+	previous := s.queuedReplan
+	s.queuedReplan = &request
+	startWorker := !s.requestedReplanRunning
+	s.requestedReplanRunning = true
+	s.mu.Unlock()
+	if previous != nil {
+		s.finishReplan(*previous)
+	}
+	if startWorker {
+		go s.runRequestedReplans()
+	}
+}
+
+func (s *Service) runRequestedReplans() {
+	for {
+		s.mu.Lock()
+		request := s.queuedReplan
+		s.queuedReplan = nil
+		if request == nil {
+			s.requestedReplanRunning = false
+			s.mu.Unlock()
+			return
+		}
+		s.mu.Unlock()
+		s.runReplan(*request)
+	}
+}
+
+// IsReplanning reports whether the newest request is queued or running,
+// including diagnostic writes after its plan has been published.
+func (s *Service) IsReplanning() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.activeReplanCancel != nil
 }
 
 func (s *Service) replan(ctx context.Context, reason string) *Plan {
@@ -1716,6 +1803,7 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 	s.lastReplanAt = time.Now()
 	s.plannedPredictions = pp
 	s.lastReason = request.reason
+	s.publishedReplanGeneration = request.generation
 	reason := request.reason
 	replanAtMs := s.lastReplanAt.UnixMilli()
 	saveDiag := s.SaveDiag
