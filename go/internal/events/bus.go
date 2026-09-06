@@ -156,9 +156,9 @@ type UpdateInstalled struct {
 
 func (UpdateInstalled) Kind() string { return KindUpdateInstalled }
 
-// ChargingSessionComplete is emitted by the loadpoint manager at its
-// session-completion latch — the vehicle held "not requesting" past
-// SessionCompletionTimeout — which already fires exactly once per plug-in.
+// ChargingSessionComplete is emitted once per session when a fresh,
+// matched vehicle BMS reading confirms that the active target was reached.
+// A charger refusing current does not establish battery state.
 type ChargingSessionComplete struct {
 	LoadpointID string
 	KWh         float64 // what the session meter delivered

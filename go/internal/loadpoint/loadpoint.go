@@ -121,6 +121,12 @@ func (f SiteFuse) Phases() int {
 // Read-only for consumers — only the Manager or dispatch paths mutate
 // it under lock.
 type State struct {
+	VehicleCapacityWh float64 `json:"vehicle_capacity_wh"`
+	CapacitySource    string  `json:"capacity_source"`
+	// ChargingDeclined is a sustained vehicle-side refusal, not a battery level.
+	ChargingDeclined bool `json:"charging_declined"`
+	// SoCRetention reports whether the confirmed estimate can survive restart.
+	SoCRetention       string    `json:"soc_retention,omitempty"`
 	ID                 string    `json:"id"`
 	DriverName         string    `json:"driver_name"`
 	PluggedIn          bool      `json:"plugged_in"`
@@ -245,6 +251,8 @@ type PlanWindow struct {
 
 // Manager holds the running set of loadpoints. Thread-safe.
 type Manager struct {
+	sessionMu        sync.Mutex
+	sessionStore     SessionStore
 	connectionHealth map[string]bool
 	connectionEdges  map[string]connectionEdge
 	mu               sync.RWMutex
@@ -283,13 +291,8 @@ type Manager struct {
 	bus *events.Bus
 }
 
-// SessionCompletionTimeout is how long a vehicle must stay connected
-// but explicitly not requesting current before the loadpoint treats
-// the session as vehicle-side-complete. Tuned to swallow short bursts
-// of retry-flap that some EVSEs emit while the vehicle holds steady
-// at refusing (observed cycles in the ~10 s–90 s range) without
-// snapping on a transient hiccup. Once tripped, the snap persists
-// until the cable is unplugged.
+// SessionCompletionTimeout debounces a sustained vehicle-side refusal.
+// A refusal is not evidence that the battery reached its target.
 const SessionCompletionTimeout = 90 * time.Second
 
 // The interruption hysteresis. A charge that had run steadily for at least
@@ -317,6 +320,10 @@ const (
 // union of configured parameters and observed state. Lives behind
 // Manager so consumers access it via the public State snapshot.
 type loadpointRuntime struct {
+	sessionDeviceID    string
+	sessionID          string
+	socRetention       string
+	completionNotified bool
 	Config
 
 	pluggedIn          bool
@@ -368,17 +375,13 @@ type loadpointRuntime struct {
 	// Drives session-completion (see Observe).
 	notRequestingSince time.Time
 
-	// sessionComplete latches once the vehicle has held "not
+	// chargingDeclined latches once the vehicle has held "not
 	// requesting" past SessionCompletionTimeout for this session.
-	// While set, the inferred SoC is pinned to targetSoC so the
-	// MPC stops allocating PV surplus to a sink the vehicle has
-	// already declined. Cleared on plug-out.
-	sessionComplete bool
+	// It suspends planning while the vehicle refuses energy, without
+	// changing the estimated battery level. Cleared on plug-out.
+	chargingDeclined bool
 
-	// socSource, when non-empty, overrides the API layer's
-	// vehicle-driver attribution in the State snapshot. Set to
-	// "completed" when sessionComplete is latched so operators can
-	// see why the inferred SoC pinned at target.
+	// socSource is reserved for measured battery-level attribution.
 	socSource string
 	// socConfirmed is true only after a level from the user or a matched car.
 	// A configured/default plug-in level remains a planning assumption.
@@ -480,8 +483,16 @@ func (m *Manager) SetCommanded(id string, w float64, reason string) {
 // Load replaces the configured set. Idempotent: existing state is
 // carried across when the ID is kept; removed IDs are dropped.
 func (m *Manager) Load(cfgs []Config) {
+	m.sessionMu.Lock()
+	defer m.sessionMu.Unlock()
+	var changedCapacity []string
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer func() {
+		m.mu.Unlock()
+		for _, id := range changedCapacity {
+			m.persistSession(id)
+		}
+	}()
 
 	newByID := make(map[string]*loadpointRuntime, len(cfgs))
 	newOrder := make([]string, 0, len(cfgs))
@@ -507,9 +518,19 @@ func (m *Manager) Load(cfgs []Config) {
 			lp.schedule = existing.schedule
 			lp.lastRolledFor = existing.lastRolledFor
 			lp.notRequestingSince = existing.notRequestingSince
-			lp.sessionComplete = existing.sessionComplete
+			lp.chargingDeclined = existing.chargingDeclined
 			lp.socSource = existing.socSource
 			lp.socConfirmed = existing.socConfirmed && existing.DriverName == c.DriverName
+			if existing.DriverName == c.DriverName {
+				lp.sessionDeviceID = existing.sessionDeviceID
+				lp.sessionID = existing.sessionID
+				lp.socRetention = existing.socRetention
+				lp.completionNotified = existing.completionNotified
+			} else {
+				lp.pluggedIn = false
+				lp.currentSoC = 0
+				lp.chargingDeclined = false
+			}
 			lp.commandedW = existing.commandedW
 			lp.commandedReason = existing.commandedReason
 			lp.commandedKnown = existing.commandedKnown
@@ -527,6 +548,16 @@ func (m *Manager) Load(cfgs []Config) {
 				if existing.VehicleCapacityWh > 0 {
 					lp.Config.VehicleCapacityWh = existing.VehicleCapacityWh
 				}
+			}
+			if existing.DriverName == c.DriverName && lp.pluggedIn && existing.VehicleCapacityWh != lp.VehicleCapacityWh {
+				// A capacity correction changes future Wh-to-SoC conversion,
+				// not the battery level the user just saw or its confidence.
+				delivered := 0.0
+				if lp.VehicleCapacityWh > 0 {
+					delivered = lp.deliveredWhSession / lp.VehicleCapacityWh
+				}
+				lp.sessionPluginSoC = existing.currentSoC - delivered
+				changedCapacity = append(changedCapacity, c.ID)
 			}
 		}
 		newByID[c.ID] = lp
@@ -610,8 +641,8 @@ func (m *Manager) Configs() []Config {
 // false on the latter; drivers without that distinction always pass
 // true and pre-existing behaviour is preserved. After
 // SessionCompletionTimeout of sustained !requestActive on a connected
-// session, the inferred SoC is pinned to targetSoC so the MPC stops
-// allocating PV surplus to a sink the vehicle has already declined.
+// session, charging_declined tells the planner to stop allocating energy.
+// This never changes the battery level or claims that its target was reached.
 //
 // No-op for unknown IDs — a misconfigured driver shouldn't crash the
 // manager.
@@ -629,11 +660,15 @@ func (m *Manager) SetSurplusWithheld(id string, withheld bool) {
 }
 
 func (m *Manager) Observe(id string, pluggedIn bool, powerW, deliveredWh float64, requestActive bool) {
+	m.ObserveSession(id, pluggedIn, powerW, deliveredWh, requestActive, "", "")
+}
+
+func (m *Manager) observe(id string, pluggedIn bool, powerW, deliveredWh float64, requestActive bool) ([]events.Event, *events.Bus) {
 	m.mu.Lock()
 	lp, ok := m.byID[id]
 	if !ok {
 		m.mu.Unlock()
-		return
+		return nil, nil
 	}
 	// Events decided under the lock, published after it: the bus runs
 	// handlers inline on the publisher, and a handler that looked back at
@@ -653,14 +688,15 @@ func (m *Manager) Observe(id string, pluggedIn bool, powerW, deliveredWh float64
 		}
 		lp.sessionPluginSoC = anchor
 		lp.socConfirmed = false
+		lp.completionNotified = false
 		lp.notRequestingSince = time.Time{}
-		lp.sessionComplete = false
+		lp.chargingDeclined = false
 		lp.socSource = ""
 	}
 	if !pluggedIn {
 		// Plug-out: drop any pending completion timer / latch.
 		lp.notRequestingSince = time.Time{}
-		lp.sessionComplete = false
+		lp.chargingDeclined = false
 		lp.socSource = ""
 		if lp.vehicleName != "" || lp.capacityFromCar {
 			// The identified car left with its session — the next one may
@@ -675,7 +711,7 @@ func (m *Manager) Observe(id string, pluggedIn bool, powerW, deliveredWh float64
 	lp.currentPowerW = powerW
 	lp.deliveredWhSession = deliveredWh
 
-	if pluggedIn && !requestActive && lp.surplusWithheld {
+	if pluggedIn && !requestActive && (lp.surplusWithheld || (lp.commandedKnown && lp.commandedW < DeliveringW)) {
 		// Self-induced "not requesting": we paused this surplus_only
 		// loadpoint below its floor, so the vehicle dropping current is
 		// our doing, not a vehicle-side decline. Do not start/advance the
@@ -684,29 +720,22 @@ func (m *Manager) Observe(id string, pluggedIn bool, powerW, deliveredWh float64
 		// day. Reset the clock so a genuine refusal (once we resume
 		// offering power) is timed from a clean start.
 		lp.notRequestingSince = time.Time{}
-	} else if pluggedIn && !requestActive {
+	} else if pluggedIn && !requestActive && (!lp.commandedKnown || lp.commandedW >= DeliveringW) {
 		// Vehicle has explicitly stopped requesting current while we ARE
 		// offering power. Start (or continue) the completion timer; latch
 		// once it elapses.
 		if lp.notRequestingSince.IsZero() {
 			lp.notRequestingSince = now
 		}
-		if !lp.sessionComplete && lp.targetSoC > 0 &&
+		if !lp.chargingDeclined && lp.targetSoC > 0 &&
 			!lp.notRequestingSince.IsZero() &&
 			now.Sub(lp.notRequestingSince) >= SessionCompletionTimeout {
-			lp.sessionComplete = true
-			lp.socSource = "completed"
-			// The latch is the once-per-session moment, so it is the
-			// publish point: nothing downstream needs its own dedupe.
-			fired = append(fired, events.ChargingSessionComplete{
-				LoadpointID: id,
-				KWh:         deliveredWh / 1000,
-				At:          now,
-			})
+			lp.chargingDeclined = true
+
 		}
 	} else if pluggedIn && requestActive {
 		// Vehicle is back to requesting. Reset the timer, but keep
-		// sessionComplete latched — once a vehicle has declined this
+		// chargingDeclined latched — once a vehicle has declined this
 		// session, treating it as "still hungry" the moment an EVSE
 		// retry briefly succeeds would reopen the export hole the
 		// completion latch exists to close. Plug-cycle to reset.
@@ -741,7 +770,7 @@ func (m *Manager) Observe(id string, pluggedIn bool, powerW, deliveredWh float64
 		// that stopped requesting chose to stop. Neither is a failure.
 		selfInflicted := lp.surplusWithheld ||
 			(lp.commandedKnown && lp.commandedW < steadyChargeFloorW)
-		if lp.steadyRunArmed && !lp.sessionComplete && requestActive &&
+		if lp.steadyRunArmed && !lp.chargingDeclined && requestActive &&
 			!selfInflicted && !lp.stoppedSince.IsZero() &&
 			now.Sub(lp.stoppedSince) >= interruptConfirm {
 			lp.steadyRunArmed = false
@@ -763,30 +792,21 @@ func (m *Manager) Observe(id string, pluggedIn bool, powerW, deliveredWh float64
 	// kilowatt-hours go in; if the car declines once more, the timer
 	// re-arms it. A 900 W renegotiation burst stays below the steady
 	// floor and never gets here.
-	if pluggedIn && lp.sessionComplete && lp.steadyRunArmed && requestActive && powerW >= steadyChargeFloorW {
-		lp.sessionComplete = false
+	if pluggedIn && lp.chargingDeclined && lp.steadyRunArmed && requestActive && powerW >= steadyChargeFloorW {
+		lp.chargingDeclined = false
 		lp.socSource = ""
 	}
 
 	if pluggedIn {
-		if lp.sessionComplete && lp.targetSoC > 0 {
-			// Snap the inferred SoC to target; the planner reads
-			// currentSoC as the MPC LoadpointSpec.InitialSoC,
-			// so InitialSoC == TargetSoC → DP allocates 0 W.
-			lp.currentSoC = lp.targetSoC
-		} else {
-			lp.currentSoC = estimateSoC(lp.sessionPluginSoC,
-				deliveredWh, lp.VehicleCapacityWh)
-		}
+		lp.currentSoC = estimateSoC(lp.sessionPluginSoC,
+			deliveredWh, lp.VehicleCapacityWh)
 	} else {
 		lp.currentSoC = 0
 	}
 	lp.updatedAtMs = now.UnixMilli()
 	m.mu.Unlock()
 
-	for _, e := range fired {
-		bus.Publish(e)
-	}
+	return fired, bus
 }
 
 // now returns the manager's clock, defaulting to time.Now when nowFn
@@ -958,21 +978,20 @@ func (m *Manager) SetSessionCapacityWh(id string, capacityWh float64) bool {
 //
 // Returns false for unknown IDs or when the loadpoint is unplugged.
 func (m *Manager) SetCurrentSoC(id string, socPct float64) bool {
+	m.sessionMu.Lock()
+	defer m.sessionMu.Unlock()
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer func() { m.mu.Unlock(); m.persistSession(id) }()
 	lp, ok := m.byID[id]
 	if !ok {
 		return false
 	}
-	if !lp.pluggedIn {
+	if !lp.pluggedIn || !finite(socPct) {
 		return false
 	}
-	// An operator who sets the level is telling us the latch's guess
-	// ("declined, so it must be at target") was wrong. Drop it, or the
-	// next Observe pins the estimate straight back to targetSoC and the
-	// slider looks broken. If the car really does decline, the latch
-	// re-arms after SessionCompletionTimeout as usual.
-	lp.sessionComplete = false
+	// A correction gives the planner another chance to offer energy.
+	// Sustained refusal can re-arm after SessionCompletionTimeout.
+	lp.chargingDeclined = false
 	lp.socSource = ""
 	lp.notRequestingSince = time.Time{}
 	reanchorSoCLocked(lp, socPct)
@@ -999,14 +1018,28 @@ func (m *Manager) SetCurrentSoC(id string, socPct float64) bool {
 //
 // Returns false for unknown IDs or when the loadpoint is unplugged.
 func (m *Manager) AnchorVehicleSoC(id string, socPct float64) bool {
+	m.sessionMu.Lock()
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	var completion *events.ChargingSessionComplete
+	bus := m.bus
+	defer func() {
+		m.mu.Unlock()
+		m.persistSession(id)
+		m.sessionMu.Unlock()
+		if completion != nil {
+			bus.Publish(*completion)
+		}
+	}()
 	lp, ok := m.byID[id]
 	if !ok {
 		return false
 	}
-	if !lp.pluggedIn {
+	if !lp.pluggedIn || !finite(socPct) || socPct < 0 || socPct > 1 {
 		return false
+	}
+	if lp.targetSoC > 0 && socPct >= lp.targetSoC && !lp.completionNotified {
+		lp.completionNotified = true
+		completion = &events.ChargingSessionComplete{LoadpointID: id, KWh: lp.deliveredWhSession / 1000, At: m.now()}
 	}
 	reanchorSoCLocked(lp, socPct)
 	return true
@@ -1037,6 +1070,8 @@ func (lp *loadpointRuntime) snapshot() State {
 	copy(steps, lp.AllowedStepsW)
 	sort.Float64s(steps)
 	st := State{
+		VehicleCapacityWh:  lp.VehicleCapacityWh,
+		CapacitySource:     "configured",
 		ID:                 lp.ID,
 		DriverName:         lp.DriverName,
 		PluggedIn:          lp.pluggedIn,
@@ -1052,10 +1087,16 @@ func (lp *loadpointRuntime) snapshot() State {
 		SurplusOnly:        lp.Config.SurplusOnly,
 		Schedule:           lp.schedule,
 		SoCSource:          lp.socSource,
+		ChargingDeclined:   lp.chargingDeclined,
+		SoCRetention:       lp.socRetention,
 		VehicleName:        lp.vehicleName,
 		CommandedW:         lp.commandedW,
 		CommandedReason:    lp.commandedReason,
 		CommandedKnown:     lp.commandedKnown,
+	}
+	if lp.VehicleCapacityWh <= 0 {
+		st.VehicleCapacityWh = 60000
+		st.CapacitySource = "default"
 	}
 	if st.PluggedIn && st.SoCSource == "" && !lp.socConfirmed {
 		st.SoCSource = "assumed"
