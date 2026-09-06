@@ -230,8 +230,8 @@ func TestSessionCompletionSnapsToTarget(t *testing.T) {
 
 	// Tick 1: connected and charging — request_active = true.
 	m.Observe("garage", true, 7400, 0, true)
-	if st, _ := m.State("garage"); st.SoCSource != "" {
-		t.Errorf("session start should not be marked completed: %+v", st)
+	if st, _ := m.State("garage"); st.SoCSource != "assumed" {
+		t.Errorf("session start should expose its unconfirmed level: %+v", st)
 	}
 
 	// Tick 2 (T+1m of charging): some energy delivered, inferred SoC rises.

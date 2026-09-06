@@ -3649,6 +3649,7 @@
 
     function sourceNote(lpNow) {
       var src = (lpNow && lpNow.soc_source) || "";
+      if (src === "assumed") return "Battery level needs confirmation. The plan currently assumes " + Math.round(lpNow.current_soc * 100) + " %. Drag to match the car. This level must be entered again after a box restart.";
       if (src === "vehicle") return "Live from the car. Drag only to correct drift.";
       if (src === "completed") return "The car stopped asking for current, so the box assumes the target was reached. Drag to correct.";
       return "Estimated from energy delivered. Drag to the real value and the plan follows.";
@@ -3759,7 +3760,7 @@
       var cur = (lpNow.current_soc != null) ? Math.max(0, Math.min(100, Math.round(lpNow.current_soc * 100))) : null;
       if (!operatorHolds() && cur != null) {
         slider.value = String(cur);
-        hdr.value.textContent = cur + "%";
+        hdr.value.textContent = lpNow.soc_source === "assumed" ? "Not confirmed" : cur + "%";
       }
       if (!noteTimer && !socFailed && !operatorHolds()) note.textContent = sourceNote(lpNow);
     }

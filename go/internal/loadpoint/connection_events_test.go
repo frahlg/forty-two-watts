@@ -24,9 +24,12 @@ func TestConnectionEventNeedsFreshEdgeAndSurvivesReload(t *testing.T) {
 		m.State("garage")
 	})
 	health := func(status telemetry.DriverStatus) {
-		b.Publish(events.HealthTick{Health: map[string]telemetry.DriverHealth{"easee": {Status: status}}, Now: now})
+		b.Publish(events.HealthTick{Health: map[string]telemetry.DriverHealth{"easee": {Status: status, LastSuccess: &now}}, Now: now})
 	}
 	tick := func(connected bool) { m.Observe("garage", connected, 0, 0, true); now = now.Add(3 * time.Second) }
+	// Registered does not mean a charger has supplied its first reading.
+	b.Publish(events.HealthTick{Health: map[string]telemetry.DriverHealth{"easee": {Status: telemetry.StatusOk}}, Now: now})
+	tick(false)
 	health(telemetry.StatusOk)
 	tick(true)
 	tick(true)

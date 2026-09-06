@@ -136,7 +136,8 @@ type State struct {
 	// physical connection. Zero values when no online vehicle driver is
 	// reporting. SoCSource is "vehicle" when CurrentSoC was overridden
 	// from the car's BMS, "inferred" when it's the loadpoint manager's
-	// pluginSoC + deliveredWh estimate, "" when not plugged in.
+	// confirmed anchor + deliveredWh estimate, "assumed" before the user
+	// or a matched vehicle confirms a level, "" when not plugged in.
 	VehicleSoC           float64 `json:"vehicle_soc,omitempty"`
 	VehicleChargeLimit   float64 `json:"vehicle_charge_limit,omitempty"`
 	VehicleChargingState string  `json:"vehicle_charging_state,omitempty"`
@@ -379,6 +380,9 @@ type loadpointRuntime struct {
 	// "completed" when sessionComplete is latched so operators can
 	// see why the inferred SoC pinned at target.
 	socSource string
+	// socConfirmed is true only after a level from the user or a matched car.
+	// A configured/default plug-in level remains a planning assumption.
+	socConfirmed bool
 
 	// surplusWithheld is set by the controller each tick: true when WE
 	// are intentionally withholding power from this loadpoint (a
@@ -436,7 +440,7 @@ func (m *Manager) SetBus(bus *events.Bus) {
 		defer m.mu.Unlock()
 		m.connectionHealth = make(map[string]bool, len(tick.Health))
 		for name, h := range tick.Health {
-			m.connectionHealth[name] = h.TelemetryLive()
+			m.connectionHealth[name] = h.TelemetryLive() && h.LastSuccess != nil && !h.LastSuccess.IsZero()
 		}
 	})
 }
@@ -505,6 +509,7 @@ func (m *Manager) Load(cfgs []Config) {
 			lp.notRequestingSince = existing.notRequestingSince
 			lp.sessionComplete = existing.sessionComplete
 			lp.socSource = existing.socSource
+			lp.socConfirmed = existing.socConfirmed && existing.DriverName == c.DriverName
 			lp.commandedW = existing.commandedW
 			lp.commandedReason = existing.commandedReason
 			lp.commandedKnown = existing.commandedKnown
@@ -647,6 +652,7 @@ func (m *Manager) Observe(id string, pluggedIn bool, powerW, deliveredWh float64
 			anchor = units.DefaultPluginSoC
 		}
 		lp.sessionPluginSoC = anchor
+		lp.socConfirmed = false
 		lp.notRequestingSince = time.Time{}
 		lp.sessionComplete = false
 		lp.socSource = ""
@@ -1013,12 +1019,15 @@ func (m *Manager) AnchorVehicleSoC(id string, socPct float64) bool {
 // paths so they stay arithmetically identical.
 func reanchorSoCLocked(lp *loadpointRuntime, soc float64) {
 	soc = units.ClampFraction(soc)
+	lp.socConfirmed = true
 	// Re-anchor: new_anchor + delivered/capacity == soc.
 	delivered := 0.0
 	if lp.VehicleCapacityWh > 0 {
 		delivered = lp.deliveredWhSession / lp.VehicleCapacityWh
 	}
-	lp.sessionPluginSoC = units.ClampFraction(soc - delivered)
+	// The offset may be negative when the corrected level is below the
+	// energy already delivered. Clamp the resulting level, not the offset.
+	lp.sessionPluginSoC = soc - delivered
 	lp.currentSoC = estimateSoC(lp.sessionPluginSoC, lp.deliveredWhSession, lp.VehicleCapacityWh)
 	lp.updatedAtMs = time.Now().UnixMilli()
 }
@@ -1047,6 +1056,9 @@ func (lp *loadpointRuntime) snapshot() State {
 		CommandedW:         lp.commandedW,
 		CommandedReason:    lp.commandedReason,
 		CommandedKnown:     lp.commandedKnown,
+	}
+	if st.PluggedIn && st.SoCSource == "" && !lp.socConfirmed {
+		st.SoCSource = "assumed"
 	}
 	if !lp.commandedSince.IsZero() {
 		st.CommandedSinceMs = lp.commandedSince.UnixMilli()
