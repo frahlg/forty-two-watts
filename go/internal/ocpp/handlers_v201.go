@@ -57,6 +57,7 @@ func (h *handlerV201) OnBootNotification(id string, req *provisioning.BootNotifi
 	s.vendor = vendor
 	s.model = model
 	s.serial = serial
+	s.identityCurrent = true
 	if req != nil && req.ChargingStation.FirmwareVersion != "" {
 		s.firmware = req.ChargingStation.FirmwareVersion
 	}

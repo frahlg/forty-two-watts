@@ -90,6 +90,8 @@ type chargerState struct {
 	model    string
 	serial   string
 	firmware string
+	// identityCurrent is set only by BootNotification on this connection.
+	identityCurrent bool
 	// vehicleID is the identity presented when the current/last transaction
 	// started: the RFID idTag on 1.6, or a 2.0.1 idToken — where the token
 	// type MacAddress (autocharge) or eMAID (ISO 15118) names the actual
@@ -364,6 +366,7 @@ func (h *Handler) OnConnect(id string) {
 	s := h.state(id)
 	h.mu.Lock()
 	s.online = true
+	s.identityCurrent = false
 	h.mu.Unlock()
 	h.telSuccess(id)
 	h.maybeProbeCapability(id)
@@ -378,6 +381,7 @@ func (h *Handler) OnDisconnect(id string) {
 	// reconnect is exactly when we want to ask again, so clear it here.
 	delete(h.probing, id)
 	s.online = false
+	s.identityCurrent = false
 	s.connected = false
 	s.charging = false
 	s.lastPowerW = 0
@@ -409,6 +413,7 @@ func (h *Handler) OnBootNotification(id string, req *core.BootNotificationReques
 	s.vendor = req.ChargePointVendor
 	s.model = req.ChargePointModel
 	s.serial = serial
+	s.identityCurrent = true
 	s.firmware = req.FirmwareVersion
 	h.mu.Unlock()
 	h.noteIdentity(id)

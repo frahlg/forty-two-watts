@@ -1845,6 +1845,9 @@ func main() {
 			}
 			deviceID, _ := runningDeviceID(reg, driver)
 			ocppOnline := ocppSrv != nil && ocppSrv.Handler().IsOnline(driver)
+			if ocppOnline {
+				deviceID = currentOCPPDeviceID(ocppSrv.Handler(), driver)
+			}
 			return currentEVSample(tel.Get(driver, telemetry.DerEV), health, watchdog, time.Now(), ocppOnline, deviceID)
 		}
 		// evSend routes OCPP chargers past the driver registry; loadpoints

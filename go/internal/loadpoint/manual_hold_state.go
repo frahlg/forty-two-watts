@@ -23,9 +23,9 @@ func manualHoldKey(deviceID string) string {
 }
 
 // PersistManualHold records an explicit operator action. Before first hardware
-// telemetry, retain the action in memory and bind it to the first fresh device
-// reading. Such a Start still works immediately; it does not silently gain
-// permission to charge another car after a later process restart.
+// telemetry, persist only a zero-power restriction and bind the actual action
+// to the first fresh device reading. A Start still works immediately, but
+// cannot grant positive power after restart without matching session proof.
 func (m *Manager) PersistManualHold(id string, h ManualHold, cleared bool) (err error) {
 	m.sessionMu.Lock()
 	defer m.sessionMu.Unlock()
@@ -38,16 +38,6 @@ func (m *Manager) PersistManualHold(id string, h ManualHold, cleared bool) (err 
 		m.pendingManual = map[string]pendingManualHold{}
 	}
 	m.pendingManual[id] = pendingManualHold{h, cleared}
-	if cleared && m.sessionStore != nil {
-		// A clear before telemetry must survive another immediate reboot.
-		// This barrier can only remove an old request; it grants no power.
-		if err := m.sessionStore.SaveConfig("ev_manual_clear:"+id, "pending"); err != nil {
-			return err
-		}
-		if err := m.sessionStore.SaveConfig("loadpoint_manual_hold:"+id, "{}"); err != nil {
-			return err
-		}
-	}
 	return m.flushManualHold(id)
 }
 
@@ -61,6 +51,19 @@ func (m *Manager) flushManualHold(id string) (err error) {
 	if !ok || m.sessionStore == nil {
 		return nil
 	}
+	// One atomic, name-keyed marker is authoritative until the hardware-bound
+	// write finishes. It grants no positive manual power, including for OCPP
+	// chargers that have not booted or never report a serial. No watts go here.
+	restriction := "clear"
+	if !pending.cleared && pending.hold.Persistent {
+		restriction = "unconfirmed"
+		if pending.hold.PowerW == 0 {
+			restriction = "pause"
+		}
+	}
+	if err := m.sessionStore.SaveConfig("ev_manual_unbound:"+id, restriction); err != nil {
+		return err
+	}
 	m.mu.RLock()
 	lp := m.byID[id]
 	var deviceID, sessionID string
@@ -69,6 +72,7 @@ func (m *Manager) flushManualHold(id string) (err error) {
 	}
 	m.mu.RUnlock()
 	if deviceID == "" {
+		m.setManualSaveError(id, false)
 		return nil
 	}
 	body := "{}"
@@ -97,6 +101,9 @@ func (m *Manager) flushManualHold(id string) (err error) {
 		return err
 	}
 	if err := m.sessionStore.SaveConfig("ev_manual_clear:"+id, ""); err != nil {
+		return err
+	}
+	if err := m.sessionStore.SaveConfig("ev_manual_unbound:"+id, ""); err != nil {
 		return err
 	}
 	delete(m.pendingManual, id)
@@ -128,6 +135,20 @@ func (m *Manager) RestoreManualHold(id string) (ManualHold, string) {
 	m.mu.RUnlock()
 	if m.sessionStore == nil {
 		return ManualHold{}, "none"
+	}
+	if restriction, _ := m.sessionStore.LoadConfig("ev_manual_unbound:" + id); restriction != "" {
+		if restriction == "clear" {
+			if m.pendingManual == nil {
+				m.pendingManual = map[string]pendingManualHold{}
+			}
+			m.pendingManual[id] = pendingManualHold{cleared: true}
+			_ = m.flushManualHold(id)
+			return ManualHold{}, "none"
+		}
+		if restriction == "pause" {
+			return ManualHold{Persistent: true}, "restored"
+		}
+		return ManualHold{Persistent: true}, "unconfirmed"
 	}
 	if clear, _ := m.sessionStore.LoadConfig("ev_manual_clear:" + id); clear == "pending" {
 		if m.pendingManual == nil {

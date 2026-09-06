@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"github.com/srcfl/ftw/go/internal/loadpoint"
+	"github.com/srcfl/ftw/go/internal/ocpp"
+	"github.com/srcfl/ftw/go/internal/state"
 	"github.com/srcfl/ftw/go/internal/telemetry"
 )
 
@@ -33,4 +35,14 @@ func currentEVSample(r *telemetry.DerReading, health *telemetry.DriverHealth, wa
 	}
 	return loadpoint.EVSample{PowerW: r.SmoothedW, SessionWh: d.SessionWh,
 		Connected: *d.Connected, RequestActive: active, DeviceID: deviceID, SessionID: d.SessionID}, true
+}
+
+// OCPP has no driver registry entry. Only the current adopted charger's
+// BootNotification supplies hardware identity; its dialled name is an address.
+func currentOCPPDeviceID(h *ocpp.Handler, name string) string {
+	ident, ok := h.CurrentIdentity(name)
+	if !ok || ident.Serial == "" {
+		return ""
+	}
+	return state.ResolveDeviceID(ident.Vendor, ident.Serial, "", "")
 }

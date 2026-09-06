@@ -30,7 +30,7 @@ func TestManualSaveErrorKeepsCommandAndRetriesOnFreshReading(t *testing.T) {
 			} else {
 				c.SetManualHold("garage", ManualHold{PowerW: 5520, Persistent: true})
 			}
-			attempted := action != "before_identity"
+			attempted := true
 			if (saveErr != nil) != attempted {
 				t.Fatalf("save error = %v, attempted = %v", saveErr, attempted)
 			}
@@ -106,8 +106,8 @@ func TestManualHoldBeforeIdentityBindsOnlyAfterFreshReading(t *testing.T) {
 	store := &sessionMemory{data: map[string]string{}}
 	m := sessionManager(store, "garage", "charger")
 	m.PersistManualHold("garage", ManualHold{PowerW: 4140, Persistent: true}, false)
-	if len(store.data) != 0 {
-		t.Fatal("unidentified device persisted")
+	if h, status := sessionManager(store, "garage", "charger").RestoreManualHold("garage"); status != "unconfirmed" || !h.Persistent || h.PowerW != 0 {
+		t.Fatalf("unidentified Start gained power after restart: %+v %s", h, status)
 	}
 	m.ObserveSession("garage", true, 4300, 1000, true, "easee:ABC", "session-1")
 	m = sessionManager(store, "garage", "charger")
