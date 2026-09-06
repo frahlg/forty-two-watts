@@ -325,3 +325,36 @@ func TestLoadpointsCarryManualStatus(t *testing.T) {
 		t.Fatalf("after Stop: %+v", m)
 	}
 }
+
+func TestLoadpointsReportChargerFreshnessWithoutManualHold(t *testing.T) {
+	mgr := loadpoint.NewManager()
+	mgr.Load([]loadpoint.Config{{ID: "garage", DriverName: "easee"}})
+	tel := telemetry.NewStore()
+	srv := New(&Deps{Loadpoints: mgr, Tel: tel})
+	read := func() *loadpoint.ChargerStatus {
+		t.Helper()
+		rr := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/loadpoints", nil))
+		var body struct {
+			Loadpoints []loadpoint.State `json:"loadpoints"`
+		}
+		if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		if len(body.Loadpoints) != 1 || body.Loadpoints[0].Charger == nil {
+			t.Fatalf("missing charger status: %s", rr.Body.String())
+		}
+		return body.Loadpoints[0].Charger
+	}
+	if got := read(); got.Known || got.Available {
+		t.Fatalf("no reading must stay unknown: %+v", got)
+	}
+	tel.Update("easee", telemetry.DerEV, 10800, nil, json.RawMessage(`{"is_online":false,"charging":true,"max_a":16,"reason_no_current_label":"offline"}`))
+	if got := read(); !got.Known || got.Available || got.UpdatedAtMs == 0 || got.Reason != "offline" {
+		t.Fatalf("offline cached power became current: %+v", got)
+	}
+	tel.Update("easee", telemetry.DerEV, 10800, nil, json.RawMessage(`{"is_online":true,"charging":true,"max_a":16}`))
+	if got := read(); !got.Available || got.LimitA == nil || *got.LimitA != 16 {
+		t.Fatalf("fresh report did not recover: %+v", got)
+	}
+}

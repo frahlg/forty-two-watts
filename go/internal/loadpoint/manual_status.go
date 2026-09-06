@@ -14,7 +14,8 @@ import (
 // 5–15 s to act, nothing on screen moved, and the operator removed the
 // charger to charge by hand.
 type ManualStatus struct {
-	Active bool `json:"active"`
+	Active             bool  `json:"active"`
+	ChargerUpdatedAtMs int64 `json:"charger_updated_at_ms,omitempty"`
 	// State is one of ManualSent, ManualAccepted, ManualCharging,
 	// ManualNotDrawing, ManualStalled or ManualLimited. Empty when inactive.
 	State string `json:"state,omitempty"`
@@ -60,18 +61,31 @@ const (
 	ManualStalled = "stalled"
 	// ManualLimited: a clamp the hold cannot override (main fuse, stale site
 	// meter) holds the order below what was asked.
-	ManualLimited = "limited"
+	ManualLimited     = "limited"
+	ManualUnavailable = "unavailable"
 )
+
+// ChargerStatus separates a current report from a cached reading.
+// Power and connection state cannot be treated as current when Available is false.
+type ChargerStatus struct {
+	Known       bool     `json:"known"`
+	Available   bool     `json:"available"`
+	UpdatedAtMs int64    `json:"updated_at_ms,omitempty"`
+	Reason      string   `json:"reason,omitempty"`
+	LimitA      *float64 `json:"limit_a,omitempty"`
+}
 
 // ChargerReading is what the charger's driver last reported, as far as the
 // manual status needs it. Known is false when there is no reading.
 type ChargerReading struct {
-	Known      bool
-	LimitA     float64
-	LimitKnown bool
-	Charging   bool
-	Reason     string
-	Stalled    bool
+	Known       bool
+	UpdatedAt   time.Time
+	Unavailable bool
+	LimitA      float64
+	LimitKnown  bool
+	Charging    bool
+	Reason      string
+	Stalled     bool
 }
 
 const (
@@ -121,6 +135,9 @@ func ManualStatusFrom(h ManualHold, held bool, st State, ch ChargerReading, now 
 		ChargerLimitKnown: ch.Known && ch.LimitKnown,
 		ChargerReason:     ch.Reason,
 	}
+	if !ch.UpdatedAt.IsZero() {
+		m.ChargerUpdatedAtMs = ch.UpdatedAt.UnixMilli()
+	}
 	// The ordered value is the box's last command only once a tick has run
 	// the hold branch; before that the snapshot still carries the previous
 	// automatic order, which says nothing about this hold.
@@ -149,6 +166,8 @@ func ManualStatusFrom(h ManualHold, held bool, st State, ch ChargerReading, now 
 
 	limitMatches := m.ChargerLimitKnown && m.CommandedA > 0 && math.Abs(ch.LimitA-m.CommandedA) < 1
 	switch {
+	case ch.Unavailable:
+		m.State = ManualUnavailable
 	case st.CurrentPowerW >= manualChargingFloorW || (ch.Known && ch.Charging):
 		m.State = ManualCharging
 		if clamp {

@@ -172,6 +172,8 @@ type State struct {
 	// and what the charger did with it. Populated by the API layer from the
 	// controller and the charger's reading; see ManualStatusFrom.
 	Manual ManualStatus `json:"manual"`
+	// Charger is the driver reading used for feedback in every charging mode.
+	Charger *ChargerStatus `json:"charger,omitempty"`
 
 	// BatteryBoost is the explicit, bounded home-battery-to-EV permission
 	// for this loadpoint. Populated by the API layer from Controller state.

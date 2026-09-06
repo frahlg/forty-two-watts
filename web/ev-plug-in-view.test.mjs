@@ -18,7 +18,7 @@ test('the plan view draws the planned windows on a 24 h track', () => {
   assert.match(view, /w\.start_ms/);
   assert.match(view, /w\.wh \/ 1000/);
   // A manual hold is explained instead of drawn as a plan.
-  assert.match(view, /Manual charge is running/);
+  assert.match(view, /Manual charge is selected/);
 });
 
 test('the charge-level slider writes on release, with no button', () => {
@@ -27,7 +27,7 @@ test('the charge-level slider writes on release, with no button', () => {
   assert.doesNotMatch(view, /Set current charge/);
   assert.doesNotMatch(view, /createElement\("button"\)/);
   // The refetch right after the write is what moves the plan on screen.
-  assert.match(view, /Plan updated from/);
+  assert.match(view, /Charge level saved:/);
   assert.match(view, /refreshEvModal\(\)/);
   // Polls do not snap the slider while the operator holds it.
   assert.match(view, /operatorHolds\(\)/);
@@ -45,5 +45,5 @@ test('the SoC editor left the Scheduled tab', () => {
 test('the plan view is mounted once per loadpoint and updated on polls', () => {
   assert.match(source, /evPlanEl = buildEvPlanView\(matched, d\)/);
   assert.match(source, /evPlanLpId !== matched\.id/);
-  assert.match(source, /evModalBody\.insertBefore\(evPlanEl\.el, statusTableEl\.nextSibling\)/);
+  assert.match(source, /evModalBody\.insertBefore\(evPlanEl\.el, statusTableEl\)/);
 });

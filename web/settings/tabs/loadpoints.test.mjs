@@ -128,9 +128,9 @@ describe("charger state labels", () => {
 describe("OCPP section", () => {
   it("lets the operator turn a disabled server on, rather than sending them to config.yaml", () => {
     const html = ocppSection({ enabled: false, chargers: [] }, "192.168.1.209", escHtml, [], {});
-    assert.match(html, /data-checkbox-path="ocpp\.enabled"/);
-    assert.match(html, /data-path="ocpp\.password"/);
-    assert.match(html, /ws:\/\/192\.168\.1\.209:8887/);
+    assert.match(html, /Set up OCPP/);
+    assert.doesNotMatch(html, /data-path="ocpp\.password"/);
+    assert.doesNotMatch(html, /data-checkbox-path="ocpp\.enabled"/);
   });
 
   it("offers the server settings when it is already on", () => {
@@ -159,7 +159,7 @@ describe("OCPP section", () => {
     assert.match(html, /intruder/);
     assert.match(html, /· pending/);
     assert.match(html, /ignores their telemetry/);
-    assert.match(html, /joins the site on that save/);
+    assert.match(html, /FTW saves and adds it to the site/);
   });
 
   it("shows no quarantine note when every charger is adopted", () => {

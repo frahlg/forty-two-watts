@@ -264,6 +264,16 @@ func (s *Server) decorateLoadpointsWithManual(states []loadpoint.State) {
 		}
 		states[i].Phases = phases
 		states[i].VoltageV = voltage
+		reading := chargers[states[i].DriverName]
+		status := &loadpoint.ChargerStatus{Known: reading.Known, Available: reading.Known && !reading.Unavailable, Reason: reading.Reason}
+		if !reading.UpdatedAt.IsZero() {
+			status.UpdatedAtMs = reading.UpdatedAt.UnixMilli()
+		}
+		if reading.LimitKnown {
+			limit := reading.LimitA
+			status.LimitA = &limit
+		}
+		states[i].Charger = status
 		if s.deps.LoadpointCtrl != nil {
 			h, ok := s.deps.LoadpointCtrl.GetManualHold(states[i].ID, now)
 			if ok {
@@ -293,11 +303,15 @@ func (s *Server) chargerReadings() map[string]loadpoint.ChargerReading {
 			Charging       bool     `json:"charging"`
 			Reason         string   `json:"reason_no_current_label"`
 			CommandStalled bool     `json:"command_stalled"`
+			Online         *bool    `json:"is_online"`
 		}
 		if len(rd.Data) > 0 {
 			_ = json.Unmarshal(rd.Data, &d)
 		}
-		r := loadpoint.ChargerReading{Known: true, Charging: d.Charging, Reason: d.Reason, Stalled: d.CommandStalled}
+		r := loadpoint.ChargerReading{Known: true, UpdatedAt: rd.UpdatedAt, Unavailable: d.Online != nil && !*d.Online, Charging: d.Charging, Reason: d.Reason, Stalled: d.CommandStalled}
+		if health := s.deps.Tel.DriverHealth(rd.Driver); health != nil && !health.TelemetryLive() {
+			r.Unavailable = true
+		}
 		if d.MaxA != nil {
 			r.LimitA = *d.MaxA
 			r.LimitKnown = true

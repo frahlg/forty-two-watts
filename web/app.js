@@ -65,6 +65,16 @@
     return request.then(decode).finally(function () { clearTimeout(timer); });
   }
 
+  function evWrite(path, options) {
+    var controller = new AbortController();
+    var timer = setTimeout(function () { controller.abort(); }, 30000);
+    return apiFetch(path, Object.assign({}, options, { signal: controller.signal }))
+      .catch(function (e) {
+        if (e && e.name === "AbortError") throw new Error("FTW has not confirmed the request. Check its current state before trying again");
+        throw e;
+      }).finally(function () { clearTimeout(timer); });
+  }
+
   // ---- Chart data ----
   var chartHistory = {
     grid: [],
@@ -2664,21 +2674,25 @@
   function manualStatusText(lp, d) {
     var m = lp && lp.manual;
     if (!lp || !lp.manual_active || !m || !m.active) return null;
-    if (lp.manual_release_soc > 0) {
-      return "Charging now → stops at " + Math.round(lp.manual_release_soc * 100) + " %, then back to the plan (fuse still limits).";
-    }
     var reqA = m.requested_a > 0 ? Math.round(m.requested_a) + " A" : formatW(m.requested_w || lp.manual_charge_w || 0);
     var cmdA = m.commanded_a > 0 ? Math.round(m.commanded_a) + " A" : formatW(m.commanded_w || 0);
     var since = m.since_ms > 0 ? evFmtElapsed(Date.now() - m.since_ms) : "";
     var sinceP = since ? " (" + since + ")" : "";
     var reason = m.charger_reason ? " Charger reports: " + m.charger_reason + "." : "";
+    var end = lp.manual_release_soc > 0
+      ? " Returns to the plan at the estimated " + Math.round(lp.manual_release_soc * 100) + " % target."
+      : " Continues until the car stops drawing, you return to the plan, or unplug.";
     switch (m.state) {
+      case "unavailable":
+        return "Charger status is out of date. FTW cannot confirm whether the car is charging.";
       case "charging":
-        return "Charging at " + formatW(lp.current_power_w || 0) + " — " + reqA + " requested. Runs until the car is full, Stop or unplug.";
+        return ((lp.current_power_w || 0) >= 100
+          ? "Charging at " + formatW(lp.current_power_w) + " — " + reqA + " requested."
+          : "The charger reports charging. Waiting for a power reading.") + end;
       case "sent":
-        return "Sent " + reqA + " to the charger. Waiting for it to confirm…" + sinceP;
+        return "FTW received " + reqA + ". Waiting for the charger…" + sinceP + end;
       case "accepted":
-        return "Charger set to " + cmdA + ". Waiting for the car to start drawing…" + sinceP + reason;
+        return "Charger reports a " + cmdA + " limit. Waiting for the car to start drawing…" + sinceP + reason + end;
       case "not_drawing":
         return "Charger offers " + cmdA + " but the car is not drawing" + sinceP + "." +
           (reason || " It may be full, or held by its own charge limit or schedule.");
@@ -2694,7 +2708,7 @@
         }
         return "Main fuse limits this charge to " + cmdA + " right now (" + reqA + " requested)." + sinceP;
     }
-    return "Manual charge at " + reqA + " — until the car is full, Stop or unplug.";
+    return "FTW received " + reqA + ". Waiting for charger status." + end;
   }
 
   // renderEvPlanStatus answers the question the status table can't:
@@ -2713,14 +2727,15 @@
     var winActive = lp.plan_next_start_ms > 0 && lp.plan_next_start_ms <= Date.now() && Date.now() < lp.plan_next_end_ms;
     var charging = (lp.current_power_w || 0) >= 100;
     var hasSchedule = lp.schedule && lp.schedule.soc > 0;
-    if (lp.manual_active) {
+    if (lp.charger && !lp.charger.available) {
+      text = lp.charger.known
+        ? "Charger status is out of date. FTW cannot confirm whether the car is charging."
+        : "Waiting for the charger's first status report.";
+      tone = "var(--text)";
+    } else if (lp.manual_active) {
       // The same sentence as the Manual tab, so the charger's own reason is
       // never hidden behind "manual charge is running".
-      text = lp.manual_release_soc > 0
-        ? "Charging now at " + formatW(lp.manual_charge_w || 0) + " → returns to plan at " +
-          Math.round(lp.manual_release_soc * 100) + " %."
-        : (manualStatusText(lp, d) || ("Manual charge at " + formatW(lp.manual_charge_w || 0) +
-          " — plan and PV logic are off until the car is full, Stop or unplug."));
+      text = manualStatusText(lp, d) || "Manual charge requested. Waiting for charger status.";
       if (lp.manual && (lp.manual.state === "not_drawing" || lp.manual.state === "stalled")) {
         tone = "var(--text)";
       }
@@ -2732,11 +2747,9 @@
         text += " Rate is limited by the main fuse right now.";
       }
     } else if (lp.commanded_known && lp.commanded_w > 0) {
-      text = "Charger offers " + formatW(lp.commanded_w) +
-        " but the car isn't drawing — it may be full or at its own charge limit.";
-      if (d && d.reason_no_current_label) {
-        text += " Charger reports: " + d.reason_no_current_label + ".";
-      }
+      text = "FTW requests " + formatW(lp.commanded_w) + ". Waiting for the car to draw power.";
+      var chargerReason = lp.charger && lp.charger.reason || d && d.reason_no_current_label;
+      if (chargerReason) text += " Charger reports: " + chargerReason + ".";
       tone = "var(--text)";
     } else if (lp.commanded_known && !lp.commanded_w &&
         (lp.commanded_reason === "fuse_cooldown" || lp.commanded_reason === "fuse_limit")) {
@@ -2748,7 +2761,7 @@
     } else if (lp.commanded_known && !lp.commanded_w && lp.commanded_reason === "site_meter_stale") {
       text = "Paused for safety: site-meter data is stale — charging resumes when telemetry recovers.";
       tone = "var(--text)";
-    } else if (lp.grid_deferred) {
+    } else if (lp.grid_deferred && hasSchedule) {
       // Richer than the pv_surplus_pause reason it usually co-occurs
       // with: it also says when normal planning resumes.
       text = "Waiting for tomorrow's electricity prices — until they arrive (~13:00) the car charges from PV surplus only.";
@@ -2763,7 +2776,7 @@
     } else if (lp.surplus_only) {
       text = "PV surplus only — charges when solar exceeds house load.";
     } else if (!hasSchedule) {
-      text = "Nothing will start charging: set a schedule, turn on PV only, or press Start.";
+      text = "No charging plan yet. Choose Scheduled to set a ready time, or Manual to charge now.";
       tone = "var(--text)";
     } else {
       text = "No charge window in the current plan — the target may already be reached.";
@@ -2794,9 +2807,10 @@
   var evTabsLpId = null;
   var evBoostEl = null;  // { el, update } from buildEvBoostView
   var evBoostLpId = null;
+  var evBoostDetails = null;
   var schedNeedsRebuild = false;
   var manualNeedsRebuild = false;
-  var evActiveTab = "pv"; // "pv" | "manual" | "scheduled"
+  var evActiveTab = "manual"; // "pv" | "manual" | "scheduled"
 
   // Detect whether the site has any PV driver configured. Used to hide
   // the "surplus charge from PV" option on PV-less sites where the
@@ -2812,7 +2826,12 @@
     return false;
   }
 
+  var evReading = false;
+  var evLastLp = null;
   function refreshEvModal() {
+    if (evReading) return;
+    evReading = true;
+    var requestedDriver = evModalDriver;
     // Pass driver query if known so the backend can scope the response
     // to the clicked planet (multi-EV setups). Falls back to whatever
     // the backend returns when no driver filter is honored.
@@ -2823,9 +2842,13 @@
     // to "no PV" until the dashboard's own fetchStatus lands once.
     Promise.all([
       // Local API reads.
-      apiFetch(url).then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
-      apiFetch("/api/loadpoints").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
+      boundedApiRead(url, function (r) { if (!r.ok) throw new Error("Charger status unavailable"); return r.json(); }),
+      boundedApiRead("/api/loadpoints", function (r) { if (!r.ok) throw new Error("Charging settings unavailable"); return r.json(); }),
     ]).then(function (results) {
+      if (requestedDriver !== evModalDriver || evModal.classList.contains("hidden")) return;
+      var problem = evModalBody.querySelector('.ev-read-problem');
+      if (problem) problem.remove();
+      if (statusTableEl) statusTableEl.hidden = false;
       var d = results[0];
       var lps = results[1];
       var status = lastStatusPayload;
@@ -2857,7 +2880,12 @@
       // the modal still has a header before the schedule editor.
       var freshStatus;
       if (carConnected) {
-        freshStatus = renderEvStatusTable(d);
+        freshStatus = document.createElement("details");
+        freshStatus.open = !!(statusTableEl && statusTableEl.open);
+        var detailsLabel = document.createElement("summary");
+        detailsLabel.textContent = "Charger details";
+        freshStatus.appendChild(detailsLabel);
+        freshStatus.appendChild(renderEvStatusTable(d));
       } else {
         freshStatus = document.createElement("p");
         freshStatus.style.color = "var(--text-dim)";
@@ -2894,14 +2922,35 @@
         // schedule is persistent loadpoint state, not driver state, and
         // operators routinely want to set tomorrow morning's target
         // before plugging in tonight).
-        if (!matched) {
+        if (!matched && !evModalDriver) {
           for (var j = 0; j < lps.loadpoints.length; j++) {
             if (lps.loadpoints[j].plugged_in) { matched = lps.loadpoints[j]; break; }
           }
         }
-        if (!matched) {
+        if (!matched && !evModalDriver) {
           matched = lps.loadpoints[0];
         }
+      }
+      evLastLp = matched;
+      if (matched && matched.charger && !matched.charger.available) {
+        var oldReport = document.createElement("p");
+        oldReport.textContent = matched.charger.updated_at_ms
+          ? "Last charger report: " + evFmtClock(matched.charger.updated_at_ms) + " (out of date)."
+          : "Waiting for the charger's first status report.";
+        evModalBody.replaceChild(oldReport, statusTableEl);
+        statusTableEl = oldReport;
+      }
+      var setupNote = evModalBody.querySelector(".ev-setup-note");
+      if (!matched && lps) {
+        if (!setupNote) {
+          setupNote = document.createElement("p");
+          setupNote.className = "ev-setup-note";
+          setupNote.setAttribute("role", "status");
+          evModalBody.insertBefore(setupNote, statusTableEl.nextSibling);
+        }
+        setupNote.textContent = "FTW can read this charger, but charging control is not set up. Open Settings → Chargers and add the charger.";
+      } else if (setupNote) {
+        setupNote.remove();
       }
       // Plan view: what the box will do with this car (one sentence +
       // the planned windows on a 24 h track) and the car's charge level,
@@ -2914,11 +2963,11 @@
           }
           evPlanEl = buildEvPlanView(matched, d);
           evPlanLpId = matched.id;
-          evModalBody.insertBefore(evPlanEl.el, statusTableEl.nextSibling);
+          evModalBody.insertBefore(evPlanEl.el, statusTableEl);
         } else {
           evPlanEl.update(matched, d);
           if (evPlanEl.el.parentNode !== evModalBody) {
-            evModalBody.insertBefore(evPlanEl.el, statusTableEl.nextSibling);
+            evModalBody.insertBefore(evPlanEl.el, statusTableEl);
           }
         }
       } else if (evPlanEl) {
@@ -2969,24 +3018,45 @@
           if (evBoostEl && evBoostEl.el.parentNode === evModalBody) {
             evModalBody.removeChild(evBoostEl.el);
           }
+          if (evBoostDetails && evBoostDetails.parentNode === evModalBody) evBoostDetails.remove();
           evBoostEl = buildEvBoostView(matched, status);
           evBoostLpId = matched.id;
+          evBoostDetails = document.createElement("details");
+          var boostSummary = document.createElement("summary");
+          boostSummary.textContent = "Use the home battery";
+          evBoostDetails.appendChild(boostSummary);
+          evBoostDetails.appendChild(evBoostEl.el);
         } else {
           evBoostEl.update(matched, status);
         }
-        if (evModalBody.lastChild !== evBoostEl.el) {
-          evModalBody.appendChild(evBoostEl.el);
+        if (evModalBody.lastChild !== evBoostDetails) {
+          evModalBody.appendChild(evBoostDetails);
         }
       } else if (evBoostEl) {
-        if (evBoostEl.el.parentNode === evModalBody) {
-          evModalBody.removeChild(evBoostEl.el);
-        }
+        if (evBoostDetails && evBoostDetails.parentNode === evModalBody) evBoostDetails.remove();
         evBoostEl = null;
         evBoostLpId = null;
       }
     }).catch(function () {
-      setEvModalMessage("Failed to load EV status");
-    });
+      if (requestedDriver !== evModalDriver || evModal.classList.contains("hidden")) return;
+      var problem = evModalBody.querySelector('.ev-read-problem');
+      if (!problem) {
+        problem = document.createElement("p");
+        problem.className = "ev-read-problem";
+        problem.setAttribute("role", "alert");
+        evModalBody.prepend(problem);
+      }
+      problem.textContent = "Waiting for current charger status. FTW cannot confirm whether the car is charging. Trying again…";
+      if (statusTableEl) statusTableEl.hidden = true;
+      if (evLastLp) {
+        var stale = Object.assign({}, evLastLp, {
+          charger: { known: true, available: false },
+          manual: Object.assign({}, evLastLp.manual, { state: "unavailable" }),
+        });
+        if (evTabsEl && evTabsEl.update) evTabsEl.update(stale, null);
+        if (evPlanEl) evPlanEl.update(stale, null);
+      }
+    }).finally(function () { evReading = false; });
   }
 
   // Stop reasons the controller reports for a battery boost lease, in
@@ -3157,7 +3227,7 @@
       startBtn.disabled = true;
       msg.textContent = "Starting boost…";
       // CONTROL write — strict (FIX-B): time-boxed battery boost lease.
-      apiFetch("/api/loadpoints/" + encodeURIComponent(lp.id) + "/battery_boost", {
+      evWrite("/api/loadpoints/" + encodeURIComponent(lp.id) + "/battery_boost", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -3175,7 +3245,7 @@
     stopBtn.addEventListener("click", function () {
       stopBtn.disabled = true;
       msg.textContent = "Stopping boost…";
-      apiFetch("/api/loadpoints/" + encodeURIComponent(lp.id) + "/battery_boost", { method: "DELETE" })
+      evWrite("/api/loadpoints/" + encodeURIComponent(lp.id) + "/battery_boost", { method: "DELETE" })
         .then(function (res) {
           stopBtn.disabled = false;
           if (res.ok) { msg.textContent = ""; refreshEvModal(); }
@@ -3276,6 +3346,7 @@
     slider.max = String(maxA);
     slider.step = "1";
     slider.value = String(curA);
+    slider.setAttribute("aria-label", "Charging current");
     slider.style.flex = "1";
     slider.style.accentColor = "var(--accent-e)";
 
@@ -3302,8 +3373,10 @@
     status.style.color = "var(--text-dim)";
     status.style.marginTop = "0.35rem";
     status.style.minHeight = "1em";
-    var idleText = "Charges at the slider's amps until the car is full, Stop or unplug. The plan takes over again after that.";
-    status.textContent = manualStatusText(lp, null) || idleText;
+    status.setAttribute("role", "status");
+    status.setAttribute("aria-live", "polite");
+    var idleText = "Requests this current now. Return to plan restores your schedule and solar settings.";
+    status.textContent = active ? "Changes apply when you release the slider." : idleText;
     box.appendChild(status);
 
     // Start / Stop buttons.
@@ -3314,7 +3387,8 @@
 
     var startBtn = document.createElement("button");
     startBtn.type = "button";
-    startBtn.textContent = active ? "Update" : "Charge now";
+    startBtn.textContent = "Charge now";
+    startBtn.hidden = active;
     startBtn.style.flex = "1";
     startBtn.style.padding = "0.4rem 0.6rem";
     startBtn.style.border = "none";
@@ -3326,7 +3400,7 @@
 
     var stopBtn = document.createElement("button");
     stopBtn.type = "button";
-    stopBtn.textContent = "Stop";
+    stopBtn.textContent = "Return to plan";
     stopBtn.style.flex = "1";
     stopBtn.style.padding = "0.4rem 0.6rem";
     stopBtn.style.border = "1px solid var(--line)";
@@ -3354,10 +3428,11 @@
       if (!busy) {
         stopBtn.disabled = !on;
         stopBtn.style.opacity = on ? "1" : "0.5";
-        startBtn.textContent = on ? "Update" : "Charge now";
+        startBtn.hidden = on;
+        startBtn.disabled = false;
       }
       if (busy || Date.now() < holdLineUntil) return;
-      status.textContent = manualStatusText(lastLp, lastD) || idleText;
+      status.textContent = on ? "Changes apply when you release the slider." : idleText;
     }
     function update(nextLp, d) {
       if (nextLp) lastLp = nextLp;
@@ -3374,14 +3449,17 @@
       });
     }
 
-    startBtn.addEventListener("click", function () {
+    function requestCharge() {
+      if (busy) return;
       busy = true;
+      slider.disabled = true;
+      stopBtn.disabled = true;
       startBtn.disabled = true;
       var a = parseInt(slider.value, 10) || minA;
-      status.textContent = "Sending " + a + " A to the charger…";
+      status.textContent = "Asking FTW for " + a + " A…";
       // CONTROL write — strict (FIX-B): persistent manual hold (hold_s:0)
       // with no SoC release — see the note above the slider.
-      apiFetch("/api/loadpoints/" + encodeURIComponent(lp.id) + "/manual_hold", {
+      evWrite("/api/loadpoints/" + encodeURIComponent(lp.id) + "/manual_hold", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -3391,33 +3469,46 @@
         }),
       }).then(failOn).then(function () {
         busy = false;
-        status.textContent = "Sent " + a + " A to the charger. Waiting for it to confirm…";
+        slider.disabled = false;
+        status.textContent = "FTW received " + a + " A. Waiting for the charger…";
         holdLineUntil = Date.now() + 6000;
-        manualNeedsRebuild = true; // reflect active state on next poll
+        refreshEvModal(); // read the hold and charger response without rebuilding focused inputs
       }).catch(function (e) {
         busy = false;
+        slider.disabled = false;
         startBtn.disabled = false;
-        status.textContent = "Start failed: " + ((e && e.message) || "try again") + ".";
-        holdLineUntil = Date.now() + 15000;
+        stopBtn.disabled = !lastLp.manual_active;
+        status.textContent = "Request not confirmed: " + ((e && e.message) || "try again") + ".";
+        holdLineUntil = Infinity;
       });
+    }
+    startBtn.addEventListener("click", requestCharge);
+    slider.addEventListener("change", function () {
+      if (lastLp.manual_active) requestCharge();
     });
 
     stopBtn.addEventListener("click", function () {
       busy = true;
       stopBtn.disabled = true;
-      status.textContent = "Stopping…";
-      apiFetch("/api/loadpoints/" + encodeURIComponent(lp.id) + "/manual_hold", {
+      slider.disabled = true;
+      startBtn.disabled = true;
+      status.textContent = "Returning to the plan…";
+      evWrite("/api/loadpoints/" + encodeURIComponent(lp.id) + "/manual_hold", {
         method: "DELETE",
       }).then(failOn).then(function () {
         busy = false;
-        status.textContent = "Released — back to automatic charging.";
+        slider.disabled = false;
+        startBtn.disabled = false;
+        status.textContent = "Manual charge ended. The plan decides when to charge.";
         holdLineUntil = Date.now() + 6000;
-        manualNeedsRebuild = true;
+        refreshEvModal();
       }).catch(function (e) {
         busy = false;
+        slider.disabled = false;
+        startBtn.disabled = false;
         stopBtn.disabled = false;
         status.textContent = "Stop failed: " + ((e && e.message) || "try again") + ".";
-        holdLineUntil = Date.now() + 15000;
+        holdLineUntil = Infinity;
       });
     });
 
@@ -3538,12 +3629,13 @@
     var dragging = false;
     var lastInputAt = 0;
     var noteTimer = null;
+    var socFailed = false;
     slider.addEventListener("pointerdown", function () { dragging = true; });
     ["pointerup", "pointercancel"].forEach(function (ev) {
       slider.addEventListener(ev, function () { dragging = false; });
     });
     slider.addEventListener("input", function () { lastInputAt = Date.now(); });
-    function operatorHolds() { return dragging || (Date.now() - lastInputAt) < 1500; }
+    function operatorHolds() { return dragging || socSaving || socPending !== null || (Date.now() - lastInputAt) < 1500; }
 
     function sourceNote(lpNow) {
       var src = (lpNow && lpNow.soc_source) || "";
@@ -3552,28 +3644,44 @@
       return "Estimated from energy delivered. Drag to the real value and the plan follows.";
     }
 
-    // Write on release. The handler replans before answering, so the
-    // refetch right after shows the plan built from the new value.
-    slider.addEventListener("change", function () {
-      var v = parseInt(slider.value, 10);
-      if (!isFinite(v) || v < 0 || v > 100) return;
-      if (noteTimer) { clearTimeout(noteTimer); noteTimer = null; }
-      note.textContent = "Replanning from " + v + " %…";
-      // CONTROL write — strict (FIX-B): corrects the SoC estimate and replans.
-      apiFetch("/api/loadpoints/" + encodeURIComponent(lp.id) + "/soc", {
+    var socPending = null;
+    var socSaving = false;
+    var socRevision = 0;
+    function sendSoc() {
+      if (socSaving || socPending === null) return;
+      var v = socPending;
+      var revision = socRevision;
+      socPending = null;
+      socSaving = true;
+      evWrite("/api/loadpoints/" + encodeURIComponent(lp.id) + "/soc", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ soc: v / 100 }),
       }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, body: j }; }); })
         .then(function (res) {
-          if (res.ok && res.body && res.body.ok) {
-            note.textContent = "Plan updated from " + v + " %.";
-            noteTimer = setTimeout(function () { note.textContent = sourceNote(lastLp); noteTimer = null; }, 4000);
-            refreshEvModal();
-          } else {
-            note.textContent = (res.body && res.body.error) || "Could not set the charge level.";
-          }
-        }).catch(function (e) { note.textContent = "Could not set the charge level: " + e.message; });
+          if (!(res.ok && res.body && res.body.ok)) throw new Error((res.body && res.body.error) || "FTW refused the change.");
+          if (revision !== socRevision) return;
+          note.textContent = "Charge level saved: " + v + " %." +
+            (!(lastLp.schedule && lastLp.schedule.soc > 0) && !lastLp.manual_active && !lastLp.surplus_only
+              ? " Choose Scheduled or Manual to start charging." : " Reading the updated plan…");
+          noteTimer = setTimeout(function () { noteTimer = null; if (!socFailed) note.textContent = sourceNote(lastLp); }, 6000);
+          refreshEvModal();
+        }).catch(function (e) {
+          if (revision === socRevision) { socFailed = true; note.textContent = "Charge level not confirmed: " + e.message; }
+        }).finally(function () {
+          socSaving = false;
+          if (socPending !== null) sendSoc();
+        });
+    }
+    slider.addEventListener("change", function () {
+      var v = parseInt(slider.value, 10);
+      if (!isFinite(v) || v < 0 || v > 100) return;
+      if (noteTimer) { clearTimeout(noteTimer); noteTimer = null; }
+      socRevision++;
+      socFailed = false;
+      socPending = v;
+      note.textContent = "Sending charge level: " + v + " %…";
+      sendSoc();
     });
 
     var lastLp = lp;
@@ -3583,6 +3691,7 @@
       ticks.textContent = "";
       var now = Date.now();
       var windows = (lpNow && Array.isArray(lpNow.plan_windows)) ? lpNow.plan_windows : [];
+      planWrap.hidden = windows.length === 0 || !!lpNow.manual_active;
       var shown = 0;
       var shownWh = 0;
       windows.forEach(function (w) {
@@ -3610,8 +3719,8 @@
       }
       if (lpNow && lpNow.manual_active) {
         caption.textContent = shown > 0
-          ? "Manual charge is running. The plan below resumes after it."
-          : "Manual charge is running. Nothing else is planned in the next 24 h.";
+          ? "Manual charge is selected. The plan below resumes when you return to it."
+          : "Manual charge is selected. Nothing else is planned in the next 24 h.";
       } else if (shown > 0) {
         var first = windows[0];
         caption.textContent = "Charges " + evFmtClock(first.start_ms) + "–" + evFmtClock(first.end_ms) +
@@ -3642,7 +3751,7 @@
         slider.value = String(cur);
         hdr.value.textContent = cur + "%";
       }
-      if (!noteTimer && !operatorHolds()) note.textContent = sourceNote(lpNow);
+      if (!noteTimer && !socFailed && !operatorHolds()) note.textContent = sourceNote(lpNow);
     }
 
     update(lp, d);
@@ -3704,7 +3813,7 @@
       soCb.disabled = true;
       soStatus.textContent = "Saving…";
       // CONTROL write — strict (FIX-B): loadpoint surplus-only toggle.
-      apiFetch("/api/loadpoints/" + encodeURIComponent(lp.id) + "/target", {
+      evWrite("/api/loadpoints/" + encodeURIComponent(lp.id) + "/target", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ surplus_only: soCb.checked }),
@@ -3735,7 +3844,7 @@
     // UTC minutes on save.
     var hasSched = !!(sched.soc || sched.recurring || sched.surplus_unlock_bat_soc);
     var initLocalHHMM = utcMinsToLocalHHMM(typeof sched.time_of_day_min_utc === "number" ? sched.time_of_day_min_utc : 360);
-    var initSoC = typeof sched.soc === "number" && sched.soc > 0 ? sched.soc * 100 : 50;
+    var initSoC = typeof sched.soc === "number" && sched.soc > 0 ? sched.soc * 100 : 80;
     var initRec = !!sched.recurring;
     var savedUnlock = typeof sched.surplus_unlock_bat_soc === "number" ? sched.surplus_unlock_bat_soc * 100 : 0;
     // Surplus on/off is derived from the saved threshold: > 0 ⇒ enabled.
@@ -4026,15 +4135,17 @@
     // from the new schedule. No Save button.
     var saveTimer = null;
     var saveSeq = 0;
+    var writeQueue = Promise.resolve();
     var statusTimer = null;
     function scheduleSave() {
       if (saveTimer) clearTimeout(saveTimer);
       if (statusTimer) { clearTimeout(statusTimer); statusTimer = null; }
-      status.textContent = "Saving…";
+      saveSeq++;
+      status.textContent = "Applying schedule…";
       saveTimer = setTimeout(function () { saveTimer = null; doSave(); }, 400);
     }
     function doSave() {
-      var seq = ++saveSeq;
+      var seq = saveSeq;
       var localHHMM = timeInp.value || initLocalHHMM;
       var minUTC = localHHMMToUtcMins(localHHMM);
       // Surplus checkbox gates the threshold: when off (or hidden on
@@ -4056,24 +4167,23 @@
           surplus_unlock_bat_soc: unlockVal > 0 ? unlockVal / 100 : 0,
         },
       };
-      // CONTROL write — strict (FIX-B): loadpoint schedule save.
-      apiFetch("/api/loadpoints/" + encodeURIComponent(lp.id) + "/target", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      }).then(function (r) {
-        if (!r.ok) throw new Error("HTTP " + r.status);
+      // Complete writes in order, even when the charger or planner is slow.
+      writeQueue = writeQueue.catch(function () {}).then(function () {
         if (seq !== saveSeq) return;
-        hasSched = true;
-        paintClear();
-        status.textContent = "Saved · replanning…";
-        refreshEvModal();
-        statusTimer = setTimeout(function () {
-          if (seq === saveSeq) status.textContent = "Plan updated.";
-        }, 1500);
-      }).catch(function (e) {
-        if (seq !== saveSeq) return;
-        status.textContent = "Save failed: " + e.message;
+        return evWrite("/api/loadpoints/" + encodeURIComponent(lp.id) + "/target", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        }).then(function (r) {
+          if (!r.ok) return r.json().then(function (j) { throw new Error(j.error || ("HTTP " + r.status)); });
+          if (seq !== saveSeq) return;
+          hasSched = true;
+          paintClear();
+          status.textContent = "Schedule saved. Reading the plan…";
+          refreshEvModal();
+        }).catch(function (e) {
+          if (seq === saveSeq) status.textContent = "Schedule not confirmed: " + e.message;
+        });
       });
     }
 
@@ -4093,19 +4203,20 @@
       if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
       saveSeq++;
       status.textContent = "Removing…";
-      // CONTROL write — strict (FIX-B): loadpoint schedule clear.
-      apiFetch("/api/loadpoints/" + encodeURIComponent(lp.id) + "/target", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ schedule: null }),
-      }).then(function (r) {
-        if (!r.ok) throw new Error("HTTP " + r.status);
-        status.textContent = "Schedule removed.";
-        schedNeedsRebuild = true;
-        refreshEvModal();
-      }).catch(function (e) {
-        status.textContent = "Remove failed: " + e.message;
-        clearBtn.disabled = false;
+      writeQueue = writeQueue.catch(function () {}).then(function () {
+        return evWrite("/api/loadpoints/" + encodeURIComponent(lp.id) + "/target", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ schedule: null }),
+        }).then(function (r) {
+          if (!r.ok) return r.json().then(function (j) { throw new Error(j.error || ("HTTP " + r.status)); });
+          status.textContent = "Schedule removed.";
+          schedNeedsRebuild = true;
+          refreshEvModal();
+        }).catch(function (e) {
+          status.textContent = "Removal not confirmed: " + e.message;
+          clearBtn.disabled = false;
+        });
       });
     });
 

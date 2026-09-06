@@ -14,7 +14,7 @@ test('plan-status strip renders every visibility state', () => {
   assert.match(source, /plan_total_wh \/ 1000/);
   // Charger offering power the car does not take, with the charger's
   // own reason when the driver reports one.
-  assert.match(source, /but the car isn't drawing/);
+  assert.match(source, /Waiting for the car to draw power/);
   assert.match(source, /reason_no_current_label/);
   // The silent grid-plan deferral is named instead of looking like a
   // PV-only mode nobody chose.
@@ -22,9 +22,9 @@ test('plan-status strip renders every visibility state', () => {
   assert.match(source, /grid_deferred/);
   // Manual hold names its cost: the plan is off until the car is full,
   // Stop or unplug.
-  assert.match(source, /plan and PV logic are off until the car is full, Stop or unplug/);
+  assert.match(source, /Continues until the car stops drawing/);
   // The do-nothing default is called out with the three ways out.
-  assert.match(source, /set a schedule, turn on PV only, or press Start/);
+  assert.match(source, /No charging plan yet/);
 });
 
 test('plan-status strip is the headline of the plan view', () => {

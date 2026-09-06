@@ -139,3 +139,22 @@ func TestManualStatusFrom_InactiveIsEmpty(t *testing.T) {
 		t.Errorf("inactive status must be the zero value, got %+v", got)
 	}
 }
+
+func TestManualStatusUnavailableDoesNotReuseChargingPower(t *testing.T) {
+	now := time.Now()
+	hold := ManualHold{PowerW: 11040, Persistent: true, StartedAt: now.Add(-time.Minute)}
+	st := State{Phases: 3, VoltageV: 230, CurrentPowerW: 10800}
+	reading := ChargerReading{Known: true, Unavailable: true, Charging: true, UpdatedAt: now.Add(-5 * time.Minute)}
+	got := ManualStatusFrom(hold, true, st, reading, now)
+	if got.State != ManualUnavailable {
+		t.Fatalf("old power became current charging: %+v", got)
+	}
+	if got.ChargerUpdatedAtMs != reading.UpdatedAt.UnixMilli() {
+		t.Fatalf("missing age: %+v", got)
+	}
+	reading.Unavailable = false
+	reading.UpdatedAt = now
+	if got := ManualStatusFrom(hold, true, st, reading, now); got.State != ManualCharging {
+		t.Fatalf("did not recover: %+v", got)
+	}
+}
