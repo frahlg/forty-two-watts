@@ -2863,6 +2863,7 @@
     } else {
       text = "No charge window yet for this goal. Choose Charge now if you need to charge immediately.";
     }
+    if (lp.manual_save_error) text = (text ? text + " " : "") + "This choice is active now, but could not be saved for restart. FTW is retrying.";
     if (!text) return null;
     var p = document.createElement("p");
     p.style.color = tone;

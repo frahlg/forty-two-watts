@@ -107,3 +107,18 @@ test('a lower requested current keeps actual old power visible until it arrives'
   assert.match(words, /confirm the new limit/);
   assert.match(words, /Still charging at 11000 W/);
 });
+
+
+test('failed hold persistence stays visible until the box reports recovery', () => {
+  const strip = source.slice(source.indexOf('function renderEvPlanStatus'), source.indexOf('// Keep controls mounted while polling'));
+  const render = new Function('document', 'manualStatusText', strip + '; return renderEvPlanStatus;')(
+    { createElement: () => ({ style: {} }) }, describeManual,
+  );
+  const paused = { ...lp, plugged_in: true, manual_save_error: true, manual: { ...lp.manual, state: 'paused', requested_a: 0, requested_w: 0 } };
+  assert.match(render(paused).textContent, /Paused by you/);
+  assert.match(render(paused).textContent, /This choice is active now, but could not be saved for restart. FTW is retrying/);
+  assert.doesNotMatch(render({ ...paused, manual_save_error: false }).textContent, /could not be saved/);
+  // Returning to the plan also changes the persisted choice: a failed clear
+  // must remain visible even though there is no active hold anymore.
+  assert.match(render({ ...paused, manual_active: false }).textContent, /could not be saved for restart/);
+});
