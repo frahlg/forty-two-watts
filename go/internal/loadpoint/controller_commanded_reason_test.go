@@ -144,7 +144,7 @@ func TestCommandedReasonManualHold(t *testing.T) {
 
 	c.Tick(context.Background(), base)
 
-	if w, r := commandedReason(t, c, cfg.ID); w != 11040 || r != "manual_hold" {
-		t.Errorf("hold: want (11040, manual_hold), got (%.0f, %q)", w, r)
+	if w, r := commandedReason(t, c, cfg.ID); w != 11000 || r != "charger_limit" {
+		t.Errorf("hold: want (11000, charger_limit), got (%.0f, %q)", w, r)
 	}
 }

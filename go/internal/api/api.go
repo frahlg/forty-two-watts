@@ -3457,19 +3457,17 @@ func applyManualEVHold(deps *Deps, driverName string, action string) {
 		return
 	}
 	if action == "ev_pause" {
-		deps.LoadpointCtrl.ClearManualHold(lpID)
-		slog.Info("ev manual pause — cleared manual hold, reverting to plan", "lp", lpID)
+		deps.LoadpointCtrl.SetManualHold(lpID, loadpoint.ManualHold{PowerW: 0, Persistent: true})
+		slog.Info("ev manual pause — held at zero power", "lp", lpID)
 		return
 	}
 	if maxW <= 0 {
 		maxW = 11000 // 16 A × 3φ × 230 V fallback when the LP config didn't set it
 	}
-	// 100-year expiry serves as "sticky until the operator cancels".
-	// Using time.Now() + a long delta rather than time.Time{} because
-	// SetManualHold treats zero ExpiresAt as "delete" (controller.go:653).
+	// Keep an explicit start active until the operator changes it or unplugs.
 	deps.LoadpointCtrl.SetManualHold(lpID, loadpoint.ManualHold{
-		PowerW:    maxW,
-		ExpiresAt: time.Now().Add(100 * 365 * 24 * time.Hour),
+		PowerW: maxW,
+		Persistent: true,
 	})
 	slog.Info("ev manual start/resume — installed sticky hold",
 		"lp", lpID, "action", action, "hold_w", maxW)

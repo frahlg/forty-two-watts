@@ -748,6 +748,7 @@ func main() {
 	// The planner consumes loadpoint state so battery and EV can be
 	// co-optimized in one DP.
 	lpMgr := loadpoint.NewManager()
+	lpMgr.SetSessionStore(st)
 	if len(cfg.Loadpoints) > 0 {
 		lpMgr.Load(buildLoadpointConfigs(cfg.Loadpoints))
 		slog.Info("loadpoints configured", "count", len(cfg.Loadpoints))
@@ -1518,7 +1519,10 @@ func main() {
 		mpcSvc.Loadpoints = func(slotLenMin int) []*mpc.LoadpointSpec {
 			specs := make([]*mpc.LoadpointSpec, 0)
 			for _, st := range lpMgr.States() {
-				if !st.PluggedIn {
+				if lpController != nil {
+					lpController.SetGridDeferred(st.ID, false)
+				}
+				if !st.PluggedIn || st.ChargingDeclined {
 					continue
 				}
 				// An active boost lease may carry a session-local EV target and
@@ -1828,8 +1832,11 @@ func main() {
 	// (mpc already imports loadpoint — the cycle must go this way).
 	// lpController is forward-declared earlier so the MPC spec builder
 	// closure can push grid-deferred state into it.
-	if mpcSvc != nil {
+	{
 		planAdapter := func(now time.Time) (loadpoint.Directive, bool) {
+			if mpcSvc == nil {
+				return loadpoint.Directive{}, false
+			}
 			d, ok := mpcSvc.SlotDirectiveAt(now)
 			if !ok {
 				return loadpoint.Directive{}, false
@@ -1837,31 +1844,16 @@ func main() {
 			return d.LoadpointDirective(), true
 		}
 		telAdapter := func(driver string) (loadpoint.EVSample, bool) {
-			r := tel.Get(driver, telemetry.DerEV)
-			if r == nil {
-				return loadpoint.EVSample{}, false
+			cfgMu.RLock()
+			watchdog := time.Duration(cfg.Site.WatchdogTimeoutS) * time.Second
+			cfgMu.RUnlock()
+			health := tel.DriverHealth(driver)
+			if health != nil && health.WatchdogTimeoutOverride > 0 {
+				watchdog = health.WatchdogTimeoutOverride
 			}
-			// RequestActive defaults to true so drivers that
-			// don't emit the field keep their pre-existing
-			// behaviour — only drivers that explicitly emit
-			// request_active=false will trip the
-			// session-completion detector.
-			d := struct {
-				Connected     bool    `json:"connected"`
-				SessionWh     float64 `json:"session_wh"`
-				RequestActive *bool   `json:"request_active"`
-			}{}
-			_ = json.Unmarshal(r.Data, &d)
-			reqActive := true
-			if d.RequestActive != nil {
-				reqActive = *d.RequestActive
-			}
-			return loadpoint.EVSample{
-				PowerW:        r.SmoothedW,
-				SessionWh:     d.SessionWh,
-				Connected:     d.Connected,
-				RequestActive: reqActive,
-			}, true
+			deviceID, _ := runningDeviceID(reg, driver)
+			ocppOnline := ocppSrv != nil && ocppSrv.Handler().IsOnline(driver)
+			return currentEVSample(tel.Get(driver, telemetry.DerEV), health, watchdog, time.Now(), ocppOnline, deviceID)
 		}
 		// evSend routes OCPP chargers past the driver registry; loadpoints
 		// stay unaware of the difference.
@@ -2482,12 +2474,10 @@ func main() {
 		SelfUpdate:       selfUpdater,
 		OptimizerUpdate:  optimizerUpdater,
 		Restart: func(reqCtx context.Context) error {
-			// Prefer the docker-compose sidecar path when wired up: the
-			// updater container does docker compose up -d --force-recreate,
-			// which is the same code path post-update restarts use, so
-			// there's only one battle-tested escape hatch in production.
+			// Restart the existing container through the updater.
+			// An old updater refuses this action before touching Docker.
 			if selfUpdater != nil {
-				if err := selfUpdater.Trigger(reqCtx, "restart", ""); err == nil {
+				if err := selfUpdater.TriggerRestart(reqCtx); err == nil {
 					slog.Info("restart: dispatched via updater sidecar")
 					return nil
 				} else {

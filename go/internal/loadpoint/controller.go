@@ -408,6 +408,7 @@ type ManualHold struct {
 	ReleaseAtSoC float64
 
 	// StartedAt is when the operator installed the hold. The API keeps it
+	UpdatedAt time.Time `json:"updated_at,omitempty"`
 	// across an Update of the amps, so the manual tab can say how long the
 	// charge has been asked for. SetManualHold fills a zero value.
 	StartedAt time.Time
@@ -439,6 +440,8 @@ type EVSample struct {
 	SessionWh     float64
 	Connected     bool
 	RequestActive bool
+	DeviceID      string
+	SessionID     string
 }
 
 // PlanFunc returns the current-slot directive for now, or (_, false)
@@ -1307,6 +1310,9 @@ func (c *Controller) SetManualHold(id string, h ManualHold) {
 	if c == nil {
 		return
 	}
+	if h.PowerW > 0 && c.manager != nil {
+		c.manager.RetryCharging(id)
+	}
 	c.holdMu.Lock()
 	if c.holds == nil {
 		c.holds = map[string]ManualHold{}
@@ -1319,6 +1325,7 @@ func (c *Controller) SetManualHold(id string, h ManualHold) {
 		if h.StartedAt.IsZero() {
 			h.StartedAt = time.Now()
 		}
+		h.UpdatedAt = time.Now()
 		c.holds[id] = h
 	}
 	saver := c.manualHoldSaver
@@ -1506,7 +1513,7 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config, d
 	enteringSurplusPaused, _ := c.getSurplusPause(lpCfg.ID)
 	selfWithheld := surplusOn && enteringSurplusPaused
 	c.manager.SetSurplusWithheld(lpCfg.ID, selfWithheld)
-	c.manager.Observe(lpCfg.ID, sample.Connected, sample.PowerW, sample.SessionWh, sample.RequestActive)
+	c.manager.ObserveSession(lpCfg.ID, sample.Connected, sample.PowerW, sample.SessionWh, sample.RequestActive, sample.DeviceID, sample.SessionID)
 	c.evaluateBatteryBoost(lpCfg.ID, now, sample.Connected, dispatchAllowed)
 	if !sample.Connected {
 		c.resetSurplusSession(lpCfg.ID)
@@ -1574,7 +1581,7 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config, d
 	// "throttled to 0" (RequestActive); others leave it true and never
 	// auto-release. Done before the dispatch branch below so the freed
 	// tick falls straight through to automatic (surplus/plan) dispatch.
-	if _, held := c.GetManualHold(lpCfg.ID, now); held {
+	if hold, held := c.GetManualHold(lpCfg.ID, now); held && hold.PowerW > 0 {
 		if !sample.RequestActive {
 			if c.manualHoldIdleFor(lpCfg.ID, now) >= SessionCompletionTimeout {
 				slog.Info("loadpoint manual hold auto-released — vehicle stopped requesting current (full/declined)",
@@ -1611,7 +1618,10 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config, d
 		// zero/empty fields fall through to the normal defaults so a
 		// minimal hold (just `power_w`) still carries the per-phase
 		// fuse clamp inputs the driver needs to stay safe.
-		holdW := hold.PowerW
+		holdW := clampManualPower(lpCfg, hold, c.siteFuse())
+		if holdW != hold.PowerW {
+			cmdReason = "charger_limit"
+		}
 		// An explicit manual hold ("Start" / amp slider) takes priority
 		// over surplus_only: when the operator deliberately pins a charge
 		// rate we honour it even if that means importing from the grid.
@@ -1833,7 +1843,13 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config, d
 		}
 	}
 
+	// A manual diagnostic may lower a site limit, but never replace the
+	// installation's voltage, phase count or fuse with a larger offer.
+	c.applyInstallationLimits(cmd)
 	c.applyPerPhaseFuseClamp(lpCfg, cmd)
+	if applyCurrentCeiling(cmd) {
+		cmdReason = "fuse_limit"
+	}
 	// Tell the manager what was ordered, after every clamp has spoken.
 	// The interruption latch reads this to keep a pause the box chose —
 	// plan slot, Stop hold, surplus clamp — from ever reading as a

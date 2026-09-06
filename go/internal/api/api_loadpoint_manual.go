@@ -50,7 +50,7 @@ type manualHoldRequest struct {
 // confirm what's installed. Returned by POST and GET.
 type manualHoldResponse struct {
 	Active          bool    `json:"active"`
-	PowerW          float64 `json:"power_w,omitempty"`
+	PowerW          float64 `json:"power_w"`
 	PhaseMode       string  `json:"phase_mode,omitempty"`
 	PhaseSplitW     float64 `json:"phase_split_w,omitempty"`
 	MinPhaseHoldS   int     `json:"min_phase_hold_s,omitempty"`
@@ -110,8 +110,12 @@ func (s *Server) handleLoadpointManualHold(w http.ResponseWriter, r *http.Reques
 		})
 		return
 	}
-	if req.PowerW < 0 {
-		writeJSON(w, 400, map[string]string{"error": "power_w must be >= 0"})
+	if req.PowerW < 0 || req.PhaseSplitW < 0 || req.Voltage < 0 || req.MaxAmpsPerPhase < 0 || req.MinPhaseHoldS < 0 {
+		writeJSON(w, 400, map[string]string{"error": "power and optional phase limits must be >= 0"})
+		return
+	}
+	if req.SitePhases != 0 && req.SitePhases != 1 && req.SitePhases != 3 {
+		writeJSON(w, 400, map[string]string{"error": "site_phases must be 1 or 3 when set"})
 		return
 	}
 	switch req.PhaseMode {

@@ -552,6 +552,11 @@ func TestAMalformedLoadpointCommandIsRefused(t *testing.T) {
 		args map[string]any
 		arg  string
 	}{
+		{"text power", OpLoadpointHold, map[string]any{"id": "lp1", "power_w": "6000"}, "power_w"},
+		{"text limit", OpLoadpointHold, map[string]any{"id": "lp1", "power_w": 4140, "max_amps_per_phase": "32"}, "max_amps_per_phase"},
+		{"negative voltage", OpLoadpointHold, map[string]any{"id": "lp1", "power_w": 4140, "voltage": -230}, "voltage"},
+		{"fractional phase hold", OpLoadpointHold, map[string]any{"id": "lp1", "power_w": 4140, "min_phase_hold_s": 1.5}, "min_phase_hold_s"},
+		{"invalid phases", OpLoadpointHold, map[string]any{"id": "lp1", "power_w": 4140, "site_phases": 2}, "site_phases"},
 		{"negative power", OpLoadpointHold,
 			map[string]any{"id": "lp1", "power_w": -100, "hold_s": 0}, "power_w"},
 		{"hold beyond the cap", OpLoadpointHold,

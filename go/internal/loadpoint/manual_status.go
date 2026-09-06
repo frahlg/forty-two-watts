@@ -27,9 +27,9 @@ type ManualStatus struct {
 	SinceMs int64 `json:"since_ms,omitempty"`
 	// RequestedW is what the operator asked for; CommandedW is what the box
 	// ordered after every clamp. They differ while the main fuse limits.
-	RequestedW float64 `json:"requested_w,omitempty"`
+	RequestedW float64 `json:"requested_w"`
 	CommandedW float64 `json:"commanded_w,omitempty"`
-	RequestedA float64 `json:"requested_a,omitempty"`
+	RequestedA float64 `json:"requested_a"`
 	CommandedA float64 `json:"commanded_a,omitempty"`
 	// ChargerLimitA is the current limit the charger itself reports, when
 	// its driver exposes one (Easee: max_a). ChargerLimitKnown separates a
@@ -63,6 +63,8 @@ const (
 	// meter) holds the order below what was asked.
 	ManualLimited     = "limited"
 	ManualUnavailable = "unavailable"
+	ManualPausing     = "pausing"
+	ManualPaused      = "paused"
 )
 
 // ChargerStatus separates a current report from a cached reading.
@@ -106,7 +108,7 @@ const (
 // before the hold was installed and says nothing about it.
 func holdClampReason(reason string) bool {
 	switch reason {
-	case "fuse_limit", "fuse_cooldown", "site_meter_stale":
+	case "fuse_limit", "fuse_cooldown", "site_meter_stale", "charger_limit":
 		return true
 	}
 	return false
@@ -150,6 +152,9 @@ func ManualStatusFrom(h ManualHold, held bool, st State, ch ChargerReading, now 
 	m.CommandedA = toA(ordered)
 
 	since := h.StartedAt
+	if h.UpdatedAt.After(since) {
+		since = h.UpdatedAt
+	}
 	if !h.StartedAt.IsZero() {
 		m.StartedAtMs = h.StartedAt.UnixMilli()
 	}
@@ -164,17 +169,37 @@ func ManualStatusFrom(h ManualHold, held bool, st State, ch ChargerReading, now 
 		elapsed = now.Sub(since)
 	}
 
-	limitMatches := m.ChargerLimitKnown && m.CommandedA > 0 && math.Abs(ch.LimitA-m.CommandedA) < 1
+	if h.PowerW == 0 {
+		m.State = ManualPausing
+		switch {
+		case ch.Unavailable:
+			m.State = ManualUnavailable
+		case st.CommandedKnown && st.CommandedReason == "manual_hold" && st.CommandedW == 0 &&
+			!ch.UpdatedAt.IsZero() && !ch.UpdatedAt.Before(since) &&
+			ch.Known && !ch.Charging && st.CurrentPowerW < manualChargingFloorW &&
+			(!ch.LimitKnown || ch.LimitA < 0.1):
+			m.State = ManualPaused
+		case elapsed >= manualConfirmTimeout:
+			m.State = ManualStalled
+		}
+		return m
+	}
+
+	limitMatches := m.ChargerLimitKnown && m.CommandedA >= 0 && math.Abs(ch.LimitA-m.CommandedA) < 1
 	switch {
 	case ch.Unavailable:
 		m.State = ManualUnavailable
+	case ch.Known && ch.Stalled:
+		m.State = ManualStalled
+	case m.ChargerLimitKnown && !limitMatches && elapsed >= manualConfirmTimeout:
+		m.State = ManualStalled
+	case (m.ChargerLimitKnown && !limitMatches) || (!ch.UpdatedAt.IsZero() && ch.UpdatedAt.Before(since)):
+		m.State = ManualSent
 	case st.CurrentPowerW >= manualChargingFloorW || (ch.Known && ch.Charging):
 		m.State = ManualCharging
 		if clamp {
 			m.LimitReason = st.CommandedReason
 		}
-	case ch.Known && ch.Stalled:
-		m.State = ManualStalled
 	case clamp:
 		m.State = ManualLimited
 		m.LimitReason = st.CommandedReason
