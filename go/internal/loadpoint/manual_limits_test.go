@@ -63,3 +63,33 @@ func TestCurrentCeilingCannotTurnZeroFuseBudgetIntoDefaultAmps(t *testing.T) {
 		}
 	}
 }
+
+// A fuse budget is a ceiling, including between steps and below the minimum.
+// The dispatch may pause; it must never increase an already reduced request.
+func TestFusePowerBudgetNeverRoundsUp(t *testing.T) {
+	for _, tc := range []struct {
+		name                     string
+		want, cap, max, expected float64
+		steps                    []float64
+	}{
+		{"below minimum", 11000, 3000, 11000, 0, []float64{0, 4140, 6900, 11000}},
+		{"between steps", 11000, 6000, 11000, 4140, []float64{0, 4140, 6900, 11000}},
+		{"no steps below minimum", 11000, 3000, 11000, 0, nil},
+		{"continuous budget", 11000, 5000, 11000, 5000, nil},
+		{"invalid step above rating", 11000, 8000, 7000, 6900, []float64{0, 4140, 6900, 8000}},
+		{"reduced one phase request", 2000, 1500, 11000, 0, []float64{0, 4140, 6900, 11000}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := holdLoadpoint()
+			cfg.MinChargeW = 4140
+			cfg.MaxChargeW = tc.max
+			cfg.AllowedStepsW = tc.steps
+			c := newTestController(t, []Config{cfg}, nil, map[string]EVSample{}, &fakeSender{})
+			c.SetFuseEVMax(func() (float64, bool) { return tc.cap, true })
+			got, _ := c.applyFuseClampAndCooldown(time.Now(), cfg, tc.want)
+			if got != tc.expected || got > tc.cap || got > tc.want {
+				t.Fatalf("want %v cap %v: sent %v, expected %v", tc.want, tc.cap, got, tc.expected)
+			}
+		})
+	}
+}

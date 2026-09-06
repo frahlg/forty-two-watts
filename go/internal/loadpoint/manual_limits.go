@@ -5,13 +5,6 @@ import "math"
 // A manual selection is a ceiling. Never round it up to a larger step or
 // let it bypass the configured charger's rating.
 func clampManualPower(cfg Config, hold ManualHold, site SiteFuse) float64 {
-	want := hold.PowerW
-	if math.IsNaN(want) || math.IsInf(want, 0) || want <= 0 {
-		return 0
-	}
-	if cfg.MaxChargeW > 0 && want > cfg.MaxChargeW {
-		want = cfg.MaxChargeW
-	}
 	floor := cfg.MinChargeW
 	mode := hold.PhaseMode
 	if mode == "" {
@@ -20,19 +13,7 @@ func clampManualPower(cfg Config, hold ManualHold, site SiteFuse) float64 {
 	if (mode == "1p" || mode == "auto") && site.Phases() == 3 {
 		floor /= 3
 	}
-	if want < floor {
-		return 0
-	}
-	if len(cfg.AllowedStepsW) == 0 {
-		return want
-	}
-	best := 0.0
-	for _, step := range cfg.AllowedStepsW {
-		if step >= floor && step <= want && step > best {
-			best = step
-		}
-	}
-	return best
+	return floorChargeW(hold.PowerW, floor, cfg.MaxChargeW, cfg.AllowedStepsW)
 }
 
 func (c *Controller) applyInstallationLimits(cmd map[string]any) {

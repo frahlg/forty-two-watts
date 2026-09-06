@@ -833,7 +833,7 @@ func (c *Controller) applyFuseClampAndCooldown(now time.Time, lpCfg Config, want
 		return wantW, ""
 	}
 	// Need to ramp down. Snap to the largest allowed step ≤ cap.
-	snapped := SnapChargeW(cap, lpCfg.MinChargeW, lpCfg.MaxChargeW, lpCfg.AllowedStepsW)
+	snapped := floorChargeW(cap, lpCfg.MinChargeW, lpCfg.MaxChargeW, lpCfg.AllowedStepsW)
 	if snapped > 0 && snapped >= lpCfg.MinChargeW {
 		slog.Info("loadpoint fuse-clamp: ramped down",
 			"lp", lpCfg.ID, "want_w", wantW, "fuse_cap_w", cap, "snapped_w", snapped)

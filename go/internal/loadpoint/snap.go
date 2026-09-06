@@ -47,6 +47,29 @@ func SnapChargeW(want, min, max float64, steps []float64) float64 {
 	return best
 }
 
+// floorChargeW treats want as a hard ceiling. No feasible step means pause.
+func floorChargeW(want, min, max float64, steps []float64) float64 {
+	if math.IsNaN(want) || math.IsInf(want, 0) || want <= 0 {
+		return 0
+	}
+	if max > 0 && want > max {
+		want = max
+	}
+	if want < min {
+		return 0
+	}
+	if len(steps) == 0 {
+		return want
+	}
+	best := 0.0
+	for _, step := range steps {
+		if step >= min && step <= want && step > best {
+			best = step
+		}
+	}
+	return best
+}
+
 // PhaseFor returns the phase count chosen for wantW given the mode
 // and split threshold (W). "auto" below split → 1Φ, above → 3Φ.
 // Unknown modes fall back to 3Φ for safety (the pre-switching
