@@ -64,6 +64,8 @@ import (
 	"github.com/srcfl/ftw/go/internal/prices"
 	"github.com/srcfl/ftw/go/internal/proxy"
 	"github.com/srcfl/ftw/go/internal/pvmodel"
+	"github.com/srcfl/ftw/go/internal/pvperf"
+	"github.com/srcfl/ftw/go/internal/roofmodel"
 	"github.com/srcfl/ftw/go/internal/selftune"
 	"github.com/srcfl/ftw/go/internal/selfupdate"
 	"github.com/srcfl/ftw/go/internal/state"
@@ -856,6 +858,12 @@ func main() {
 	// Assigned where the OCPP server starts (optional; nil-guarded).
 	var ocppSrv *ocpp.Server
 
+	// Forward-declared so the reload callback can hand hot-edited roofmodel
+	// config to the service. Geotorget credentials arrive through Settings
+	// while the process is running; a boot-time snapshot stranded them until
+	// a restart nothing announced. Assigned later (roofmodel.FromConfig).
+	var roofModelSvc *roofmodel.Service
+
 	// ---- Config hot-reload watcher ----
 	// Named because two callers share it: the fsnotify watcher created
 	// below and POST /api/config (Deps.ConfigApplier), so a config saved
@@ -962,6 +970,11 @@ func main() {
 				PhaseCnt: newCfg.Fuse.Phases,
 			})
 		}
+
+		// Roof-derivation module: swap in the fresh config so the enable
+		// toggle and Geotorget credentials saved through the API work on
+		// the next click. Nil-receiver safe until the service is built.
+		roofModelSvc.Reconfigure(newCfg.RoofModel)
 
 		// Site-meter swap propagation. The configreload watcher
 		// already updated ctrl.SiteMeterDriver under ctrlMu before
@@ -1177,6 +1190,31 @@ func main() {
 		defer forecastSvc.Stop()
 		slog.Info("forecast service started", "provider", forecastSvc.Provider.Name(),
 			"lat", forecastSvc.Lat, "lon", forecastSvc.Lon, "rated_pv_w", ratedPVW)
+	}
+
+	// ---- Start PV performance scoring (optional) ----
+	// Nightly backfill of SMHI STRÅNG historical irradiance + expected-vs-actual
+	// PV scoring. Nil when the site has no PV geometry to score against. This is
+	// read-only with respect to control: it only fetches weather data and writes
+	// the irradiance_history + pv_performance_daily tables.
+	// Optional roof-geometry module: always constructed (so a hot-reloaded
+	// enable works without a restart) but inert until config enables it, and
+	// stateless — it only runs when an operator asks for a derive.
+	roofModelSvc = roofmodel.FromConfig(cfg.RoofModel)
+
+	pvPerfSvc := pvperf.FromConfig(cfg.Weather, ratedPVW, st,
+		"ftw/"+Version+" github.com/srcfl/ftw")
+	if pvPerfSvc != nil {
+		pvPerfSvc.Start(ctx)
+		defer pvPerfSvc.Stop()
+		// Close the loop: measured performance calibrates the forward
+		// forecast. The hook is read at fetch time, so it starts correcting
+		// as soon as enough days are scored — no restart needed.
+		if forecastSvc != nil {
+			forecastSvc.Calibration = pvPerfSvc.CalibrationFactor
+		}
+		slog.Info("pv performance scoring started",
+			"lat", pvPerfSvc.Lat, "lon", pvPerfSvc.Lon, "arrays", len(pvPerfSvc.Arrays))
 	}
 
 	// ---- Start PV digital twin (optional, requires weather config) ----
@@ -2414,6 +2452,8 @@ func main() {
 		SnapshotDir:      filepath.Join(filepath.Dir(statePath), "snapshots"),
 		Prices:           priceSvc,
 		Forecast:         forecastSvc,
+		PVPerf:           pvPerfSvc,
+		RoofModel:        roofModelSvc,
 		MPC:              mpcSvc,
 		PlannerPrefs:     plannerPrefs,
 		PVModel:          pvSvc,
