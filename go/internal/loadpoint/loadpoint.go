@@ -122,6 +122,7 @@ func (f SiteFuse) Phases() int {
 // it under lock.
 type State struct {
 	ManualRestoreUnconfirmed bool    `json:"manual_restore_unconfirmed"`
+	ManualSaveError          bool    `json:"manual_save_error"`
 	VehicleCapacityWh        float64 `json:"vehicle_capacity_wh"`
 	CapacitySource           string  `json:"capacity_source"`
 	// ChargingDeclined is a sustained vehicle-side refusal, not a battery level.
@@ -326,6 +327,7 @@ type loadpointRuntime struct {
 	configGeneration         uint64
 	sessionGeneration        uint64
 	manualRestoreUnconfirmed bool
+	manualSaveError          bool
 	sessionDeviceID          string
 	sessionID                string
 	socRetention             string
@@ -538,6 +540,7 @@ func (m *Manager) Load(cfgs []Config) {
 				lp.socRetention = existing.socRetention
 				lp.completionNotified = existing.completionNotified
 				lp.manualRestoreUnconfirmed = existing.manualRestoreUnconfirmed
+				lp.manualSaveError = existing.manualSaveError
 			} else {
 				lp.pluggedIn = false
 				lp.currentSoC = 0
@@ -1076,6 +1079,7 @@ func (lp *loadpointRuntime) snapshot() State {
 	sort.Float64s(steps)
 	st := State{
 		ManualRestoreUnconfirmed: lp.manualRestoreUnconfirmed,
+		ManualSaveError:          lp.manualSaveError,
 		VehicleCapacityWh:        lp.VehicleCapacityWh,
 		CapacitySource:           "configured",
 		ID:                       lp.ID,

@@ -5,6 +5,70 @@ import (
 	"time"
 )
 
+func TestManualSaveErrorKeepsCommandAndRetriesOnFreshReading(t *testing.T) {
+	for _, action := range []string{"start", "clear", "before_identity"} {
+		t.Run(action, func(t *testing.T) {
+			store := &sessionMemory{data: map[string]string{}}
+			m := sessionManager(store, "garage", "charger")
+			if action != "before_identity" {
+				m.ObserveSession("garage", true, 4300, 1000, true, "easee:A", "session-1")
+			}
+			c := NewController(m, nil, nil, nil)
+			var saveErr error
+			c.SetManualHoldSaver(func(id string, h ManualHold, cleared bool) {
+				saveErr = m.PersistManualHold(id, h, cleared)
+			})
+			if action == "clear" {
+				c.SetManualHold("garage", ManualHold{PowerW: 4140, Persistent: true})
+				if saveErr != nil {
+					t.Fatal(saveErr)
+				}
+			}
+			store.fail = true
+			if action == "clear" {
+				c.ClearManualHold("garage")
+			} else {
+				c.SetManualHold("garage", ManualHold{PowerW: 5520, Persistent: true})
+			}
+			attempted := action != "before_identity"
+			if (saveErr != nil) != attempted {
+				t.Fatalf("save error = %v, attempted = %v", saveErr, attempted)
+			}
+			if s, _ := m.State("garage"); s.ManualSaveError != attempted {
+				t.Fatalf("save failure not reported: %+v", s)
+			}
+			// A later telemetry flush can fail too, including the first write
+			// of an explicit request received before hardware was known.
+			m.ObserveSession("garage", true, 4300, 1100, true, "easee:A", "session-1")
+			if s, _ := m.State("garage"); !s.ManualSaveError {
+				t.Fatal("retry failure not reported")
+			}
+			if h, ok := c.GetManualHold("garage", time.Now()); (action == "clear" && ok) ||
+				(action != "clear" && (!ok || h.PowerW != 5520)) {
+				t.Fatalf("disk failure changed the current command: %+v %v", h, ok)
+			}
+			// Reloading settings cannot hide an outstanding failed save.
+			m.Load([]Config{{ID: "garage", DriverName: "charger", VehicleCapacityWh: 60000}})
+			if s, _ := m.State("garage"); !s.ManualSaveError {
+				t.Fatal("config reload hid the failed save")
+			}
+			store.fail = false
+			m.ObserveSession("garage", true, 4300, 1200, true, "easee:A", "session-1")
+			if s, _ := m.State("garage"); s.ManualSaveError {
+				t.Fatal("successful retry did not clear the warning")
+			}
+			// Prove the retry reached storage rather than only clearing a flag.
+			restarted := sessionManager(store, "garage", "charger")
+			restarted.ObserveSession("garage", true, 4300, 1200, true, "easee:A", "session-1")
+			h, status := restarted.RestoreManualHold("garage")
+			if (action == "clear" && status != "none") ||
+				(action != "clear" && (status != "restored" || h.PowerW != 5520)) {
+				t.Fatalf("retried command did not survive restart: %+v %s", h, status)
+			}
+		})
+	}
+}
+
 func TestManualHoldRestoreRequiresHardwareAndActiveSession(t *testing.T) {
 	store := &sessionMemory{data: map[string]string{}}
 	m := sessionManager(store, "garage", "charger")

@@ -26,9 +26,14 @@ func manualHoldKey(deviceID string) string {
 // telemetry, retain the action in memory and bind it to the first fresh device
 // reading. Such a Start still works immediately; it does not silently gain
 // permission to charge another car after a later process restart.
-func (m *Manager) PersistManualHold(id string, h ManualHold, cleared bool) error {
+func (m *Manager) PersistManualHold(id string, h ManualHold, cleared bool) (err error) {
 	m.sessionMu.Lock()
 	defer m.sessionMu.Unlock()
+	defer func() {
+		if err != nil {
+			m.setManualSaveError(id, true)
+		}
+	}()
 	if m.pendingManual == nil {
 		m.pendingManual = map[string]pendingManualHold{}
 	}
@@ -46,7 +51,12 @@ func (m *Manager) PersistManualHold(id string, h ManualHold, cleared bool) error
 	return m.flushManualHold(id)
 }
 
-func (m *Manager) flushManualHold(id string) error {
+func (m *Manager) flushManualHold(id string) (err error) {
+	defer func() {
+		if err != nil {
+			m.setManualSaveError(id, true)
+		}
+	}()
 	pending, ok := m.pendingManual[id]
 	if !ok || m.sessionStore == nil {
 		return nil
@@ -90,7 +100,16 @@ func (m *Manager) flushManualHold(id string) error {
 		return err
 	}
 	delete(m.pendingManual, id)
+	m.setManualSaveError(id, false)
 	return nil
+}
+
+func (m *Manager) setManualSaveError(id string, value bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if lp := m.byID[id]; lp != nil {
+		lp.manualSaveError = value
+	}
 }
 
 // RestoreManualHold returns pending until hardware identity is known. A

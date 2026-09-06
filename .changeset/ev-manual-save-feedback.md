@@ -2,4 +2,4 @@
 "ftw": patch
 ---
 
-Show when a charging choice is active but could not be saved for restart. The notice clears when the box confirms its retry succeeded.
+Show when a charging choice applies now but could not be saved for restart. Retry its save when fresh charger data arrives and clear the message only after storage confirms it.
