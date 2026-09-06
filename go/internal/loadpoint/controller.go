@@ -410,11 +410,10 @@ type ManualHold struct {
 	// release target.
 	ReleaseAtSoC float64
 
-	// StartedAt is when the operator installed the hold. The API keeps it
-	UpdatedAt time.Time `json:"updated_at,omitempty"`
-	// across an Update of the amps, so the manual tab can say how long the
-	// charge has been asked for. SetManualHold fills a zero value.
+	// StartedAt remains the first request time when the current changes.
 	StartedAt time.Time
+	// UpdatedAt identifies the latest choice, including a current change.
+	UpdatedAt time.Time `json:"updated_at,omitempty"`
 }
 
 // Directive is the loadpoint-relevant slice of mpc.SlotDirective.
