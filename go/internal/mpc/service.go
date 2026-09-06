@@ -209,6 +209,7 @@ type Service struct {
 	// the final guard for work that does not stop promptly on context cancel.
 	latestReplanGeneration    uint64 // guarded by mu
 	publishedReplanGeneration uint64
+	failedReplanGeneration    uint64
 	activeReplanCancel        context.CancelFunc
 	queuedReplan              *replanRequest
 	requestedReplanRunning    bool
@@ -524,6 +525,7 @@ func (s *Service) SlotDirectiveAt(now time.Time) (SlotDirective, bool) {
 	// plan under one lock so a concurrent replan cannot mix generations.
 	s.mu.RLock()
 	p := s.last
+	failedReplacement := s.failedReplanGeneration > s.publishedReplanGeneration
 	lpID := s.lastLoadpointID
 	params := s.lastParams
 	if params.Mode == "" {
@@ -532,7 +534,7 @@ func (s *Service) SlotDirectiveAt(now time.Time) (SlotDirective, bool) {
 		params = s.Defaults
 	}
 	s.mu.RUnlock()
-	if p == nil {
+	if p == nil || failedReplacement {
 		return SlotDirective{}, false
 	}
 	if time.Since(time.UnixMilli(p.GeneratedAtMs)) > MaxPlanAge {
@@ -723,12 +725,13 @@ func (s *Service) SlotAt(now time.Time) (string, float64, string, bool) {
 	}
 	s.mu.RLock()
 	p := s.last
+	failedReplacement := s.failedReplanGeneration > s.publishedReplanGeneration
 	params := s.lastParams
 	if params.Mode == "" {
 		params = s.Defaults
 	}
 	s.mu.RUnlock()
-	if p == nil {
+	if p == nil || failedReplacement {
 		return "", 0, "", false
 	}
 	if time.Since(time.UnixMilli(p.GeneratedAtMs)) > MaxPlanAge {
@@ -1290,6 +1293,12 @@ func (s *Service) finishReplan(request replanRequest) {
 	s.mu.Lock()
 	if request.generation == s.latestReplanGeneration {
 		s.activeReplanCancel = nil
+		if s.publishedReplanGeneration != request.generation {
+			// Keep the last plan during a normal recalculation, but stop using
+			// it when the replacement fails. A later retry must publish a new
+			// plan before dispatch resumes; queuing work alone is not enough.
+			s.failedReplanGeneration = request.generation
+		}
 	}
 	s.mu.Unlock()
 }
