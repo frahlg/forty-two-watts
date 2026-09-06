@@ -168,6 +168,10 @@ type State struct {
 	ManualActive     bool    `json:"manual_active"`
 	ManualChargeW    float64 `json:"manual_charge_w,omitempty"`
 	ManualReleaseSoC float64 `json:"manual_release_soc,omitempty"`
+	// Manual is the live account of the hold: what was ordered, since when,
+	// and what the charger did with it. Populated by the API layer from the
+	// controller and the charger's reading; see ManualStatusFrom.
+	Manual ManualStatus `json:"manual"`
 
 	// BatteryBoost is the explicit, bounded home-battery-to-EV permission
 	// for this loadpoint. Populated by the API layer from Controller state.
@@ -192,6 +196,9 @@ type State struct {
 	// "the box is pausing on purpose".
 	CommandedW     float64 `json:"commanded_w"`
 	CommandedKnown bool    `json:"commanded_known"`
+	// CommandedSinceMs is when the current order was first given; it moves
+	// when CommandedW or CommandedReason changes. Zero until the first tick.
+	CommandedSinceMs int64 `json:"commanded_since_ms,omitempty"`
 
 	// CommandedReason names the dispatch branch that decided CommandedW:
 	// "plan", "no_plan_budget", "pv_surplus", "pv_surplus_pause",
@@ -389,6 +396,9 @@ type loadpointRuntime struct {
 	commandedW      float64
 	commandedKnown  bool
 	commandedReason string
+	// commandedSince is when the current (commandedW, commandedReason) pair
+	// was first ordered. The manual status counts elapsed time from it.
+	commandedSince time.Time
 
 	// The interruption hysteresis state. chargingSteadySince anchors the
 	// current continuous above-floor run; steadyRunArmed latches once that
@@ -433,10 +443,15 @@ func (m *Manager) SetCommanded(id string, w float64, reason string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if lp, ok := m.byID[id]; ok {
+		changed := !lp.commandedKnown || lp.commandedW != w ||
+			(reason != "" && reason != lp.commandedReason)
 		lp.commandedW = w
 		lp.commandedKnown = true
 		if reason != "" {
 			lp.commandedReason = reason
+		}
+		if changed {
+			lp.commandedSince = time.Now()
 		}
 	}
 }
@@ -476,6 +491,7 @@ func (m *Manager) Load(cfgs []Config) {
 			lp.commandedW = existing.commandedW
 			lp.commandedReason = existing.commandedReason
 			lp.commandedKnown = existing.commandedKnown
+			lp.commandedSince = existing.commandedSince
 			lp.chargingSteadySince = existing.chargingSteadySince
 			lp.stoppedSince = existing.stoppedSince
 			lp.steadyRunArmed = existing.steadyRunArmed
@@ -984,7 +1000,7 @@ func (lp *loadpointRuntime) snapshot() State {
 	steps := make([]float64, len(lp.AllowedStepsW))
 	copy(steps, lp.AllowedStepsW)
 	sort.Float64s(steps)
-	return State{
+	st := State{
 		ID:                 lp.ID,
 		DriverName:         lp.DriverName,
 		PluggedIn:          lp.pluggedIn,
@@ -1005,6 +1021,10 @@ func (lp *loadpointRuntime) snapshot() State {
 		CommandedReason:    lp.commandedReason,
 		CommandedKnown:     lp.commandedKnown,
 	}
+	if !lp.commandedSince.IsZero() {
+		st.CommandedSinceMs = lp.commandedSince.UnixMilli()
+	}
+	return st
 }
 
 // SetScheduleSaver wires the persistence callback. Pass nil to disable.

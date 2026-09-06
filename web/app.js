@@ -2647,6 +2647,56 @@
     return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
   }
 
+  function evFmtElapsed(ms) {
+    var s = Math.max(0, Math.round(ms / 1000));
+    if (s < 90) return s + " s";
+    var m = Math.round(s / 60);
+    if (m < 90) return m + " min";
+    return Math.round(m / 60) + " h";
+  }
+
+  // manualStatusText is the one sentence the Manual tab and the plan strip
+  // show while an operator hold runs. It follows the charger, not the
+  // request: sent, taken by the charger, charging, not drawing, stalled or
+  // limited by the fuse, each with the time elapsed. The box derives the
+  // state (loadpoint.manual); this only puts words on it. Returns null
+  // when no hold is active.
+  function manualStatusText(lp, d) {
+    var m = lp && lp.manual;
+    if (!lp || !lp.manual_active || !m || !m.active) return null;
+    if (lp.manual_release_soc > 0) {
+      return "Charging now → stops at " + Math.round(lp.manual_release_soc * 100) + " %, then back to the plan (fuse still limits).";
+    }
+    var reqA = m.requested_a > 0 ? Math.round(m.requested_a) + " A" : formatW(m.requested_w || lp.manual_charge_w || 0);
+    var cmdA = m.commanded_a > 0 ? Math.round(m.commanded_a) + " A" : formatW(m.commanded_w || 0);
+    var since = m.since_ms > 0 ? evFmtElapsed(Date.now() - m.since_ms) : "";
+    var sinceP = since ? " (" + since + ")" : "";
+    var reason = m.charger_reason ? " Charger reports: " + m.charger_reason + "." : "";
+    switch (m.state) {
+      case "charging":
+        return "Charging at " + formatW(lp.current_power_w || 0) + " — " + reqA + " requested. Runs until the car is full, Stop or unplug.";
+      case "sent":
+        return "Sent " + reqA + " to the charger. Waiting for it to confirm…" + sinceP;
+      case "accepted":
+        return "Charger set to " + cmdA + ". Waiting for the car to start drawing…" + sinceP + reason;
+      case "not_drawing":
+        return "Charger offers " + cmdA + " but the car is not drawing" + sinceP + "." +
+          (reason || " It may be full, or held by its own charge limit or schedule.");
+      case "stalled":
+        return "Nothing is charging" + (since ? " after " + since : "") + ": the charger has not acted on " + reqA + "." +
+          (reason || " Check the car's own charge limit or schedule, then the charger's app.");
+      case "limited":
+        if (m.limit_reason === "fuse_cooldown") {
+          return "Paused: main-fuse protection — " + reqA + " requested; charging resumes on its own." + sinceP;
+        }
+        if (m.limit_reason === "site_meter_stale") {
+          return "Paused for safety: site-meter data is stale — " + reqA + " requested; charging resumes when telemetry recovers.";
+        }
+        return "Main fuse limits this charge to " + cmdA + " right now (" + reqA + " requested)." + sinceP;
+    }
+    return "Manual charge at " + reqA + " — until the car is full, Stop or unplug.";
+  }
+
   // renderEvPlanStatus answers the question the status table can't:
   // "why isn't it charging right now, and when will it?" Field
   // experience: a car plugged in against a schedule sits at 0 W until
@@ -2664,11 +2714,16 @@
     var charging = (lp.current_power_w || 0) >= 100;
     var hasSchedule = lp.schedule && lp.schedule.soc > 0;
     if (lp.manual_active) {
+      // The same sentence as the Manual tab, so the charger's own reason is
+      // never hidden behind "manual charge is running".
       text = lp.manual_release_soc > 0
         ? "Charging now at " + formatW(lp.manual_charge_w || 0) + " → returns to plan at " +
           Math.round(lp.manual_release_soc * 100) + " %."
-        : "Manual charge at " + formatW(lp.manual_charge_w || 0) +
-          " — plan and PV logic are off until the car is full, Stop or unplug.";
+        : (manualStatusText(lp, d) || ("Manual charge at " + formatW(lp.manual_charge_w || 0) +
+          " — plan and PV logic are off until the car is full, Stop or unplug."));
+      if (lp.manual && (lp.manual.state === "not_drawing" || lp.manual.state === "stalled")) {
+        tone = "var(--text)";
+      }
     } else if (charging) {
       text = winActive
         ? "Charging on plan until " + evFmtClock(lp.plan_next_end_ms) + "." + kwPlanned
@@ -2900,6 +2955,9 @@
         }
         evTabsEl = null;
         evTabsLpId = null;
+      }
+      if (matched && evTabsEl && typeof evTabsEl.update === "function") {
+        evTabsEl.update(matched, d);
       }
       // Boost from the home battery: one control, below the tabs, for
       // whichever mode the loadpoint is in. Mounted once per loadpoint
@@ -3244,11 +3302,8 @@
     status.style.color = "var(--text-dim)";
     status.style.marginTop = "0.35rem";
     status.style.minHeight = "1em";
-    status.textContent = active
-      ? (lp && lp.manual_release_soc > 0
-        ? "Charging now → stops at " + Math.round(lp.manual_release_soc * 100) + " %, then back to the plan (fuse still limits)."
-        : "Charging at the slider's amps until the car is full, Stop or unplug (fuse still limits).")
-      : "Charges at the slider's amps until the car is full, Stop or unplug. The plan takes over again after that.";
+    var idleText = "Charges at the slider's amps until the car is full, Stop or unplug. The plan takes over again after that.";
+    status.textContent = manualStatusText(lp, null) || idleText;
     box.appendChild(status);
 
     // Start / Stop buttons.
@@ -3286,10 +3341,44 @@
     btnRow.appendChild(stopBtn);
     box.appendChild(btnRow);
 
+    // Live state. The section is mounted once per loadpoint; update() runs
+    // on every poll and rewrites the status line from lp.manual, so what the
+    // operator reads follows the charger instead of the click. A message
+    // written by a click holds the line until the box shows the new state.
+    var lastLp = lp;
+    var lastD = null;
+    var busy = false;
+    var holdLineUntil = 0;
+    function renderStatus() {
+      var on = !!(lastLp && lastLp.manual_active);
+      if (!busy) {
+        stopBtn.disabled = !on;
+        stopBtn.style.opacity = on ? "1" : "0.5";
+        startBtn.textContent = on ? "Update" : "Charge now";
+      }
+      if (busy || Date.now() < holdLineUntil) return;
+      status.textContent = manualStatusText(lastLp, lastD) || idleText;
+    }
+    function update(nextLp, d) {
+      if (nextLp) lastLp = nextLp;
+      if (d) lastD = d;
+      renderStatus();
+    }
+
+    // failOn turns an HTTP error into a rejection carrying the server's
+    // reason, so a refused Start (403, 404, 409) never reads as success.
+    function failOn(r) {
+      if (r.ok) return r;
+      return r.json().catch(function () { return {}; }).then(function (j) {
+        throw new Error((j && j.error) || ("HTTP " + r.status));
+      });
+    }
+
     startBtn.addEventListener("click", function () {
+      busy = true;
       startBtn.disabled = true;
-      status.textContent = "Starting…";
       var a = parseInt(slider.value, 10) || minA;
+      status.textContent = "Sending " + a + " A to the charger…";
       // CONTROL write — strict (FIX-B): persistent manual hold (hold_s:0)
       // with no SoC release — see the note above the slider.
       apiFetch("/api/loadpoints/" + encodeURIComponent(lp.id) + "/manual_hold", {
@@ -3300,30 +3389,39 @@
           hold_s: 0,
           phase_mode: phases === 1 ? "1p" : "3p",
         }),
-      }).then(function () {
-        status.textContent = "Charging at " + a + " A until the car is full, Stop or unplug.";
+      }).then(failOn).then(function () {
+        busy = false;
+        status.textContent = "Sent " + a + " A to the charger. Waiting for it to confirm…";
+        holdLineUntil = Date.now() + 6000;
         manualNeedsRebuild = true; // reflect active state on next poll
-      }).catch(function () {
+      }).catch(function (e) {
+        busy = false;
         startBtn.disabled = false;
-        status.textContent = "Start failed — try again.";
+        status.textContent = "Start failed: " + ((e && e.message) || "try again") + ".";
+        holdLineUntil = Date.now() + 15000;
       });
     });
 
     stopBtn.addEventListener("click", function () {
+      busy = true;
       stopBtn.disabled = true;
       status.textContent = "Stopping…";
       apiFetch("/api/loadpoints/" + encodeURIComponent(lp.id) + "/manual_hold", {
         method: "DELETE",
-      }).then(function () {
+      }).then(failOn).then(function () {
+        busy = false;
         status.textContent = "Released — back to automatic charging.";
+        holdLineUntil = Date.now() + 6000;
         manualNeedsRebuild = true;
-      }).catch(function () {
+      }).catch(function (e) {
+        busy = false;
         stopBtn.disabled = false;
-        status.textContent = "Stop failed — try again.";
+        status.textContent = "Stop failed: " + ((e && e.message) || "try again") + ".";
+        holdLineUntil = Date.now() + 15000;
       });
     });
 
-    return box;
+    return { el: box, update: update };
   }
 
   // sliderHeader builds a "LABEL ............ value" row (mono uppercase
@@ -4037,7 +4135,8 @@
     pvPanel.appendChild(buildPVModeSection(lp));
 
     var manualPanel = document.createElement("div");
-    manualPanel.appendChild(buildManualChargeSection(lp));
+    var manual = buildManualChargeSection(lp);
+    manualPanel.appendChild(manual.el);
 
     var schedPanel = document.createElement("div");
     schedPanel.appendChild(buildScheduleSection(lp, hasPV));
@@ -4086,6 +4185,9 @@
     container.appendChild(pvPanel);
     container.appendChild(manualPanel);
     container.appendChild(schedPanel);
+
+    // Polls redraw the live parts of the panels without remounting them.
+    container.update = function (nextLp, d) { manual.update(nextLp, d); };
 
     selectTab(evActiveTab);
     return container;

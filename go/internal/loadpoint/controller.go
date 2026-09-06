@@ -408,6 +408,11 @@ type ManualHold struct {
 	// Persisted with the hold, so a restart mid-boost keeps the
 	// release target.
 	ReleaseAtSoC float64
+
+	// StartedAt is when the operator installed the hold. The API keeps it
+	// across an Update of the amps, so the manual tab can say how long the
+	// charge has been asked for. SetManualHold fills a zero value.
+	StartedAt time.Time
 }
 
 // Directive is the loadpoint-relevant slice of mpc.SlotDirective.
@@ -1314,6 +1319,9 @@ func (c *Controller) SetManualHold(id string, h ManualHold) {
 		delete(c.holds, id)
 		cleared = true
 	} else {
+		if h.StartedAt.IsZero() {
+			h.StartedAt = time.Now()
+		}
 		c.holds[id] = h
 	}
 	saver := c.manualHoldSaver
