@@ -137,8 +137,7 @@ after Core passes its health check.
 
 For manual Core + updater operation, first set `FTW_IMAGE_TAG` and
 `FTW_UPDATER_IMAGE_TAG` in the project's `.env` to the same published immutable
-tag. Then run the commands below, using `forty-two-watts` instead of `ftw` on a
-legacy installation:
+tag. Run these commands with the Core service name from your Compose file:
 
 ```bash
 cd ~/ftw
