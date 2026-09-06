@@ -1,5 +1,63 @@
 # Changelog
 
+## 2.14.1
+
+### Patch Changes
+
+- dc89136: The Devices card no longer has its own pencil editor for the car's charge level; the slider in the EV card owns that value (#1062). The card still shows the charge, now as one number with its source in plain words — "estimated", "from the car", or "pinned after the car stopped asking" — and, while a car is plugged in, a line saying where to change it. Two leftovers from an older EV power slider were removed from the dashboard script; they had no control on the page and nothing called them. The HTTP routes behind them are unchanged.
+- 5801b4d: Keep unchanged drivers running when settings pass through the web API. Compare numeric values from JSON and YAML equally, including nested driver settings. Bound charger settings requests so a missing reply leads to a visible retry state.
+- 8241ca1: Use Easee session evidence to retain a confirmed battery level across a restart only when the same active session is verified.
+- 9bbc69d: Keep a confirmed EV battery level across restart only when fresh charger telemetry identifies the same hardware and charging session. Show when the level cannot be retained or the disk write failed. Changing battery capacity preserves the current level and its confidence.
+  
+  Treat a car declining current as a separate charging status. It no longer changes the estimated battery level to the target or sends a completed notification. Completion needs a fresh matched vehicle battery reading.
+  
+  A higher goal, an explicit retry or measured charging lets the planner resume after a prior refusal.
+- 2e01f7f: Let the charging view save the usual car’s usable battery size without replacing other settings. Apply a saved size through the shared config path and keep the current charge level steady. A failed save leaves the previous size in use.
+- 008ba8c: Explain when the charger’s own current limit reduces a request, without blaming the main fuse.
+- 5e01da8: Add Pause charging and Resume plan beside Charge now, with status that waits for the charger to stop. Let users change battery size beside the current level. Explain whether that level survives a restart, and never call a car that declined charge full. Keep the request deadline active until the response body arrives.
+- 0fe4c9b: Keep a changed charging request pending until the controller processes that choice and receives a fresh charger reading. An earlier command cannot confirm a new current or pause.
+- c459d15: Notify subscribed phones when a car is plugged in. Ignore first readings and recovery after an outage. Charging notifications carry the charger identity so the app can open its status and controls.
+- e7edd06: Explain when charging needs a new choice because the charger or connection could not be confirmed, including after reconnecting. Keep the message separate from confirmation that current has stopped.
+- 87a7e80: Show when the current car uses a different battery size from the usual size just saved.
+- a4979e5: Stop dispatching an old plan when its replacement fails, so a removed charging goal cannot keep charging the car. Keep the current plan during normal recalculation, require a successful new plan after failure, and preserve manual Start and Pause with the usual safety limits.
+- aea554e: Add a charger without inventing an ID or pressing Save again. Charger settings apply on change, with errors and a retry beside the form. OCPP setup stays separate from cloud chargers.
+  
+  Charging feedback separates the FTW request, the charger's reported limit and measured power. Old charger readings cannot claim current charging. Manual current changes apply on release; Return to plan names the action that ends a manual hold. Charge level and schedule writes run in order, and failed requests stay visible.
+  
+  Keep the charging goal and solar rule together, with no mode tabs. Show when Charge now overrides them. Show the current slider only while manual charging is active. Opening goal settings does not send a command.
+- 7e6dc2e: Guide the first charger connection from Chargers into the charger catalog and back after saving the connection. Hide the unrelated global Save button for charger autosave; keep explicit saves beside OCPP and shared-car settings.
+- 7a31411: Keep the battery level entered while waiting when the same charger first verifies its session at charging start. Count newly delivered energy from that level and save it once the session is verified.
+- 8f3b6b5: Keep EV power below the fuse budget when the budget falls between charging steps or below the minimum.
+- cca809c: Save charging goals before applying them. If storage fails, keep the previous goal and return a clear error for both goal edits and removals. A successful retry applies and saves the new goal together.
+- 27bf915: Bind a saved manual charging request to its charger hardware and verified charging session. Keep a saved pause on the same charger. When a prior positive request cannot be verified, pause and ask the owner to confirm instead of resuming automatic charging. Preserve explicit Start or Clear actions that arrive before the first charger reading.
+  
+  A running request also stops if the charger, session or loadpoint binding changes. A clear issued before telemetry survives another immediate restart, and concurrent Set/Clear writes preserve the order shown by the controller.
+- 7085724: Show when a charging choice applies now but could not be saved for restart. Retry its save when fresh charger data arrives and clear the message only after storage confirms it.
+- c0c5bfb: Preserve manual charging while the charger driver starts or has no reading. An absent reading no longer counts as an unplug. A confirmed unplug still ends the manual session.
+- cf41766: Ask OCPP chargers for fresh hardware identity after reconnecting, with bounded retries for missing replies and a safe fallback when the request is unsupported. Pause an older manual Start when hardware identity is lost, keep an explicit Pause, and allow a new Start to bind to the next verified identity. Keep cable status unknown during a network interruption, and preserve the reconnect boundary even when it falls between control ticks.
+- 6843ddd: Keep OCPP messages and command replies bound to the connection they came from. A delayed status or BootNotification from an older connection can no longer clear Pause or replace the current charger's identity. Check capabilities again after reconnecting.
+- 51ce2f2: Show the connected car and its next action on the home screen, with a direct route to charging controls. Keep stale status visible until a fresh reading confirms unplugging. Let the user choose the displayed first goal without changing its time or battery target.
+- 51024e6: Keep a manual pause until the user resumes or unplugs. Show when a pause is waiting for the charger and when it is confirmed. Keep manual charging available without a planner and enforce charger and installation limits on every manual request.
+- 2e730b7: Apply an automatic charging stop only if the manual request has not changed since the controller checked it. Keep a newer Pause, Start or slider change, and give each explicit retry a fresh wait for the car to draw current.
+- 212b045: Remove the active derived target when a charging goal is removed. The old deadline no longer drives the planner after the UI says the goal is gone. A separate Charge now request continues unchanged.
+- a8eb067: Ask how to continue when an earlier charge request cannot be matched after restart. Offer Charge now, Resume plan and Pause charging without calling it a user pause. Keep actual power visible until a changed current limit reaches the charger.
+- f73cd99: Confirm saved charging settings before calculating the plan. Show that planning is in progress and keep old charging windows out of that state.
+- 8c33446: Mark the default EV battery level as unconfirmed. Ask for the car's level after a box restart instead of presenting a calculation from the default as a confirmed estimate. An entered level still applies on slider release and survives a settings reload.
+- b67f07b: Save the solar charging choice before applying it. If storage fails, keep the previous choice and reject the change in both the box UI and Webapp. A retry can save and apply the choice once storage recovers.
+- 08e117d: Keep an explicit charging pause across restart even before the charger reports hardware identity. A prior Start without matching session proof restores only a pause that needs confirmation. Use the current OCPP connection's boot identity, and retry failed saves when charger data returns.
+- 7a7024b: Pause a prior manual request when a session counter resets, including when the previous session had no verified ID. Keep an explicit Start when the same uninterrupted session gains its first verified ID.
+- cd07ddc: EV modal, Manual tab: after Charge now the line under the button follows the charger instead of repeating the request. It says that the amps were sent and the box is waiting for the charger to confirm, that the charger has taken the limit and the car has not started drawing, that the car is charging, that the charger offers the current but the car is not drawing it (with the charger's own reason, such as "EV not accepting current"), that the command stalled, or that the main fuse limits the charge right now — each with the time elapsed. The plan strip above the tabs says the same while a manual charge runs, so the charger's reason is no longer hidden behind the manual sentence. A refused Start (403, 404, 409) now reads as a failure with the server's reason instead of "Charging at 16 A".
+  
+  `GET /api/loadpoints` carries this as `manual` per loadpoint: `state` (`sent`, `accepted`, `charging`, `not_drawing`, `stalled`, `limited`), `started_at_ms`, `since_ms`, requested and commanded watts and amps, the charger's reported limit and reason. `POST …/manual_hold` answers with `started_at_ms`, and an Update of the amps keeps the first press as the start. `commanded_since_ms` says when the box's current order was first given.
+- 2391dd1: Full backups now include managed drivers whose active links use absolute paths inside the data directory. The archive stores relative links so restore works at a new path. Links that escape the data directory or form cycles remain blocked.
+- 3b66faf: Keep the selected optimizer image after updates and rollbacks by saving and checking its Compose pin. Report a failed pin write instead of a successful update, preserve other host settings and file permissions, and keep shell payloads containing credentials out of updater logs.
+- 2391dd1: Restart restarts the existing container and keeps its exact image, including local test builds. It never pulls or recreates from a stale Compose tag. Core refuses the unsafe restart path on older updaters and explains how to update the updater.
+- 7806f79: Stop savings database reads when an app request times out or is canceled, so the request releases its place for later app reads. Keep canceled calculations out of the daily savings cache.
+- 99371b8: Keep driver paths consistent when settings are saved. Adding a charger no longer restarts other drivers with paths that fail to load.
+- ab8f5ac: A surplus-only EV can take leftover PV while the home battery buys from the grid. Surplus-only is an EV policy, not a site-wide import ban: the car still cannot import, and the home battery still cannot feed the car.
+  
+  Core DP includes this change. Sites using the optional Python/HiGHS planner need an updated optimizer to produce the same allocation. Core DP does not require a new optimizer image.
+
 ## 2.14.0
 
 ### Minor Changes
