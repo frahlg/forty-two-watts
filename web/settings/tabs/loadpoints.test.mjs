@@ -221,3 +221,27 @@ describe("OCPP server form", () => {
     assert.doesNotMatch(html, /<script>/);
   });
 });
+
+
+describe("first charger connection", () => {
+  const settings = window.FTWSettings;
+  const render = config => settings.tabs.loadpoints.render({ config, escHtml, help: () => '' });
+  it("offers a connection action instead of an empty Add form", () => {
+    settings.ocppStatus = { enabled: false, chargers: [] };
+    const html = render({ drivers: [], loadpoints: [] });
+    assert.match(html, /id="connect-charger"/);
+    assert.doesNotMatch(html, /id="new-lp-add"/);
+    assert.doesNotMatch(html, /ctek_hybrid|EV-capable driver/);
+    assert.match(html, /Save OCPP connection settings/);
+    assert.match(html, /Save car profiles/);
+  });
+  it("does not offer an unsaved connection as a usable charger", () => {
+    settings.catalogByLua = { 'drivers/easee.lua': { capabilities: ['ev'] } };
+    const config = { drivers: [{ name: 'easee', lua: 'drivers/easee.lua' }], loadpoints: [] };
+    settings.chargerSetupPending = 'easee';
+    assert.doesNotMatch(render(config), /id="new-lp-add"/);
+    settings.chargerSetupPending = null;
+    assert.match(render(config), /id="new-lp-add"/);
+    assert.match(render(config), /value="easee" selected/);
+  });
+});

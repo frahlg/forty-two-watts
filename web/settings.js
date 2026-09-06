@@ -67,19 +67,25 @@
 
   tabsEl.addEventListener("click", function (e) {
     if (e.target.tagName === "BUTTON" && e.target.dataset.tab) {
-      tabsEl.querySelectorAll("button").forEach(function (b) {
-        b.classList.toggle("active", b === e.target);
-      });
-      captureCurrentTab();
-      currentTab = e.target.dataset.tab;
-      renderTab(currentTab);
+      navigateTab(e.target.dataset.tab);
     }
   });
 
-  saveBtn.addEventListener("click", function () {
+  function navigateTab(tab) {
+    captureCurrentTab();
+    currentTab = tab;
+    tabsEl.querySelectorAll("button").forEach(function (button) {
+      button.classList.toggle("active", button.dataset.tab === tab);
+    });
+    renderTab(tab);
+  }
+
+  saveBtn.addEventListener("click", function () { saveSettings().catch(function () {}); });
+
+  function saveSettings() {
     captureCurrentTab();
     setStatus("Saving...");
-    apiFetch("/api/config", {
+    return apiFetch("/api/config", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(currentConfig),
@@ -106,11 +112,13 @@
         if (res && res.restart_required) {
           showRestartModal(res.restart_reasons || []);
         }
+        return res;
       })
       .catch(function (e) {
         setStatus("Save failed: " + e.message, "error");
+        throw e;
       });
-  });
+  }
 
   // ---- Restart-required modal ----
 
@@ -269,6 +277,8 @@
   }
 
   function renderTab(tab) {
+    saveBtn.hidden = tab === "loadpoints" || (tab === "devices" && !!S.chargerSetup);
+    saveBtn.style.display = saveBtn.hidden ? "none" : "";
     var def = S.tabs[tab];
     if (!def) {
       bodyEl.innerHTML = '<p style="color:var(--text-dim)">Unknown tab: ' + escHtml(tab) + '</p>';
@@ -285,6 +295,8 @@
       setByPath: setByPath,
       captureCurrentTab: captureCurrentTab,
       renderTab: renderTab,
+      navigateTab: navigateTab,
+      saveConfig: saveSettings,
       apiFetch: apiFetch,
     };
     var html = "";

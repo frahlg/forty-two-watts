@@ -436,7 +436,9 @@
       var help = ctx.help, escHtml = ctx.escHtml, config = ctx.config;
       if (!config.loadpoints) config.loadpoints = [];
       var ocppIds = ocppChargerIds(S.ocppStatus);
-      var drivers = evDriverNames(config, S.ocppStatus);
+      var drivers = evDriverNames(config, S.ocppStatus).filter(function (name) {
+        return name !== S.chargerSetupPending;
+      });
 
       var html =
         '<p style="color:var(--text-dim);font-size:0.8rem;margin:0 0 12px">' +
@@ -451,10 +453,12 @@
 
       if (!drivers.length) {
         html +=
-          '<div class="ha-status-indicator ha-warn" style="margin:12px 0">' +
-          '⚠ No EV-capable driver configured and no OCPP charger connected. Add a driver under <b>Devices</b> ' +
-          '(e.g. drivers/ctek_hybrid.lua), or point an OCPP charger at the URL above.' +
-          '</div>';
+          '<section aria-label="Connect a charger" style="margin:12px 0">' +
+          '<h3>Connect a charger</h3>' +
+          '<p>Choose your charger and enter its connection details. Then check its power limit and your car’s battery size here.</p>' +
+          '<button type="button" class="btn-add" id="connect-charger">Connect a charger</button>' +
+          '<p style="color:var(--text-dim);font-size:0.8rem">If your charger connects directly using OCPP, open OCPP connection settings below.</p>' +
+          '</section>';
       }
 
       html += '<div class="devices-list">';
@@ -487,7 +491,7 @@
           '<div>' +
           '<label>Charger ' + help("The charger FTW controls.") + '</label>' +
           '<select data-path="' + prefix + '.driver_name">' +
-          '<option value="">— select driver —</option>' +
+          '<option value="">— choose charger —</option>' +
           driverOpts +
           '</select>' +
           '</div>' +
@@ -529,14 +533,14 @@
       });
       html += '</div>';
 
-      html +=
+      if (drivers.length) html +=
         '<fieldset><legend>Add charger</legend>' +
         '<div class="field-row"><div>' +
         '<label for="new-lp-id">Name (optional)</label><input type="text" id="new-lp-id" placeholder="Uses the charger name">' +
         '</div><div>' +
         '<label for="new-lp-driver">Charger</label>' +
         '<select id="new-lp-driver">' +
-        '<option value="">— select driver —</option>' +
+        '<option value="">— choose charger —</option>' +
         drivers.map(function (n) {
           var label = n + (ocppIds.indexOf(n) >= 0 ? " (OCPP)" : "");
           return '<option value="' + escHtml(n) + '"' + (drivers.length === 1 ? ' selected' : '') + '>' + escHtml(label) + '</option>';
@@ -547,14 +551,34 @@
         '<p id="new-lp-status" role="status" aria-live="polite" style="margin:8px 0 0"></p>' +
         '</fieldset>';
 
-      html += '<details><summary>OCPP connection settings</summary>' + ocppHtml + '</details>';
-      html += '<details><summary>Cars that share a charger</summary>' + vehiclesSection(config, escHtml, help) + '</details>';
+      html += '<details><summary>OCPP connection settings</summary>' + ocppHtml +
+        '<button type="button" class="btn-add" data-save-charger-extra="OCPP connection settings">Save OCPP connection settings</button><p role="status" data-extra-save-status></p></details>';
+      html += '<details><summary>Cars that share a charger</summary>' + vehiclesSection(config, escHtml, help) +
+        '<button type="button" class="btn-add" data-save-charger-extra="Car profiles">Save car profiles</button><p role="status" data-extra-save-status></p></details>';
 
       return html;
     },
 
     after: function (ctx) {
       var bodyEl = ctx.bodyEl, config = ctx.config;
+
+      var connectCharger = document.getElementById('connect-charger');
+      if (connectCharger) connectCharger.addEventListener('click', function () {
+        S.chargerSetup = true;
+        ctx.navigateTab('devices');
+      });
+      bodyEl.querySelectorAll('[data-save-charger-extra]').forEach(function (button) {
+        button.addEventListener('click', function () {
+          var status = button.parentElement.querySelector('[data-extra-save-status]');
+          button.disabled = true;
+          status.textContent = 'Saving ' + button.dataset.saveChargerExtra.toLowerCase() + '…';
+          chargerSaveQueue.catch(function () {}).then(function () { return ctx.saveConfig(); }).then(function (result) {
+            status.textContent = button.dataset.saveChargerExtra + (result && result.restart_required ? ' saved. Restart FTW to apply them.' : ' saved.');
+          }).catch(function (error) {
+            status.textContent = 'Not saved: ' + error.message + '. Try again.';
+          }).finally(function () { button.disabled = false; });
+        });
+      });
 
       var configureOcpp = document.getElementById('configure-ocpp');
       if (configureOcpp) configureOcpp.addEventListener('click', function () {

@@ -25,6 +25,7 @@ function stubElement() {
     className: "",
     innerHTML: "",
     dataset: {},
+    style: {},
     handlers: {},
     classList: { add() {}, remove() {}, toggle() {} },
     addEventListener(type, fn) { this.handlers[type] = fn; },
@@ -97,5 +98,24 @@ describe("the settings shell after a save", () => {
     await settled();
 
     assert.equal(called, 0, "a rejected save told the tab it landed");
+  });
+});
+
+
+describe("charger setup navigation and saves", () => {
+  it("keeps the selected tab, hides global Save only there and still exposes explicit saves", async () => {
+    const { elements, requests, tabs } = loadShell({ drivers: [], loadpoints: [] });
+    let context;
+    tabs.control = { render: ctx => { context = ctx; return ''; } };
+    tabs.loadpoints = { render: ctx => { context = ctx; return ''; } };
+    elements['settings-btn'].handlers.click();
+    await settled();
+    context.navigateTab('loadpoints');
+    assert.equal(elements['settings-save'].hidden, true);
+    assert.equal(elements['settings-save'].style.display, 'none');
+    await context.saveConfig();
+    assert.equal(requests.filter(r => r.opts?.method === 'POST').length, 1);
+    context.navigateTab('control');
+    assert.equal(elements['settings-save'].hidden, false);
   });
 });
