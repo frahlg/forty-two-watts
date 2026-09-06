@@ -18,7 +18,7 @@ const statusText = source.slice(
 // screen moved, and the operator removed the charger to charge by hand.
 
 test('the status line follows the charger through every state', () => {
-  for (const state of ['sent', 'accepted', 'charging', 'not_drawing', 'stalled', 'limited', 'unavailable']) {
+  for (const state of ['sent', 'accepted', 'charging', 'not_drawing', 'stalled', 'limited', 'unavailable', 'pausing', 'paused']) {
     assert.match(statusText, new RegExp(`case "${state}":`));
   }
   assert.match(statusText, /Waiting for the charger/);
@@ -77,4 +77,14 @@ test('an estimated release target remains visible while waiting', () => {
   const words = describeManual({ ...lp, manual_release_soc: 0.8, manual: { ...lp.manual, state: 'sent' } });
   assert.match(words, /estimated 80 % target/);
   assert.doesNotMatch(words, /Charging at/);
+});
+
+
+test('pause status waits for the charger before claiming it stopped', () => {
+  const waiting = describeManual({ ...lp, manual: { ...lp.manual, state: 'pausing', requested_a: 0, requested_w: 0 }, current_power_w: 11000 });
+  assert.match(waiting, /Waiting for the charger to stop/);
+  assert.doesNotMatch(waiting, /Paused by you/);
+  const paused = describeManual({ ...lp, manual: { ...lp.manual, state: 'paused', requested_a: 0, requested_w: 0 } });
+  assert.match(paused, /Paused by you/);
+  assert.match(paused, /until you resume the plan/);
 });

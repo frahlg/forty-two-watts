@@ -69,6 +69,12 @@
     var controller = new AbortController();
     var timer = setTimeout(function () { controller.abort(); }, 30000);
     return apiFetch(path, Object.assign({}, options, { signal: controller.signal }))
+      .then(function (response) {
+        // Keep the deadline until the body arrives, including an error body.
+        return response.arrayBuffer().then(function (body) {
+          return new Response(response.status === 204 ? null : body, { status: response.status, statusText: response.statusText, headers: response.headers });
+        });
+      })
       .catch(function (e) {
         if (e && e.name === "AbortError") throw new Error("FTW has not confirmed the request. Check its current state before trying again");
         throw e;
@@ -2747,6 +2753,10 @@
       ? " Returns to the plan at the estimated " + Math.round(lp.manual_release_soc * 100) + " % target."
       : " Continues until the car stops drawing, you return to the plan, or unplug.";
     switch (m.state) {
+      case "pausing":
+        return "Pause requested. " + ((lp.current_power_w || 0) >= 100 ? formatW(lp.current_power_w) + " is still flowing. " : "") + "Waiting for the charger to stop.";
+      case "paused":
+        return "Paused by you. Charging stays off until you resume the plan, choose Charge now, or unplug.";
       case "unavailable":
         return "Charger status is out of date. FTW cannot confirm whether the car is charging.";
       case "charging":
@@ -2761,6 +2771,7 @@
         return "Charger offers " + cmdA + " but the car is not drawing" + sinceP + "." +
           (reason || " It may be full, or held by its own charge limit or schedule.");
       case "stalled":
+        if (evIsPaused(lp)) return "The charger has not stopped after your pause request. Check the charger’s app.";
         return "Nothing is charging" + (since ? " after " + since : "") + ": the charger has not acted on " + reqA + "." +
           (reason || " Check the car's own charge limit or schedule, then the charger's app.");
       case "limited":
@@ -2810,6 +2821,8 @@
       if (lp.commanded_reason === "fuse_limit") {
         text += " Rate is limited by the main fuse right now.";
       }
+    } else if (lp.charging_declined) {
+      text = "The car stopped asking for charge. Check its charge limit or schedule. This does not confirm the battery is full.";
     } else if (lp.commanded_known && lp.commanded_w > 0) {
       text = "FTW requests " + formatW(lp.commanded_w) + ". Waiting for the car to draw power.";
       var chargerReason = lp.charger && lp.charger.reason || d && d.reason_no_current_label;
@@ -3356,6 +3369,11 @@
   // loadpoint is in (PV-surplus-only if that toggle is on). The amperage
   // is sent as watts (power_w = A × phases × voltage); the driver
   // converts back to amps given the wallbox it's talking to.
+  function evIsPaused(lp) {
+    return !!(lp && lp.manual_active && (lp.manual_charge_w === 0 ||
+      lp.manual && (lp.manual.requested_w === 0 || lp.manual.state === "paused" || lp.manual.state === "pausing")));
+  }
+
   function buildManualChargeSection(lp) {
     var phases = (lp && lp.phases) || 3;
     var voltage = (lp && lp.voltage_v) || 230;
@@ -3476,7 +3494,13 @@
     stopBtn.disabled = !active;
     stopBtn.style.opacity = active ? "1" : "0.5";
 
+    var pauseBtn = stopBtn.cloneNode(false);
+    pauseBtn.textContent = "Pause charging";
+    pauseBtn.hidden = false;
+    pauseBtn.disabled = false;
+    pauseBtn.style.opacity = "1";
     btnRow.appendChild(startBtn);
+    btnRow.appendChild(pauseBtn);
     btnRow.appendChild(stopBtn);
     box.appendChild(btnRow);
 
@@ -3490,19 +3514,24 @@
     var holdLineUntil = 0;
     function renderStatus() {
       var on = !!(lastLp && lastLp.manual_active);
+      var paused = evIsPaused(lastLp);
+      if (!busy && paused && lastLp.manual && lastLp.manual.state === "paused") holdLineUntil = 0;
       if (!busy) {
         stopBtn.hidden = !on;
         stopBtn.disabled = !on;
-        eyebrow.hidden = !on;
-        row.hidden = !on;
-        row.style.display = on ? "flex" : "none";
+        eyebrow.hidden = !on || paused;
+        row.hidden = !on || paused;
+        row.style.display = on && !paused ? "flex" : "none";
+        pauseBtn.hidden = paused;
+        pauseBtn.disabled = false;
+        stopBtn.textContent = paused ? "Resume plan" : "Return to plan";
         stopBtn.style.opacity = on ? "1" : "0.5";
-        startBtn.hidden = on;
-        if (!on) { slider.value = String(maxA); renderReadout(); }
+        startBtn.hidden = on && !paused;
+        if (!on || paused) { slider.value = String(maxA); renderReadout(); }
         startBtn.disabled = false;
       }
       if (busy || Date.now() < holdLineUntil) return;
-      status.textContent = on ? "Changes apply when you release the slider." : idleText;
+      status.textContent = paused ? "The goal and solar rule wait until you resume the plan. Charge now starts immediately." : on ? "Changes apply when you release the slider." : idleText;
     }
     function update(nextLp, d) {
       if (nextLp) lastLp = nextLp;
@@ -3523,28 +3552,30 @@
       });
     }
 
-    function requestCharge() {
+    function requestCharge(pause) {
+      pause = pause === true;
       if (busy) return;
       busy = true;
       slider.disabled = true;
       stopBtn.disabled = true;
       startBtn.disabled = true;
       var a = parseInt(slider.value, 10) || minA;
-      status.textContent = "Asking FTW for " + a + " A…";
+      pauseBtn.disabled = true;
+      status.textContent = pause ? "Sending pause request…" : "Asking FTW for " + a + " A…";
       // CONTROL write — strict (FIX-B): persistent manual hold (hold_s:0)
       // with no SoC release — see the note above the slider.
       evWrite("/api/loadpoints/" + encodeURIComponent(lp.id) + "/manual_hold", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          power_w: aToW(a),
+          power_w: pause ? 0 : aToW(a),
           hold_s: 0,
           phase_mode: phases === 1 ? "1p" : "3p",
         }),
       }).then(failOn).then(function () {
         busy = false;
         slider.disabled = false;
-        status.textContent = "FTW received " + a + " A. Waiting for the charger…";
+        status.textContent = pause ? "Pause requested. Waiting for the charger to stop…" : "FTW received " + a + " A. Waiting for the charger…";
         holdLineUntil = Date.now() + 6000;
         refreshEvModalAfterWrite(); // read the hold and charger response without rebuilding focused inputs
       }).catch(function (e) {
@@ -3552,11 +3583,13 @@
         slider.disabled = false;
         startBtn.disabled = false;
         stopBtn.disabled = !lastLp.manual_active;
+        pauseBtn.disabled = false;
         status.textContent = "Request not confirmed: " + ((e && e.message) || "try again") + ".";
         holdLineUntil = Infinity;
       });
     }
-    startBtn.addEventListener("click", requestCharge);
+    startBtn.addEventListener("click", function () { requestCharge(false); });
+    pauseBtn.addEventListener("click", function () { requestCharge(true); });
     slider.addEventListener("change", function () {
       if (lastLp.manual_active) requestCharge();
     });
@@ -3566,6 +3599,7 @@
       stopBtn.disabled = true;
       slider.disabled = true;
       startBtn.disabled = true;
+      pauseBtn.disabled = true;
       status.textContent = "Returning to the plan…";
       evWrite("/api/loadpoints/" + encodeURIComponent(lp.id) + "/manual_hold", {
         method: "DELETE",
@@ -3573,7 +3607,8 @@
         busy = false;
         slider.disabled = false;
         startBtn.disabled = false;
-        status.textContent = "Manual charge ended. The plan decides when to charge.";
+        pauseBtn.disabled = false;
+        status.textContent = "The plan decides when to charge.";
         holdLineUntil = Date.now() + 6000;
         refreshEvModalAfterWrite();
       }).catch(function (e) {
@@ -3581,7 +3616,8 @@
         slider.disabled = false;
         startBtn.disabled = false;
         stopBtn.disabled = false;
-        status.textContent = "Stop failed: " + ((e && e.message) || "try again") + ".";
+        pauseBtn.disabled = false;
+        status.textContent = "Return to plan not confirmed: " + ((e && e.message) || "try again") + ".";
         holdLineUntil = Infinity;
       });
     });
@@ -3695,6 +3731,8 @@
 
     box.appendChild(planWrap);
     box.appendChild(socWrap);
+    var capacityView = buildEvCapacityView(lp);
+    box.appendChild(capacityView.el);
 
     // While the operator holds the slider (pointer down, or keyboard
     // input in the last moment), polls must not snap it back to the
@@ -3713,10 +3751,15 @@
 
     function sourceNote(lpNow) {
       var src = (lpNow && lpNow.soc_source) || "";
-      if (src === "assumed") return "Battery level needs confirmation. The plan currently assumes " + Math.round(lpNow.current_soc * 100) + " %. Drag to match the car. This level must be entered again after a box restart.";
-      if (src === "vehicle") return "Live from the car. Drag only to correct drift.";
-      if (src === "completed") return "The car stopped asking for current, so the box assumes the target was reached. Drag to correct.";
-      return "Estimated from energy delivered. Drag to the real value and the plan follows.";
+      var retention = lpNow.soc_retention === "session"
+        ? " FTW keeps this level for the same charging session, including after a box restart."
+        : lpNow.soc_retention === "error"
+          ? " This level could not be saved for a box restart. Enter it again before relying on the plan after restarting."
+          : " This level must be entered again after a box restart.";
+      if (src === "assumed") return "Battery level needs confirmation. The plan currently assumes " + Math.round(lpNow.current_soc * 100) + " %. Drag to match the car." + retention;
+      if (src === "vehicle") return "Reported by the car. Drag only to correct drift.";
+      if (src === "completed") return "The car stopped asking for charge. Its actual battery level is not confirmed. Drag to match the car.";
+      return "Estimated from energy delivered. Drag to the real value and the plan follows." + retention;
     }
 
     var socPending = null;
@@ -3740,7 +3783,13 @@
             (!(lastLp.schedule && lastLp.schedule.soc > 0) && !lastLp.manual_active && !lastLp.surplus_only
               ? " Set a ready time, or choose Charge now." : " Reading the updated plan…");
           noteTimer = setTimeout(function () { noteTimer = null; if (!socFailed) note.textContent = sourceNote(lastLp); }, 6000);
-          refreshEvModalAfterWrite();
+          refreshEvModalAfterWrite().then(function () {
+            if (revision === socRevision && lastLp.soc_retention === "error") {
+              if (noteTimer) { clearTimeout(noteTimer); noteTimer = null; }
+              socFailed = true;
+              note.textContent = "Charge level updated: " + v + " %. It could not be saved for a box restart.";
+            }
+          });
         }).catch(function (e) {
           if (revision === socRevision) { socFailed = true; note.textContent = "Charge level not confirmed: " + e.message; }
         }).finally(function () {
@@ -3810,6 +3859,7 @@
 
     function update(lpNow, dNow) {
       lastLp = lpNow;
+      capacityView.update(lpNow);
       var fresh = renderEvPlanStatus(lpNow, dNow);
       if (headline && headline.parentNode === box) {
         if (fresh) { box.replaceChild(fresh, headline); } else { box.removeChild(headline); }
@@ -3831,6 +3881,61 @@
 
     update(lp, d);
     return { el: box, update: update, slider: slider };
+  }
+
+  function buildEvCapacityView(lp) {
+    var wrap = document.createElement("details");
+    wrap.style.cssText = "margin-top:0.6rem;font-size:0.85rem";
+    var summary = document.createElement("summary");
+    summary.style.cssText = "cursor:pointer;color:var(--text-dim)";
+    wrap.appendChild(summary);
+    var hint = document.createElement("p");
+    hint.style.cssText = "color:var(--text-dim);margin:0.4rem 0";
+    wrap.appendChild(hint);
+    var label = document.createElement("label");
+    label.textContent = "Usable battery size (kWh) ";
+    var input = document.createElement("input");
+    input.type = "number"; input.min = "1"; input.max = "300"; input.step = "0.1";
+    input.setAttribute("inputmode", "decimal");
+    input.setAttribute("aria-label", "Usable battery size, kWh");
+    input.style.cssText = "width:7em;padding:0.3rem;border:1px solid var(--line);border-radius:4px;background:var(--bg);color:var(--fg)";
+    label.appendChild(input); wrap.appendChild(label);
+    var help = document.createElement("p");
+    help.style.cssText = "color:var(--text-dim);margin:0.4rem 0";
+    help.textContent = "Applies when you leave the field. Find the usable size in your car’s specifications.";
+    wrap.appendChild(help);
+    var note = document.createElement("p");
+    note.setAttribute("role", "status");
+    note.style.cssText = "color:var(--text-dim);margin:0.4rem 0";
+    wrap.appendChild(note);
+    var retry = document.createElement("button");
+    retry.type = "button"; retry.textContent = "Try battery size again"; retry.hidden = true;
+    wrap.appendChild(retry);
+    var busy = false, dirty = false;
+    input.addEventListener("input", function () { dirty = true; });
+    function save() {
+      if (busy) return;
+      var value = Number(input.value);
+      if (!isFinite(value) || value < 1 || value > 300) { note.textContent = "Enter the usable battery size from 1 to 300 kWh."; note.setAttribute("role", "alert"); return; }
+      busy = true; input.disabled = true; retry.hidden = true;
+      note.setAttribute("role", "status"); note.textContent = "Sending battery size…";
+      evWrite("/api/loadpoints/" + encodeURIComponent(lp.id) + "/vehicle", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ capacity_wh: Math.round(value * 1000) }),
+      }).then(function (r) { return r.json().then(function (j) { if (!r.ok || !j.ok) throw new Error(j.error || "FTW refused the change."); return j; }); })
+        .then(function () { dirty = false; note.textContent = "Battery size saved. The plan uses this size for its estimates."; return refreshEvModalAfterWrite(); })
+        .catch(function (err) { note.textContent = "Battery size not confirmed: " + err.message; note.setAttribute("role", "alert"); retry.hidden = false; })
+        .finally(function () { busy = false; input.disabled = false; });
+    }
+    input.addEventListener("change", save); retry.addEventListener("click", save);
+    function update(next) {
+      var capacity = Number(next.vehicle_capacity_wh);
+      wrap.hidden = !next.plugged_in || !(capacity > 0);
+      summary.textContent = "Car battery · " + (capacity / 1000) + " kWh";
+      hint.textContent = next.capacity_source === "default" ? "FTW is using a default size. Check it against your car." : "Used for estimates. Check this size if you use another car.";
+      if (!busy && !dirty && document.activeElement !== input) input.value = String(capacity / 1000);
+    }
+    update(lp);
+    return { el: wrap, update: update };
   }
 
   // Solar is a rule of the plan. A manual hold overrides it.
@@ -3856,7 +3961,9 @@
       if (busy) return;
       soCb.checked = !!latest.surplus_only;
       soCb.disabled = !!latest.manual_active;
-      soStatus.textContent = failure || (latest.manual_active
+      soStatus.textContent = failure || (evIsPaused(latest)
+        ? "This rule resumes with the plan."
+        : latest.manual_active
         ? "Charge now overrides this rule. It resumes when you return to the plan."
         : latest.surplus_only
           ? "No grid or home battery. Your target may not be reached in time."
@@ -4341,7 +4448,9 @@
           (s.recurring ? " · repeats" : " · once")
         : "No ready time set.";
       editLabel.textContent = hasGoal ? "Change goal" : "Set a ready time";
-      suspended.textContent = nextLp.manual_active
+      suspended.textContent = evIsPaused(nextLp)
+        ? "Resume the plan to use this goal. Edits apply then."
+        : nextLp.manual_active
         ? "Charge now overrides this goal. Edits apply when you return to the plan."
         : "Changes apply as you make them.";
       schedule.update(nextLp);

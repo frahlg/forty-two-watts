@@ -5,7 +5,7 @@ import test from 'node:test';
 const source = readFileSync(new URL('./app.js', import.meta.url), 'utf8');
 const view = source.slice(
   source.indexOf('function buildEvPlanView'),
-  source.indexOf('function buildPVModeSection'),
+  source.indexOf('function buildEvCapacityView'),
 );
 
 // The plug-in moment (#1059): the modal shows what the box will do and
