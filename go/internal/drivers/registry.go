@@ -1,6 +1,7 @@
 package drivers
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -1686,9 +1687,18 @@ func sameDriverConfig(a, b config.Driver) bool {
 	// Compare the free-form Config map. Previously omitted, so a changed
 	// cloud-driver password in drivers[i].config.password was silently
 	// ignored by the hot-reload diff — the driver kept running with the
-	// stale credentials. DeepEqual also treats nil and empty maps as equal.
+	// stale credentials. The empty-map case below handles nil versus empty.
 	if len(a.Config) == 0 && len(b.Config) == 0 {
 		return true
 	}
-	return reflect.DeepEqual(a.Config, b.Config)
+	if reflect.DeepEqual(a.Config, b.Config) {
+		return true
+	}
+	// YAML decodes whole numbers as int; JSON decodes them as float64.
+	// Compare their wire values so a settings save and its file-watcher
+	// reload do not restart an unchanged driver twice. JSON keeps strings,
+	// booleans and numbers distinct, including inside nested settings.
+	aj, aerr := json.Marshal(a.Config)
+	bj, berr := json.Marshal(b.Config)
+	return aerr == nil && berr == nil && bytes.Equal(aj, bj)
 }

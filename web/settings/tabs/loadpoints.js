@@ -396,18 +396,24 @@
     feedback('Applying charger settings…');
     var operation = chargerSaveQueue.catch(function () {}).then(function () {
       // Read the current config so this save never commits another tab's draft.
-      return ctx.apiFetch('/api/config').then(function (r) {
-        if (!r.ok) throw new Error('Could not read current settings (HTTP ' + r.status + ')');
-        return r.json();
-      }).then(function (latest) {
+      function request(opts) {
+        var abort = new AbortController();
+        var timeout = setTimeout(function () { abort.abort(); }, 30000);
+        return ctx.apiFetch('/api/config', Object.assign({}, opts, { signal: abort.signal }))
+          .then(function (r) { return r.json().then(function (body) {
+            if (!r.ok) throw new Error(body.error || ('HTTP ' + r.status));
+            return body;
+          }); })
+          .catch(function (e) {
+            if (abort.signal.aborted) throw new Error('FTW did not answer within 30 seconds');
+            throw e;
+          })
+          .finally(function () { clearTimeout(timeout); });
+      }
+      return request().then(function (latest) {
         latest.loadpoints = snapshot;
-        return ctx.apiFetch('/api/config', {
+        return request({
           method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(latest),
-        });
-      }).then(function (r) {
-        return r.json().then(function (body) {
-          if (!r.ok) throw new Error(body.error || ('HTTP ' + r.status));
-          return body;
         });
       });
     });
