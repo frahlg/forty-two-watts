@@ -33,6 +33,16 @@ func (m *Manager) PersistManualHold(id string, h ManualHold, cleared bool) error
 		m.pendingManual = map[string]pendingManualHold{}
 	}
 	m.pendingManual[id] = pendingManualHold{h, cleared}
+	if cleared && m.sessionStore != nil {
+		// A clear before telemetry must survive another immediate reboot.
+		// This barrier can only remove an old request; it grants no power.
+		if err := m.sessionStore.SaveConfig("ev_manual_clear:"+id, "pending"); err != nil {
+			return err
+		}
+		if err := m.sessionStore.SaveConfig("loadpoint_manual_hold:"+id, "{}"); err != nil {
+			return err
+		}
+	}
 	return m.flushManualHold(id)
 }
 
@@ -76,6 +86,9 @@ func (m *Manager) flushManualHold(id string) error {
 	if err := m.sessionStore.SaveConfig("loadpoint_manual_hold:"+id, "{}"); err != nil {
 		return err
 	}
+	if err := m.sessionStore.SaveConfig("ev_manual_clear:"+id, ""); err != nil {
+		return err
+	}
 	delete(m.pendingManual, id)
 	return nil
 }
@@ -95,6 +108,14 @@ func (m *Manager) RestoreManualHold(id string) (ManualHold, string) {
 	}
 	m.mu.RUnlock()
 	if m.sessionStore == nil {
+		return ManualHold{}, "none"
+	}
+	if clear, _ := m.sessionStore.LoadConfig("ev_manual_clear:" + id); clear == "pending" {
+		if m.pendingManual == nil {
+			m.pendingManual = map[string]pendingManualHold{}
+		}
+		m.pendingManual[id] = pendingManualHold{cleared: true}
+		_ = m.flushManualHold(id)
 		return ManualHold{}, "none"
 	}
 	if deviceID == "" {

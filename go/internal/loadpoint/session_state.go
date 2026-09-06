@@ -80,6 +80,8 @@ func (m *Manager) ObserveSession(id string, pluggedIn bool, powerW, deliveredWh 
 	// A changed session can arrive after an unseen unplug while core was
 	// offline. Run the ordinary plug-in reset even if connected stayed true.
 	if changed || regressed {
+		m.nextSessionGeneration++
+		lp.sessionGeneration = m.nextSessionGeneration
 		lp.pluggedIn = false
 		lp.chargingSteadySince = time.Time{}
 		lp.stoppedSince = time.Time{}

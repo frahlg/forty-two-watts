@@ -105,6 +105,7 @@ type Controller struct {
 	holdMu          sync.Mutex
 	holds           map[string]ManualHold
 	manualRestored  map[string]bool
+	manualBindings  map[string]manualSessionBinding
 	manualPersistMu sync.Mutex
 	// manualIdleSince[id] is when a loadpoint with an active manual hold
 	// first observed the vehicle "not requesting current" this idle spell.
@@ -1355,7 +1356,7 @@ func (c *Controller) ClearManualHold(id string) {
 	}
 	c.manualPersistMu.Lock()
 	defer c.manualPersistMu.Unlock()
-	c.markManualExplicit(id)
+	first := c.markManualExplicit(id)
 	c.holdMu.Lock()
 	_, existed := c.holds[id]
 	delete(c.holds, id)
@@ -1363,7 +1364,7 @@ func (c *Controller) ClearManualHold(id string) {
 	c.holdMu.Unlock()
 	// Only persist the clear if a hold actually existed — ClearManualHold is
 	// called on every unplugged tick, and we must not hammer the store.
-	if saver != nil && existed {
+	if saver != nil && (existed || first) {
 		saver(id, ManualHold{}, true)
 	}
 	// The auto-release idle timer is meaningless without a hold.

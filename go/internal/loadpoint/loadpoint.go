@@ -252,14 +252,15 @@ type PlanWindow struct {
 
 // Manager holds the running set of loadpoints. Thread-safe.
 type Manager struct {
-	sessionMu        sync.Mutex
-	sessionStore     SessionStore
-	pendingManual    map[string]pendingManualHold
-	connectionHealth map[string]bool
-	connectionEdges  map[string]connectionEdge
-	mu               sync.RWMutex
-	byID             map[string]*loadpointRuntime
-	order            []string // insertion-preserving id list for deterministic listing
+	nextSessionGeneration uint64
+	sessionMu             sync.Mutex
+	sessionStore          SessionStore
+	pendingManual         map[string]pendingManualHold
+	connectionHealth      map[string]bool
+	connectionEdges       map[string]connectionEdge
+	mu                    sync.RWMutex
+	byID                  map[string]*loadpointRuntime
+	order                 []string // insertion-preserving id list for deterministic listing
 
 	// scheduleSaver, if non-nil, is invoked synchronously whenever a
 	// schedule is set or cleared. Wired by main.go to persist via
@@ -322,6 +323,8 @@ const (
 // union of configured parameters and observed state. Lives behind
 // Manager so consumers access it via the public State snapshot.
 type loadpointRuntime struct {
+	configGeneration         uint64
+	sessionGeneration        uint64
 	manualRestoreUnconfirmed bool
 	sessionDeviceID          string
 	sessionID                string
@@ -502,6 +505,14 @@ func (m *Manager) Load(cfgs []Config) {
 			continue
 		}
 		lp := &loadpointRuntime{Config: c}
+		if existing := m.byID[c.ID]; existing != nil && existing.DriverName == c.DriverName {
+			lp.sessionGeneration = existing.sessionGeneration
+			lp.configGeneration = existing.configGeneration
+		} else {
+			m.nextSessionGeneration++
+			lp.sessionGeneration = m.nextSessionGeneration
+			lp.configGeneration = m.nextSessionGeneration
+		}
 		if existing, ok := m.byID[c.ID]; ok {
 			// Preserve observed state across reload. The session
 			// plug-in anchor is carried too — otherwise a config
