@@ -24,7 +24,7 @@ test('the status line follows the charger through every state', () => {
   assert.match(statusText, /Waiting for the charger/);
   assert.match(statusText, /Waiting for the car to start drawing/);
   assert.match(statusText, /but the car is not drawing/);
-  assert.match(statusText, /the charger has not acted on/);
+  assert.match(statusText, /The charger has not acted on/);
   assert.match(statusText, /Main fuse limits this charge/);
   // The charger's own words are part of the sentence.
   assert.match(statusText, /Charger reports: " \+ m\.charger_reason/);
@@ -94,4 +94,16 @@ test('a charger limit does not blame the main fuse', () => {
   const words = describeManual({ ...lp, manual: { ...lp.manual, state: 'limited', limit_reason: 'charger_limit', commanded_a: 10 } });
   assert.match(words, /The charger limits this request to 10 A/);
   assert.doesNotMatch(words, /Main fuse/);
+});
+
+
+test('an unmatched restart asks for a choice without claiming an operator pause', () => {
+  const words = describeManual({ manual_restore_unconfirmed: true, manual_active: false });
+  assert.match(words, /Confirm how to continue after restart/);
+  assert.doesNotMatch(words, /Paused by you/);
+});
+test('a lower requested current keeps actual old power visible until it arrives', () => {
+  const words = describeManual({ ...lp, current_power_w: 11000, manual: { ...lp.manual, state: 'sent', requested_a: 6 } });
+  assert.match(words, /confirm the new limit/);
+  assert.match(words, /Still charging at 11000 W/);
 });

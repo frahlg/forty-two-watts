@@ -2742,6 +2742,7 @@
   // state (loadpoint.manual); this only puts words on it. Returns null
   // when no hold is active.
   function manualStatusText(lp, d) {
+    if (lp && lp.manual_restore_unconfirmed) return "Confirm how to continue after restart. FTW could not match the earlier charge request to this connection.";
     var m = lp && lp.manual;
     if (!lp || !lp.manual_active || !m || !m.active) return null;
     var reqA = m.requested_a > 0 ? Math.round(m.requested_a) + " A" : formatW(m.requested_w || lp.manual_charge_w || 0);
@@ -2764,7 +2765,7 @@
           ? "Charging at " + formatW(lp.current_power_w) + " — " + reqA + " requested."
           : "The charger reports charging. Waiting for a power reading.") + end;
       case "sent":
-        return "FTW received " + reqA + ". Waiting for the charger…" + sinceP + end;
+        return "FTW received " + reqA + ". Waiting for the charger to confirm the new limit." + sinceP + ((lp.current_power_w || 0) >= 100 ? " Still charging at " + formatW(lp.current_power_w) + "." : "") + end;
       case "accepted":
         return "Charger reports a " + cmdA + " limit. Waiting for the car to start drawing…" + sinceP + reason + end;
       case "not_drawing":
@@ -2772,7 +2773,8 @@
           (reason || " It may be full, or held by its own charge limit or schedule.");
       case "stalled":
         if (evIsPaused(lp)) return "The charger has not stopped after your pause request. Check the charger’s app.";
-        return "Nothing is charging" + (since ? " after " + since : "") + ": the charger has not acted on " + reqA + "." +
+        return "The charger has not acted on " + reqA + (since ? " after " + since : "") + "." +
+          ((lp.current_power_w || 0) >= 100 ? " Still charging at " + formatW(lp.current_power_w) + "." : "") +
           (reason || " Check the car's own charge limit or schedule, then the charger's app.");
       case "limited":
         if (m.limit_reason === "charger_limit") return "The charger limits this request to " + cmdA + " (" + reqA + " requested).";
@@ -2796,14 +2798,16 @@
   // there is nothing worth saying (no loadpoint, or unplugged — the
   // schedule note covers that case).
   function renderEvPlanStatus(lp, d) {
-    if (!lp || !lp.plugged_in) return null;
+    if (!lp || (!lp.plugged_in && !lp.manual_restore_unconfirmed)) return null;
     var text = null;
     var tone = "var(--text-dim)";
     var kwPlanned = lp.plan_total_wh > 0 ? " ~" + (lp.plan_total_wh / 1000).toFixed(1) + " kWh planned." : "";
     var winActive = lp.plan_next_start_ms > 0 && lp.plan_next_start_ms <= Date.now() && Date.now() < lp.plan_next_end_ms;
     var charging = (lp.current_power_w || 0) >= 100;
     var hasSchedule = lp.schedule && lp.schedule.soc > 0;
-    if (lp.charger && !lp.charger.available) {
+    if (lp.manual_restore_unconfirmed) {
+      text = manualStatusText(lp, d);
+    } else if (lp.charger && !lp.charger.available) {
       text = lp.charger.known
         ? "Charger status is out of date. FTW cannot confirm whether the car is charging."
         : "Waiting for the charger's first status report.";
@@ -3371,7 +3375,7 @@
   // is sent as watts (power_w = A × phases × voltage); the driver
   // converts back to amps given the wallbox it's talking to.
   function evIsPaused(lp) {
-    return !!(lp && lp.manual_active && (lp.manual_charge_w === 0 ||
+    return !!(lp && !lp.manual_restore_unconfirmed && lp.manual_active && (lp.manual_charge_w === 0 ||
       lp.manual && (lp.manual.requested_w === 0 || lp.manual.state === "paused" || lp.manual.state === "pausing")));
   }
 
@@ -3516,23 +3520,24 @@
     function renderStatus() {
       var on = !!(lastLp && lastLp.manual_active);
       var paused = evIsPaused(lastLp);
+      var restore = !!lastLp.manual_restore_unconfirmed;
       if (!busy && paused && lastLp.manual && lastLp.manual.state === "paused") holdLineUntil = 0;
       if (!busy) {
-        stopBtn.hidden = !on;
-        stopBtn.disabled = !on;
-        eyebrow.hidden = !on || paused;
-        row.hidden = !on || paused;
-        row.style.display = on && !paused ? "flex" : "none";
+        stopBtn.hidden = !on && !restore;
+        stopBtn.disabled = !on && !restore;
+        eyebrow.hidden = !on || paused || restore;
+        row.hidden = !on || paused || restore;
+        row.style.display = on && !paused && !restore ? "flex" : "none";
         pauseBtn.hidden = paused;
         pauseBtn.disabled = false;
-        stopBtn.textContent = paused ? "Resume plan" : "Return to plan";
-        stopBtn.style.opacity = on ? "1" : "0.5";
-        startBtn.hidden = on && !paused;
-        if (!on || paused) { slider.value = String(maxA); renderReadout(); }
+        stopBtn.textContent = paused || restore ? "Resume plan" : "Return to plan";
+        stopBtn.style.opacity = on || restore ? "1" : "0.5";
+        startBtn.hidden = on && !paused && !restore;
+        if (!on || paused || restore) { slider.value = String(maxA); renderReadout(); }
         startBtn.disabled = false;
       }
       if (busy || Date.now() < holdLineUntil) return;
-      status.textContent = paused ? "The goal and solar rule wait until you resume the plan. Charge now starts immediately." : on ? "Changes apply when you release the slider." : idleText;
+      status.textContent = restore ? "Choose Charge now to start immediately, Resume plan to use your goal, or Pause charging to keep charging off." : paused ? "The goal and solar rule wait until you resume the plan. Charge now starts immediately." : on ? "Changes apply when you release the slider." : idleText;
     }
     function update(nextLp, d) {
       if (nextLp) lastLp = nextLp;
@@ -3972,8 +3977,8 @@
       latest = next;
       if (busy) return;
       soCb.checked = !!latest.surplus_only;
-      soCb.disabled = !!latest.manual_active;
-      soStatus.textContent = failure || (evIsPaused(latest)
+      soCb.disabled = !!latest.manual_active || !!latest.manual_restore_unconfirmed;
+      soStatus.textContent = failure || (evIsPaused(latest) || latest.manual_restore_unconfirmed
         ? "This rule resumes with the plan."
         : latest.manual_active
         ? "Charge now overrides this rule. It resumes when you return to the plan."
@@ -4460,7 +4465,7 @@
           (s.recurring ? " · repeats" : " · once")
         : "No ready time set.";
       editLabel.textContent = hasGoal ? "Change goal" : "Set a ready time";
-      suspended.textContent = evIsPaused(nextLp)
+      suspended.textContent = evIsPaused(nextLp) || nextLp.manual_restore_unconfirmed
         ? "Resume the plan to use this goal. Edits apply then."
         : nextLp.manual_active
         ? "Charge now overrides this goal. Edits apply when you return to the plan."
