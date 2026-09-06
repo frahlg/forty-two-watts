@@ -56,6 +56,11 @@ type Handler struct {
 	// the connect and boot triggers — which arrive milliseconds apart, long
 	// before any answer — ask once between them rather than twice.
 	probing map[string]bool
+	// identityProbe asks for a fresh BootNotification; only that message can
+	// establish hardware identity on a new socket. See identity_probe.go.
+	identityProbe        func(string, Version, func(error)) error
+	identityProbeTiming  identityProbeTiming
+	identityProbeStopped bool
 }
 
 // chargerState is what we accumulate from successive OCPP messages for one
@@ -90,6 +95,14 @@ type chargerState struct {
 	model    string
 	serial   string
 	firmware string
+	// identityCurrent is set only by BootNotification on this connection.
+	connectionGeneration  uint64 // process-local socket epoch; never a physical session ID
+	connectedKnown        bool   // physical status received on the current socket
+	identityCurrent       bool
+	identityProbeTimer    *time.Timer
+	identityProbeEpoch    uint64
+	identityProbeAttempts int
+	identityProbeAfter    time.Time
 	// vehicleID is the identity presented when the current/last transaction
 	// started: the RFID idTag on 1.6, or a 2.0.1 idToken — where the token
 	// type MacAddress (autocharge) or eMAID (ISO 15118) names the actual
@@ -115,12 +128,13 @@ type chargerState struct {
 // BootNotification confirmation.
 func NewHandler(tel *telemetry.Store, heartbeatIntervalS int) *Handler {
 	return &Handler{
-		tel:                tel,
-		heartbeatIntervalS: heartbeatIntervalS,
-		chargers:           map[string]*chargerState{},
-		approved:           map[string]bool{},
-		probing:            map[string]bool{},
-		nextTxID:           1,
+		tel:                 tel,
+		heartbeatIntervalS:  heartbeatIntervalS,
+		chargers:            map[string]*chargerState{},
+		approved:            map[string]bool{},
+		probing:             map[string]bool{},
+		identityProbeTiming: defaultIdentityProbeTiming,
+		nextTxID:            1,
 	}
 }
 
@@ -145,12 +159,16 @@ func (h *Handler) SetApprovedIDs(ids []string) {
 	}
 	h.mu.Lock()
 	var revoked []string
-	for id := range h.chargers {
+	for id, charger := range h.chargers {
 		if h.approved[id] && !m[id] {
 			revoked = append(revoked, id)
+			h.cancelIdentityProbeLocked(charger)
 		}
 	}
 	h.approved = m
+	for id, charger := range h.chargers {
+		h.scheduleIdentityProbeLocked(id, charger)
+	}
 	h.mu.Unlock()
 	for _, id := range revoked {
 		blob, _ := json.Marshal(map[string]any{"type": "ev", "w": 0.0})
@@ -364,7 +382,18 @@ func (h *Handler) OnConnect(id string) {
 	s := h.state(id)
 	h.mu.Lock()
 	s.online = true
+	s.connectionGeneration++
+	s.connectedKnown = false
+	s.charging = false
+	s.lastPowerW = 0
+	s.identityCurrent = false
+	s.featureProfiles = ""
+	s.steerable = nil
+	h.cancelIdentityProbeLocked(s)
+	s.identityProbeAttempts = 0
+	h.scheduleIdentityProbeLocked(id, s)
 	h.mu.Unlock()
+	h.pushReading(id, s)
 	h.telSuccess(id)
 	h.maybeProbeCapability(id)
 }
@@ -378,7 +407,9 @@ func (h *Handler) OnDisconnect(id string) {
 	// reconnect is exactly when we want to ask again, so clear it here.
 	delete(h.probing, id)
 	s.online = false
-	s.connected = false
+	s.identityCurrent = false
+	h.cancelIdentityProbeLocked(s)
+	s.connectedKnown = false
 	s.charging = false
 	s.lastPowerW = 0
 	h.mu.Unlock()
@@ -409,6 +440,8 @@ func (h *Handler) OnBootNotification(id string, req *core.BootNotificationReques
 	s.vendor = req.ChargePointVendor
 	s.model = req.ChargePointModel
 	s.serial = serial
+	s.identityCurrent = true
+	h.cancelIdentityProbeLocked(s)
 	s.firmware = req.FirmwareVersion
 	h.mu.Unlock()
 	h.noteIdentity(id)
@@ -444,6 +477,7 @@ func (h *Handler) OnDataTransfer(id string, req *core.DataTransferRequest) (*cor
 func (h *Handler) OnStatusNotification(id string, req *core.StatusNotificationRequest) (*core.StatusNotificationConfirmation, error) {
 	s := h.state(id)
 	h.mu.Lock()
+	s.connectedKnown = true
 	switch req.Status {
 	case core.ChargePointStatusAvailable, core.ChargePointStatusUnavailable:
 		s.connected = false
@@ -522,6 +556,7 @@ func (h *Handler) OnStartTransaction(id string, req *core.StartTransactionReques
 	s.sessionStartMeterWh = float64(req.MeterStart)
 	s.sessionMeterWh = 0
 	s.connected = true
+	s.connectedKnown = true
 	s.charging = true
 	h.mu.Unlock()
 
@@ -578,9 +613,18 @@ func (h *Handler) pushReading(id string, s *chargerState) {
 	data := map[string]any{
 		"type":       "ev",
 		"w":          w,
-		"connected":  s.connected,
 		"charging":   s.charging,
 		"session_wh": s.sessionMeterWh,
+	}
+	data["connection_generation"] = s.connectionGeneration
+	if s.online && s.connectedKnown {
+		data["connected"] = s.connected
+	} else {
+		// A socket transition says nothing about the physical cable. Keep
+		// the zero out of manual-command acknowledgements in both clients.
+		data["connection_unknown"] = true
+		data["is_online"] = false
+		data["reason_no_current_label"] = "Waiting for charger connection status"
 	}
 	h.mu.Unlock()
 	if !approved {

@@ -44,7 +44,7 @@ test('every controller stop reason has words', () => {
 test('the boost view is mounted last in the modal and updated on polls', () => {
   assert.match(app, /evBoostEl = buildEvBoostView\(matched, status\)/);
   assert.match(app, /evBoostEl\.update\(matched, status\)/);
-  assert.match(app, /evModalBody\.lastChild !== evBoostEl\.el/);
+  assert.match(app, /evModalBody\.lastChild !== evBoostDetails/);
 });
 
 test('the legacy site-wide cover left the modal but is never hidden while on', () => {

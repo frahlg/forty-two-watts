@@ -425,16 +425,14 @@ func containsTraversal(id string) bool {
 	return id == "." || id == ".."
 }
 
-// handleVersionRestart signals the sidecar to pull + force-recreate the
-// main service regardless of whether a newer image exists. Exists so the
-// full update flow can be exercised end-to-end in dev / CI before cutting
-// a real release.
+// handleVersionRestart restarts the existing Core container. No image is
+// selected or downloaded, even when Compose now names a different release.
 func (s *Server) handleVersionRestart(w http.ResponseWriter, r *http.Request) {
 	if s.deps.SelfUpdate == nil {
 		writeJSON(w, 503, map[string]string{"error": "self-update disabled"})
 		return
 	}
-	if err := s.deps.SelfUpdate.Trigger(r.Context(), "restart", ""); err != nil {
+	if err := s.deps.SelfUpdate.TriggerRestart(r.Context()); err != nil {
 		writeJSON(w, 502, map[string]string{"error": err.Error()})
 		return
 	}

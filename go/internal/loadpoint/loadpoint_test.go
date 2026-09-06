@@ -1,6 +1,7 @@
 package loadpoint
 
 import (
+	"math"
 	"testing"
 	"time"
 )
@@ -209,7 +210,7 @@ func TestStatesReturnsAllInOrder(t *testing.T) {
 	}
 }
 
-// TestSessionCompletionSnapsToTarget walks the scenario where the
+// TestVehicleDeclineDoesNotInventTargetSoC walks the scenario where the
 // vehicle charges normally, then explicitly stops requesting current
 // for a sustained window (typically because it hit its own onboard
 // SoC target or its onboard schedule ended). Without the completion
@@ -217,7 +218,7 @@ func TestStatesReturnsAllInOrder(t *testing.T) {
 // the MPC would keep allocating PV surplus to a phantom sink, spilling
 // it to the grid. With the latch the inferred SoC snaps to the target
 // and the planner sees the EV as done.
-func TestSessionCompletionSnapsToTarget(t *testing.T) {
+func TestVehicleDeclineDoesNotInventTargetSoC(t *testing.T) {
 	m := NewManager()
 	m.Load([]Config{{
 		ID: "garage", DriverName: "evse-test",
@@ -230,8 +231,8 @@ func TestSessionCompletionSnapsToTarget(t *testing.T) {
 
 	// Tick 1: connected and charging — request_active = true.
 	m.Observe("garage", true, 7400, 0, true)
-	if st, _ := m.State("garage"); st.SoCSource != "" {
-		t.Errorf("session start should not be marked completed: %+v", st)
+	if st, _ := m.State("garage"); st.SoCSource != "assumed" {
+		t.Errorf("session start should expose its unconfirmed level: %+v", st)
 	}
 
 	// Tick 2 (T+1m of charging): some energy delivered, inferred SoC rises.
@@ -245,14 +246,14 @@ func TestSessionCompletionSnapsToTarget(t *testing.T) {
 	// delivered_wh frozen, power drops to 0.
 	clock = clock.Add(6 * time.Second)
 	m.Observe("garage", true, 0, 1000, false)
-	if st, _ := m.State("garage"); st.SoCSource == "completed" {
+	if st, _ := m.State("garage"); st.ChargingDeclined {
 		t.Errorf("first not-requesting tick should NOT yet complete (under threshold): %+v", st)
 	}
 
 	// Tick 4 (T+30s of not-requesting): below threshold — still not completed.
 	clock = clock.Add(30 * time.Second)
 	m.Observe("garage", true, 0, 1000, false)
-	if st, _ := m.State("garage"); st.SoCSource == "completed" {
+	if st, _ := m.State("garage"); st.ChargingDeclined {
 		t.Errorf("30s not-requesting should NOT yet complete (under 90s threshold): %+v", st)
 	}
 
@@ -260,10 +261,10 @@ func TestSessionCompletionSnapsToTarget(t *testing.T) {
 	clock = clock.Add(60 * time.Second)
 	m.Observe("garage", true, 0, 1000, false)
 	st, _ := m.State("garage")
-	if st.SoCSource != "completed" {
+	if !st.ChargingDeclined {
 		t.Errorf("expected SoCSource='completed' after threshold, got %q (state=%+v)", st.SoCSource, st)
 	}
-	if st.CurrentSoC != 0.6 {
+	if math.Abs(st.CurrentSoC-(0.2+1000.0/60000)) > 1e-9 {
 		t.Errorf("expected inferred SoC pinned to target 60, got %.2f", st.CurrentSoC)
 	}
 
@@ -274,7 +275,7 @@ func TestSessionCompletionSnapsToTarget(t *testing.T) {
 	// clears it.
 	clock = clock.Add(15 * time.Second)
 	m.Observe("garage", true, 0, 1000, true)
-	if st, _ := m.State("garage"); st.SoCSource != "completed" || st.CurrentSoC != 0.6 {
+	if st, _ := m.State("garage"); !st.ChargingDeclined || math.Abs(st.CurrentSoC-(0.2+1000.0/60000)) > 1e-9 {
 		t.Errorf("brief request_active flicker should not clear latch: %+v", st)
 	}
 
@@ -306,7 +307,7 @@ func TestSessionCompletionRequiresTarget(t *testing.T) {
 	m.Observe("garage", true, 0, 0, false)
 
 	st, _ := m.State("garage")
-	if st.SoCSource == "completed" {
+	if st.ChargingDeclined {
 		t.Errorf("completion should not trigger without a target: %+v", st)
 	}
 }
@@ -332,7 +333,7 @@ func TestRequestActiveDefaultPreservesInference(t *testing.T) {
 	clock = clock.Add(5 * time.Minute)
 	m.Observe("garage", true, 7400, 600, true) // 600 Wh in → SoC = 30 + 1
 	st, _ := m.State("garage")
-	if st.SoCSource == "completed" {
+	if st.ChargingDeclined {
 		t.Errorf("request_active=true must not trigger completion: %+v", st)
 	}
 	if st.CurrentSoC < 0.305 || st.CurrentSoC > 0.315 {
@@ -359,7 +360,7 @@ func latchedManager(t *testing.T) (*Manager, *time.Time) {
 	clock = clock.Add(SessionCompletionTimeout)
 	m.Observe("garage", true, 0, 1000, false)
 	st, _ := m.State("garage")
-	if st.SoCSource != "completed" || st.CurrentSoC != 0.6 {
+	if !st.ChargingDeclined || math.Abs(st.CurrentSoC-(0.2+1000.0/60000)) > 1e-9 {
 		t.Fatalf("precondition: latch should have fired, got %+v", st)
 	}
 	return m, &clock
@@ -377,7 +378,7 @@ func TestSetCurrentSoCClearsCompletionLatch(t *testing.T) {
 	*clock = clock.Add(3 * time.Second)
 	m.Observe("garage", true, 0, 1000, false) // still not requesting, timer restarts
 	st, _ := m.State("garage")
-	if st.SoCSource == "completed" {
+	if st.ChargingDeclined {
 		t.Errorf("latch should be cleared by the operator's correction: %+v", st)
 	}
 	if st.CurrentSoC < 0.49 || st.CurrentSoC > 0.51 {
@@ -386,43 +387,43 @@ func TestSetCurrentSoCClearsCompletionLatch(t *testing.T) {
 	// A car that keeps declining re-arms the latch after the timeout.
 	*clock = clock.Add(SessionCompletionTimeout)
 	m.Observe("garage", true, 0, 1000, false)
-	if st, _ := m.State("garage"); st.SoCSource != "completed" || st.CurrentSoC != 0.6 {
+	if st, _ := m.State("garage"); !st.ChargingDeclined || math.Abs(st.CurrentSoC-0.5) > 1e-9 {
 		t.Errorf("latch should re-arm after sustained not-requesting: %+v", st)
 	}
 }
 
-// Same morning, later: a manual charge pushed 11 kW into the car for
-// forty minutes and the estimate still read 80 %, because the latch
-// only ever released on plug-out. Ten minutes of steady current is the
-// car charging, not an EVSE retry blip; the estimate must follow the
-// delivered energy again.
-func TestSustainedChargingClearsCompletionLatch(t *testing.T) {
+// A car that actually resumes charging is eligible for planning immediately.
+func TestMeasuredChargingClearsVehicleDecline(t *testing.T) {
 	m, clock := latchedManager(t)
-	// Charging resumes at full power; a brief run must not release.
 	*clock = clock.Add(5 * time.Second)
 	m.Observe("garage", true, 11000, 1500, true)
-	if st, _ := m.State("garage"); st.SoCSource != "completed" || st.CurrentSoC != 0.6 {
-		t.Fatalf("a fresh run must not release the latch yet: %+v", st)
-	}
-	*clock = clock.Add(InterruptSteadyRun / 2)
-	m.Observe("garage", true, 11000, 3000, true)
-	if st, _ := m.State("garage"); st.SoCSource != "completed" {
-		t.Fatalf("half a steady run must not release the latch: %+v", st)
-	}
-	*clock = clock.Add(InterruptSteadyRun/2 + time.Second)
-	m.Observe("garage", true, 11000, 4000, true)
 	st, _ := m.State("garage")
-	if st.SoCSource == "completed" {
-		t.Errorf("a full steady run should release the latch: %+v", st)
+	if st.ChargingDeclined || math.Abs(st.CurrentSoC-(0.2+1500.0/60000)) > 1e-9 {
+		t.Fatalf("resumed delivery did not clear refusal: %+v", st)
 	}
-	// anchor 0.2 + 4000/60000 ≈ 0.267 — the estimate moved off the pin.
-	if st.CurrentSoC < 0.26 || st.CurrentSoC > 0.27 {
-		t.Errorf("estimate should follow delivered Wh after release, got %.3f", st.CurrentSoC)
+}
+
+func TestHigherTargetRetriesVehicleWithoutInventingBatteryLevel(t *testing.T) {
+	m, _ := latchedManager(t)
+	before, _ := m.State("garage")
+	m.SetTarget("garage", .9, time.Now().Add(time.Hour))
+	after, _ := m.State("garage")
+	if after.ChargingDeclined || after.CurrentSoC != before.CurrentSoC {
+		t.Fatalf("higher target did not retry honestly: %+v", after)
 	}
-	// And keeps following as more energy goes in.
-	*clock = clock.Add(time.Minute)
-	m.Observe("garage", true, 11000, 6000, true)
-	if st, _ := m.State("garage"); st.CurrentSoC < 0.29 || st.CurrentSoC > 0.31 {
-		t.Errorf("estimate should keep rising, got %.3f", st.CurrentSoC)
+}
+
+func TestExplicitRetryAndHigherScheduleClearVehicleDecline(t *testing.T) {
+	m, _ := latchedManager(t)
+	before, _ := m.State("garage")
+	m.RetryCharging("garage")
+	after, _ := m.State("garage")
+	if after.ChargingDeclined || after.CurrentSoC != before.CurrentSoC {
+		t.Fatalf("retry changed level: %+v", after)
+	}
+	m, _ = latchedManager(t)
+	m.SetSchedule("garage", Schedule{SoC: .9, TimeOfDayMinUTC: 7 * 60})
+	if after, _ := m.State("garage"); after.ChargingDeclined {
+		t.Fatalf("new goal retained refusal: %+v", after)
 	}
 }

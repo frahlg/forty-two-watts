@@ -1,12 +1,14 @@
 package api
 
 import (
+	"encoding/json"
 	"fmt"
 	"math"
 	"net/http"
 	"time"
 
 	"github.com/srcfl/ftw/go/internal/loadpoint"
+	"github.com/srcfl/ftw/go/internal/telemetry"
 )
 
 // Manual-hold diagnostics endpoint. Lets an operator pin a loadpoint
@@ -48,7 +50,7 @@ type manualHoldRequest struct {
 // confirm what's installed. Returned by POST and GET.
 type manualHoldResponse struct {
 	Active          bool    `json:"active"`
-	PowerW          float64 `json:"power_w,omitempty"`
+	PowerW          float64 `json:"power_w"`
 	PhaseMode       string  `json:"phase_mode,omitempty"`
 	PhaseSplitW     float64 `json:"phase_split_w,omitempty"`
 	MinPhaseHoldS   int     `json:"min_phase_hold_s,omitempty"`
@@ -57,6 +59,10 @@ type manualHoldResponse struct {
 	SitePhases      int     `json:"site_phases,omitempty"`
 	ExpiresAtMs     int64   `json:"expires_at_ms,omitempty"`
 	ReleaseAtSoCPct float64 `json:"release_at_soc_pct,omitempty"`
+	// StartedAtMs is when the operator installed the hold; an Update of
+	// the amps keeps it. The live account of what the charger did with the
+	// hold is `manual` on GET /api/loadpoints.
+	StartedAtMs int64 `json:"started_at_ms,omitempty"`
 }
 
 // maxManualHoldS bounds the hold duration so a forgotten hold can't
@@ -104,8 +110,12 @@ func (s *Server) handleLoadpointManualHold(w http.ResponseWriter, r *http.Reques
 		})
 		return
 	}
-	if req.PowerW < 0 {
-		writeJSON(w, 400, map[string]string{"error": "power_w must be >= 0"})
+	if req.PowerW < 0 || req.PhaseSplitW < 0 || req.Voltage < 0 || req.MaxAmpsPerPhase < 0 || req.MinPhaseHoldS < 0 {
+		writeJSON(w, 400, map[string]string{"error": "power and optional phase limits must be >= 0"})
+		return
+	}
+	if req.SitePhases != 0 && req.SitePhases != 1 && req.SitePhases != 3 {
+		writeJSON(w, 400, map[string]string{"error": "site_phases must be 1 or 3 when set"})
 		return
 	}
 	switch req.PhaseMode {
@@ -156,6 +166,13 @@ func (s *Server) handleLoadpointManualHold(w http.ResponseWriter, r *http.Reques
 		ExpiresAt:       expires,
 		Persistent:      persistent,
 		ReleaseAtSoC:    req.ReleaseAtSoCPct / 100,
+	}
+	// An Update of the amps keeps the hold's start, so the manual tab keeps
+	// counting from the first press; a fresh hold starts now.
+	now := time.Now()
+	hold.StartedAt = now
+	if prev, ok := s.deps.LoadpointCtrl.GetManualHold(id, now); ok && !prev.StartedAt.IsZero() {
+		hold.StartedAt = prev.StartedAt
 	}
 	s.deps.LoadpointCtrl.SetManualHold(id, hold)
 	writeJSON(w, 200, manualHoldResponseFrom(hold, true))
@@ -240,6 +257,7 @@ func (s *Server) decorateLoadpointsWithManual(states []loadpoint.State) {
 	}
 
 	now := time.Now()
+	chargers := s.chargerReadings()
 	for i := range states {
 		phases := fusePhases
 		switch phaseModeByID[states[i].ID] {
@@ -250,14 +268,61 @@ func (s *Server) decorateLoadpointsWithManual(states []loadpoint.State) {
 		}
 		states[i].Phases = phases
 		states[i].VoltageV = voltage
+		reading := chargers[states[i].DriverName]
+		status := &loadpoint.ChargerStatus{Known: reading.Known, Available: reading.Known && !reading.Unavailable, Reason: reading.Reason}
+		if !reading.UpdatedAt.IsZero() {
+			status.UpdatedAtMs = reading.UpdatedAt.UnixMilli()
+		}
+		if reading.LimitKnown {
+			limit := reading.LimitA
+			status.LimitA = &limit
+		}
+		states[i].Charger = status
 		if s.deps.LoadpointCtrl != nil {
-			if h, ok := s.deps.LoadpointCtrl.GetManualHold(states[i].ID, now); ok {
+			h, ok := s.deps.LoadpointCtrl.GetManualHold(states[i].ID, now)
+			if ok {
 				states[i].ManualActive = true
 				states[i].ManualChargeW = h.PowerW
 				states[i].ManualReleaseSoC = h.ReleaseAtSoC
 			}
+			states[i].Manual = loadpoint.ManualStatusFrom(h, ok, states[i], chargers[states[i].DriverName], now)
 		}
 	}
+}
+
+// chargerReadings collects, per EV driver, what the charger last reported
+// about the current it allows and why it delivers none. The field names
+// follow the EV driver contract (easee_cloud.lua and its siblings): max_a,
+// charging, reason_no_current_label, command_stalled. A driver that emits
+// none of them still yields a reading, so the manual status knows the
+// charger is there but cannot confirm a limit.
+func (s *Server) chargerReadings() map[string]loadpoint.ChargerReading {
+	out := map[string]loadpoint.ChargerReading{}
+	if s.deps.Tel == nil {
+		return out
+	}
+	for _, rd := range s.deps.Tel.ReadingsByType(telemetry.DerEV) {
+		var d struct {
+			MaxA           *float64 `json:"max_a"`
+			Charging       bool     `json:"charging"`
+			Reason         string   `json:"reason_no_current_label"`
+			CommandStalled bool     `json:"command_stalled"`
+			Online         *bool    `json:"is_online"`
+		}
+		if len(rd.Data) > 0 {
+			_ = json.Unmarshal(rd.Data, &d)
+		}
+		r := loadpoint.ChargerReading{Known: true, UpdatedAt: rd.UpdatedAt, Unavailable: d.Online != nil && !*d.Online, Charging: d.Charging, Reason: d.Reason, Stalled: d.CommandStalled}
+		if health := s.deps.Tel.DriverHealth(rd.Driver); health != nil && !health.TelemetryLive() {
+			r.Unavailable = true
+		}
+		if d.MaxA != nil {
+			r.LimitA = *d.MaxA
+			r.LimitKnown = true
+		}
+		out[rd.Driver] = r
+	}
+	return out
 }
 
 func manualHoldResponseFrom(h loadpoint.ManualHold, active bool) manualHoldResponse {
@@ -276,5 +341,8 @@ func manualHoldResponseFrom(h loadpoint.ManualHold, active bool) manualHoldRespo
 		resp.ExpiresAtMs = h.ExpiresAt.UnixMilli()
 	}
 	resp.ReleaseAtSoCPct = h.ReleaseAtSoC * 100
+	if !h.StartedAt.IsZero() {
+		resp.StartedAtMs = h.StartedAt.UnixMilli()
+	}
 	return resp
 }

@@ -151,7 +151,7 @@ func (w *WebPush) Publish(ctx context.Context, m Message) error {
 		return ErrNothingToSend
 	}
 
-	payload, err := json.Marshal(map[string]string{"title": m.Title, "body": m.Body})
+	payload, err := json.Marshal(map[string]string{"title": m.Title, "body": m.Body, "kind": m.Kind, "loadpoint_id": m.LoadpointID})
 	if err != nil {
 		return fmt.Errorf("webpush: encode payload: %w", err)
 	}

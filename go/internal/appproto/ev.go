@@ -27,7 +27,7 @@ func argNum(args map[string]any, key string) (float64, bool) {
 	case uint64:
 		return float64(v), true
 	case float64:
-		return v, true
+		return v, !math.IsNaN(v) && !math.IsInf(v, 0)
 	}
 	return 0, false
 }
@@ -36,7 +36,7 @@ func argNum(args map[string]any, key string) (float64, bool) {
 // millisecond is a client bug worth refusing rather than rounding.
 func argInt(args map[string]any, key string) (int64, bool) {
 	f, ok := argNum(args, key)
-	if !ok || f != math.Trunc(f) {
+	if !ok || f != math.Trunc(f) || f < math.MinInt64 || f >= math.MaxInt64 {
 		return 0, false
 	}
 	return int64(f), true
@@ -98,9 +98,25 @@ func (h *Handler) loadpointHold(cmd Cmd, uptimeMs int64) error {
 	// absent means 0, a valid "pause" hold, exactly as an omitted JSON field
 	// would; hold_s of 0 or absent is the persistent operator hold that only
 	// clear or an unplug releases.
-	powerW, _ := argNum(cmd.Args, "power_w")
-	if powerW < 0 {
-		return h.rejectArg(cmd, "power_w", powerW)
+	powerW, powerOK := argNum(cmd.Args, "power_w")
+	if _, present := cmd.Args["power_w"]; (present && !powerOK) || powerW < 0 {
+		return h.rejectArg(cmd, "power_w", cmd.Args["power_w"])
+	}
+	for _, key := range []string{"phase_split_w", "voltage", "max_amps_per_phase"} {
+		if value, present := cmd.Args[key]; present {
+			n, ok := argNum(cmd.Args, key)
+			if !ok || n < 0 {
+				return h.rejectArg(cmd, key, value)
+			}
+		}
+	}
+	for _, key := range []string{"min_phase_hold_s", "site_phases"} {
+		if value, present := cmd.Args[key]; present {
+			n, ok := argInt(cmd.Args, key)
+			if !ok || n < 0 || (key == "site_phases" && n != 0 && n != 1 && n != 3) {
+				return h.rejectArg(cmd, key, value)
+			}
+		}
 	}
 	var holdS int64
 	if _, present := cmd.Args["hold_s"]; present {
@@ -113,7 +129,10 @@ func (h *Handler) loadpointHold(cmd Cmd, uptimeMs int64) error {
 	if holdS > int64(loadpoint.MaxManualHold/time.Second) {
 		return h.rejectArg(cmd, "hold_s", holdS)
 	}
-	phaseMode, _ := cmd.Args["phase_mode"].(string)
+	phaseMode, phaseOK := cmd.Args["phase_mode"].(string)
+	if _, present := cmd.Args["phase_mode"]; present && !phaseOK {
+		return h.rejectArg(cmd, "phase_mode", cmd.Args["phase_mode"])
+	}
 	switch phaseMode {
 	case "", "auto", "1p", "3p":
 	default:
@@ -401,8 +420,8 @@ func (h *Handler) loadpointSurplusOnlySet(cmd Cmd, uptimeMs int64) error {
 	}
 
 	if _, ok := lp.SetSurplusOnly(id, want); !ok {
-		// The loadpoint went away between the existence check and the
-		// write — a configuration reload mid-command.
+		// The loadpoint disappeared or storage rejected the change. Keep
+		// the previous choice and let the app offer a retry.
 		return h.settleAndReport(cmd.CmdID, CmdResult{
 			CmdID: cmd.CmdID,
 			State: CmdRejected,

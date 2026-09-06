@@ -299,6 +299,23 @@ func describeSource(ctx context.Context, dataDir string, source sourceEntry) (Fi
 		if err != nil || !pathInside(dataDir, resolved) {
 			return FileEntry{}, fmt.Errorf("backup: symlink escapes data dir: %s -> %s", source.sourcePath, target)
 		}
+		// Managed driver activations use absolute paths in the running
+		// container. Store an internal relative link so restore can relocate
+		// data without referring back to /app/data or the original machine.
+		// Do not follow the link; validate the complete archive graph below.
+		if filepath.IsAbs(target) {
+			rootPrefix := dataDir + string(filepath.Separator)
+			if !strings.HasPrefix(target, rootPrefix) {
+				return FileEntry{}, fmt.Errorf("backup: absolute symlink is outside data dir: %s", source.sourcePath)
+			}
+			back, relErr := filepath.Rel(filepath.Dir(source.sourcePath), dataDir)
+			if relErr != nil {
+				return FileEntry{}, relErr
+			}
+			// Preserve .. until archive graph validation has expanded links.
+			target = back + string(filepath.Separator) + strings.TrimPrefix(target, rootPrefix)
+		}
+		target = filepath.ToSlash(target)
 		entry.Type, entry.LinkTarget = "symlink", target
 		h := sha256.Sum256([]byte(target))
 		entry.SHA256 = hex.EncodeToString(h[:])
@@ -495,7 +512,7 @@ func validateManifest(manifest Manifest) error {
 		return errors.New("backup: invalid manifest identity or database path")
 	}
 	seen := make(map[string]bool, len(manifest.Files))
-	symlinks := make(map[string]bool)
+	symlinks := make(map[string]string)
 	databaseFound := false
 	for _, entry := range manifest.Files {
 		if !safeDataPath(entry.Path) || entry.Path == manifestPath || seen[entry.Path] {
@@ -528,19 +545,63 @@ func validateManifest(manifest Manifest) error {
 			if !safeDataPath(resolved) {
 				return fmt.Errorf("backup: symlink target escapes data root: %s -> %s", entry.Path, entry.LinkTarget)
 			}
-			symlinks[entry.Path] = true
+			symlinks[entry.Path] = entry.LinkTarget
 		}
 	}
 	if !databaseFound {
 		return errors.New("backup: compressed database missing from manifest")
 	}
+	// A lexical path check alone misses `alias/../outside`: .. applies
+	// after alias is followed. Resolve each link against archive entries,
+	// never the host filesystem, and reject cycles or escape chains.
+	for name, target := range symlinks {
+		if err := validateArchiveLink(name, target, symlinks); err != nil {
+			return err
+		}
+	}
 	for _, entry := range manifest.Files {
 		parent := path.Dir(entry.Path)
 		for parent != "." && parent != "/" {
-			if symlinks[parent] {
+			if _, ok := symlinks[parent]; ok {
 				return fmt.Errorf("backup: entry %s is nested below symlink %s", entry.Path, parent)
 			}
 			parent = path.Dir(parent)
+		}
+	}
+	return nil
+}
+
+// validateArchiveLink models relative symlink traversal without cleaning away
+// .. before symlink expansion. Archive paths start at the data root.
+func validateArchiveLink(name, target string, links map[string]string) error {
+	parts := strings.Split(strings.TrimPrefix(path.Dir(name), "data/"), "/")
+	if path.Dir(name) == "data" {
+		parts = nil
+	}
+	pending := strings.Split(target, "/")
+	expansions := 0
+	for len(pending) > 0 {
+		part := pending[0]
+		pending = pending[1:]
+		switch part {
+		case "", ".":
+			continue
+		case "..":
+			if len(parts) == 0 {
+				return fmt.Errorf("backup: symlink chain escapes data root: %s", name)
+			}
+			parts = parts[:len(parts)-1]
+		default:
+			candidate := "data/" + strings.Join(append(append([]string{}, parts...), part), "/")
+			if next, ok := links[candidate]; ok {
+				expansions++
+				if expansions > 40 {
+					return fmt.Errorf("backup: cyclic or excessive symlink chain: %s", name)
+				}
+				pending = append(strings.Split(next, "/"), pending...)
+			} else {
+				parts = append(parts, part)
+			}
 		}
 	}
 	return nil

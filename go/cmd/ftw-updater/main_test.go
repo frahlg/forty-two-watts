@@ -78,6 +78,7 @@ func newTestServer(t *testing.T) (*server, *fakeRunner) {
 		imageID:         func(context.Context, string) (string, error) { return "sha256:current", nil },
 		containerID:     func(context.Context, string) (string, error) { return "ftw-container", nil },
 		chownFile:       func(string, int, int) error { return nil },
+		optimizerPin:    func(string) error { return nil },
 	}
 	s.checkSnapshotFile = func(_ context.Context, _ string, snapshotID, file string) error {
 		_, err := os.Stat(filepath.Join(dir, "data", "snapshots", snapshotID, file))
@@ -319,7 +320,7 @@ func TestHandleUpdate_MissingOptimizerLeavesUserOverrideUntouched(t *testing.T) 
 	}
 }
 
-func TestHandleUpdate_RestartForceRecreates(t *testing.T) {
+func TestHandleUpdate_RestartDoesNotRecreate(t *testing.T) {
 	s, runner := newTestServer(t)
 	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(`{"action":"restart"}`))
 	rr := httptest.NewRecorder()
@@ -328,9 +329,9 @@ func TestHandleUpdate_RestartForceRecreates(t *testing.T) {
 		t.Fatalf("status = %d", rr.Code)
 	}
 	waitForState(t, s, "done")
-	up := strings.Join(runner.snapshot()[1], " ")
-	if !strings.Contains(up, "--force-recreate") {
-		t.Errorf("restart path must force-recreate: %v", up)
+	calls := runner.snapshot()
+	if len(calls) != 1 || strings.Join(calls[0], " ") != strings.Join(s.composeArgs("restart", "--no-deps", s.mainServiceName), " ") {
+		t.Fatalf("restart must only restart the existing container: %v", calls)
 	}
 }
 
@@ -473,7 +474,7 @@ func TestHandleUpdate_MigratesHardcodedImageWithTransientOverride(t *testing.T) 
 	}
 }
 
-func TestHandleUpdate_RestartMigratesHardcodedImageWithTransientOverride(t *testing.T) {
+func TestHandleUpdate_RestartPreservesHardcodedImage(t *testing.T) {
 	s, runner := newTestServer(t)
 	writeCompose(t, s.composeFile, `services:
   forty-two-watts:
@@ -494,8 +495,8 @@ func TestHandleUpdate_RestartMigratesHardcodedImageWithTransientOverride(t *test
 	waitForState(t, s, "done")
 	for _, call := range runner.snapshot() {
 		joined := strings.Join(call, " ")
-		if !strings.Contains(joined, "ftw-compose-update-") {
-			t.Fatalf("legacy restart must use compatibility override: %v", call)
+		if strings.Contains(joined, "ftw-compose-update-") || !strings.Contains(joined, "restart --no-deps") {
+			t.Fatalf("legacy restart must keep its container without a migration override: %v", call)
 		}
 		if call[len(call)-1] != legacyMainServiceName {
 			t.Fatalf("legacy service identity must be preserved: %v", call)
@@ -696,7 +697,7 @@ func TestValidateComponentImagePinRequiresExactVariable(t *testing.T) {
 	}
 }
 
-func TestComponentRollbackPinsUnsupportedOptimizerImages(t *testing.T) {
+func TestComponentRollbackRejectsNonPersistentOptimizerImages(t *testing.T) {
 	for _, image := range []string{
 		"ghcr.io/srcfl/ftw-optimizer:latest",
 		"ghcr.io/srcfl/ftw-optimizer:${MY_TAG:-latest}",
@@ -708,16 +709,13 @@ func TestComponentRollbackPinsUnsupportedOptimizerImages(t *testing.T) {
 
 			s.runComponentRollback("optimizer", time.Now())
 			state := s.readState()
-			if state.State != "done" || state.Action != "component_rollback" {
-				t.Fatalf("rollback state = %+v", state)
+			if state.State != "failed" || !strings.Contains(state.Message, "must use ${FTW_OPTIMIZER_IMAGE_TAG}") {
+				t.Fatalf("rollback must reject a pin Compose cannot use: %+v", state)
 			}
-			calls, envs := runner.snapshot(), runner.envSnapshot()
-			if len(calls) != 2 || !strings.Contains(strings.Join(calls[0], " "), "image tag sha256:optimizer-old "+canonicalOptimizerImage+":ftw-rollback-") {
-				t.Fatalf("rollback calls = %v", calls)
+			if len(runner.snapshot()) != 0 {
+				t.Fatalf("unsupported rollback changed an image: %v", runner.snapshot())
 			}
-			if len(envs) != 2 || len(envs[1]) != 1 || !strings.HasPrefix(envs[1][0], "FTW_OPTIMIZER_IMAGE_TAG=ftw-rollback-") {
-				t.Fatalf("rollback env = %v", envs)
-			}
+
 		})
 	}
 }
@@ -744,21 +742,88 @@ func TestPrepareUpdateImagePin_WinsOverHardcodedUserOverride(t *testing.T) {
 	}
 }
 
-// `restart` is the dev path — no target needed, no env override, falls
-// through to compose's :latest default.
-func TestHandleUpdate_RestartLeavesEnvUnset(t *testing.T) {
+func TestHandleUpdate_RestartKeepsEveryRunningImage(t *testing.T) {
+	for _, tc := range []struct{ name, image, target, action string }{
+		{"beta with stale env", "ghcr.io/srcfl/ftw:v2.14.0-beta.1", "", "restart"},
+		{"wrong caller version", "ghcr.io/srcfl/ftw:v2.14.0-beta.1", "v2.0.0", "restart"},
+		{"moving tag", "ghcr.io/srcfl/ftw:latest", "", "restart"},
+		{"local review", "ftw-ev-review:46d04a7a", "", "restart_existing"},
+		{"digest", "ghcr.io/srcfl/ftw@sha256:abc123", "", "restart_existing"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, runner := newTestServer(t)
+			writeCompose(t, s.composeFile, "services:\n  ftw:\n    image: "+tc.image+"\n")
+			writeCompose(t, filepath.Join(filepath.Dir(s.composeFile), ".env"), "FTW_IMAGE_TAG=v2.0.0-beta.2\n")
+			s.imageRef = func(context.Context, string) (string, error) {
+				t.Error("restart must not resolve an image")
+				return "", errors.New("inspect unavailable")
+			}
+			healthChecks := 0
+			s.healthCheck = func(_ context.Context, service string) error {
+				healthChecks++
+				if service != canonicalMainServiceName {
+					t.Errorf("health checked %s", service)
+				}
+				return nil
+			}
+			req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(`{"action":"`+tc.action+`","target":"`+tc.target+`"}`))
+			rr := httptest.NewRecorder()
+			s.handleUpdate(rr, req)
+			if rr.Code != http.StatusAccepted {
+				t.Fatalf("status = %d: %s", rr.Code, rr.Body.String())
+			}
+			st := waitForState(t, s, "done")
+			if st.Action != "restart" || st.Target != "" || st.Step != st.TotalSteps {
+				t.Fatalf("restart state = %+v", st)
+			}
+			calls := runner.snapshot()
+			if len(calls) != 1 || strings.Join(calls[0], " ") != strings.Join(s.composeArgs("restart", "--no-deps", canonicalMainServiceName), " ") {
+				t.Fatalf("restart selected or pulled a replacement image: %v", calls)
+			}
+			for _, env := range runner.envSnapshot() {
+				if len(env) != 0 {
+					t.Fatalf("restart image env = %v", env)
+				}
+			}
+			if healthChecks != 1 {
+				t.Fatalf("health checks = %d", healthChecks)
+			}
+			pin, _ := os.ReadFile(filepath.Join(filepath.Dir(s.composeFile), ".env"))
+			if string(pin) != "FTW_IMAGE_TAG=v2.0.0-beta.2\n" {
+				t.Fatalf("restart rewrote .env: %s", pin)
+			}
+		})
+	}
+}
+
+func TestHandleUpdate_RestartRejectsMovingTarget(t *testing.T) {
 	s, runner := newTestServer(t)
-	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(`{"action":"restart"}`))
+	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(`{"action":"restart","target":"latest"}`))
 	rr := httptest.NewRecorder()
 	s.handleUpdate(rr, req)
-	if rr.Code != 202 {
-		t.Fatalf("status = %d", rr.Code)
+	if rr.Code != 400 {
+		t.Fatalf("status = %d, want 400", rr.Code)
 	}
-	waitForState(t, s, "done")
-	for i, env := range runner.envSnapshot() {
-		if len(env) != 0 {
-			t.Errorf("restart call %d should have no extra env, got %v", i, env)
-		}
+	if len(runner.snapshot()) != 0 {
+		t.Fatal("rejected restart called Docker")
+	}
+}
+
+func TestRestartFailureDoesNotFallBackToRecreate(t *testing.T) {
+	for _, failed := range []string{"restart", "health"} {
+		t.Run(failed, func(t *testing.T) {
+			s, runner := newTestServer(t)
+			runner.fail = failed == "restart"
+			s.healthCheck = func(context.Context, string) error { return errors.New("health did not recover") }
+			s.runJob("restart", "v2.0.0")
+			st := s.readState()
+			if st.State != "failed" || !strings.Contains(st.Message, "restart failed") {
+				t.Fatalf("state = %+v", st)
+			}
+			if len(runner.snapshot()) != 1 {
+				t.Fatalf("failure must not pull/recreate: %v", runner.snapshot())
+			}
+		})
 	}
 }
 

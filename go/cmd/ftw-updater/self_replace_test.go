@@ -268,3 +268,26 @@ func TestIsUpdaterImage(t *testing.T) {
 		}
 	}
 }
+
+func TestBetaUpdateReplacesUpdaterWithTheSameCandidate(t *testing.T) {
+	s, _ := newTestServer(t)
+	healthy := false
+	s.healthCheck = func(_ context.Context, service string) error {
+		if service == canonicalMainServiceName {
+			healthy = true
+		}
+		return nil
+	}
+	var replacement string
+	s.selfReplace = func(target string) error {
+		if !healthy || s.readState().State != "done" {
+			t.Error("updater replacement preceded healthy Core")
+		}
+		replacement = target
+		return nil
+	}
+	s.runJob("update", "v2.15.0-beta.1")
+	if replacement != "v2.15.0-beta.1" {
+		t.Fatalf("updater replacement = %q", replacement)
+	}
+}

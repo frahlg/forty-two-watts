@@ -126,6 +126,7 @@ type server struct {
 	// Injectable so the ordering — only after a verified Core update, never able
 	// to fail one — is testable without Docker. See self_replace.go.
 	selfReplace       func(target string) error
+	optimizerPin      func(target string) error
 	chownFile         func(string, int, int) error
 	checkSnapshotFile func(context.Context, string, string, string) error
 	stageSnapshotFile func(context.Context, string, string, string, string) error
@@ -286,6 +287,7 @@ func main() {
 		defer cancel()
 		return srv.replaceUpdater(ctx, target)
 	}
+	srv.optimizerPin = srv.persistOptimizerPin
 	srv.chownFile = os.Chown
 	srv.checkSnapshotFile = func(ctx context.Context, containerID, snapshotID, file string) error {
 		return srv.runner(ctx, nil, "exec", containerID, "test", "-f", "/app/data/snapshots/"+snapshotID+"/"+file)
@@ -346,6 +348,11 @@ func (s *server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad json: "+err.Error(), 400)
 		return
 	}
+	// A distinct action lets new Core fail closed on an old updater: old
+	// sidecars reject it before running Docker instead of pulling :latest.
+	if body.Action == "restart_existing" {
+		body.Action = "restart"
+	}
 	if body.Component == "" {
 		body.Component = "core"
 	}
@@ -372,9 +379,13 @@ func (s *server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	case "restart":
-		// target optional — when empty, compose's `${FTW_IMAGE_TAG:-latest}`
-		// substitution falls through to :latest. That's the dev path for
-		// exercising the flow without a real release.
+		// Older Core may send a release target. Validate the old wire shape,
+		// but never use that hint to select an image during a restart.
+		if body.Target != "" && !isImmutableImageTag(body.Target) {
+			http.Error(w, "target must be stable vX.Y.Z or beta vX.Y.Z-beta.N", 400)
+			return
+		}
+		body.Target = ""
 	case "rollback":
 		if body.Snapshot == "" {
 			http.Error(w, "rollback requires snapshot id", 400)
@@ -451,17 +462,38 @@ func (s *server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(st)
 }
 
-// runJob executes a pull+up (or pull+up --force-recreate) sequence,
-// emitting state transitions between steps. Runs inside a goroutine so
-// the HTTP handler that kicked it off has already responded.
-//
-// When target is non-empty (always the case for action=update), it's
-// passed as FTW_IMAGE_TAG=<target> so docker-compose.yml's image tag
-// substitution pulls the specific version. action=restart with empty
-// target falls through to compose's default (`:latest`) — that's the
-// dev path for exercising the flow without a real release.
+// runJob dispatches a component update or a restart of its existing container.
 func (s *server) runJob(action, target string) {
 	s.runComponentJob(action, target, "core", time.Time{})
+}
+
+// restartExisting never pulls or recreates a container. Its image ID, mounts
+// and environment survive even when Compose or .env now names another build.
+func (s *server) restartExisting(spec componentSpec, startedAt time.Time) {
+	st := State{State: "restarting", Action: "restart", Component: spec.name,
+		StartedAt: startedAt, PhaseStartedAt: time.Now(), UpdatedAt: time.Now(),
+		Message: "Restarting the existing container", Step: 1, TotalSteps: 3}
+	s.writeState(st)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	err := s.runWithStateHeartbeat(st, func() error {
+		return s.runner(ctx, nil, s.composeArgs("restart", "--no-deps", spec.service)...)
+	})
+	cancel()
+	if err == nil && s.healthCheck != nil {
+		st.State, st.Message, st.Step = "checking", "Waiting for the service to become ready", 2
+		st.PhaseStartedAt, st.UpdatedAt = time.Now(), time.Now()
+		s.writeState(st)
+		ctx, cancel = context.WithTimeout(context.Background(), componentHealthTimeout(spec.name))
+		err = s.runWithStateHeartbeat(st, func() error { return s.healthCheck(ctx, spec.service) })
+		cancel()
+	}
+	st.UpdatedAt = time.Now()
+	if err != nil {
+		st.State, st.Message = "failed", "restart failed: "+err.Error()
+	} else {
+		st.State, st.Message, st.Step = "done", "Service restarted and ready", 3
+	}
+	s.writeState(st)
 }
 
 func (s *server) runComponentJob(action, target, component string, startedAt time.Time) {
@@ -473,6 +505,16 @@ func (s *server) runComponentJob(action, target, component string, startedAt tim
 	if err != nil {
 		s.writeState(State{State: "failed", Action: action, Component: component, Target: target, StartedAt: now, UpdatedAt: now, Message: err.Error()})
 		return
+	}
+	if action == "restart" {
+		s.restartExisting(spec, now)
+		return
+	}
+	if action == "update" && spec.name == "optimizer" {
+		if err := s.validateOptimizerPinLayout(); err != nil {
+			s.writeState(State{State: "failed", Action: action, Component: component, Target: target, StartedAt: now, UpdatedAt: time.Now(), Message: "optimizer update blocked: " + err.Error()})
+			return
+		}
 	}
 	if action == "update" && spec.name == "core" {
 		if err := s.requireHealthyOptimizer(); err != nil {
@@ -503,7 +545,7 @@ func (s *server) runComponentJob(action, target, component string, startedAt tim
 	if target != "" {
 		env = []string{spec.tagEnv + "=" + target}
 	}
-	if action == "update" || action == "restart" {
+	if action == "update" {
 		cleanup, err := s.prepareComponentImagePin(spec)
 		if err != nil {
 			msg := "compose preflight failed: " + err.Error()
@@ -590,12 +632,6 @@ func (s *server) runComponentJob(action, target, component string, startedAt tim
 	defer upCancel()
 
 	upArgs := s.composeArgs("up", "-d", spec.service)
-	if action == "restart" {
-		// --force-recreate is what makes restart actually restart when the
-		// image digest didn't change — exactly the dev/test path the main
-		// UI exposes as the "Restart" button.
-		upArgs = s.composeArgs("up", "-d", "--force-recreate", spec.service)
-	}
 	if err := s.runWithStateHeartbeat(restartState, func() error {
 		return s.runner(upCtx, env, upArgs...)
 	}); err != nil {
@@ -622,6 +658,13 @@ func (s *server) runComponentJob(action, target, component string, startedAt tim
 				}
 			}
 			s.writeState(State{State: "failed", Action: action, Component: component, Target: target, StartedAt: now, UpdatedAt: time.Now(), Message: "health check failed: " + healthErr.Error()})
+			return
+		}
+	}
+
+	if spec.name == "optimizer" {
+		if err := s.saveOptimizerPin(target); err != nil {
+			s.writeState(State{State: "failed", Action: action, Component: component, Target: target, StartedAt: now, UpdatedAt: time.Now(), Message: "optimizer is ready, but its image pin was not saved: " + err.Error(), PreviousImageID: previousImageID})
 			return
 		}
 	}
@@ -734,6 +777,11 @@ func (s *server) restorePreviousComponentImage(imageID string, spec componentSpe
 }
 
 func (s *server) restorePreviousComponentImageWithTag(imageID, previousTag string, spec componentSpec) error {
+	if spec.name == "optimizer" {
+		if err := s.validateOptimizerPinLayout(); err != nil {
+			return err
+		}
+	}
 	image, ok, err := serviceImageFromComposeFiles(s.composeFiles(), spec.service)
 	if err != nil {
 		return err
@@ -766,6 +814,11 @@ func (s *server) restorePreviousComponentImageWithTag(imageID, previousTag strin
 	if s.healthCheck != nil {
 		if err := s.healthCheck(ctx, spec.service); err != nil {
 			return fmt.Errorf("previous image health check: %w", err)
+		}
+	}
+	if spec.name == "optimizer" {
+		if err := s.saveOptimizerPin(rollbackTag); err != nil {
+			return fmt.Errorf("previous optimizer is ready, but its image pin was not saved: %w", err)
 		}
 	}
 	return nil
@@ -1583,8 +1636,20 @@ func dockerCompose(ctx context.Context, extraEnv []string, args ...string) error
 	if err != nil {
 		return fmt.Errorf("%w: %s", err, truncate(string(out), 400))
 	}
-	slog.Info("docker compose ok", "args", args, "env", extraEnv, "out", truncate(string(out), 200))
+	slog.Info("docker compose ok", "args", loggedDockerArgs(args), "env", extraEnv, "out", truncate(string(out), 200))
 	return nil
+}
+
+// Shell payloads can contain the base64-encoded .env. Keep command shape in
+// logs without publishing credentials in support bundles.
+func loggedDockerArgs(args []string) []string {
+	redacted := append([]string(nil), args...)
+	for i, arg := range redacted {
+		if arg == "-c" && i+1 < len(redacted) {
+			redacted[i+1] = "[shell payload hidden]"
+		}
+	}
+	return redacted
 }
 
 func dockerOutput(ctx context.Context, args ...string) (string, error) {

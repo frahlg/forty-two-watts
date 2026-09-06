@@ -49,8 +49,8 @@ func TestChargeNowHoldReleasesAtTargetSoC(t *testing.T) {
 	if _, active := c.GetManualHold(cfg.ID, base); !active {
 		t.Fatalf("hold released below its target SoC")
 	}
-	if n := len(sender.calls); n == 0 || sender.calls[n-1].power != 11040 {
-		t.Fatalf("below target: want the 11040 W hold dispatched, got %+v", sender.calls)
+	if n := len(sender.calls); n == 0 || sender.calls[n-1].power != 11000 {
+		t.Fatalf("below target: want the 11000 W charger limit dispatched, got %+v", sender.calls)
 	}
 
 	// Session energy grows past the target: SoC = 0.5 + 18300/60000 =

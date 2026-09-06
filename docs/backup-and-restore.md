@@ -24,6 +24,11 @@ FTW:
 4. hashes every file, verifies the finished archive and runs SQLite
    `quick_check` before publishing it.
 
+Managed-driver links that point inside the persistent directory become relative
+links in the archive. Restore can therefore move the data to another directory
+or machine. Backup never follows these links to copy a host file; verification
+rejects link chains that escape the data directory or form a cycle.
+
 Choose **Download**, save the `.ftwbak` file on another computer or USB disk,
 and keep at least one older known-good copy. **Verify** rechecks the server copy;
 it does not prove that a download exists elsewhere.

@@ -23,6 +23,20 @@ grep -Fq 'CANONICAL_GHCR_USER: ${{ github.actor }}' "${assets}"
 grep -Fq 'CANONICAL_GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}' "${assets}"
 grep -Fq 'username: ${{ github.actor }}' "${optimizer_release}"
 grep -Fq 'password: ${{ secrets.GITHUB_TOKEN }}' "${optimizer_release}"
+if grep -Fq 'LEGACY_GHCR_TOKEN' "${optimizer_release}"; then
+  echo "canonical optimizer writes must not use the personal namespace credential" >&2
+  exit 1
+fi
+grep -Fq 'bash scripts/check-ghcr-write-access.sh srcfl/ftw-optimizer' "${optimizer_release}"
+grep -Fq 'GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}' "${optimizer_release}"
+grep -A3 '^  validate:$' "${optimizer_release}" | grep -Fq 'needs: registry'
+grep -A5 '^      dry_run:$' "${optimizer_release}" | grep -Fq 'default: true'
+grep -A5 '^  publish:$' "${optimizer_release}" | \
+  grep -Fq 'if: ${{ !inputs.dry_run && needs.validate.outputs.image_exists != '\''true'\'' }}'
+grep -A9 '^  release:$' "${optimizer_release}" | grep -Fq '!inputs.dry_run &&'
+grep -A1 '^permissions:$' "${optimizer_release}" | grep -Fq 'contents: read'
+grep -A7 '^  registry:$' "${optimizer_release}" | grep -Fq 'packages: write'
+grep -A5 '^  dry-run:$' "${optimizer_release}" | grep -Fq 'needs: [registry, validate, test]'
 grep -Fq 'LEGACY_GHCR_TOKEN' "${beta}"
 grep -Fq 'LEGACY_GHCR_TOKEN' "${release}"
 grep -Fq 'LEGACY_GHCR_TOKEN' "${assets}"

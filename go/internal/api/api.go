@@ -525,6 +525,7 @@ func (s *Server) routes() {
 	// actuation: a schedule saved late is the same instruction, only
 	// later, while target/soc/force_start move energy now. The split is
 	// what lets a phone save one through the passthrough.
+	s.handle("POST /api/loadpoints/{id}/vehicle", Configure, s.handleLoadpointVehicle)
 	s.handle("PUT    /api/loadpoints/{id}/schedule", Configure, s.handleLoadpointSchedulePut)
 	s.handle("DELETE /api/loadpoints/{id}/schedule", Configure, s.handleLoadpointScheduleClear)
 	s.handle("POST /api/loadpoints/{id}/soc", Actuate, s.handleLoadpointSoC, Via(appproto.OpLoadpointSoCSet))
@@ -1653,6 +1654,10 @@ func (s *Server) handlePostConfig(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]string{"error": "validation: " + err.Error()})
 		return
 	}
+	// API input carries portable paths, while the registry and file watcher
+	// use resolved paths. Resolve before comparing or applying so an unrelated
+	// settings edit cannot restart every driver with a missing relative file.
+	newCfg.ResolveDriverPaths(filepath.Dir(s.deps.ConfigPath))
 	// Diff against the live config BEFORE we mutate the shared pointer —
 	// otherwise the comparison would always come back empty.
 	s.deps.CfgMu.RLock()
@@ -2496,11 +2501,16 @@ func (s *Server) handleMPCPlan(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, s.mpcDisabledPayload())
 		return
 	}
-	plan := s.deps.MPC.Latest()
-	at, reason := s.deps.MPC.LastReplanInfo()
+	snapshot := s.deps.MPC.PlanSnapshot()
+	plan := snapshot.Plan
+	if snapshot.Outdated {
+		plan = nil
+	}
 	meta := map[string]any{
-		"last_replan_ms":     at.UnixMilli(),
-		"last_replan_reason": reason,
+		"last_replan_ms":     snapshot.ReplanAt.UnixMilli(),
+		"last_replan_reason": snapshot.Reason,
+		"replanning":         snapshot.Pending,
+		"outdated":           snapshot.Outdated,
 	}
 	if plan == nil {
 		writeJSON(w, 200, map[string]any{"enabled": true, "plan": nil, "meta": meta})
@@ -3452,19 +3462,17 @@ func applyManualEVHold(deps *Deps, driverName string, action string) {
 		return
 	}
 	if action == "ev_pause" {
-		deps.LoadpointCtrl.ClearManualHold(lpID)
-		slog.Info("ev manual pause — cleared manual hold, reverting to plan", "lp", lpID)
+		deps.LoadpointCtrl.SetManualHold(lpID, loadpoint.ManualHold{PowerW: 0, Persistent: true})
+		slog.Info("ev manual pause — held at zero power", "lp", lpID)
 		return
 	}
 	if maxW <= 0 {
 		maxW = 11000 // 16 A × 3φ × 230 V fallback when the LP config didn't set it
 	}
-	// 100-year expiry serves as "sticky until the operator cancels".
-	// Using time.Now() + a long delta rather than time.Time{} because
-	// SetManualHold treats zero ExpiresAt as "delete" (controller.go:653).
+	// Keep an explicit start active until the operator changes it or unplugs.
 	deps.LoadpointCtrl.SetManualHold(lpID, loadpoint.ManualHold{
-		PowerW:    maxW,
-		ExpiresAt: time.Now().Add(100 * 365 * 24 * time.Hour),
+		PowerW:     maxW,
+		Persistent: true,
 	})
 	slog.Info("ev manual start/resume — installed sticky hold",
 		"lp", lpID, "action", action, "hold_w", maxW)
@@ -3700,18 +3708,18 @@ func (s *Server) handleLoadpointTarget(w http.ResponseWriter, r *http.Request) {
 	}
 	surplusDisabled := false
 	if req.SurplusOnly != nil {
-		prev, ok := s.deps.Loadpoints.SetSurplusOnly(id, *req.SurplusOnly)
+		prev, ok, err := s.deps.Loadpoints.SetSurplusOnlyChecked(id, *req.SurplusOnly)
+		if err != nil {
+			slog.Warn("failed to save loadpoint solar preference", "lp", id, "err", err)
+			writeJSON(w, 500, map[string]string{"error": "Could not save solar charging preference. Your previous choice is unchanged. Try again."})
+			return
+		}
 		if !ok {
 			writeJSON(w, 404, map[string]string{"error": "loadpoint not found"})
 			return
 		}
-		// Disabling surplus_only is a planner regime change: the
-		// loadpoint may now import from the grid (and the home
-		// battery may feed it if BatteryCoversEV is on). Force a
-		// synchronous replan with a tagged reason so the new
-		// schedule is in place by the time this HTTP response
-		// returns and the diagnose snapshot records "why" the
-		// plan changed at this timestamp.
+		// The saved rule takes effect in dispatch immediately. Rebuild the
+		// plan separately so a slow solve cannot hide the storage acknowledgement.
 		if prev && !*req.SurplusOnly {
 			surplusDisabled = true
 		}
@@ -3723,20 +3731,11 @@ func (s *Server) handleLoadpointTarget(w http.ResponseWriter, r *http.Request) {
 		if surplusDisabled {
 			slog.Info("loadpoint surplus_only disabled — forcing replan",
 				"lp", id)
-			// Synchronous + fresh context (the request context dies the
-			// moment we writeJSON). Replan typically completes in
-			// <100ms for current grid sizes; the API caller blocks
-			// briefly and returns to a UI that can immediately fetch
-			// /api/mpc/plan and see the new schedule.
-			s.deps.MPC.ReplanWithReason(context.Background(), "surplus_only_disabled")
+			s.deps.MPC.RequestReplan("surplus_only_disabled")
 		} else if scheduleChanged {
 			s.replanForScheduleChange(id)
 		} else {
-			// Other field changes: replan is helpful but not load-
-			// bearing — kick it off in the background so the API stays
-			// snappy. The goroutine uses a fresh context for the same
-			// reason as above (request ctx cancellation).
-			go s.deps.MPC.ReplanWithReason(context.Background(), "loadpoint_target_changed")
+			s.deps.MPC.RequestReplan("loadpoint_target_changed")
 		}
 	}
 	writeJSON(w, 200, map[string]any{"ok": true})
@@ -3751,7 +3750,12 @@ func (s *Server) handleLoadpointTarget(w http.ResponseWriter, r *http.Request) {
 // schedule-only route.
 func (s *Server) applyLoadpointSchedule(id string, raw json.RawMessage) (int, string) {
 	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
-		if !s.deps.Loadpoints.ClearSchedule(id) {
+		ok, err := s.deps.Loadpoints.ClearScheduleChecked(id)
+		if err != nil {
+			slog.Warn("failed to clear loadpoint schedule", "lp", id, "err", err)
+			return 500, "Could not remove charging goal. Your previous goal is unchanged. Try again."
+		}
+		if !ok {
 			return 404, "loadpoint not found"
 		}
 		return 0, ""
@@ -3766,7 +3770,12 @@ func (s *Server) applyLoadpointSchedule(id string, raw json.RawMessage) (int, st
 	if sched.Days > 0x7F {
 		return 400, "days must be a 7-bit weekday mask (0..127, bit 0 = Monday)"
 	}
-	if !s.deps.Loadpoints.SetSchedule(id, sched) {
+	ok, err := s.deps.Loadpoints.SetScheduleChecked(id, sched)
+	if err != nil {
+		slog.Warn("failed to save loadpoint schedule", "lp", id, "err", err)
+		return 500, "Could not save charging goal. Your previous goal is unchanged. Try again."
+	}
+	if !ok {
 		return 404, "loadpoint not found"
 	}
 	// Roll immediately so a read-modify-write on the heels of this set
@@ -3796,17 +3805,15 @@ func (s *Server) refreshVehicleForSchedule(id string) {
 	}(id)
 }
 
-// replanForScheduleChange forces a synchronous MPC replan tagged with
-// the schedule-change reason. Synchronous + fresh context (the request
-// context dies the moment the handler answers) so the caller returns
-// to a UI that can immediately fetch /api/mpc/plan and see the new
-// schedule.
+// replanForScheduleChange requests a new plan after the goal has been stored.
+// Saving and calculating are separate outcomes; GET /api/loadpoints reports
+// plan_pending until the new plan is ready.
 func (s *Server) replanForScheduleChange(id string) {
 	if s.deps.MPC == nil {
 		return
 	}
 	slog.Info("loadpoint schedule changed — forcing replan", "lp", id)
-	s.deps.MPC.ReplanWithReason(context.Background(), "loadpoint_schedule_changed")
+	s.deps.MPC.RequestReplan("loadpoint_schedule_changed")
 }
 
 // PUT /api/loadpoints/{id}/schedule replaces the loadpoint's schedule.
@@ -3845,10 +3852,8 @@ func (s *Server) handleLoadpointSchedulePut(w http.ResponseWriter, r *http.Reque
 }
 
 // DELETE /api/loadpoints/{id}/schedule clears the schedule. Same price
-// as PUT: removing the standing instruction is configuration too. The
-// one-shot target a previous roll derived stays until it expires —
-// clearing the schedule is not a stop button, and stopping a charge in
-// progress remains an actuation.
+// as PUT: removing the standing instruction is configuration too. Its derived
+// target clears after storage succeeds. Manual charging remains active.
 func (s *Server) handleLoadpointScheduleClear(w http.ResponseWriter, r *http.Request) {
 	if s.deps.Loadpoints == nil {
 		writeJSON(w, 404, map[string]string{"error": "loadpoints not configured"})
@@ -3859,8 +3864,8 @@ func (s *Server) handleLoadpointScheduleClear(w http.ResponseWriter, r *http.Req
 		writeJSON(w, 400, map[string]string{"error": "id required"})
 		return
 	}
-	if !s.deps.Loadpoints.ClearSchedule(id) {
-		writeJSON(w, 404, map[string]string{"error": "loadpoint not found"})
+	if status, msg := s.applyLoadpointSchedule(id, json.RawMessage("null")); status != 0 {
+		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
 	s.refreshVehicleForSchedule(id)
@@ -3911,12 +3916,8 @@ func (s *Server) handleLoadpointSoC(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	// Replan before answering, on a fresh context: the request context
-	// dies with the response, and the client reads /api/loadpoints the
-	// moment this returns to redraw the plan from the corrected SoC.
-	// A replan is well under a second on current grids.
 	if s.deps.MPC != nil {
-		s.deps.MPC.ReplanWithReason(context.Background(), "loadpoint_soc_corrected")
+		s.deps.MPC.RequestReplan("loadpoint_soc_corrected")
 	}
 	writeJSON(w, 200, map[string]any{"ok": true})
 }

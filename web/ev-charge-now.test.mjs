@@ -19,13 +19,14 @@ test('Start installs a hold without a SoC release', () => {
   assert.doesNotMatch(manual, /release_at_soc_pct/);
   assert.doesNotMatch(manual, /lp\.schedule/);
   // The button names its contract without a percentage.
-  assert.match(manual, /startBtn\.textContent = active \? "Update" : "Charge now";/);
-  assert.match(manual, /until the car is full, Stop or unplug/);
+  assert.match(manual, /startBtn\.textContent = "Charge now";/);
+  assert.match(manual, /slider\.addEventListener\("change"/);
+  assert.match(manual, /if \(lastLp\.manual_active\) requestCharge\(\)/);
 });
 
 test('an API-installed release target is still explained when active', () => {
   // A hold with release_at_soc_pct can still arrive through the API;
   // the manual tab and the plan strip keep saying where it stops.
-  assert.match(source, /stops at " \+ Math\.round\(lp\.manual_release_soc \* 100\)/);
-  assert.match(source, /returns to plan at/);
+  assert.match(source, /Math\.round\(lp\.manual_release_soc \* 100\)/);
+  assert.match(source, /Returns to the plan at the estimated/);
 });

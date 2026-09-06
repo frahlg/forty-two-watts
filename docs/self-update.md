@@ -90,7 +90,13 @@ restored Core fails health. See [backup-and-restore.md](backup-and-restore.md).
 
 Optimizer-only updates use `optimizer-vX.Y.Z[-beta.N]`, recreate and
 health-check only `ftw-optimizer`, and never replace Core. Failure restores the
-previous Optimizer image while Core continues on its Go fallback.
+previous Optimizer image while Core continues on its Go fallback. After health
+succeeds, both update and rollback save `FTW_OPTIMIZER_IMAGE_TAG` in the host
+project's `.env` and check it before reporting success. Other settings, file
+owner and mode stay intact. A pin write failure is reported as a failed
+operation even if the optimizer is healthy; repair the host project and retry.
+The host Compose image must use `${FTW_OPTIMIZER_IMAGE_TAG}` (an optional default
+is allowed), or the operation stops before replacing the optimizer.
 
 A Driver update downloads one signed artifact, verifies hash, metadata and host
 API compatibility, then atomically activates exactly that version. Core puts
@@ -120,7 +126,18 @@ The version badge selects `stable` or `beta`, checks availability and starts
 an update. Changing channel does not deploy anything. A skipped version remains
 hidden only until a newer version appears.
 
-For manual Core + updater operation:
+**Restart** stops and starts the existing Core container, then checks its health.
+It keeps that container's image and environment, even if `.env` or Compose now
+names a different release. It does not apply changes to Compose; use the update
+flow for a new image. Core sends `restart_existing` so an older updater refuses
+before it can pull or replace anything. If FTW reports that safe restart needs a
+newer updater, update Core and updater together using the paired commands below.
+A normal Core update also asks the updater to replace itself with the same tag
+after Core passes its health check.
+
+For manual Core + updater operation, first set `FTW_IMAGE_TAG` and
+`FTW_UPDATER_IMAGE_TAG` in the project's `.env` to the same published immutable
+tag. Run these commands with the Core service name from your Compose file:
 
 ```bash
 cd ~/ftw

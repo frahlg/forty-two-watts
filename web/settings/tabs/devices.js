@@ -919,7 +919,11 @@
     render: function (ctx) {
       var help = ctx.help, escHtml = ctx.escHtml, config = ctx.config;
       if (!config.drivers) config.drivers = [];
-      var html = '<fieldset><legend>Add from catalog</legend>' +
+      var html = S.chargerSetup ? '<section aria-label="Charger connection"><h3>Connect your charger</h3>' +
+        '<p>Choose your charger below and enter its connection details. Continue to charging when the connection is ready.</p>' +
+        '<button type="button" class="btn-add" id="charger-setup-continue"' + (S.chargerSetupPending ? '' : ' disabled') + '>Continue to charging</button>' +
+        '<p id="charger-setup-status" role="status"></p></section>' : '';
+      html += '<fieldset><legend>' + (S.chargerSetup ? 'Choose your charger' : 'Add from catalog') + '</legend>' +
         '<div class="field-row"><div>' +
         '<label>Channel</label>' +
         '<select id="driver-catalog-channel"><option value="stable">Stable</option><option value="beta">Beta · test one driver</option></select>' +
@@ -1325,7 +1329,10 @@
         if (!host || !picker) return;
 
         var query = (search && search.value || "").trim();
-        var matches = searchCatalog(entries, query);
+        var choices = S.chargerSetup ? entries.filter(function (entry) {
+          return (entry.capabilities || []).indexOf('ev') >= 0;
+        }) : entries;
+        var matches = searchCatalog(choices, query);
 
         host.textContent = "";
         if (matches.length === 0) {
@@ -1355,7 +1362,7 @@
 
         var tags = document.createElement("div");
         tags.className = "drv-catalog-tags";
-        (e.capabilities || []).forEach(function (cap) {
+        (S.chargerSetup ? [] : (e.capabilities || [])).forEach(function (cap) {
           var tag = document.createElement("span");
           tag.className = "drv-catalog-tag";
           tag.textContent = cap;
@@ -1781,7 +1788,13 @@
         }
         var finishAdd = function () {
           config.drivers.push(driver);
+          if (S.chargerSetup) S.chargerSetupPending = driver.name;
           ctx.renderTab("devices");
+          if (S.chargerSetup) {
+            var connection = bodyEl.querySelector('[data-path="drivers.' + (config.drivers.length - 1) + '.config.email"]') ||
+              bodyEl.querySelector('[data-path="drivers.' + (config.drivers.length - 1) + '.config.host"]');
+            if (connection) { connection.scrollIntoView({ block: 'center' }); connection.focus(); }
+          }
         };
         if (chosen.dataset.channel !== "beta") {
           finishAdd();
@@ -1798,6 +1811,49 @@
           window.alert("Beta driver install failed: " + err.message);
           btn.disabled = false;
           btn.textContent = "+ Add selected";
+        });
+      });
+
+      var continueCharging = document.getElementById('charger-setup-continue');
+      if (continueCharging) {
+        bodyEl.querySelectorAll('.device-meta,.driver-module-status,.device-core-row').forEach(function (element) { element.hidden = true; element.style.display = 'none'; });
+        var channel = document.getElementById('driver-catalog-channel');
+        if (channel) channel.parentElement.hidden = true;
+        var name = document.getElementById('driver-catalog-name');
+        if (name) name.placeholder = 'e.g. garage';
+        var picker = document.getElementById('driver-catalog-picker');
+        if (picker) picker.closest('fieldset').querySelectorAll(':scope > p').forEach(function (paragraph) { paragraph.hidden = true; });
+        var pendingIndex = (config.drivers || []).findIndex(function (device) { return device.name === S.chargerSetupPending; });
+        var connectionInput = bodyEl.querySelector('[data-path="drivers.' + pendingIndex + '.config.email"]') || bodyEl.querySelector('[data-path="drivers.' + pendingIndex + '.config.host"]');
+        var connectionBox = connectionInput && connectionInput.closest('fieldset');
+        if (connectionBox) {
+          connectionBox.appendChild(continueCharging);
+          connectionBox.appendChild(document.getElementById('charger-setup-status'));
+        }
+      }
+      if (continueCharging) continueCharging.addEventListener('click', function () {
+        ctx.captureCurrentTab();
+        var charger = (config.drivers || []).find(function (device) { return device.name === S.chargerSetupPending; });
+        var status = document.getElementById('charger-setup-status');
+        if (!charger) { status.textContent = 'Choose your charger below first.'; return; }
+        var connection = charger.config || {};
+        if (Object.prototype.hasOwnProperty.call(connection, 'email') && (!connection.email || !connection.serial)) {
+          status.textContent = 'Connect your account and choose the charger first.';
+          return;
+        }
+        if (Object.prototype.hasOwnProperty.call(connection, 'host') && !connection.host) {
+          status.textContent = 'Enter your charger’s address first.';
+          return;
+        }
+        continueCharging.disabled = true;
+        status.textContent = 'Saving the charger connection…';
+        ctx.saveConfig().then(function () {
+          S.chargerSetup = false;
+          S.chargerSetupPending = null;
+          ctx.navigateTab('loadpoints');
+        }).catch(function (error) {
+          status.textContent = 'Connection not saved: ' + error.message + '. Try again.';
+          continueCharging.disabled = false;
         });
       });
 
@@ -1852,7 +1908,7 @@
               if (d && d.config) d.config.serial = sel.value;
               if (config.ev_charger) config.ev_charger.serial = sel.value;
             };
-            if (statusEl) statusEl.textContent = chargers.length + " charger(s) found";
+            if (statusEl) statusEl.textContent = chargers.length + (S.chargerSetup ? " charger(s) found. Choose Continue to charging to save the connection." : " charger(s) found");
           }).catch(function (e) {
             if (statusEl) statusEl.textContent = "Error: " + e.message;
           }).finally(function () {

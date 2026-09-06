@@ -255,7 +255,7 @@ func TestPublishCarriesVAPIDAndDecryptablePayload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := wp.Publish(context.Background(), Message{Title: "Car charged", Body: "7.4 kWh delivered — ready to go.", Priority: 3}); err != nil {
+	if err := wp.Publish(context.Background(), Message{Title: "Car charged", Body: "7.4 kWh delivered — ready to go.", Priority: 3, Kind: PushChargingSessionComplete, LoadpointID: "garage"}); err != nil {
 		t.Fatalf("publish: %v", err)
 	}
 
@@ -277,6 +277,10 @@ func TestPublishCarriesVAPIDAndDecryptablePayload(t *testing.T) {
 	}
 	if payload["title"] != "Car charged" || !strings.Contains(payload["body"], "7.4 kWh") {
 		t.Fatalf("payload = %v", payload)
+	}
+
+	if payload["kind"] != PushChargingSessionComplete || payload["loadpoint_id"] != "garage" {
+		t.Fatalf("charger destination lost in encryption: %v", payload)
 	}
 
 	// The Authorization header verifies against the published key.

@@ -57,6 +57,8 @@ func (h *handlerV201) OnBootNotification(id string, req *provisioning.BootNotifi
 	s.vendor = vendor
 	s.model = model
 	s.serial = serial
+	s.identityCurrent = true
+	h.cancelIdentityProbeLocked(s)
 	if req != nil && req.ChargingStation.FirmwareVersion != "" {
 		s.firmware = req.ChargingStation.FirmwareVersion
 	}
@@ -94,6 +96,7 @@ func (h *handlerV201) OnHeartbeat(id string, _ *availability.HeartbeatRequest) (
 func (h *handlerV201) OnStatusNotification(id string, req *availability.StatusNotificationRequest) (*availability.StatusNotificationResponse, error) {
 	s := h.state(id)
 	h.mu.Lock()
+	s.connectedKnown = true
 	switch req.ConnectorStatus {
 	case availability.ConnectorStatusAvailable, availability.ConnectorStatusUnavailable:
 		s.connected = false
@@ -101,10 +104,12 @@ func (h *handlerV201) OnStatusNotification(id string, req *availability.StatusNo
 		s.lastPowerW = 0
 	case availability.ConnectorStatusOccupied, availability.ConnectorStatusReserved:
 		s.connected = true
+		s.connectedKnown = true
 	case availability.ConnectorStatusFaulted:
 		// Matches the 1.6 path: a faulted connector still has a cable in it,
 		// so it stays connected while charging stops.
 		s.connected = true
+		s.connectedKnown = true
 		s.charging = false
 		s.lastPowerW = 0
 	}
@@ -146,10 +151,12 @@ func (h *handlerV201) OnTransactionEvent(id string, req *transactions.Transactio
 		s.sessionStartMeterWh = energyWh
 		s.sessionMeterWh = 0
 		s.connected = true
+		s.connectedKnown = true
 		s.charging = true
 
 	case transactions.TransactionEventUpdated:
 		s.connected = true
+		s.connectedKnown = true
 		if hasEnergy && s.transactionID >= 0 {
 			s.sessionMeterWh = energyWh - s.sessionStartMeterWh
 		}
