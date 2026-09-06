@@ -210,6 +210,8 @@ type State struct {
 	// CommandedSinceMs is when the current order was first given; it moves
 	// when CommandedW or CommandedReason changes. Zero until the first tick.
 	CommandedSinceMs int64 `json:"commanded_since_ms,omitempty"`
+	// Internal identity of the manual choice used to compute the order.
+	ManualCommandUpdatedAt time.Time `json:"-"`
 
 	// CommandedReason names the dispatch branch that decided CommandedW:
 	// "plan", "no_plan_budget", "pv_surplus", "pv_surplus_pause",
@@ -417,7 +419,8 @@ type loadpointRuntime struct {
 	commandedReason string
 	// commandedSince is when the current (commandedW, commandedReason) pair
 	// was first ordered. The manual status counts elapsed time from it.
-	commandedSince time.Time
+	commandedSince         time.Time
+	manualCommandUpdatedAt time.Time
 
 	// The interruption hysteresis state. chargingSteadySince anchors the
 	// current continuous above-floor run; steadyRunArmed latches once that
@@ -472,12 +475,17 @@ func (m *Manager) SetCommandedW(id string, w float64) {
 // "wake_kick". Empty keeps whatever was recorded before (used by the
 // legacy SetCommandedW wrapper). No-op for an unknown id.
 func (m *Manager) SetCommanded(id string, w float64, reason string) {
+	m.setCommandedForManual(id, w, reason, time.Time{})
+}
+
+func (m *Manager) setCommandedForManual(id string, w float64, reason string, updatedAt time.Time) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if lp, ok := m.byID[id]; ok {
 		changed := !lp.commandedKnown || lp.commandedW != w ||
 			(reason != "" && reason != lp.commandedReason)
 		lp.commandedW = w
+		lp.manualCommandUpdatedAt = updatedAt
 		lp.commandedKnown = true
 		if reason != "" {
 			lp.commandedReason = reason
@@ -554,6 +562,7 @@ func (m *Manager) Load(cfgs []Config) {
 			lp.commandedReason = existing.commandedReason
 			lp.commandedKnown = existing.commandedKnown
 			lp.commandedSince = existing.commandedSince
+			lp.manualCommandUpdatedAt = existing.manualCommandUpdatedAt
 			lp.chargingSteadySince = existing.chargingSteadySince
 			lp.stoppedSince = existing.stoppedSince
 			lp.steadyRunArmed = existing.steadyRunArmed
@@ -1125,6 +1134,7 @@ func (lp *loadpointRuntime) snapshot() State {
 	if st.PluggedIn && st.SoCSource == "" && !lp.socConfirmed {
 		st.SoCSource = "assumed"
 	}
+	st.ManualCommandUpdatedAt = lp.manualCommandUpdatedAt
 	if !lp.commandedSince.IsZero() {
 		st.CommandedSinceMs = lp.commandedSince.UnixMilli()
 	}

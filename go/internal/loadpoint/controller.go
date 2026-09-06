@@ -1621,8 +1621,10 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config, d
 	// clamp that overrides the value overrides the reason with it. Fed
 	// to Manager.SetCommanded after the last clamp has spoken.
 	cmdReason := ""
+	var manualCommandUpdatedAt time.Time
 	if hold, ok := c.GetManualHold(lpCfg.ID, now); ok {
 		cmdReason = "manual_hold"
+		manualCommandUpdatedAt = hold.UpdatedAt
 		// Manual override active — skip MPC translation. The hold's
 		// non-zero fields override the loadpoint config + site fuse;
 		// zero/empty fields fall through to the normal defaults so a
@@ -1865,7 +1867,7 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config, d
 	// plan slot, Stop hold, surplus clamp — from ever reading as a
 	// charge that failed.
 	if w, ok := cmd["power_w"].(float64); ok {
-		c.manager.SetCommanded(lpCfg.ID, w, cmdReason)
+		c.manager.setCommandedForManual(lpCfg.ID, w, cmdReason, manualCommandUpdatedAt)
 	}
 	payload, err := json.Marshal(cmd)
 	if err != nil {
