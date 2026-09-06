@@ -1395,9 +1395,16 @@ func (c *Controller) TickWithDispatch(ctx context.Context, now time.Time, dispat
 }
 
 func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config, dispatchAllowed bool) {
-	var sample EVSample
-	if c.tel != nil {
-		sample, _ = c.tel(lpCfg.DriverName)
+	if c.tel == nil {
+		return
+	}
+	sample, observed := c.tel(lpCfg.DriverName)
+	if !observed {
+		// No reading is not an unplug. In particular, startup must not
+		// clear a restored manual hold while the driver is still logging in.
+		// Core's driver-health owner handles autonomous recovery; without
+		// an EV sample this loop cannot confirm a session or send a setpoint.
+		return
 	}
 	// Resolve the schedule once per tick — used for bat-SoC unlock
 	// (surplusActive) below. Zero value when no schedule is set,
