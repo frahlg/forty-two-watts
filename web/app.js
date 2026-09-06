@@ -2967,7 +2967,7 @@
         freshStatus.style.color = "var(--text-dim)";
         freshStatus.style.fontStyle = "italic";
         freshStatus.style.margin = "0 0 0.6rem 0";
-        freshStatus.textContent = "No car connected — schedule below is saved to the loadpoint and applies on next plug-in.";
+        freshStatus.textContent = "No car connected. This goal is saved and applies when you plug in.";
       }
       if (statusTableEl && statusTableEl.parentNode === evModalBody) {
         evModalBody.replaceChild(freshStatus, statusTableEl);
