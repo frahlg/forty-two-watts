@@ -381,8 +381,6 @@ type loadpointRuntime struct {
 	// changing the estimated battery level. Cleared on plug-out.
 	chargingDeclined bool
 
-	// socSource is reserved for measured battery-level attribution.
-	socSource string
 	// socConfirmed is true only after a level from the user or a matched car.
 	// A configured/default plug-in level remains a planning assumption.
 	socConfirmed bool
@@ -519,7 +517,6 @@ func (m *Manager) Load(cfgs []Config) {
 			lp.lastRolledFor = existing.lastRolledFor
 			lp.notRequestingSince = existing.notRequestingSince
 			lp.chargingDeclined = existing.chargingDeclined
-			lp.socSource = existing.socSource
 			lp.socConfirmed = existing.socConfirmed && existing.DriverName == c.DriverName
 			if existing.DriverName == c.DriverName {
 				lp.sessionDeviceID = existing.sessionDeviceID
@@ -691,13 +688,11 @@ func (m *Manager) observe(id string, pluggedIn bool, powerW, deliveredWh float64
 		lp.completionNotified = false
 		lp.notRequestingSince = time.Time{}
 		lp.chargingDeclined = false
-		lp.socSource = ""
 	}
 	if !pluggedIn {
 		// Plug-out: drop any pending completion timer / latch.
 		lp.notRequestingSince = time.Time{}
 		lp.chargingDeclined = false
-		lp.socSource = ""
 		if lp.vehicleName != "" || lp.capacityFromCar {
 			// The identified car left with its session — the next one may
 			// be different, so restore the loadpoint's own capacity.
@@ -711,7 +706,12 @@ func (m *Manager) observe(id string, pluggedIn bool, powerW, deliveredWh float64
 	lp.currentPowerW = powerW
 	lp.deliveredWhSession = deliveredWh
 
-	if pluggedIn && !requestActive && (lp.surplusWithheld || (lp.commandedKnown && lp.commandedW < DeliveringW)) {
+	if pluggedIn && powerW >= DeliveringW {
+		// Measured energy delivery is stronger evidence than a delayed
+		// request_active flag. Let planning follow the car immediately.
+		lp.chargingDeclined = false
+		lp.notRequestingSince = time.Time{}
+	} else if pluggedIn && !requestActive && (lp.surplusWithheld || (lp.commandedKnown && lp.commandedW < DeliveringW)) {
 		// Self-induced "not requesting": we paused this surplus_only
 		// loadpoint below its floor, so the vehicle dropping current is
 		// our doing, not a vehicle-side decline. Do not start/advance the
@@ -731,7 +731,6 @@ func (m *Manager) observe(id string, pluggedIn bool, powerW, deliveredWh float64
 			!lp.notRequestingSince.IsZero() &&
 			now.Sub(lp.notRequestingSince) >= SessionCompletionTimeout {
 			lp.chargingDeclined = true
-
 		}
 	} else if pluggedIn && requestActive {
 		// Vehicle is back to requesting. Reset the timer, but keep
@@ -783,18 +782,6 @@ func (m *Manager) observe(id string, pluggedIn bool, powerW, deliveredWh float64
 		lp.chargingSteadySince = time.Time{}
 		lp.stoppedSince = time.Time{}
 		lp.steadyRunArmed = false
-	}
-
-	// InterruptSteadyRun of real current after the completion latch is
-	// not an EVSE retry blip: the car is taking energy again (operator
-	// Start, a raised charge limit in the car). Release the latch so the
-	// estimate follows delivered Wh instead of sitting at targetSoC while
-	// kilowatt-hours go in; if the car declines once more, the timer
-	// re-arms it. A 900 W renegotiation burst stays below the steady
-	// floor and never gets here.
-	if pluggedIn && lp.chargingDeclined && lp.steadyRunArmed && requestActive && powerW >= steadyChargeFloorW {
-		lp.chargingDeclined = false
-		lp.socSource = ""
 	}
 
 	if pluggedIn {
@@ -857,6 +844,10 @@ func (m *Manager) SetTarget(id string, soc float64, targetTime time.Time) bool {
 	lp, ok := m.byID[id]
 	if !ok {
 		return false
+	}
+	if units.ClampFraction(soc) > lp.targetSoC {
+		lp.chargingDeclined = false
+		lp.notRequestingSince = time.Time{}
 	}
 	lp.targetSoC = units.ClampFraction(soc)
 	lp.targetTime = targetTime
@@ -992,7 +983,6 @@ func (m *Manager) SetCurrentSoC(id string, socPct float64) bool {
 	// A correction gives the planner another chance to offer energy.
 	// Sustained refusal can re-arm after SessionCompletionTimeout.
 	lp.chargingDeclined = false
-	lp.socSource = ""
 	lp.notRequestingSince = time.Time{}
 	reanchorSoCLocked(lp, socPct)
 	return true
@@ -1086,7 +1076,6 @@ func (lp *loadpointRuntime) snapshot() State {
 		AllowedStepsW:      steps,
 		SurplusOnly:        lp.Config.SurplusOnly,
 		Schedule:           lp.schedule,
-		SoCSource:          lp.socSource,
 		ChargingDeclined:   lp.chargingDeclined,
 		SoCRetention:       lp.socRetention,
 		VehicleName:        lp.vehicleName,
@@ -1130,6 +1119,10 @@ func (m *Manager) SetSchedule(id string, s Schedule) bool {
 	// The weekday mask is 7 bits; a stray high bit from a future
 	// client is dropped rather than left to confuse the roll.
 	s.Days &= 0x7F
+	if s.SoC > lp.schedule.SoC {
+		lp.chargingDeclined = false
+		lp.notRequestingSince = time.Time{}
+	}
 	lp.schedule = s
 	// Force RollSchedules to re-evaluate on next call — operator just
 	// changed the contract so any previous idempotence cache is stale.
@@ -1243,5 +1236,16 @@ func (m *Manager) RollSchedules(now time.Time) {
 			lp.targetSoC = s.SoC
 			lp.lastRolledFor = next
 		}
+	}
+}
+
+// RetryCharging lets an explicit Start action retry a vehicle that previously
+// declined current. It changes no battery level or stored user intent.
+func (m *Manager) RetryCharging(id string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if lp := m.byID[id]; lp != nil {
+		lp.chargingDeclined = false
+		lp.notRequestingSince = time.Time{}
 	}
 }

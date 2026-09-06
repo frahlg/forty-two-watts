@@ -392,38 +392,38 @@ func TestSetCurrentSoCClearsCompletionLatch(t *testing.T) {
 	}
 }
 
-// Same morning, later: a manual charge pushed 11 kW into the car for
-// forty minutes and the estimate still read 80 %, because the latch
-// only ever released on plug-out. Ten minutes of steady current is the
-// car charging, not an EVSE retry blip; the estimate must follow the
-// delivered energy again.
-func TestSustainedChargingClearsCompletionLatch(t *testing.T) {
+// A car that actually resumes charging is eligible for planning immediately.
+func TestMeasuredChargingClearsVehicleDecline(t *testing.T) {
 	m, clock := latchedManager(t)
-	// Charging resumes at full power; a brief run must not release.
 	*clock = clock.Add(5 * time.Second)
 	m.Observe("garage", true, 11000, 1500, true)
-	if st, _ := m.State("garage"); !st.ChargingDeclined || math.Abs(st.CurrentSoC-(0.2+1500.0/60000)) > 1e-9 {
-		t.Fatalf("a fresh run must not release the latch yet: %+v", st)
-	}
-	*clock = clock.Add(InterruptSteadyRun / 2)
-	m.Observe("garage", true, 11000, 3000, true)
-	if st, _ := m.State("garage"); !st.ChargingDeclined {
-		t.Fatalf("half a steady run must not release the latch: %+v", st)
-	}
-	*clock = clock.Add(InterruptSteadyRun/2 + time.Second)
-	m.Observe("garage", true, 11000, 4000, true)
 	st, _ := m.State("garage")
-	if st.ChargingDeclined {
-		t.Errorf("a full steady run should release the latch: %+v", st)
+	if st.ChargingDeclined || math.Abs(st.CurrentSoC-(0.2+1500.0/60000)) > 1e-9 {
+		t.Fatalf("resumed delivery did not clear refusal: %+v", st)
 	}
-	// anchor 0.2 + 4000/60000 ≈ 0.267 — the estimate moved off the pin.
-	if st.CurrentSoC < 0.26 || st.CurrentSoC > 0.27 {
-		t.Errorf("estimate should follow delivered Wh after release, got %.3f", st.CurrentSoC)
+}
+
+func TestHigherTargetRetriesVehicleWithoutInventingBatteryLevel(t *testing.T) {
+	m, _ := latchedManager(t)
+	before, _ := m.State("garage")
+	m.SetTarget("garage", .9, time.Now().Add(time.Hour))
+	after, _ := m.State("garage")
+	if after.ChargingDeclined || after.CurrentSoC != before.CurrentSoC {
+		t.Fatalf("higher target did not retry honestly: %+v", after)
 	}
-	// And keeps following as more energy goes in.
-	*clock = clock.Add(time.Minute)
-	m.Observe("garage", true, 11000, 6000, true)
-	if st, _ := m.State("garage"); st.CurrentSoC < 0.29 || st.CurrentSoC > 0.31 {
-		t.Errorf("estimate should keep rising, got %.3f", st.CurrentSoC)
+}
+
+func TestExplicitRetryAndHigherScheduleClearVehicleDecline(t *testing.T) {
+	m, _ := latchedManager(t)
+	before, _ := m.State("garage")
+	m.RetryCharging("garage")
+	after, _ := m.State("garage")
+	if after.ChargingDeclined || after.CurrentSoC != before.CurrentSoC {
+		t.Fatalf("retry changed level: %+v", after)
+	}
+	m, _ = latchedManager(t)
+	m.SetSchedule("garage", Schedule{SoC: .9, TimeOfDayMinUTC: 7 * 60})
+	if after, _ := m.State("garage"); after.ChargingDeclined {
+		t.Fatalf("new goal retained refusal: %+v", after)
 	}
 }
