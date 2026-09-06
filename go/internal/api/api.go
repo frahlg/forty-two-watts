@@ -3849,10 +3849,9 @@ func (s *Server) handleLoadpointSchedulePut(w http.ResponseWriter, r *http.Reque
 }
 
 // DELETE /api/loadpoints/{id}/schedule clears the schedule. Same price
-// as PUT: removing the standing instruction is configuration too. The
-// one-shot target a previous roll derived stays until it expires —
-// clearing the schedule is not a stop button, and stopping a charge in
-// progress remains an actuation.
+// as PUT: removing the standing instruction is configuration too. It also
+// removes the target derived from that schedule. Manual charging has its
+// own release action and continues unchanged.
 func (s *Server) handleLoadpointScheduleClear(w http.ResponseWriter, r *http.Request) {
 	if s.deps.Loadpoints == nil {
 		writeJSON(w, 404, map[string]string{"error": "loadpoints not configured"})
