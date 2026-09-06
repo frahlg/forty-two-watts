@@ -68,6 +68,7 @@ const (
 	KindNotificationDispatched  = "notifications.dispatched"
 	KindUpdateAvailable         = "update.available"
 	KindUpdateInstalled         = "update.installed"
+	KindChargingConnected       = "charging.connected"
 	KindChargingSessionComplete = "charging.session_complete"
 	KindChargingInterrupted     = "charging.interrupted"
 )
@@ -176,3 +177,11 @@ type ChargingInterrupted struct {
 }
 
 func (ChargingInterrupted) Kind() string { return KindChargingInterrupted }
+
+// ChargingConnected names a confirmed cable connection, not a charge start.
+type ChargingConnected struct {
+	LoadpointID string
+	At          time.Time
+}
+
+func (ChargingConnected) Kind() string { return KindChargingConnected }

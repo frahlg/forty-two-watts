@@ -244,9 +244,11 @@ type PlanWindow struct {
 
 // Manager holds the running set of loadpoints. Thread-safe.
 type Manager struct {
-	mu    sync.RWMutex
-	byID  map[string]*loadpointRuntime
-	order []string // insertion-preserving id list for deterministic listing
+	connectionHealth map[string]bool
+	connectionEdges  map[string]connectionEdge
+	mu               sync.RWMutex
+	byID             map[string]*loadpointRuntime
+	order            []string // insertion-preserving id list for deterministic listing
 
 	// scheduleSaver, if non-nil, is invoked synchronously whenever a
 	// schedule is set or cleared. Wired by main.go to persist via
@@ -417,13 +419,26 @@ func NewManager() *Manager {
 	return &Manager{byID: map[string]*loadpointRuntime{}}
 }
 
-// SetBus wires the shared event bus. The manager publishes exactly two
-// things on it: the session-completion latch tripping, and the interruption
-// hysteresis firing. Nil stays a no-op.
+// SetBus wires charging events and the freshness used to qualify cable edges.
 func (m *Manager) SetBus(bus *events.Bus) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.bus = bus
+	if bus == nil {
+		return
+	}
+	bus.Subscribe(events.KindHealthTick, func(e events.Event) {
+		tick, ok := e.(events.HealthTick)
+		if !ok {
+			return
+		}
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		m.connectionHealth = make(map[string]bool, len(tick.Health))
+		for name, h := range tick.Health {
+			m.connectionHealth[name] = h.TelemetryLive()
+		}
+	})
 }
 
 // SetCommandedW records what the controller last ordered this loadpoint to
@@ -511,6 +526,13 @@ func (m *Manager) Load(cfgs []Config) {
 		}
 		newByID[c.ID] = lp
 		newOrder = append(newOrder, c.ID)
+	}
+	for id := range m.connectionEdges {
+		next, present := newByID[id]
+		previous := m.byID[id]
+		if !present || previous == nil || previous.DriverName != next.DriverName {
+			delete(m.connectionEdges, id)
+		}
 	}
 	m.byID = newByID
 	m.order = newOrder
@@ -614,6 +636,9 @@ func (m *Manager) Observe(id string, pluggedIn bool, powerW, deliveredWh float64
 	var fired []events.Event
 	bus := m.bus
 	now := m.now()
+	if m.observeConnectionLocked(id, lp.DriverName, pluggedIn, now) {
+		fired = append(fired, events.ChargingConnected{LoadpointID: id, At: now})
+	}
 	if pluggedIn && !lp.pluggedIn {
 		// Plug-in transition: seed the session anchor and clear any
 		// session-completion latched from a prior session.
