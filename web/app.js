@@ -556,7 +556,7 @@
       if (lpEv.vehicle_soc > 0) {
         p.soc = lpEv.vehicle_soc * 100;
         p.socSource = "vehicle";
-      } else if (lpEv.current_soc > 0) {
+      } else if (lpEv.current_soc > 0 && lpEv.soc_source !== "assumed") {
         p.soc = lpEv.current_soc * 100;
         p.socSource = lpEv.soc_source || "inferred";
       }
@@ -2121,6 +2121,68 @@
   // entries mean "no loadpoint for this driver" and the planet
   // falls back to legacy kW-only rendering.
   var loadpointsByDriver = null;
+  var chargingNoticePoints = [];
+  var chargingNoticeRows = new Map();
+  var chargingNoticeTimer = null;
+  function updateChargingNotice(payload) {
+    var fresh = !!(payload && Array.isArray(payload.loadpoints));
+    if (fresh) {
+      chargingNoticePoints = payload.loadpoints.map(function (lp) {
+        var previous = chargingNoticePoints.find(function (old) { return old.id === lp.id; });
+        // Offline telemetry cannot establish that the cable was removed.
+        return previous && previous.plugged_in && lp.charger && !lp.charger.available
+          ? Object.assign({}, lp, { plugged_in: true }) : lp;
+      });
+      if (chargingNoticeTimer) clearTimeout(chargingNoticeTimer);
+      chargingNoticeTimer = setTimeout(function () { updateChargingNotice(null); }, 15000);
+    }
+    fresh = fresh && !document.hidden;
+    var host = document.getElementById("charging-notices");
+    var anchor = document.getElementById("power-now");
+    if (!anchor) return;
+    if (!host) {
+      host = document.createElement("div");
+      host.id = "charging-notices";
+      anchor.parentNode.insertBefore(host, anchor);
+    }
+    var keep = new Set();
+    chargingNoticePoints.filter(function (lp) { return lp.plugged_in; }).forEach(function (lp) {
+      keep.add(lp.id);
+      var row = chargingNoticeRows.get(lp.id);
+      if (!row) {
+        var section = document.createElement("section");
+        section.className = "overview-card";
+        section.setAttribute("aria-label", "Car connection");
+        section.style.cssText = "padding:0.9rem;margin-bottom:1rem";
+        var title = document.createElement("strong");
+        var status = document.createElement("p");
+        status.setAttribute("role", "status");
+        status.style.cssText = "margin:0.45rem 0;font-size:0.9rem";
+        var button = document.createElement("button");
+        button.type = "button";
+        button.style.cssText = "background:none;border:0;color:var(--accent-e);padding:0.3rem 0;text-align:left;text-decoration:underline;font:inherit;cursor:pointer";
+        section.append(title, status, button);
+        host.appendChild(section);
+        row = { section: section, title: title, status: status, button: button };
+        chargingNoticeRows.set(lp.id, row);
+      }
+      var available = fresh && (!lp.charger || lp.charger.available);
+      row.title.textContent = available ? "Car connected" : "Car status is out of date";
+      var message = available ? renderEvPlanStatus(lp, null) : null;
+      row.status.textContent = message ? message.textContent : "Waiting for current charger status. The last reading cannot confirm charging.";
+      row.button.textContent = "Check charging" + (lp.soc_source !== "vehicle" ? " and battery level" : "");
+      row.button.onclick = function () {
+        if (energyFlowEl) energyFlowEl.dispatchEvent(new CustomEvent("ftw-planet-click", { detail: { role: "ev", name: lp.driver_name } }));
+      };
+    });
+    chargingNoticeRows.forEach(function (row, id) {
+      if (!keep.has(id)) { row.section.remove(); chargingNoticeRows.delete(id); }
+    });
+    host.hidden = keep.size === 0;
+  }
+  document.addEventListener("visibilitychange", function () {
+    if (document.hidden) updateChargingNotice(null);
+  });
   // Last successful /api/status payload — surfaced so secondary
   // consumers (e.g. the EV modal's 5 s refresh) can read derived
   // facts like siteHasPV() without re-fetching. `null` until the
@@ -2156,6 +2218,7 @@
           });
           loadpointsByDriver = idx;
         }
+        updateChargingNotice(lp);
         setConnected(true);
         if (firstLoad) { firstLoad = false; }
         if (setupBannerShown) { hideSetupBanner(); }
@@ -2172,6 +2235,7 @@
       })
       .catch(function (e) {
         console.warn("status fetch failed:", e);
+        updateChargingNotice(null);
         setConnected(false);
         if (firstLoad) { showSetupBanner(); }
       });
@@ -2779,7 +2843,7 @@
       text = "No charging plan yet. Set a ready time, or choose Charge now.";
       tone = "var(--text)";
     } else {
-      text = "No charge window in the current plan — the target may already be reached.";
+      text = "No charge window yet for this goal. Choose Charge now if you need to charge immediately.";
     }
     if (!text) return null;
     var p = document.createElement("p");
@@ -4105,8 +4169,15 @@
       b.style.color = "var(--fg)";
       return b;
     }
+    var chooseBtn = mkBtn("Use " + Math.round(initSoC) + " % by " + initLocalHHMM);
+    chooseBtn.style.textTransform = "none";
+    chooseBtn.style.letterSpacing = "normal";
+    chooseBtn.addEventListener("click", scheduleSave);
+    btnRow.appendChild(chooseBtn);
     var clearBtn = mkBtn("Remove schedule");
     function paintClear() {
+      chooseBtn.hidden = hasSched;
+      clearBtn.hidden = !hasSched;
       clearBtn.disabled = !hasSched;
       clearBtn.style.opacity = hasSched ? "1" : "0.4";
     }
@@ -4121,7 +4192,7 @@
     status.style.minHeight = "1em";
     status.textContent = hasSched
       ? "Changes save as you make them; the plan above follows."
-      : "Move the target or pick a time to set a schedule; the plan above follows.";
+      : "No goal set yet. Choose this goal, or change the level or time.";
     box.appendChild(status);
 
     // Every control writes when it changes: the slider on release, the
@@ -4138,6 +4209,7 @@
       if (saveTimer) clearTimeout(saveTimer);
       if (statusTimer) { clearTimeout(statusTimer); statusTimer = null; }
       saveSeq++;
+      chooseBtn.disabled = true;
       status.textContent = "Applying schedule…";
       saveTimer = setTimeout(function () { saveTimer = null; doSave(); }, 400);
     }
@@ -4179,7 +4251,11 @@
           status.textContent = "Schedule saved. Reading the plan…";
           refreshEvModalAfterWrite();
         }).catch(function (e) {
-          if (seq === saveSeq) status.textContent = "Schedule not confirmed: " + e.message;
+          if (seq === saveSeq) {
+            chooseBtn.disabled = false;
+            chooseBtn.textContent = "Use " + targetSlider.value + " % by " + timeInp.value;
+            status.textContent = "Schedule not confirmed: " + e.message;
+          }
         });
       });
     }
