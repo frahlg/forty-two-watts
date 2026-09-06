@@ -1132,20 +1132,10 @@ func (m *Manager) GetSchedule(id string) (Schedule, bool) {
 // reload doesn't resurrect the old schedule from disk. Returns false
 // for unknown IDs.
 func (m *Manager) ClearSchedule(id string) bool {
-	m.mu.Lock()
-	lp, ok := m.byID[id]
-	if !ok {
-		m.mu.Unlock()
-		return false
-	}
-	lp.schedule = Schedule{}
-	lp.lastRolledFor = time.Time{}
-	saver := m.scheduleSaver
-	m.mu.Unlock()
-	if saver != nil {
-		saver(id, Schedule{})
-	}
-	return true
+	// Removing the goal also removes its active derived deadline. Leaving
+	// that target behind would keep planning a charge the UI says was removed.
+	// Manual holds belong to the controller and are unaffected.
+	return m.SetSchedule(id, Schedule{})
 }
 
 // HydrateSchedules loads persisted schedules at boot. `loader(id)`

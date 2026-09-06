@@ -99,6 +99,7 @@ func TestScheduleDeleteClearsAndReplans(t *testing.T) {
 	// Seeded on the manager directly, so the replan reason below can
 	// only have come from the DELETE.
 	mgr.SetSchedule("garage", loadpoint.Schedule{SoC: 0.8, TimeOfDayMinUTC: 360, Recurring: true})
+	mgr.RollSchedules(time.Now())
 
 	req := httptest.NewRequest(http.MethodDelete, "/api/loadpoints/garage/schedule", nil)
 	rr := httptest.NewRecorder()
@@ -109,6 +110,10 @@ func TestScheduleDeleteClearsAndReplans(t *testing.T) {
 
 	if _, ok := mgr.GetSchedule("garage"); ok {
 		t.Fatal("DELETE did not clear the schedule")
+	}
+	state, _ := mgr.State("garage")
+	if state.TargetSoC != 0 || !state.TargetTime.IsZero() {
+		t.Fatalf("DELETE left an active target after removing the goal: %+v", state)
 	}
 	if _, reason := svc.LastReplanInfo(); reason != "loadpoint_schedule_changed" {
 		t.Fatalf("replan reason = %q, want loadpoint_schedule_changed", reason)
