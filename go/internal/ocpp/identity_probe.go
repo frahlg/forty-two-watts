@@ -98,8 +98,12 @@ func (h *Handler) stopIdentityProbes() {
 }
 
 func (s *Server) requestBootNotification(id string, version Version, done func(error)) error {
+	alias, err := s.sockets.currentID(id)
+	if err != nil {
+		return err
+	}
 	if version == Version201 && s.csms != nil {
-		return s.csms.TriggerMessage(id, func(reply *remotecontrol.TriggerMessageResponse, err error) {
+		return s.csms.TriggerMessage(alias, func(reply *remotecontrol.TriggerMessageResponse, err error) {
 			if err != nil {
 				done(err)
 				return
@@ -114,7 +118,7 @@ func (s *Server) requestBootNotification(id string, version Version, done func(e
 			done(fmt.Errorf("BootNotification trigger rejected: %v", reply))
 		}, remotecontrol.MessageTriggerBootNotification)
 	}
-	return s.cs.TriggerMessage(id, func(reply *remotetrigger.TriggerMessageConfirmation, err error) {
+	return s.cs.TriggerMessage(alias, func(reply *remotetrigger.TriggerMessageConfirmation, err error) {
 		if err != nil {
 			done(err)
 			return

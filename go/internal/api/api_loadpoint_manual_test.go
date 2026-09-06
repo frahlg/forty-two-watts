@@ -299,6 +299,9 @@ func TestLoadpointsCarryManualStatus(t *testing.T) {
 		t.Fatalf("charger echo cannot confirm an unprocessed request: %+v", m)
 	}
 	ctrl.Tick(context.Background(), time.Now())
+	// Confirmation must arrive after dispatch; the pre-tick echo above is
+	// deliberately too early, even when both fall in the same millisecond.
+	tel.Update("easee", telemetry.DerEV, 0, nil, json.RawMessage(`{"max_a":6,"charging":false,"reason_no_current_label":"car not drawing current"}`))
 	m = manual()
 	if m.State != loadpoint.ManualAccepted || !m.ChargerLimitKnown || m.ChargerLimitA != 6 || m.ChargerReason != "car not drawing current" {
 		t.Fatalf("after the charger took the limit: %+v", m)

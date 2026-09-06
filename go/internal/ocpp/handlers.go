@@ -387,6 +387,8 @@ func (h *Handler) OnConnect(id string) {
 	s.charging = false
 	s.lastPowerW = 0
 	s.identityCurrent = false
+	s.featureProfiles = ""
+	s.steerable = nil
 	h.cancelIdentityProbeLocked(s)
 	s.identityProbeAttempts = 0
 	h.scheduleIdentityProbeLocked(id, s)
