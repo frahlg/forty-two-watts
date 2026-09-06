@@ -90,7 +90,13 @@ restored Core fails health. See [backup-and-restore.md](backup-and-restore.md).
 
 Optimizer-only updates use `optimizer-vX.Y.Z[-beta.N]`, recreate and
 health-check only `ftw-optimizer`, and never replace Core. Failure restores the
-previous Optimizer image while Core continues on its Go fallback.
+previous Optimizer image while Core continues on its Go fallback. After health
+succeeds, both update and rollback save `FTW_OPTIMIZER_IMAGE_TAG` in the host
+project's `.env` and check it before reporting success. Other settings, file
+owner and mode stay intact. A pin write failure is reported as a failed
+operation even if the optimizer is healthy; repair the host project and retry.
+The host Compose image must use `${FTW_OPTIMIZER_IMAGE_TAG}` (an optional default
+is allowed), or the operation stops before replacing the optimizer.
 
 A Driver update downloads one signed artifact, verifies hash, metadata and host
 API compatibility, then atomically activates exactly that version. Core puts

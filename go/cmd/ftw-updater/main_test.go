@@ -78,6 +78,7 @@ func newTestServer(t *testing.T) (*server, *fakeRunner) {
 		imageID:         func(context.Context, string) (string, error) { return "sha256:current", nil },
 		containerID:     func(context.Context, string) (string, error) { return "ftw-container", nil },
 		chownFile:       func(string, int, int) error { return nil },
+		optimizerPin:    func(string) error { return nil },
 	}
 	s.checkSnapshotFile = func(_ context.Context, _ string, snapshotID, file string) error {
 		_, err := os.Stat(filepath.Join(dir, "data", "snapshots", snapshotID, file))
@@ -696,7 +697,7 @@ func TestValidateComponentImagePinRequiresExactVariable(t *testing.T) {
 	}
 }
 
-func TestComponentRollbackPinsUnsupportedOptimizerImages(t *testing.T) {
+func TestComponentRollbackRejectsNonPersistentOptimizerImages(t *testing.T) {
 	for _, image := range []string{
 		"ghcr.io/srcfl/ftw-optimizer:latest",
 		"ghcr.io/srcfl/ftw-optimizer:${MY_TAG:-latest}",
@@ -708,16 +709,13 @@ func TestComponentRollbackPinsUnsupportedOptimizerImages(t *testing.T) {
 
 			s.runComponentRollback("optimizer", time.Now())
 			state := s.readState()
-			if state.State != "done" || state.Action != "component_rollback" {
-				t.Fatalf("rollback state = %+v", state)
+			if state.State != "failed" || !strings.Contains(state.Message, "must use ${FTW_OPTIMIZER_IMAGE_TAG}") {
+				t.Fatalf("rollback must reject a pin Compose cannot use: %+v", state)
 			}
-			calls, envs := runner.snapshot(), runner.envSnapshot()
-			if len(calls) != 2 || !strings.Contains(strings.Join(calls[0], " "), "image tag sha256:optimizer-old "+canonicalOptimizerImage+":ftw-rollback-") {
-				t.Fatalf("rollback calls = %v", calls)
+			if len(runner.snapshot()) != 0 {
+				t.Fatalf("unsupported rollback changed an image: %v", runner.snapshot())
 			}
-			if len(envs) != 2 || len(envs[1]) != 1 || !strings.HasPrefix(envs[1][0], "FTW_OPTIMIZER_IMAGE_TAG=ftw-rollback-") {
-				t.Fatalf("rollback env = %v", envs)
-			}
+
 		})
 	}
 }

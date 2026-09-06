@@ -126,6 +126,7 @@ type server struct {
 	// Injectable so the ordering — only after a verified Core update, never able
 	// to fail one — is testable without Docker. See self_replace.go.
 	selfReplace       func(target string) error
+	optimizerPin      func(target string) error
 	chownFile         func(string, int, int) error
 	checkSnapshotFile func(context.Context, string, string, string) error
 	stageSnapshotFile func(context.Context, string, string, string, string) error
@@ -286,6 +287,7 @@ func main() {
 		defer cancel()
 		return srv.replaceUpdater(ctx, target)
 	}
+	srv.optimizerPin = srv.persistOptimizerPin
 	srv.chownFile = os.Chown
 	srv.checkSnapshotFile = func(ctx context.Context, containerID, snapshotID, file string) error {
 		return srv.runner(ctx, nil, "exec", containerID, "test", "-f", "/app/data/snapshots/"+snapshotID+"/"+file)
@@ -508,6 +510,12 @@ func (s *server) runComponentJob(action, target, component string, startedAt tim
 		s.restartExisting(spec, now)
 		return
 	}
+	if action == "update" && spec.name == "optimizer" {
+		if err := s.validateOptimizerPinLayout(); err != nil {
+			s.writeState(State{State: "failed", Action: action, Component: component, Target: target, StartedAt: now, UpdatedAt: time.Now(), Message: "optimizer update blocked: " + err.Error()})
+			return
+		}
+	}
 	if action == "update" && spec.name == "core" {
 		if err := s.requireHealthyOptimizer(); err != nil {
 			msg := "core update blocked: " + err.Error()
@@ -654,6 +662,13 @@ func (s *server) runComponentJob(action, target, component string, startedAt tim
 		}
 	}
 
+	if spec.name == "optimizer" {
+		if err := s.saveOptimizerPin(target); err != nil {
+			s.writeState(State{State: "failed", Action: action, Component: component, Target: target, StartedAt: now, UpdatedAt: time.Now(), Message: "optimizer is ready, but its image pin was not saved: " + err.Error(), PreviousImageID: previousImageID})
+			return
+		}
+	}
+
 	// The main container is now being recreated. The brand-new replica
 	// will read this "done" state on startup and serve it to the UI that's
 	// still polling in the browser.
@@ -762,6 +777,11 @@ func (s *server) restorePreviousComponentImage(imageID string, spec componentSpe
 }
 
 func (s *server) restorePreviousComponentImageWithTag(imageID, previousTag string, spec componentSpec) error {
+	if spec.name == "optimizer" {
+		if err := s.validateOptimizerPinLayout(); err != nil {
+			return err
+		}
+	}
 	image, ok, err := serviceImageFromComposeFiles(s.composeFiles(), spec.service)
 	if err != nil {
 		return err
@@ -794,6 +814,11 @@ func (s *server) restorePreviousComponentImageWithTag(imageID, previousTag strin
 	if s.healthCheck != nil {
 		if err := s.healthCheck(ctx, spec.service); err != nil {
 			return fmt.Errorf("previous image health check: %w", err)
+		}
+	}
+	if spec.name == "optimizer" {
+		if err := s.saveOptimizerPin(rollbackTag); err != nil {
+			return fmt.Errorf("previous optimizer is ready, but its image pin was not saved: %w", err)
 		}
 	}
 	return nil
@@ -1611,8 +1636,20 @@ func dockerCompose(ctx context.Context, extraEnv []string, args ...string) error
 	if err != nil {
 		return fmt.Errorf("%w: %s", err, truncate(string(out), 400))
 	}
-	slog.Info("docker compose ok", "args", args, "env", extraEnv, "out", truncate(string(out), 200))
+	slog.Info("docker compose ok", "args", loggedDockerArgs(args), "env", extraEnv, "out", truncate(string(out), 200))
 	return nil
+}
+
+// Shell payloads can contain the base64-encoded .env. Keep command shape in
+// logs without publishing credentials in support bundles.
+func loggedDockerArgs(args []string) []string {
+	redacted := append([]string(nil), args...)
+	for i, arg := range redacted {
+		if arg == "-c" && i+1 < len(redacted) {
+			redacted[i+1] = "[shell payload hidden]"
+		}
+	}
+	return redacted
 }
 
 func dockerOutput(ctx context.Context, args ...string) (string, error) {
