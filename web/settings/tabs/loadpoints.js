@@ -476,7 +476,7 @@
           // that is not connected right now). Operator can re-pick from
           // the list to fix it.
           driverOpts = '<option value="' + escHtml(lp.driver_name) + '" selected>' +
-            escHtml(lp.driver_name) + ' (not connected?)</option>' + driverOpts;
+            escHtml(lp.driver_name) + ' (saved connection)</option>' + driverOpts;
         }
 
         html +=
