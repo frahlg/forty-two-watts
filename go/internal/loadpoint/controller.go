@@ -102,8 +102,10 @@ type Controller struct {
 	// 5-second control loop. Missing entries (or expired holds, which
 	// `GetManualHold` lazily evicts) fall through to the normal
 	// compute-from-plan path.
-	holdMu sync.Mutex
-	holds  map[string]ManualHold
+	holdMu          sync.Mutex
+	holds           map[string]ManualHold
+	manualRestored  map[string]bool
+	manualPersistMu sync.Mutex
 	// manualIdleSince[id] is when a loadpoint with an active manual hold
 	// first observed the vehicle "not requesting current" this idle spell.
 	// Once it has stayed not-requesting for SessionCompletionTimeout the

@@ -134,6 +134,7 @@ func (m *Manager) ObserveSession(id string, pluggedIn bool, powerW, deliveredWh 
 		lp.socRetention = "unavailable"
 	}
 	m.mu.Unlock()
+	_ = m.flushManualHold(id)
 }
 
 // persistSession runs outside Manager.mu, but sessionMu serializes it with

@@ -121,8 +121,9 @@ func (f SiteFuse) Phases() int {
 // Read-only for consumers — only the Manager or dispatch paths mutate
 // it under lock.
 type State struct {
-	VehicleCapacityWh float64 `json:"vehicle_capacity_wh"`
-	CapacitySource    string  `json:"capacity_source"`
+	ManualRestoreUnconfirmed bool    `json:"manual_restore_unconfirmed"`
+	VehicleCapacityWh        float64 `json:"vehicle_capacity_wh"`
+	CapacitySource           string  `json:"capacity_source"`
 	// ChargingDeclined is a sustained vehicle-side refusal, not a battery level.
 	ChargingDeclined bool `json:"charging_declined"`
 	// SoCRetention reports whether the confirmed estimate can survive restart.
@@ -253,6 +254,7 @@ type PlanWindow struct {
 type Manager struct {
 	sessionMu        sync.Mutex
 	sessionStore     SessionStore
+	pendingManual    map[string]pendingManualHold
 	connectionHealth map[string]bool
 	connectionEdges  map[string]connectionEdge
 	mu               sync.RWMutex
@@ -320,10 +322,11 @@ const (
 // union of configured parameters and observed state. Lives behind
 // Manager so consumers access it via the public State snapshot.
 type loadpointRuntime struct {
-	sessionDeviceID    string
-	sessionID          string
-	socRetention       string
-	completionNotified bool
+	manualRestoreUnconfirmed bool
+	sessionDeviceID          string
+	sessionID                string
+	socRetention             string
+	completionNotified       bool
 	Config
 
 	pluggedIn          bool
@@ -523,6 +526,7 @@ func (m *Manager) Load(cfgs []Config) {
 				lp.sessionID = existing.sessionID
 				lp.socRetention = existing.socRetention
 				lp.completionNotified = existing.completionNotified
+				lp.manualRestoreUnconfirmed = existing.manualRestoreUnconfirmed
 			} else {
 				lp.pluggedIn = false
 				lp.currentSoC = 0
@@ -1060,28 +1064,29 @@ func (lp *loadpointRuntime) snapshot() State {
 	copy(steps, lp.AllowedStepsW)
 	sort.Float64s(steps)
 	st := State{
-		VehicleCapacityWh:  lp.VehicleCapacityWh,
-		CapacitySource:     "configured",
-		ID:                 lp.ID,
-		DriverName:         lp.DriverName,
-		PluggedIn:          lp.pluggedIn,
-		CurrentSoC:         lp.currentSoC,
-		CurrentPowerW:      lp.currentPowerW,
-		DeliveredWhSession: lp.deliveredWhSession,
-		TargetSoC:          lp.targetSoC,
-		TargetTime:         lp.targetTime,
-		UpdatedAtMs:        lp.updatedAtMs,
-		MinChargeW:         lp.MinChargeW,
-		MaxChargeW:         lp.MaxChargeW,
-		AllowedStepsW:      steps,
-		SurplusOnly:        lp.Config.SurplusOnly,
-		Schedule:           lp.schedule,
-		ChargingDeclined:   lp.chargingDeclined,
-		SoCRetention:       lp.socRetention,
-		VehicleName:        lp.vehicleName,
-		CommandedW:         lp.commandedW,
-		CommandedReason:    lp.commandedReason,
-		CommandedKnown:     lp.commandedKnown,
+		ManualRestoreUnconfirmed: lp.manualRestoreUnconfirmed,
+		VehicleCapacityWh:        lp.VehicleCapacityWh,
+		CapacitySource:           "configured",
+		ID:                       lp.ID,
+		DriverName:               lp.DriverName,
+		PluggedIn:                lp.pluggedIn,
+		CurrentSoC:               lp.currentSoC,
+		CurrentPowerW:            lp.currentPowerW,
+		DeliveredWhSession:       lp.deliveredWhSession,
+		TargetSoC:                lp.targetSoC,
+		TargetTime:               lp.targetTime,
+		UpdatedAtMs:              lp.updatedAtMs,
+		MinChargeW:               lp.MinChargeW,
+		MaxChargeW:               lp.MaxChargeW,
+		AllowedStepsW:            steps,
+		SurplusOnly:              lp.Config.SurplusOnly,
+		Schedule:                 lp.schedule,
+		ChargingDeclined:         lp.chargingDeclined,
+		SoCRetention:             lp.socRetention,
+		VehicleName:              lp.vehicleName,
+		CommandedW:               lp.commandedW,
+		CommandedReason:          lp.commandedReason,
+		CommandedKnown:           lp.commandedKnown,
 	}
 	if lp.VehicleCapacityWh <= 0 {
 		st.VehicleCapacityWh = 60000
