@@ -102,6 +102,7 @@ func Start(ctx context.Context, cfg *Config, tel *telemetry.Store) (*Server, err
 	})
 
 	s := &Server{cfg: cfg, cs: cs, handler: h, done: make(chan struct{})}
+	h.identityProbe = s.requestBootNotification
 
 	// OCPP 2.0.1 on its own port, when configured. Same handler and therefore
 	// the same charger state and telemetry — only the message encoding differs.
@@ -243,6 +244,7 @@ func (s *Server) Stop() {
 		return
 	}
 	s.stopOnce.Do(func() {
+		s.handler.stopIdentityProbes()
 		s.cs.Stop()
 		if s.csms != nil {
 			s.csms.Stop()

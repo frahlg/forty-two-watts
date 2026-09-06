@@ -16,24 +16,31 @@ func currentEVSample(r *telemetry.DerReading, health *telemetry.DriverHealth, wa
 	if watchdog <= 0 {
 		watchdog = time.Minute
 	}
-	if r == nil || r.UpdatedAt.IsZero() || now.Sub(r.UpdatedAt) > watchdog ||
-		(!ocppOnline && (health == nil || !health.TelemetryLive())) {
+	if r == nil || r.UpdatedAt.IsZero() || now.Sub(r.UpdatedAt) > watchdog {
 		return loadpoint.EVSample{}, false
 	}
 	var d struct {
-		Connected     *bool   `json:"connected"`
-		SessionWh     float64 `json:"session_wh"`
-		RequestActive *bool   `json:"request_active"`
-		SessionID     string  `json:"session_id"`
+		ConnectionGeneration uint64  `json:"connection_generation"`
+		ConnectionUnknown    bool    `json:"connection_unknown"`
+		Connected            *bool   `json:"connected"`
+		SessionWh            float64 `json:"session_wh"`
+		RequestActive        *bool   `json:"request_active"`
+		SessionID            string  `json:"session_id"`
 	}
-	if json.Unmarshal(r.Data, &d) != nil || d.Connected == nil || d.SessionWh < 0 {
+	if json.Unmarshal(r.Data, &d) != nil || d.SessionWh < 0 {
+		return loadpoint.EVSample{}, false
+	}
+	if d.ConnectionUnknown {
+		return loadpoint.EVSample{ConnectionUnknown: true, ConnectionGeneration: d.ConnectionGeneration}, true
+	}
+	if d.Connected == nil || (!ocppOnline && (health == nil || !health.TelemetryLive())) {
 		return loadpoint.EVSample{}, false
 	}
 	active := true
 	if d.RequestActive != nil {
 		active = *d.RequestActive
 	}
-	return loadpoint.EVSample{PowerW: r.SmoothedW, SessionWh: d.SessionWh,
+	return loadpoint.EVSample{ConnectionGeneration: d.ConnectionGeneration, PowerW: r.SmoothedW, SessionWh: d.SessionWh,
 		Connected: *d.Connected, RequestActive: active, DeviceID: deviceID, SessionID: d.SessionID}, true
 }
 

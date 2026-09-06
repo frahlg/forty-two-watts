@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/srcfl/ftw/go/internal/events"
+	"github.com/srcfl/ftw/go/internal/units"
 )
 
 // SessionStore is implemented by state.Store. The charger hardware identity,
@@ -179,4 +180,54 @@ func (m *Manager) persistSession(id string) {
 		lp.socRetention = retention
 	}
 	m.mu.Unlock()
+}
+
+// observeConnectionProof handles a lost socket without inventing a cable
+// edge or refreshing the last physical observation. A fresh Boot alone must
+// not let an older manual Start follow an unidentified connection.
+func (m *Manager) observeConnectionProof(id string, generation uint64, unknown bool) {
+	m.sessionMu.Lock()
+	defer m.sessionMu.Unlock()
+	m.mu.Lock()
+	lp := m.byID[id]
+	if lp == nil {
+		m.mu.Unlock()
+		return
+	}
+	changed := generation != 0 && lp.connectionGeneration != 0 && generation != lp.connectionGeneration
+	if generation != 0 {
+		lp.connectionGeneration = generation
+	}
+	if (!unknown && !changed) || (!changed && lp.sessionDeviceID == "" && lp.sessionID == "") {
+		m.mu.Unlock()
+		return
+	}
+	previousDevice := lp.sessionDeviceID
+	lp.sessionDeviceID, lp.sessionID = "", ""
+	m.nextSessionGeneration++
+	lp.sessionGeneration = m.nextSessionGeneration
+	lp.socConfirmed = false
+	lp.socRetention = "unavailable"
+	if lp.vehicleName != "" || lp.capacityFromCar {
+		lp.VehicleCapacityWh = lp.baseCapacityWh
+		lp.vehicleName = ""
+		lp.capacityFromCar = false
+		lp.baseCapacityWh = 0
+	}
+	anchor := lp.PluginSoC
+	if anchor <= 0 {
+		anchor = units.DefaultPluginSoC
+	}
+	lp.sessionPluginSoC = anchor
+	lp.currentSoC = estimateSoC(anchor, lp.deliveredWhSession, lp.VehicleCapacityWh)
+	lp.chargingSteadySince = time.Time{}
+	lp.stoppedSince = time.Time{}
+	lp.steadyRunArmed = false
+	lp.notRequestingSince = time.Time{}
+	lp.chargingDeclined = false
+	lp.completionNotified = false
+	m.mu.Unlock()
+	if m.sessionStore != nil && previousDevice != "" {
+		_ = m.sessionStore.SaveConfig(sessionKey(previousDevice), "{}")
+	}
 }

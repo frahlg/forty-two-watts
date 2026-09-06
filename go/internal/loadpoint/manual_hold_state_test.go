@@ -1,9 +1,68 @@
 package loadpoint
 
 import (
+	"context"
 	"testing"
 	"time"
 )
+
+func TestLostHardwareProofPausesOldStartButAllowsANewExplicitStart(t *testing.T) {
+	cfg := holdLoadpoint()
+	sender := &fakeSender{}
+	sample := EVSample{Connected: true, RequestActive: true, DeviceID: "easee:A", SessionID: "session-1"}
+	samples := map[string]EVSample{cfg.DriverName: sample}
+	c := newTestController(t, []Config{cfg}, nil, samples, sender)
+	c.SetSiteFuse(SiteFuse{MaxAmps: 16, Voltage: 230, PhaseCnt: 3})
+	now := time.Now()
+	tick := func(want float64) {
+		t.Helper()
+		c.Tick(context.Background(), now)
+		now = now.Add(time.Second)
+		if n := len(sender.calls); n == 0 || sender.calls[n-1].power != want {
+			t.Fatalf("commands=%+v, want latest power %v", sender.calls, want)
+		}
+	}
+	tick(0)
+	c.SetManualHold(cfg.ID, ManualHold{PowerW: 4140, Persistent: true})
+	tick(4140)
+	sample.DeviceID, sample.SessionID = "", ""
+	samples[cfg.DriverName] = sample
+	tick(0)
+	if state, _ := c.manager.State(cfg.ID); !state.ManualRestoreUnconfirmed {
+		t.Fatal("lost proof did not explain the pause")
+	}
+	tick(0)
+	if state, _ := c.manager.State(cfg.ID); !state.ManualRestoreUnconfirmed {
+		t.Fatal("a later unknown sample cleared the confirmation requirement")
+	}
+	// This request belongs to the currently unknown socket, not the older
+	// device. It works now and may acquire its first fresh hardware identity.
+	c.SetManualHold(cfg.ID, ManualHold{PowerW: 4140, Persistent: true})
+	tick(4140)
+	sample.DeviceID, sample.SessionID = "easee:B", "session-2"
+	samples[cfg.DriverName] = sample
+	tick(4140)
+	if state, _ := c.manager.State(cfg.ID); state.ManualRestoreUnconfirmed {
+		t.Fatal("new explicit Start still asks for confirmation")
+	}
+}
+
+func TestLostHardwareProofKeepsExplicitPauseConfirmed(t *testing.T) {
+	m := sessionManager(nil, "garage", "charger")
+	m.ObserveSession("garage", true, 0, 1000, false, "easee:A", "session-1")
+	c := NewController(m, nil, nil, nil)
+	c.SetManualHold("garage", ManualHold{Persistent: true})
+	for _, device := range []string{"", "", "easee:B"} {
+		m.ObserveSession("garage", true, 0, 1000, false, device, "")
+		c.restoreManualHoldForSession("garage")
+		if hold, ok := c.GetManualHold("garage", time.Now()); !ok || hold.PowerW != 0 {
+			t.Fatalf("explicit pause lost: %+v %v", hold, ok)
+		}
+		if state, _ := m.State("garage"); state.ManualRestoreUnconfirmed {
+			t.Fatal("explicit Pause unnecessarily asks for confirmation")
+		}
+	}
+}
 
 func TestManualSaveErrorKeepsCommandAndRetriesOnFreshReading(t *testing.T) {
 	for _, action := range []string{"start", "clear", "before_identity"} {
@@ -288,5 +347,40 @@ func TestConcurrentSetAndClearPersistInControllerOrder(t *testing.T) {
 	}
 	if _, ok := c.GetManualHold("garage", time.Now()); ok {
 		t.Fatal("clear lost to earlier save")
+	}
+}
+
+func TestManualStartWithoutHardwareCannotFollowAnotherSocket(t *testing.T) {
+	cfg := holdLoadpoint()
+	sender := &fakeSender{}
+	sample := EVSample{Connected: true, RequestActive: true, ConnectionGeneration: 1}
+	samples := map[string]EVSample{cfg.DriverName: sample}
+	c := newTestController(t, []Config{cfg}, nil, samples, sender)
+	c.SetSiteFuse(SiteFuse{MaxAmps: 16, Voltage: 230, PhaseCnt: 3})
+	now := time.Now()
+	tick := func(want float64) {
+		t.Helper()
+		c.Tick(context.Background(), now)
+		now = now.Add(time.Second)
+		if sender.calls[len(sender.calls)-1].power != want {
+			t.Fatalf("commands=%+v, want %v", sender.calls, want)
+		}
+	}
+	tick(0)
+	c.SetManualHold(cfg.ID, ManualHold{PowerW: 4140, Persistent: true})
+	tick(4140)
+	sample.ConnectionGeneration = 2
+	samples[cfg.DriverName] = sample
+	tick(0)
+	if st, _ := c.manager.State(cfg.ID); !st.ManualRestoreUnconfirmed {
+		t.Fatal("new socket inherited unknown hardware Start")
+	}
+	c.SetManualHold(cfg.ID, ManualHold{PowerW: 4140, Persistent: true})
+	tick(4140)
+	sample.DeviceID = "easee:A"
+	samples[cfg.DriverName] = sample
+	tick(4140)
+	if st, _ := c.manager.State(cfg.ID); st.ManualRestoreUnconfirmed {
+		t.Fatal("first proof on same socket invalidated explicit Start")
 	}
 }

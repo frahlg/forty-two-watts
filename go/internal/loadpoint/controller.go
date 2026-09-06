@@ -438,12 +438,16 @@ type Directive struct {
 // true. The loadpoint manager uses it to detect vehicle-side
 // completion via the SessionCompletionTimeout timer.
 type EVSample struct {
-	PowerW        float64
-	SessionWh     float64
-	Connected     bool
-	RequestActive bool
-	DeviceID      string
-	SessionID     string
+	// ConnectionUnknown is a socket transition without fresh physical status.
+	// It revokes hardware proof but must not imply a physical unplug.
+	ConnectionUnknown    bool
+	ConnectionGeneration uint64 // process-local transport epoch, not durable session proof
+	PowerW               float64
+	SessionWh            float64
+	Connected            bool
+	RequestActive        bool
+	DeviceID             string
+	SessionID            string
 }
 
 // PlanFunc returns the current-slot directive for now, or (_, false)
@@ -1504,6 +1508,11 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config, d
 		// clear a restored manual hold while the driver is still logging in.
 		// Core's driver-health owner handles autonomous recovery; without
 		// an EV sample this loop cannot confirm a session or send a setpoint.
+		return
+	}
+	c.manager.observeConnectionProof(lpCfg.ID, sample.ConnectionGeneration, sample.ConnectionUnknown)
+	if sample.ConnectionUnknown {
+		c.restoreManualHoldForSession(lpCfg.ID)
 		return
 	}
 	// Resolve the schedule once per tick — used for the bat-SoC unlock

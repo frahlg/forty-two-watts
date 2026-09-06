@@ -1,16 +1,17 @@
 package loadpoint
 
 type manualSessionBinding struct {
-	deviceID, sessionID string
-	generation          uint64
-	configuration       uint64
+	deviceID, sessionID  string
+	generation           uint64
+	configuration        uint64
+	connectionGeneration uint64
 }
 
 func (m *Manager) manualSessionBinding(id string) manualSessionBinding {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if lp := m.byID[id]; lp != nil {
-		return manualSessionBinding{lp.sessionDeviceID, lp.sessionID, lp.sessionGeneration, lp.configGeneration}
+		return manualSessionBinding{lp.sessionDeviceID, lp.sessionID, lp.sessionGeneration, lp.configGeneration, lp.connectionGeneration}
 	}
 	return manualSessionBinding{}
 }
@@ -49,8 +50,9 @@ func (c *Controller) restoreManualHoldForSession(id string) {
 		c.manualBindings = map[string]manualSessionBinding{}
 	}
 	previous, bound := c.manualBindings[id]
-	changed := bound && previous.configuration != current.configuration
-	if bound && previous.deviceID != "" && current.deviceID != "" {
+	changed := bound && (previous.configuration != current.configuration ||
+		(previous.connectionGeneration != 0 && current.connectionGeneration != 0 && previous.connectionGeneration != current.connectionGeneration))
+	if bound && previous.deviceID != "" {
 		changed = changed || previous.deviceID != current.deviceID
 		// ObserveSession preserves the generation for a valid first proof.
 		// A changed generation therefore means a new connection or a counter
@@ -59,14 +61,14 @@ func (c *Controller) restoreManualHoldForSession(id string) {
 	}
 	// A Start before the first hardware reading binds here. Once bound, a
 	// different hardware/session/config generation must not inherit its power.
-	if current.deviceID != "" {
-		c.manualBindings[id] = current
-	}
+	c.manualBindings[id] = current
 	if changed {
-		if _, held := c.holds[id]; held {
-			c.holds[id] = ManualHold{Persistent: true}
+		if hold, held := c.holds[id]; held {
+			if hold.PowerW > 0 {
+				c.holds[id] = ManualHold{Persistent: true}
+				c.manager.SetManualRestoreUnconfirmed(id, true)
+			}
 			c.manualRestored[id] = true
-			c.manager.SetManualRestoreUnconfirmed(id, true)
 			c.holdMu.Unlock()
 			// Keep the safe pause across another restart. The next explicit
 			// Start or Return to plan decides how this new session proceeds.

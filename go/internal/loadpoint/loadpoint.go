@@ -332,6 +332,7 @@ const (
 type loadpointRuntime struct {
 	configGeneration         uint64
 	sessionGeneration        uint64
+	connectionGeneration     uint64
 	manualRestoreUnconfirmed bool
 	manualSaveError          bool
 	sessionDeviceID          string
@@ -523,6 +524,7 @@ func (m *Manager) Load(cfgs []Config) {
 		lp := &loadpointRuntime{Config: c}
 		if existing := m.byID[c.ID]; existing != nil && existing.DriverName == c.DriverName {
 			lp.sessionGeneration = existing.sessionGeneration
+			lp.connectionGeneration = existing.connectionGeneration
 			lp.configGeneration = existing.configGeneration
 		} else {
 			m.nextSessionGeneration++
