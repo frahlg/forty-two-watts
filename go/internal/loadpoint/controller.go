@@ -1336,6 +1336,7 @@ func (c *Controller) SetManualHold(id string, h ManualHold) {
 	}
 	saver := c.manualHoldSaver
 	c.holdMu.Unlock()
+	c.resetManualIdle(id)
 	// Persist outside the lock (saver may do disk I/O). Only persistent
 	// operator holds survive a restart; clearing or a timed hold writes the
 	// "cleared" sentinel so a stale persistent hold isn't resurrected.
@@ -1356,6 +1357,30 @@ func (c *Controller) ClearManualHold(id string) {
 	}
 	c.manualPersistMu.Lock()
 	defer c.manualPersistMu.Unlock()
+	c.clearManualHoldLocked(id)
+}
+
+// releaseManualHoldIfCurrent applies a tick's decision only to the request
+// it read. A newer Pause, Start or slider change keeps its own command.
+func (c *Controller) releaseManualHoldIfCurrent(id string, expected ManualHold) bool {
+	if c == nil {
+		return false
+	}
+	c.manualPersistMu.Lock()
+	defer c.manualPersistMu.Unlock()
+	c.holdMu.Lock()
+	current, found := c.holds[id]
+	c.holdMu.Unlock()
+	if !found || current != expected {
+		return false
+	}
+	c.clearManualHoldLocked(id)
+	return true
+}
+
+// clearManualHoldLocked requires manualPersistMu. Keep removal and its save
+// ordered with explicit commands and session restoration.
+func (c *Controller) clearManualHoldLocked(id string) {
 	first := c.markManualExplicit(id)
 	c.holdMu.Lock()
 	_, existed := c.holds[id]
@@ -1593,10 +1618,9 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config, d
 	// tick falls straight through to automatic (surplus/plan) dispatch.
 	if hold, held := c.GetManualHold(lpCfg.ID, now); held && hold.PowerW > 0 {
 		if !sample.RequestActive {
-			if c.manualHoldIdleFor(lpCfg.ID, now) >= SessionCompletionTimeout {
+			if c.manualHoldIdleFor(lpCfg.ID, now) >= SessionCompletionTimeout && c.releaseManualHoldIfCurrent(lpCfg.ID, hold) {
 				slog.Info("loadpoint manual hold auto-released — vehicle stopped requesting current (full/declined)",
 					"lp", lpCfg.ID, "idle", SessionCompletionTimeout)
-				c.ClearManualHold(lpCfg.ID)
 			}
 		} else {
 			c.resetManualIdle(lpCfg.ID)
@@ -1609,10 +1633,9 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config, d
 	// surplus/plan dispatch instead of holding the wallbox at a fixed
 	// amperage the rest of the session.
 	if hold, held := c.GetManualHold(lpCfg.ID, now); held && hold.ReleaseAtSoC > 0 {
-		if st, ok := c.manager.State(lpCfg.ID); ok && st.CurrentSoC >= hold.ReleaseAtSoC {
+		if st, ok := c.manager.State(lpCfg.ID); ok && st.CurrentSoC >= hold.ReleaseAtSoC && c.releaseManualHoldIfCurrent(lpCfg.ID, hold) {
 			slog.Info("loadpoint manual hold released — charge-now target reached",
 				"lp", lpCfg.ID, "soc", st.CurrentSoC, "release_at_soc", hold.ReleaseAtSoC)
-			c.ClearManualHold(lpCfg.ID)
 		}
 	}
 
