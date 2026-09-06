@@ -2742,7 +2742,7 @@
   // state (loadpoint.manual); this only puts words on it. Returns null
   // when no hold is active.
   function manualStatusText(lp, d) {
-    if (lp && lp.manual_restore_unconfirmed) return "Confirm how to continue after restart. FTW could not match the earlier charge request to this connection.";
+    if (lp && lp.manual_restore_unconfirmed) return "Confirm how to continue charging. FTW could not confirm the charger or connection.";
     var m = lp && lp.manual;
     if (!lp || !lp.manual_active || !m || !m.active) return null;
     var reqA = m.requested_a > 0 ? Math.round(m.requested_a) + " A" : formatW(m.requested_w || lp.manual_charge_w || 0);
@@ -3546,7 +3546,7 @@
         startBtn.disabled = false;
       }
       if (busy || Date.now() < holdLineUntil) return;
-      status.textContent = restore ? "Choose Charge now to start immediately, Resume plan to use your goal, or Pause charging to keep charging off." : paused ? "The goal and solar rule wait until you resume the plan. Charge now starts immediately." : on ? "Changes apply when you release the slider." : idleText;
+      status.textContent = restore ? "Choose Charge now to request charging, Resume plan to use your goal, or Pause charging to request a stop." : paused ? "The goal and solar rule wait until you resume the plan. Charge now starts immediately." : on ? "Changes apply when you release the slider." : idleText;
     }
     function update(nextLp, d) {
       if (nextLp) lastLp = nextLp;

@@ -97,9 +97,12 @@ test('a charger limit does not blame the main fuse', () => {
 });
 
 
-test('an unmatched restart asks for a choice without claiming an operator pause', () => {
+test('an unconfirmed charger or connection asks for a choice without claiming a stop', () => {
   const words = describeManual({ manual_restore_unconfirmed: true, manual_active: false });
-  assert.match(words, /Confirm how to continue after restart/);
+  assert.match(words, /Confirm how to continue charging/);
+  assert.match(words, /could not confirm the charger or connection/);
+  assert.doesNotMatch(words, /after restart|[Pp]aused|stopped/);
+  assert.match(manual, /Pause charging to request a stop/);
   assert.doesNotMatch(words, /Paused by you/);
 });
 test('a lower requested current keeps actual old power visible until it arrives', () => {
