@@ -788,15 +788,13 @@ func main() {
 	// YAML, so the previous in-memory-only behaviour reverted the
 	// flag on every restart.
 	const lpSurplusKeyPrefix = "loadpoint_surplus_only:"
-	lpMgr.SetSurplusOnlySaver(func(id string, v bool) {
+	lpMgr.SetSurplusOnlySaver(func(id string, v bool) error {
 		key := lpSurplusKeyPrefix + id
 		val := "false"
 		if v {
 			val = "true"
 		}
-		if err := st.SaveConfig(key, val); err != nil {
-			slog.Warn("failed to persist loadpoint surplus_only", "lp", id, "err", err)
-		}
+		return st.SaveConfig(key, val)
 	})
 	hydrateLoadpointSurplusOnly := func() {
 		lpMgr.HydrateSurplusOnly(func(id string) (bool, bool) {

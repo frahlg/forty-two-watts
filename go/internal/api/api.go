@@ -3703,7 +3703,12 @@ func (s *Server) handleLoadpointTarget(w http.ResponseWriter, r *http.Request) {
 	}
 	surplusDisabled := false
 	if req.SurplusOnly != nil {
-		prev, ok := s.deps.Loadpoints.SetSurplusOnly(id, *req.SurplusOnly)
+		prev, ok, err := s.deps.Loadpoints.SetSurplusOnlyChecked(id, *req.SurplusOnly)
+		if err != nil {
+			slog.Warn("failed to save loadpoint solar preference", "lp", id, "err", err)
+			writeJSON(w, 500, map[string]string{"error": "Could not save solar charging preference. Your previous choice is unchanged. Try again."})
+			return
+		}
 		if !ok {
 			writeJSON(w, 404, map[string]string{"error": "loadpoint not found"})
 			return

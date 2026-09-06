@@ -420,8 +420,8 @@ func (h *Handler) loadpointSurplusOnlySet(cmd Cmd, uptimeMs int64) error {
 	}
 
 	if _, ok := lp.SetSurplusOnly(id, want); !ok {
-		// The loadpoint went away between the existence check and the
-		// write — a configuration reload mid-command.
+		// The loadpoint disappeared or storage rejected the change. Keep
+		// the previous choice and let the app offer a retry.
 		return h.settleAndReport(cmd.CmdID, CmdResult{
 			CmdID: cmd.CmdID,
 			State: CmdRejected,

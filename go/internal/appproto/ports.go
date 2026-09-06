@@ -171,7 +171,8 @@ type Loadpoints interface {
 	// ObservedSoC is the state of charge the box holds for the car now.
 	ObservedSoC(id string) (soc float64, ok bool)
 	// SetSurplusOnly turns PV-only charging on or off and reports the value
-	// it replaced. The implementation carries the replan the HTTP target
+	// it replaced, or ok=false if the loadpoint is missing or the save fails.
+	// The implementation carries the replan the HTTP target
 	// route does — synchronous when the flag turns off, because the car may
 	// now draw from the grid and the plan must say so before the app reads
 	// it back.

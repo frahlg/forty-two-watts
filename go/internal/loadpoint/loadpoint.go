@@ -263,10 +263,11 @@ type Manager struct {
 	byID                  map[string]*loadpointRuntime
 	order                 []string // insertion-preserving id list for deterministic listing
 
+	// intentMu serializes durable goal and solar edits with config reloads.
+	intentMu sync.Mutex
 	// scheduleSaver, if non-nil, is invoked synchronously whenever a
 	// schedule is set or cleared. Wired by main.go to persist via
 	// state.SaveConfig. Left nil in tests / sites without storage.
-	scheduleMu    sync.Mutex
 	scheduleSaver func(id string, s Schedule) error
 
 	// surplusOnlySaver, if non-nil, persists the runtime surplus_only
@@ -275,7 +276,7 @@ type Manager struct {
 	// finding that frustrating since the toggle lives in the dashboard
 	// EV modal, not the YAML they'd think to edit. Same pattern as
 	// scheduleSaver.
-	surplusOnlySaver func(id string, v bool)
+	surplusOnlySaver func(id string, v bool) error
 
 	// nowFn is the clock the manager uses for time-sensitive logic
 	// (session-completion timer in particular). Defaults to time.Now;
@@ -490,8 +491,8 @@ func (m *Manager) SetCommanded(id string, w float64, reason string) {
 // Load replaces the configured set. Idempotent: existing state is
 // carried across when the ID is kept; removed IDs are dropped.
 func (m *Manager) Load(cfgs []Config) {
-	m.scheduleMu.Lock()
-	defer m.scheduleMu.Unlock()
+	m.intentMu.Lock()
+	defer m.intentMu.Unlock()
 	m.sessionMu.Lock()
 	defer m.sessionMu.Unlock()
 	var changedCapacity []string
@@ -875,35 +876,44 @@ func (m *Manager) SetTarget(id string, soc float64, targetTime time.Time) bool {
 	return true
 }
 
-// SetSurplusOnly toggles the runtime surplus_only flag for a loadpoint.
-// Mutates Config.SurplusOnly so subsequent Configs() calls reflect the
-// new value (both the MPC LoadpointSpec builder in main.go and the
-// dispatch controller read from there). Returns (previous, ok) so a
-// caller can detect the transition direction — disabling surplus_only
-// is a regime change for the planner (the EV may now import from the
-// grid) and the API handler forces a tagged replan in that case.
+// SetSurplusOnly changes solar-only charging and returns the previous choice.
+// A missing loadpoint or failed save returns ok=false. Consumers use the
+// transition to replan before charging can draw from the grid.
 func (m *Manager) SetSurplusOnly(id string, v bool) (prev bool, ok bool) {
-	m.mu.Lock()
+	prev, ok, err := m.SetSurplusOnlyChecked(id, v)
+	return prev, ok && err == nil
+}
+
+// SetSurplusOnlyChecked keeps the previous solar preference until storage
+// accepts the change. Readers and charging continue with the current choice.
+func (m *Manager) SetSurplusOnlyChecked(id string, v bool) (prev bool, ok bool, err error) {
+	m.intentMu.Lock()
+	defer m.intentMu.Unlock()
+	m.mu.RLock()
 	lp, ok := m.byID[id]
 	if !ok {
-		m.mu.Unlock()
-		return false, false
+		m.mu.RUnlock()
+		return false, false, nil
 	}
 	prev = lp.Config.SurplusOnly
-	lp.Config.SurplusOnly = v
 	saver := m.surplusOnlySaver
-	m.mu.Unlock()
+	m.mu.RUnlock()
 	if saver != nil && prev != v {
-		saver(id, v)
+		if err := saver(id, v); err != nil {
+			return prev, true, err
+		}
 	}
-	return prev, true
+	m.mu.Lock()
+	lp.Config.SurplusOnly = v
+	m.mu.Unlock()
+	return prev, true, nil
 }
 
 // SetSurplusOnlySaver wires the persistence callback. Pass nil to
-// disable. Mirrors SetScheduleSaver — the saver runs on every change
-// (after the mutex is released, so the storage I/O isn't on the hot
-// path).
-func (m *Manager) SetSurplusOnlySaver(saver func(id string, v bool)) {
+// disable. The saver runs before each change without blocking state reads.
+func (m *Manager) SetSurplusOnlySaver(saver func(id string, v bool) error) {
+	m.intentMu.Lock()
+	defer m.intentMu.Unlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.surplusOnlySaver = saver
@@ -915,6 +925,8 @@ func (m *Manager) SetSurplusOnlySaver(saver func(id string, v bool)) {
 // the YAML default, (zero, false) otherwise. Matches the pattern used
 // by HydrateSchedules.
 func (m *Manager) HydrateSurplusOnly(load func(id string) (bool, bool)) {
+	m.intentMu.Lock()
+	defer m.intentMu.Unlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for id, lp := range m.byID {
@@ -1122,8 +1134,8 @@ func (lp *loadpointRuntime) snapshot() State {
 // SetScheduleSaver wires the persistence callback. Pass nil to disable.
 // Safe to call before or after Load().
 func (m *Manager) SetScheduleSaver(saver func(id string, s Schedule) error) {
-	m.scheduleMu.Lock()
-	defer m.scheduleMu.Unlock()
+	m.intentMu.Lock()
+	defer m.intentMu.Unlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.scheduleSaver = saver
@@ -1140,8 +1152,8 @@ func (m *Manager) SetSchedule(id string, s Schedule) bool {
 // failure the previous schedule and derived target remain in effect.
 // The callback runs without m.mu so readers can keep seeing the current goal.
 func (m *Manager) SetScheduleChecked(id string, s Schedule) (bool, error) {
-	m.scheduleMu.Lock()
-	defer m.scheduleMu.Unlock()
+	m.intentMu.Lock()
+	defer m.intentMu.Unlock()
 	m.mu.RLock()
 	lp, ok := m.byID[id]
 	saver := m.scheduleSaver
@@ -1160,7 +1172,7 @@ func (m *Manager) SetScheduleChecked(id string, s Schedule) (bool, error) {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	// Load shares scheduleMu, so the configured loadpoint cannot change
+	// Load shares intentMu, so the configured loadpoint cannot change
 	// between the save and the in-memory update.
 	if s.SoC > lp.schedule.SoC {
 		lp.chargingDeclined = false
@@ -1225,8 +1237,8 @@ func (m *Manager) ClearScheduleChecked(id string) (bool, error) {
 // Does NOT invoke the saver — this is a load path. Does NOT call
 // RollSchedules either; the controller's first tick will handle that.
 func (m *Manager) HydrateSchedules(loader func(id string) (Schedule, bool)) {
-	m.scheduleMu.Lock()
-	defer m.scheduleMu.Unlock()
+	m.intentMu.Lock()
+	defer m.intentMu.Unlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, id := range m.order {
