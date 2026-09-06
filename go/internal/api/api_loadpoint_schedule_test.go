@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -12,6 +13,83 @@ import (
 	"github.com/srcfl/ftw/go/internal/mpc"
 	"github.com/srcfl/ftw/go/internal/state"
 )
+
+func TestScheduleStorageFailureKeepsGoalAndRetrySaves(t *testing.T) {
+	for _, tc := range []struct {
+		name, method, path, body string
+		clear                    bool
+	}{
+		{"put", http.MethodPut, "/schedule", `{"soc_pct":90,"time_of_day_min_utc":420}`, false},
+		{"delete", http.MethodDelete, "/schedule", "", true},
+		{"put_null", http.MethodPut, "/schedule", "null", true},
+		{"target_set", http.MethodPost, "/target", `{"schedule":{"soc_pct":90,"time_of_day_min_utc":420}}`, false},
+		{"target_clear", http.MethodPost, "/target", `{"schedule":null}`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, mgr, svc := newScheduleServer(t)
+			path := filepath.Join(t.TempDir(), "goals.db")
+			disk, err := state.Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { disk.Close() })
+			mgr.SetScheduleSaver(func(_ string, s loadpoint.Schedule) error {
+				b, err := json.Marshal(s)
+				if err != nil {
+					return err
+				}
+				return disk.SaveConfig("goal", string(b))
+			})
+			old := loadpoint.Schedule{SoC: .8, TimeOfDayMinUTC: 360, Recurring: true}
+			if !mgr.SetSchedule("garage", old) {
+				t.Fatal("initial save failed")
+			}
+			mgr.RollSchedules(time.Now())
+			before, _ := mgr.State("garage")
+			if err := disk.Close(); err != nil {
+				t.Fatal(err)
+			}
+			request := func() *httptest.ResponseRecorder {
+				r := httptest.NewRequest(tc.method, "/api/loadpoints/garage"+tc.path, strings.NewReader(tc.body))
+				r.Header.Set("Content-Type", "application/json")
+				rr := httptest.NewRecorder()
+				srv.Handler().ServeHTTP(rr, r)
+				return rr
+			}
+			rr := request()
+			if rr.Code != http.StatusInternalServerError || !strings.Contains(rr.Body.String(), "previous goal is unchanged") {
+				t.Fatalf("failed storage returned %d: %s", rr.Code, rr.Body.String())
+			}
+			after, _ := mgr.State("garage")
+			if after.Schedule != old || after.TargetSoC != before.TargetSoC || after.TargetTime != before.TargetTime {
+				t.Fatalf("failed request changed the running goal: %+v", after)
+			}
+			if _, reason := svc.LastReplanInfo(); reason != "" {
+				t.Fatalf("failed save triggered replan: %s", reason)
+			}
+			disk, err = state.Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if rr = request(); rr.Code != http.StatusOK {
+				t.Fatalf("retry returned %d: %s", rr.Code, rr.Body.String())
+			}
+			raw, found := disk.LoadConfig("goal")
+			var saved loadpoint.Schedule
+			if !found || json.Unmarshal([]byte(raw), &saved) != nil {
+				t.Fatalf("retry did not persist a goal: %q", raw)
+			}
+			after, _ = mgr.State("garage")
+			if tc.clear {
+				if !saved.Empty() || !after.Schedule.Empty() || after.TargetSoC != 0 || !after.TargetTime.IsZero() {
+					t.Fatalf("retry failed to remove goal: saved=%+v state=%+v", saved, after)
+				}
+			} else if saved.SoC != .9 || after.Schedule != saved || after.TargetSoC != .9 || after.TargetTime.IsZero() {
+				t.Fatalf("retry did not apply the saved goal: saved=%+v state=%+v", saved, after)
+			}
+		})
+	}
+}
 
 // The schedule-only route. Its tier is pinned alongside the other
 // verb-blind cases in TestRouteTierIgnoresTheMethod; these tests cover

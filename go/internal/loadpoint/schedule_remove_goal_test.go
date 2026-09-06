@@ -18,7 +18,7 @@ func TestRemoveScheduleClearsDerivedGoalButKeepsManualCharge(t *testing.T) {
 		t.Fatal("test needs a rolled goal")
 	}
 	var saved Schedule
-	m.SetScheduleSaver(func(_ string, s Schedule) { saved = s })
+	m.SetScheduleSaver(func(_ string, s Schedule) error { saved = s; return nil })
 	sender := &fakeSender{}
 	c := NewController(m, func(time.Time) (Directive, bool) { return Directive{}, false }, func(string) (EVSample, bool) { return EVSample{Connected: true, RequestActive: true}, true }, sender.Send)
 	c.SetManualHold(cfg.ID, ManualHold{PowerW: 4140, PhaseMode: "3p", Persistent: true})

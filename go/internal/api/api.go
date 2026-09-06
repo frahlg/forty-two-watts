@@ -3754,7 +3754,12 @@ func (s *Server) handleLoadpointTarget(w http.ResponseWriter, r *http.Request) {
 // schedule-only route.
 func (s *Server) applyLoadpointSchedule(id string, raw json.RawMessage) (int, string) {
 	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
-		if !s.deps.Loadpoints.ClearSchedule(id) {
+		ok, err := s.deps.Loadpoints.ClearScheduleChecked(id)
+		if err != nil {
+			slog.Warn("failed to clear loadpoint schedule", "lp", id, "err", err)
+			return 500, "Could not remove charging goal. Your previous goal is unchanged. Try again."
+		}
+		if !ok {
 			return 404, "loadpoint not found"
 		}
 		return 0, ""
@@ -3769,7 +3774,12 @@ func (s *Server) applyLoadpointSchedule(id string, raw json.RawMessage) (int, st
 	if sched.Days > 0x7F {
 		return 400, "days must be a 7-bit weekday mask (0..127, bit 0 = Monday)"
 	}
-	if !s.deps.Loadpoints.SetSchedule(id, sched) {
+	ok, err := s.deps.Loadpoints.SetScheduleChecked(id, sched)
+	if err != nil {
+		slog.Warn("failed to save loadpoint schedule", "lp", id, "err", err)
+		return 500, "Could not save charging goal. Your previous goal is unchanged. Try again."
+	}
+	if !ok {
 		return 404, "loadpoint not found"
 	}
 	// Roll immediately so a read-modify-write on the heels of this set
@@ -3848,9 +3858,8 @@ func (s *Server) handleLoadpointSchedulePut(w http.ResponseWriter, r *http.Reque
 }
 
 // DELETE /api/loadpoints/{id}/schedule clears the schedule. Same price
-// as PUT: removing the standing instruction is configuration too. It also
-// removes the target derived from that schedule. Manual charging has its
-// own release action and continues unchanged.
+// as PUT: removing the standing instruction is configuration too. Its derived
+// target clears after storage succeeds. Manual charging remains active.
 func (s *Server) handleLoadpointScheduleClear(w http.ResponseWriter, r *http.Request) {
 	if s.deps.Loadpoints == nil {
 		writeJSON(w, 404, map[string]string{"error": "loadpoints not configured"})
@@ -3861,8 +3870,8 @@ func (s *Server) handleLoadpointScheduleClear(w http.ResponseWriter, r *http.Req
 		writeJSON(w, 400, map[string]string{"error": "id required"})
 		return
 	}
-	if !s.deps.Loadpoints.ClearSchedule(id) {
-		writeJSON(w, 404, map[string]string{"error": "loadpoint not found"})
+	if status, msg := s.applyLoadpointSchedule(id, json.RawMessage("null")); status != 0 {
+		writeJSON(w, status, map[string]string{"error": msg})
 		return
 	}
 	s.refreshVehicleForSchedule(id)

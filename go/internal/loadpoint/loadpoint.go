@@ -266,7 +266,8 @@ type Manager struct {
 	// scheduleSaver, if non-nil, is invoked synchronously whenever a
 	// schedule is set or cleared. Wired by main.go to persist via
 	// state.SaveConfig. Left nil in tests / sites without storage.
-	scheduleSaver func(id string, s Schedule)
+	scheduleMu    sync.Mutex
+	scheduleSaver func(id string, s Schedule) error
 
 	// surplusOnlySaver, if non-nil, persists the runtime surplus_only
 	// flag whenever an operator toggles it. Without this the flag
@@ -489,6 +490,8 @@ func (m *Manager) SetCommanded(id string, w float64, reason string) {
 // Load replaces the configured set. Idempotent: existing state is
 // carried across when the ID is kept; removed IDs are dropped.
 func (m *Manager) Load(cfgs []Config) {
+	m.scheduleMu.Lock()
+	defer m.scheduleMu.Unlock()
 	m.sessionMu.Lock()
 	defer m.sessionMu.Unlock()
 	var changedCapacity []string
@@ -1118,27 +1121,47 @@ func (lp *loadpointRuntime) snapshot() State {
 
 // SetScheduleSaver wires the persistence callback. Pass nil to disable.
 // Safe to call before or after Load().
-func (m *Manager) SetScheduleSaver(saver func(id string, s Schedule)) {
+func (m *Manager) SetScheduleSaver(saver func(id string, s Schedule) error) {
+	m.scheduleMu.Lock()
+	defer m.scheduleMu.Unlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.scheduleSaver = saver
 }
 
-// SetSchedule stores the operator's intent for a loadpoint. Empty
-// schedules clear (equivalent to ClearSchedule). Returns false for
-// unknown IDs. The persistence callback (if wired) is invoked outside
-// the lock so a slow disk doesn't block other readers.
+// SetSchedule stores the operator's intent. It returns false for an unknown
+// loadpoint or a failed save. Use SetScheduleChecked to distinguish them.
 func (m *Manager) SetSchedule(id string, s Schedule) bool {
-	m.mu.Lock()
+	ok, err := m.SetScheduleChecked(id, s)
+	return ok && err == nil
+}
+
+// SetScheduleChecked saves before changing the active goal. On storage
+// failure the previous schedule and derived target remain in effect.
+// The callback runs without m.mu so readers can keep seeing the current goal.
+func (m *Manager) SetScheduleChecked(id string, s Schedule) (bool, error) {
+	m.scheduleMu.Lock()
+	defer m.scheduleMu.Unlock()
+	m.mu.RLock()
 	lp, ok := m.byID[id]
+	saver := m.scheduleSaver
+	m.mu.RUnlock()
 	if !ok {
-		m.mu.Unlock()
-		return false
+		return false, nil
 	}
 	s.Normalize()
 	// The weekday mask is 7 bits; a stray high bit from a future
 	// client is dropped rather than left to confuse the roll.
 	s.Days &= 0x7F
+	if saver != nil {
+		if err := saver(id, s); err != nil {
+			return true, err
+		}
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	// Load shares scheduleMu, so the configured loadpoint cannot change
+	// between the save and the in-memory update.
 	if s.SoC > lp.schedule.SoC {
 		lp.chargingDeclined = false
 		lp.notRequestingSince = time.Time{}
@@ -1158,12 +1181,7 @@ func (m *Manager) SetSchedule(id string, s Schedule) bool {
 	// non-recurring saves.
 	lp.targetTime = time.Time{}
 	lp.targetSoC = 0
-	saver := m.scheduleSaver
-	m.mu.Unlock()
-	if saver != nil {
-		saver(id, s)
-	}
-	return true
+	return true, nil
 }
 
 // GetSchedule returns the current schedule and a found flag. The flag
@@ -1184,12 +1202,18 @@ func (m *Manager) GetSchedule(id string) (Schedule, bool) {
 
 // ClearSchedule removes the operator's intent. Persists Empty so a
 // reload doesn't resurrect the old schedule from disk. Returns false
-// for unknown IDs.
+// for unknown IDs or a failed save.
 func (m *Manager) ClearSchedule(id string) bool {
+	ok, err := m.ClearScheduleChecked(id)
+	return ok && err == nil
+}
+
+// ClearScheduleChecked keeps the previous goal when its removal cannot save.
+func (m *Manager) ClearScheduleChecked(id string) (bool, error) {
 	// Removing the goal also removes its active derived deadline. Leaving
 	// that target behind would keep planning a charge the UI says was removed.
 	// Manual holds belong to the controller and are unaffected.
-	return m.SetSchedule(id, Schedule{})
+	return m.SetScheduleChecked(id, Schedule{})
 }
 
 // HydrateSchedules loads persisted schedules at boot. `loader(id)`
@@ -1201,6 +1225,8 @@ func (m *Manager) ClearSchedule(id string) bool {
 // Does NOT invoke the saver — this is a load path. Does NOT call
 // RollSchedules either; the controller's first tick will handle that.
 func (m *Manager) HydrateSchedules(loader func(id string) (Schedule, bool)) {
+	m.scheduleMu.Lock()
+	defer m.scheduleMu.Unlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, id := range m.order {

@@ -758,22 +758,16 @@ func main() {
 	// schedule writes the empty JSON ("{}"), which HydrateSchedules
 	// treats as no-config so a future reload doesn't resurrect it.
 	const lpSchedKeyPrefix = "loadpoint_schedule:"
-	lpMgr.SetScheduleSaver(func(id string, s loadpoint.Schedule) {
+	lpMgr.SetScheduleSaver(func(id string, s loadpoint.Schedule) error {
 		key := lpSchedKeyPrefix + id
 		if s.Empty() {
-			if err := st.SaveConfig(key, "{}"); err != nil {
-				slog.Warn("failed to clear loadpoint schedule", "lp", id, "err", err)
-			}
-			return
+			return st.SaveConfig(key, "{}")
 		}
 		b, err := json.Marshal(s)
 		if err != nil {
-			slog.Warn("failed to marshal loadpoint schedule", "lp", id, "err", err)
-			return
+			return err
 		}
-		if err := st.SaveConfig(key, string(b)); err != nil {
-			slog.Warn("failed to persist loadpoint schedule", "lp", id, "err", err)
-		}
+		return st.SaveConfig(key, string(b))
 	})
 	lpMgr.HydrateSchedules(func(id string) (loadpoint.Schedule, bool) {
 		v, ok := st.LoadConfig(lpSchedKeyPrefix + id)
