@@ -525,6 +525,7 @@ func (s *Server) routes() {
 	// actuation: a schedule saved late is the same instruction, only
 	// later, while target/soc/force_start move energy now. The split is
 	// what lets a phone save one through the passthrough.
+	s.handle("POST /api/loadpoints/{id}/vehicle", Configure, s.handleLoadpointVehicle)
 	s.handle("PUT    /api/loadpoints/{id}/schedule", Configure, s.handleLoadpointSchedulePut)
 	s.handle("DELETE /api/loadpoints/{id}/schedule", Configure, s.handleLoadpointScheduleClear)
 	s.handle("POST /api/loadpoints/{id}/soc", Actuate, s.handleLoadpointSoC, Via(appproto.OpLoadpointSoCSet))
