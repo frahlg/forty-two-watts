@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"math"
 	"strings"
+	"time"
 
 	"github.com/srcfl/ftw/go/internal/events"
 )
@@ -80,6 +81,15 @@ func (m *Manager) ObserveSession(id string, pluggedIn bool, powerW, deliveredWh 
 	// offline. Run the ordinary plug-in reset even if connected stayed true.
 	if changed || regressed {
 		lp.pluggedIn = false
+		lp.chargingSteadySince = time.Time{}
+		lp.stoppedSince = time.Time{}
+		lp.steadyRunArmed = false
+		if lp.vehicleName != "" || lp.capacityFromCar {
+			lp.VehicleCapacityWh = lp.baseCapacityWh
+			lp.vehicleName = ""
+			lp.capacityFromCar = false
+			lp.baseCapacityWh = 0
+		}
 	}
 	lp.sessionDeviceID, lp.sessionID = deviceID, sessionID
 	confirmed := lp.socConfirmed && lp.pluggedIn
@@ -88,8 +98,12 @@ func (m *Manager) ObserveSession(id string, pluggedIn bool, powerW, deliveredWh 
 	if !pluggedIn || regressed {
 		// Tombstone the hardware record. A later reconnect cannot resurrect a
 		// level from before an observed unplug or a session-counter reset.
-		if m.sessionStore != nil && previousDevice != "" {
-			_ = m.sessionStore.SaveConfig(sessionKey(previousDevice), "{}")
+		if m.sessionStore != nil {
+			for _, knownDevice := range []string{previousDevice, deviceID} {
+				if knownDevice != "" {
+					_ = m.sessionStore.SaveConfig(sessionKey(knownDevice), "{}")
+				}
+			}
 		}
 	}
 	var restore *savedSession

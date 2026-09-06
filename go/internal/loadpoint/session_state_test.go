@@ -126,3 +126,27 @@ func TestCapacityChangeKeepsCurrentLevelAndConfidence(t *testing.T) {
 		}
 	}
 }
+
+func TestNewSessionAfterOutageDropsPriorCarCapacity(t *testing.T) {
+	m := sessionManager(nil, "garage", "charger")
+	m.ObserveSession("garage", true, 4300, 1000, true, "easee:ABC", "session-1")
+	m.ApplyVehicleProfile("garage", "Old car", 100000)
+	m.ObserveSession("garage", true, 4300, 2000, true, "easee:ABC", "session-2")
+	if s, _ := m.State("garage"); s.VehicleName != "" || s.VehicleCapacityWh != 60000 {
+		t.Fatalf("prior car leaked after an unseen reconnect: %+v", s)
+	}
+}
+
+func TestFirstReadingUnpluggedTombstonesStoredSession(t *testing.T) {
+	store := &sessionMemory{data: map[string]string{}}
+	m := sessionManager(store, "garage", "charger")
+	m.ObserveSession("garage", true, 4300, 1000, true, "easee:ABC", "session-1")
+	m.SetCurrentSoC("garage", .84)
+	m = sessionManager(store, "garage", "charger")
+	m.ObserveSession("garage", false, 0, 0, false, "easee:ABC", "")
+	m = sessionManager(store, "garage", "charger")
+	m.ObserveSession("garage", true, 0, 1000, true, "easee:ABC", "session-1")
+	if s, _ := m.State("garage"); s.SoCSource != "assumed" {
+		t.Fatalf("cold unplug failed to clear stored session: %+v", s)
+	}
+}
