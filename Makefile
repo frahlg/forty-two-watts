@@ -153,7 +153,7 @@ ci-hw-pi:
 # verify-all adds cross-compile checks for all release targets, catching
 # platform-specific syscall/import mistakes before push.
 
-verify: test compose-migration-test container-boundary-test release-workflow-test
+verify: test compose-migration-test container-boundary-test release-workflow-test native-solver-test
 	cd go && go vet ./...
 	cd go && go build ./...
 	@echo "verify: vet + test + build clean"
@@ -286,3 +286,12 @@ clean:
 docs:
 	@echo "see docs/ for:"
 	@ls -1 docs/
+
+# Optional proprietary worker: verify bundled artifacts and the Core boundary.
+.PHONY: native-solver-check native-solver-test
+native-solver-check:
+	python3 optimizer/native/verify.py
+	python3 -m unittest discover -s optimizer/native -p verify_test.py
+
+native-solver-test: native-solver-check
+	cd go && FTW_NATIVE_SOLVER="$$(python3 ../optimizer/native/verify.py --host-binary)" go test -count=1 ./internal/mpc -run '^TestNative'
